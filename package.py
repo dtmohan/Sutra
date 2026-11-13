@@ -30,21 +30,22 @@ def package(source, output):
     manifest=f'''<?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
 <Metadata><Identity Language="en-US" Id="{pkg['name']}" Version="{version}" Publisher="{pkg['publisher']}"/>
-<DisplayName>{pkg['displayName']}</DisplayName><Description xml:space="preserve">Karma Auto native chat, governed local Python edits/tests and unchanged STP governance.</Description>
+<DisplayName>{pkg['displayName']}</DisplayName><Description xml:space="preserve">Sutra Auto native chat, governed local Python edits/tests and unchanged STP governance.</Description>
 <Tags>local,ollama,context</Tags><Categories>Other</Categories><GalleryFlags/>
 <Properties><Property Id="Microsoft.VisualStudio.Code.Engine" Value="{pkg['engines']['vscode']}"/><Property Id="Microsoft.VisualStudio.Code.ExtensionDependencies" Value=""/><Property Id="Microsoft.VisualStudio.Code.ExtensionPack" Value=""/><Property Id="Microsoft.VisualStudio.Code.ExtensionKind" Value="workspace"/></Properties></Metadata>
 <Installation><InstallationTarget Id="Microsoft.VisualStudio.Code"/></Installation><Dependencies/>
 <Assets><Asset Type="Microsoft.VisualStudio.Code.Manifest" Path="extension/package.json" Addressable="true"/></Assets></PackageManifest>'''
     types='''<?xml version="1.0" encoding="utf-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="json" ContentType="application/json"/><Default Extension="js" ContentType="application/javascript"/><Default Extension="html" ContentType="text/html"/><Default Extension="py" ContentType="text/plain"/><Default Extension="txt" ContentType="text/plain"/><Default Extension="ts" ContentType="text/plain"/><Default Extension="svg" ContentType="image/svg+xml"/><Default Extension="h" ContentType="text/plain"/><Default Extension="vsixmanifest" ContentType="text/xml"/><Default Extension="m" ContentType="text/plain"/></Types>'''
-    vsix=output/f"{pkg['publisher']}.{pkg['name']}-{version}.vsix"
+    vsix=output/f"Sutra-{version}.vsix"
     with zipfile.ZipFile(vsix,'w',zipfile.ZIP_DEFLATED) as z:
         z.writestr('extension.vsixmanifest',manifest);z.writestr('[Content_Types].xml',types)
         for p in sorted(files):z.write(p,'extension/'+p.relative_to(source).as_posix())
     with zipfile.ZipFile(vsix) as z:assert z.testzip() is None
-    source_files=set(files)|{source/'package.py'}
+    source_files=set(files)|{source/name for name in ('package.py','README.md','CHANGELOG.md','THIRD_PARTY_NOTICES.md','.gitignore')}
+    source_files.update(p for p in (source/'docs').rglob('*') if p.is_file())
     source_files.update((source/'harness').glob('*.py'));source_files.update((source/'test').glob('*'))
     source_files.update(p for p in (source/'examples').rglob('*') if p.is_file())
-    with zipfile.ZipFile(output/f'Karma-{version}-source.zip','w',zipfile.ZIP_DEFLATED) as z:
+    with zipfile.ZipFile(output/f'Sutra-{version}-source.zip','w',zipfile.ZIP_DEFLATED) as z:
         for p in sorted(source_files):
             if p.is_file():z.write(p,p.relative_to(source))
     result={'version':version,'vsix':vsix.name,'sha256':hashlib.sha256(vsix.read_bytes()).hexdigest(),'bytes':vsix.stat().st_size,'runtime_files':len(files),'kernel_sha256':kernel,'runtime_tests_included':False}

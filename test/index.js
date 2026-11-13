@@ -16,7 +16,7 @@ exports.run=async()=>{
   for(const id of ['nav-dashboard','nav-chat','nav-settings','nav-tools','settings-section','troubleshooting','save-runtime'])assert(html.includes('id="'+id+'"'));
   assert(!html.includes('id="extra"'));report.checks.push('tabbed overview, labelled settings and troubleshooting ship without a JSON constraint editor');
   report.checks.push('recovery commands and discover-defaults controls ship in the packaged extension');
-  report.checks.push('native chat API registers @karma; model setup command available','simple prompt precedes collapsed advanced controls');
+  report.checks.push('native chat API registers @sutra; model setup command available','simple prompt precedes collapsed advanced controls');
   assert((await vscode.commands.getCommands(true)).includes('karma.openReport'));
   for(const name of ['importCalibration','selectCalibrations','revokeCalibration','evaluateCalibration'])assert((await vscode.commands.getCommands(true)).includes('karma.'+name));
   const workspace=vscode.workspace.workspaceFolders[0].uri.fsPath;

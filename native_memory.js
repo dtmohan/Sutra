@@ -42,6 +42,6 @@ class NativeMemory{
     if(bound)return {parent:bound,source:'chat_binding'};
     return {parent:legacyParent,source:legacyParent?'assistant_receipt':'new_conversation'};
   }
-  summary(id){return '<summary>\nKarma conversation context is retained in the local receipt ledger.\nKARMA_CONTEXT_V1:'+id+':'+this.signature(id)+'\nThe next governed call must revalidate this pointer. It grants no workspace or network permissions.\n</summary>';}
+  summary(id){return '<summary>\nSutra conversation context is retained in the local receipt ledger.\nKARMA_CONTEXT_V1:'+id+':'+this.signature(id)+'\nThe next governed call must revalidate this pointer. It grants no workspace or network permissions.\n</summary>';}
 }
 module.exports={NativeMemory,isCompaction,SUMMARY};

@@ -13,13 +13,13 @@ function latestRequest(vscode,messages){
   let prompt=user?.content.filter(p=>p instanceof vscode.LanguageModelTextPart).map(p=>p.value).join('\n')||'';
   const wrapped=prompt.match(/<userRequest>([\s\S]*?)<\/userRequest>/);
   if(wrapped)prompt=wrapped[1];
-  if(!prompt.trim()||prompt.length>1800)throw new Error('Karma needs a text request of 1–1800 characters. Attach source through the armed scope.');
+  if(!prompt.trim()||prompt.length>1800)throw new Error('Sutra needs a text request of 1–1800 characters. Attach source through the armed scope.');
   const previous=[...messages].reverse().filter(m=>m.role===vscode.LanguageModelChatMessageRole.Assistant);
-  const parent=previous.map(m=>m.content.filter(p=>p instanceof vscode.LanguageModelTextPart).map(p=>p.value).join('')).map(text=>{const matches=[...text.matchAll(/\[Karma[^\n]*\]\(karma-preview:\/conversation\/([a-f0-9]{32})\/Response\.md\)/g)];return matches.at(-1)?.[1]||text.match(/^Karma conversation receipt: ([a-f0-9]{32})$/m)?.[1];}).find(Boolean);
+  const parent=previous.map(m=>m.content.filter(p=>p instanceof vscode.LanguageModelTextPart).map(p=>p.value).join('')).map(text=>{const matches=[...text.matchAll(/\[(?:Karma|Sutra)[^\n]*\]\(karma-preview:\/conversation\/([a-f0-9]{32})\/Response\.md\)/g)];return matches.at(-1)?.[1]||text.match(/^(?:Karma|Sutra) conversation receipt: ([a-f0-9]{32})$/m)?.[1];}).find(Boolean);
   return {prompt,parent};
 }
 function install(vscode,context,deps){
-  let armPromise,armNotice=false,armingStep='',armed,activeCancel,arming=false,running=false,selecting=false,lastRoute='',routing,reason='Open Karma chat to talk. Arm a task when you need workspace access.';
+  let armPromise,armNotice=false,armingStep='',armed,activeCancel,arming=false,running=false,selecting=false,lastRoute='',routing,reason='Open Sutra chat to talk. Arm a task when you need workspace access.';
   const memory=new NativeMemory(context);let lastCompaction;
   const tickets=new Map(),completed=new Map(),changed=new vscode.EventEmitter();
   const enabled=()=>vscode.workspace.getConfiguration('karma').get('nativeEnabled',true);
@@ -29,15 +29,15 @@ function install(vscode,context,deps){
     // The stable VS Code API does not expose the focused chat's model or harness.
     // An armed task/default preference is never evidence about another chat.
     const live=!!routing?.active;
-    const label=!enabled()?'Karma: off':arming?'Karma: finish arming':selecting?'Karma: opening chat':live?'Karma: request received':running?'Karma: action running':armed?'Karma: armed · routing unverified':'Karma: chat ready · workspace unarmed';
-    const explanation=arming?armingStep:selecting?'Opening Local chat with Karma Auto. No prompt is being sent.':live?'This request reached Karma. Protocol admission is checked before model dispatch.':
-      'No Karma request is in flight. The current chat selection is unverified; check for Karma Auto beneath the prompt. Direct Ollama and other chats bypass Karma.';
-    return {enabled:enabled(),arming,armingStep,selecting,armed:!!armed&&enabled(),working:running||live,session:armed?.session,scope:'Karma model requests and Karma action tool only',defaultModel:chat.get('defaultModel',''),defaultsReady,reason,lastRoute,label,explanation,routing:routing?{...routing}:null,compaction:lastCompaction};
+    const label=!enabled()?'Sutra: off':arming?'Sutra: finish arming':selecting?'Sutra: opening chat':live?'Sutra: request received':running?'Sutra: action running':armed?'Sutra: armed · routing unverified':'Sutra: chat ready · workspace unarmed';
+    const explanation=arming?armingStep:selecting?'Opening Local chat with Sutra Auto. No prompt is being sent.':live?'This request reached Sutra. Protocol admission is checked before model dispatch.':
+      'No Sutra request is in flight. The current chat selection is unverified; check for Sutra Auto beneath the prompt. Direct Ollama and other chats bypass Sutra.';
+    return {enabled:enabled(),arming,armingStep,selecting,armed:!!armed&&enabled(),working:running||live,session:armed?.session,scope:'Sutra model requests and Sutra action tool only',defaultModel:chat.get('defaultModel',''),defaultsReady,reason,lastRoute,label,explanation,routing:routing?{...routing}:null,compaction:lastCompaction};
   }
   function publish(){deps.onStatus(status());}
   function disarm(why='Disarmed by user. Task and budget retained.'){armed=undefined;tickets.clear();completed.clear();activeCancel?.cancel();reason=why;publish();}
   const identity=st=>({session:st.session,contract_hash:st.contract?.contract_hash,calibration_hash:st.calibration?.binding?.hash});
-  function assertArmed(){if(arming)throw new Error('Task arming is in progress.');if(!enabled()||!armed)throw new Error('Karma is not armed. Run Karma: Arm Task and Open Chat.');if(deps.workspace()!==armed.workspace){disarm('Workspace changed.');throw new Error(reason);}return armed;}
+  function assertArmed(){if(arming)throw new Error('Task arming is in progress.');if(!enabled()||!armed)throw new Error('Sutra is not armed. Run Sutra: Arm Task and Open Chat.');if(deps.workspace()!==armed.workspace){disarm('Workspace changed.');throw new Error(reason);}return armed;}
   async function check(token){const a=assertArmed(),st=await deps.request({op:'state'},token);if(armed!==a||JSON.stringify(identity(st))!==JSON.stringify(a.binding)){disarm('Task or calibration changed. Re-arm to accept the current contract.');throw new Error(reason);}return st;}
   function setArmingStep(message){armingStep=message;publish();}
   function beginArm(){
@@ -47,20 +47,20 @@ function install(vscode,context,deps){
   function offerArm(){
     if(armNotice||arming||armed||!enabled())return;
     armNotice=true;
-    void vscode.window.showInformationMessage('Karma received your prompt. Arm a task to authorize scoped workspace access. Conversation is already available.', 'Arm task').then(choice=>{
+    void vscode.window.showInformationMessage('Sutra received your prompt. Arm a task to authorize scoped workspace access. Conversation is already available.', 'Arm task').then(choice=>{
       if(choice==='Arm task')return beginArm();
     }).catch(error=>vscode.window.showErrorMessage(error.message));
   }
   async function arm(){
-    if(arming||running||routing?.active||selecting||deps.isBusy())throw new Error('Wait for the active Karma request before arming.');
-    if(!enabled())throw new Error('Enable Karma native chat first.');
+    if(arming||running||routing?.active||selecting||deps.isBusy())throw new Error('Wait for the active Sutra request before arming.');
+    if(!enabled())throw new Error('Enable Sutra native chat first.');
     let success=false,failure;arming=true;armNotice=false;setArmingStep('Preparing task choices…');try{
     await deps.configureModels(false);let st=await deps.request({op:'state'});
     const choices=[];
     if(st.contract?.contract.constraints.native_task||st.auto)choices.push({label:'Arm current task',description:st.contract.contract.goal,kind:'current'});
     choices.push({label:'Start a read-only workspace review',kind:'review'},{label:'Start a scoped Python coding task',description:'Exact edits and sandboxed unittest runs',kind:'coding'});
     setArmingStep('Choose a task in the picker at the top of VS Code. Escape cancels setup.');
-    const chosen=await vscode.window.showQuickPick(choices,{ignoreFocusOut:true,title:'Karma Auto — choose the task to arm',placeHolder:'Arming applies only to Karma model requests. Existing tasks stay in history.'});if(!chosen)return;
+    const chosen=await vscode.window.showQuickPick(choices,{ignoreFocusOut:true,title:'Sutra Auto — choose the task to arm',placeHolder:'Arming applies only to Sutra model requests. Existing tasks stay in history.'});if(!chosen)return;
     if(chosen.kind!=='current'){
       setArmingStep('Enter the task goal in the input at the top of VS Code, then press Enter.');
       const goal=await vscode.window.showInputBox({title:'Task goal',prompt:'This goal stays pinned across model switches.',value:chosen.kind==='review'?'Review this workspace and explain its architecture.':'Fix and test the selected Python code within the approved scope.' ,ignoreFocusOut:true});if(!goal?.trim())return;
@@ -77,30 +77,30 @@ function install(vscode,context,deps){
     setArmingStep('Confirm the displayed scope: choose Arm this task in the picker at the top of VS Code.');
     const ok=await vscode.window.showQuickPick([{label:'Arm this task',description:'Scope: '+k.allowed_paths.join(', ')},{label:'Cancel'}],{ignoreFocusOut:true,title:`Edits ${k.edits_allowed?'allowed':'off'} · tests ${k.tests_allowed?'allowed':'off'} · network ${k.network_allowed?'allowed':'off'}`});if(ok?.label!=='Arm this task')return;
     if(running||deps.isBusy())throw new Error('An operation started while arming. Retry when it finishes.');
-    setArmingStep('Opening Karma chat and verifying the task contract…');
+    setArmingStep('Opening Sutra chat and verifying the task contract…');
     await selectNativeChat();
     const latest=await deps.request({op:'state'});if(JSON.stringify(identity(st))!==JSON.stringify(identity(latest)))throw new Error('Task changed while arming. Review the current scope again.');
-    disarm();armed={binding:identity(st),session:st.session,workspace:deps.workspace(),generation:crypto.randomUUID(),coding:!!k.native_task};reason='Task armed. Send your request in the Karma Auto chat.';success=true;publish();
-    void vscode.window.showInformationMessage('Karma is armed for: '+st.contract.contract.goal+'. Send your request in the Karma Auto chat.');
+    disarm();armed={binding:identity(st),session:st.session,workspace:deps.workspace(),generation:crypto.randomUUID(),coding:!!k.native_task};reason='Task armed. Send your request in the Sutra Auto chat.';success=true;publish();
+    void vscode.window.showInformationMessage('Sutra is armed for: '+st.contract.contract.goal+'. Send your request in the Sutra Auto chat.');
     }catch(error){failure=error;reason='Could not arm: '+error.message;throw error;}
     finally{arming=false;armingStep='';if(!success&&!failure)reason=armed?'Setup cancelled; the previous task remains armed.':'Arming cancelled. Choose Arm task to try again. No model call was made.';publish();}
 
   }
   async function selectNativeChat(){
-    if(selecting)throw new Error('Karma chat selection is already in progress.');
+    if(selecting)throw new Error('Sutra chat selection is already in progress.');
     selecting=true;publish();
     try{
-      if(!enabled())throw new Error('Enable Karma native chat first.');
+      if(!enabled())throw new Error('Enable Sutra native chat first.');
       const commands=await vscode.commands.getCommands(true);
-      if(!commands.includes('workbench.action.chat.newLocalChat'))throw new Error('This VS Code version cannot open the compatible Local chat. Karma has not changed your chat preferences.');
+      if(!commands.includes('workbench.action.chat.newLocalChat'))throw new Error('This VS Code version cannot open the compatible Local chat. Sutra has not changed your chat preferences.');
       const selector={vendor:'karma',id:MODEL_IDS.auto,family:'karma'};
       const models=await vscode.lm.selectChatModels(selector);
-      if(!models.some(m=>m.id===MODEL_IDS.auto))throw new Error('Karma Auto is not available yet. Reload VS Code and retry.');
+      if(!models.some(m=>m.id===MODEL_IDS.auto))throw new Error('Sutra Auto is not available yet. Reload VS Code and retry.');
       const chat=vscode.workspace.getConfiguration('chat');
       const previous=new Map(),written=[];
       for(const [key,value] of Object.entries(CHAT_DEFAULTS)){
         const inspected=chat.inspect?.(key);
-        if(inspected?.policyValue!==undefined&&inspected.policyValue!==value)throw new Error('Your organization manages chat.'+key+'. Karma cannot save a compatible chat default.');
+        if(inspected?.policyValue!==undefined&&inspected.policyValue!==value)throw new Error('Your organization manages chat.'+key+'. Sutra cannot save a compatible chat default.');
         previous.set(key,inspected?.globalValue);
       }
       try{
@@ -109,7 +109,7 @@ function install(vscode,context,deps){
           await chat.update(key,value,vscode.ConfigurationTarget.Global);written.push(key);
         }
         const effective=vscode.workspace.getConfiguration('chat');
-        for(const [key,value] of Object.entries(CHAT_DEFAULTS))if(effective.get(key)!==value)throw new Error('A workspace or managed setting overrides chat.'+key+'. Resolve that override to use Karma as the saved default.');
+        for(const [key,value] of Object.entries(CHAT_DEFAULTS))if(effective.get(key)!==value)throw new Error('A workspace or managed setting overrides chat.'+key+'. Resolve that override to use Sutra as the saved default.');
         // Reveal the chat panel first so selection cannot target a stale chat editor.
         await vscode.commands.executeCommand('workbench.panel.chat.view.copilot.focus');
         await vscode.commands.executeCommand('workbench.action.chat.newLocalChat');
@@ -121,20 +121,20 @@ function install(vscode,context,deps){
         }
         throw error;
       }
-      reason='Local chat and Karma Auto saved for new sessions. A model preference does not arm a task or verify routing.';
+      reason='Local chat and Sutra Auto saved for new sessions. A model preference does not arm a task or verify routing.';
       publish();
     }finally{selecting=false;publish();}
   }
   async function useNativeChat(){
     if(arming){void vscode.window.showInformationMessage(armingStep);return;}
-    if(running||routing?.active||deps.isBusy())throw new Error('A Karma operation is running. Wait for it to finish before opening another chat.');
+    if(running||routing?.active||deps.isBusy())throw new Error('A Sutra operation is running. Wait for it to finish before opening another chat.');
     await selectNativeChat();
-    void vscode.window.showInformationMessage('Opened Local chat with Karma Auto. This choice is saved for new sessions. You can chat now. Arm a task for workspace reads, edits or tests; existing conversations keep their own model.', 'Arm task').then(choice=>{
+    void vscode.window.showInformationMessage('Opened Local chat with Sutra Auto. This choice is saved for new sessions. You can chat now. Arm a task for workspace reads, edits or tests; existing conversations keep their own model.', 'Arm task').then(choice=>{
       if(choice==='Arm task')return beginArm();
     }).catch(error=>vscode.window.showErrorMessage(error.message));
   }
   async function trackRequest(model,progress,token,invoke){
-    if(routing?.active||running||deps.isBusy())throw new Error('A Karma request is running. Wait before switching models.');
+    if(routing?.active||running||deps.isBusy())throw new Error('A Sutra request is running. Wait before switching models.');
     const audit={id:crypto.randomUUID(),model:model.id,startedAt:new Date().toISOString(),active:true,stage:'received'};
     routing=audit;publish();deps.onRoute?.({...audit});
     try{
@@ -144,24 +144,24 @@ function install(vscode,context,deps){
     }catch(error){audit.stage=token.isCancellationRequested||/cancel|disarm/i.test(error.message)?'cancelled':'blocked';audit.message=error.message;throw error;}
     finally{audit.active=false;audit.finishedAt=new Date().toISOString();publish();deps.onRoute?.({...audit});}
   }
-  function ticket(input){const t=tickets.get(input?.ticket),a=assertArmed();if(!t||t.generation!==a.generation||Date.now()>t.expires)throw new Error('Missing, expired or revoked Karma action ticket.');return t;}
+  function ticket(input){const t=tickets.get(input?.ticket),a=assertArmed();if(!t||t.generation!==a.generation||Date.now()>t.expires)throw new Error('Missing, expired or revoked Sutra action ticket.');return t;}
   const tool={
     prepareInvocation(options){const t=ticket(options.input);const md=new vscode.MarkdownString();md.appendText(t.kind==='edit'?'Apply this exact proposed edit to '+t.preview.target+'?':'Run the permitted Python test '+t.preview.target+' in a read-only snapshot with network denied?');if(t.preview.diff)md.appendCodeblock(t.preview.diff,'diff');md.isTrusted=false;
-      return {invocationMessage:t.kind==='edit'?'Applying governed edit':'Running governed test',confirmationMessages:{title:'Karma: '+(t.kind==='edit'?'apply edit':'run test'),message:md}};},
+      return {invocationMessage:t.kind==='edit'?'Applying governed edit':'Running governed test',confirmationMessages:{title:'Sutra: '+(t.kind==='edit'?'apply edit':'run test'),message:md}};},
     async invoke(options,token){
-      if(running||deps.isBusy())throw new Error('A Karma operation is already running.');
-      if(token.isCancellationRequested)throw new Error('Karma action cancelled.');
+      if(running||deps.isBusy())throw new Error('A Sutra operation is already running.');
+      if(token.isCancellationRequested)throw new Error('Sutra action cancelled.');
       const t=ticket(options.input);await check(token);if(ticket(options.input)!==t)throw new Error('Action revoked.');
       // VS Code may skip prepareInvocation confirmations for programmatic calls
       // without a chat token. Require a host dialog for that path as well.
       if(!options.toolInvocationToken){
         const label=t.kind==='edit'?'Apply edit':'Run test';
-        const confirmed=await vscode.window.showWarningMessage('Karma: '+label+' · '+t.preview.target,{modal:true,detail:t.preview.diff||'Run the permitted Python unittest in a read-only snapshot with network denied. Exit status is a process observation; assertions remain unverified.'},label);
-        if(confirmed!==label)throw new Error('Karma action not confirmed.');
+        const confirmed=await vscode.window.showWarningMessage('Sutra: '+label+' · '+t.preview.target,{modal:true,detail:t.preview.diff||'Run the permitted Python unittest in a read-only snapshot with network denied. Exit status is a process observation; assertions remain unverified.'},label);
+        if(confirmed!==label)throw new Error('Sutra action not confirmed.');
         await check(token);if(ticket(options.input)!==t)throw new Error('Action revoked.');
       }
-      if(running||deps.isBusy())throw new Error('Another Karma operation started.');
-      if(token.isCancellationRequested)throw new Error('Karma action cancelled.');
+      if(running||deps.isBusy())throw new Error('Another Sutra operation started.');
+      if(token.isCancellationRequested)throw new Error('Sutra action cancelled.');
       tickets.delete(options.input.ticket);running=true;activeCancel=new vscode.CancellationTokenSource();const cancel=token.onCancellationRequested(()=>activeCancel?.cancel());publish();
       try{const data=await deps.request({op:'native_execute',...armed.binding,invocation_id:t.invocation_id},activeCancel.token);const result={...data.action_receipt,assertions_verified:false};completed.set(t.callId,{prompt:t.prompt,conversationId:t.conversationId,result,generation:t.generation});deps.publishReview(data);
         return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify({receipt:result.id,status:result.result.status,target:t.preview.target,returncode:result.result.returncode,assertions_verified:false,note:'A zero exit status is a process observation, not verified test assertions.'}))]);
@@ -169,17 +169,17 @@ function install(vscode,context,deps){
     }
   };
   const provider={onDidChangeLanguageModelChatInformation:changed.event,
-    provideLanguageModelChatInformation(){if(!enabled())return [];const models=deps.modelSettings();return ['auto','low','mid','high'].map(id=>({id:MODEL_IDS[id],name:id==='auto'?'Karma Auto':'Karma '+id[0].toUpperCase()+id.slice(1),family:'karma',version:'0.15.1',maxInputTokens:64000,maxOutputTokens:4096,detail:id==='auto'?'Governed local routing':models[id]||'Configure this tier',tooltip:'Chat normally; arm a task for workspace tools. Every local call uses the invocation gateway.',capabilities:{toolCalling:true,imageInput:false}}));},
+    provideLanguageModelChatInformation(){if(!enabled())return [];const models=deps.modelSettings();return ['auto','low','mid','high'].map(id=>({id:MODEL_IDS[id],name:id==='auto'?'Sutra Auto':'Sutra '+id[0].toUpperCase()+id.slice(1),family:'karma',version:'0.16.0',maxInputTokens:64000,maxOutputTokens:4096,detail:id==='auto'?'Governed local routing':models[id]||'Configure this tier',tooltip:'Chat normally; arm a task for workspace tools. Every local call uses the invocation gateway.',capabilities:{toolCalling:true,imageInput:false}}));},
     provideTokenCount(model,input){return Buffer.byteLength(typeof input==='string'?input:JSON.stringify(input),'utf8');},
     async provideLanguageModelChatResponse(model,messages,options,progress,token){
       if(isCompaction(vscode,messages)){
-        if(token.isCancellationRequested)throw new Error('Karma compaction cancelled.');
-        if(!enabled())throw new Error('Karma is disabled.');
+        if(token.isCancellationRequested)throw new Error('Sutra compaction cancelled.');
+        if(!enabled())throw new Error('Sutra is disabled.');
         const saved=memory.resolve(vscode,messages,options);
         // Compaction is host bookkeeping: carry an authenticated receipt pointer.
         // Never send the summarizer instruction to a model as a new user task.
         if(!saved.parent){
-          progress.report(new vscode.LanguageModelTextPart('<summary>Karma has no authenticated checkpoint in this supplied history. Missing context must be restated; no permissions are granted.</summary>'));
+          progress.report(new vscode.LanguageModelTextPart('<summary>Sutra has no authenticated checkpoint in this supplied history. Missing context must be restated; no permissions are granted.</summary>'));
           lastCompaction={status:'missing_checkpoint',time:new Date().toISOString()};publish();
           deps.onRoute?.({id:crypto.randomUUID(),stage:'compaction_missing_checkpoint',active:false,model:model.id});return;
         }
@@ -190,23 +190,23 @@ function install(vscode,context,deps){
         deps.onRoute?.({id:crypto.randomUUID(),stage:'compaction_checkpoint_preserved',active:false,invocationId:saved.parent,memorySource:saved.source,model:model.id});return;
       }
       return trackRequest(model,progress,token,async audit=>{
-      if(token.isCancellationRequested)throw new Error('Karma request cancelled.');
+      if(token.isCancellationRequested)throw new Error('Sutra request cancelled.');
       if(arming||!enabled()){
         audit.stage=arming?'awaiting_confirmation':'needs_arming';
-        const guidance=arming?armingStep:!enabled()?'Enable native chat in Karma Settings, then arm a task.':'Choose Arm task in Karma, or run **Karma: Arm Task and Open Chat** from the Command Palette. Confirm the task and scope, then resend your request.';
-        progress.report(new vscode.LanguageModelTextPart('You are connected to Karma. '+guidance+'\n\nSetup guidance only — no model call, source read, edit, or test was performed.'));
+        const guidance=arming?armingStep:!enabled()?'Enable native chat in Sutra Settings, then arm a task.':'Choose Arm task in Sutra, or run **Sutra: Arm Task and Open Chat** from the Command Palette. Confirm the task and scope, then resend your request.';
+        progress.report(new vscode.LanguageModelTextPart('You are connected to Sutra. '+guidance+'\n\nSetup guidance only — no model call, source read, edit, or test was performed.'));
         return;
       }
-      if(running||deps.isBusy())throw new Error('A Karma request is running. Wait before switching models.');
+      if(running||deps.isBusy())throw new Error('A Sutra request is running. Wait before switching models.');
       const request=latestRequest(vscode,messages);
       if(!request.results){const saved=memory.resolve(vscode,messages,options,request.parent);request.parent=saved.parent;audit.memorySource=saved.source;}
       let prompt=request.prompt,conversationId;
-      if(request.results){assertArmed();if(request.results.length!==1)throw new Error('Unexpected tool results for Karma.');const known=completed.get(request.results[0].callId);if(!known||known.generation!==armed.generation)throw new Error('Tool result lacks a current Karma host receipt.');if(!['applied','process_exited_zero','process_failed'].includes(known.result.result.status)){progress.report(new vscode.LanguageModelTextPart('Karma stopped after '+known.result.result.status+'. Inspect the host action receipt before continuing.'));return;}prompt=known.prompt;conversationId=known.conversationId;}
+      if(request.results){assertArmed();if(request.results.length!==1)throw new Error('Unexpected tool results for Sutra.');const known=completed.get(request.results[0].callId);if(!known||known.generation!==armed.generation)throw new Error('Tool result lacks a current Sutra host receipt.');if(!['applied','process_exited_zero','process_failed'].includes(known.result.result.status)){progress.report(new vscode.LanguageModelTextPart('Sutra stopped after '+known.result.result.status+'. Inspect the host action receipt before continuing.'));return;}prompt=known.prompt;conversationId=known.conversationId;}
       const a=armed;
       const tier=Object.keys(MODEL_IDS).find(key=>MODEL_IDS[key]===model.id);
-      if(!tier)throw new Error('Unknown Karma tier');
+      if(!tier)throw new Error('Unknown Sutra tier');
       const tools=options.tools||[],canAct=tools.some(t=>t.name===ACTION);
-      if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&!canAct)throw new Error('Required tool mode does not include the Karma action tool.');
+      if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&!canAct)throw new Error('Required tool mode does not include the Sutra action tool.');
       let responseUsage={calls:[]},footerId,footerSignature;
       const recordUsage=result=>{responseUsage=tokens.merge(responseUsage,result?.token_usage);audit.token_usage=responseUsage;};
       running=true;activeCancel=new vscode.CancellationTokenSource();const cancellation=token.onCancellationRequested(()=>activeCancel?.cancel());publish();
@@ -217,12 +217,12 @@ function install(vscode,context,deps){
           const chat=await deps.request({op:'conversation',prompt,parent:request.parent,models,tier},activeCancel.token);
           if(armed!==a||!enabled()||activeCancel.token.isCancellationRequested)throw new Error('Native request disarmed or cancelled. Response withheld.');
           const r=chat.result;recordUsage(r);lastRoute=chat.route.model;audit.model=lastRoute;audit.memoryUsed=chat.memory_used;audit.conversationBudget=chat.budget;audit.invocationId=r.invocation_id;audit.stage=r.admission.admitted?'conversation':'withheld';publish();
-          if(!r.admission.admitted){progress.report(new vscode.LanguageModelTextPart('Karma withheld the conversation response: '+r.admission.errors.join('; ')));return;}
+          if(!r.admission.admitted){progress.report(new vscode.LanguageModelTextPart('Sutra withheld the conversation response: '+r.admission.errors.join('; ')));return;}
           const p=r.accepted_output;
           if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&(p.intent!=='workspace'||!a))throw new Error('No admitted action is available to satisfy required tool mode.');
           footerSignature=await memory.remember(r.invocation_id,options);footerId=r.invocation_id;
           progress.report(new vscode.LanguageModelTextPart(p.answer+'\n\n'));
-          if(p.diagram){try{await deps.presentConversation?.(chat);progress.report(new vscode.LanguageModelTextPart('Diagram opened beside the chat. Use **Karma: Open Last Diagram** to reopen it.\n\n'));}catch(error){progress.report(new vscode.LanguageModelTextPart('Diagram preview could not open: '+error.message+'\n\n'));}}
+          if(p.diagram){try{await deps.presentConversation?.(chat);progress.report(new vscode.LanguageModelTextPart('Diagram opened beside the chat. Use **Sutra: Open Last Diagram** to reopen it.\n\n'));}catch(error){progress.report(new vscode.LanguageModelTextPart('Diagram preview could not open: '+error.message+'\n\n'));}}
           if(p.intent!=='workspace')return;
           if(!a){audit.stage='needs_workspace_scope';progress.report(new vscode.LanguageModelTextPart('To inspect or change workspace files, choose **Arm task**, confirm its scope, then resend your request. General conversation can continue without arming.'));offerArm();return;}
           conversationId=r.invocation_id;audit.conversationInvocationId=r.invocation_id;progress.report(new vscode.LanguageModelTextPart('Checking the armed workspace task before accessing source…\n\n'));
@@ -232,14 +232,14 @@ function install(vscode,context,deps){
         if(a.coding){const models=await deps.configureModels(false,activeCancel.token);data=await deps.request({op:'native_work',...a.binding,prompt,models,tier,conversation_id:conversationId},activeCancel.token);}
         else data=await deps.simpleChat(prompt,{tier,token:activeCancel.token,conversationId});
         if(armed!==a||!enabled()||activeCancel.token.isCancellationRequested)throw new Error('Native request disarmed or cancelled. Proposal withheld.');
-        if(data?.notice){audit.stage='guidance';progress.report(new vscode.LanguageModelTextPart(data.notice.message+'\n\nKarma setup guidance — no model invocation.'));return;}
+        if(data?.notice){audit.stage='guidance';progress.report(new vscode.LanguageModelTextPart(data.notice.message+'\n\nSutra setup guidance — no model invocation.'));return;}
         if(!data?.result)throw new Error(data?.notice?.message||'No governed response available.');
         deps.publishReview(data);lastRoute=data.route?.model||data.result.model||'';publish();
-        const r=data.result;recordUsage(r);audit.invocationId=r.invocation_id;audit.model=lastRoute;audit.stage=r.admission.admitted?'admitted':'withheld';publish();if(!r.admission.admitted){progress.report(new vscode.LanguageModelTextPart('Karma withheld the response: '+r.admission.errors.join('; ')));return;}
+        const r=data.result;recordUsage(r);audit.invocationId=r.invocation_id;audit.model=lastRoute;audit.stage=r.admission.admitted?'admitted':'withheld';publish();if(!r.admission.admitted){progress.report(new vscode.LanguageModelTextPart('Sutra withheld the response: '+r.admission.errors.join('; ')));return;}
         const p=r.accepted_output;if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&!['edit','run_tests'].includes(p.action?.kind))throw new Error('No admitted action is available to satisfy required tool mode.');
-        progress.report(new vscode.LanguageModelTextPart(`Karma routing confirmed · ${lastRoute} · task ${a.session}\nRequest ${audit.id} · protocol invocation ${r.invocation_id}\n\n${p.answer||p.summary}\n\n`));
+        progress.report(new vscode.LanguageModelTextPart(`Sutra routing confirmed · ${lastRoute} · task ${a.session}\nRequest ${audit.id} · protocol invocation ${r.invocation_id}\n\n${p.answer||p.summary}\n\n`));
         if(['edit','run_tests'].includes(p.action?.kind)){
-          if(!canAct){progress.report(new vscode.LanguageModelTextPart('The proposal is retained. Enable the Karma action tool in native Agent chat to review and apply it. No action executed.'));return;}
+          if(!canAct){progress.report(new vscode.LanguageModelTextPart('The proposal is retained. Enable the Sutra action tool in native Agent chat to review and apply it. No action executed.'));return;}
           const preview=await deps.request({op:'native_preview',...a.binding,invocation_id:r.invocation_id},activeCancel.token);if(armed!==a||activeCancel.token.isCancellationRequested)throw new Error('Task disarmed or cancelled during preview.');
           const id=crypto.randomUUID(),callId=crypto.randomUUID();tickets.set(id,{generation:a.generation,expires:Date.now()+300000,invocation_id:r.invocation_id,kind:p.action.kind,preview,prompt,conversationId,callId});
           if(preview.diff)await deps.showDiff(preview,r.invocation_id);
@@ -248,9 +248,9 @@ function install(vscode,context,deps){
         }else{progress.report(new vscode.LanguageModelTextPart('Remaining: '+(p.remaining?.join('; ')||'No further step proposed.')+'\n\nModel notes are not proof of correctness. Test receipts report process observations.'));}
       }finally{
         if(responseUsage.calls.length||footerId){
-          const detail=tokens.compact(responseUsage),label='Karma · '+detail+' · conversation details';
-          const footer=footerId?`[${label}](karma-preview:/conversation/${footerId}/Response.md?checkpoint=${footerSignature})`:'Karma · '+detail;
-          if(!activeCancel.token.isCancellationRequested)progress.report(new vscode.LanguageModelTextPart('\n\n---\n'+footer+(footerId?(audit.memoryUsed?' · Memory restored':' · New conversation'):'')+' · Per-stage counts in **Karma → Usage**.\n'));
+          const detail=tokens.compact(responseUsage),label='Sutra · '+detail+' · conversation details';
+          const footer=footerId?`[${label}](karma-preview:/conversation/${footerId}/Response.md?checkpoint=${footerSignature})`:'Sutra · '+detail;
+          if(!activeCancel.token.isCancellationRequested)progress.report(new vscode.LanguageModelTextPart('\n\n---\n'+footer+(footerId?(audit.memoryUsed?' · Memory restored':' · New conversation'):'')+' · Per-stage counts in **Sutra → Usage**.\n'));
         }
         cancellation.dispose();activeCancel.dispose();activeCancel=undefined;running=false;publish();
       }

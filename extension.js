@@ -12,9 +12,9 @@ function activate(context) {
   // Bundled runtime inputs are versioned and verified before execution.
   const integrity=JSON.parse(fs.readFileSync(path.join(context.extensionPath,'runtime-integrity.json'),'utf8'));
   for(const [name,expected] of Object.entries(integrity.sha256)){
-    if(crypto.createHash('sha256').update(fs.readFileSync(path.join(context.extensionPath,name))).digest('hex')!==expected)throw new Error('Karma runtime integrity check failed: '+name);
+    if(crypto.createHash('sha256').update(fs.readFileSync(path.join(context.extensionPath,name))).digest('hex')!==expected)throw new Error('Sutra runtime integrity check failed: '+name);
   }
-  const output = vscode.window.createOutputChannel('Karma Local Harness');
+  const output = vscode.window.createOutputChannel('Sutra');
   let nativeController, panel, panelReady=false, panelSection, busy = false, sequence = false, telemetry, telemetryDir, dashboardTimer, dashboardInFlight=false, stopAuto=false, chatCancellation;
   const previewDocuments=new Map(), previewChanges=new vscode.EventEmitter();
   function updateReports(data){
@@ -27,7 +27,7 @@ function activate(context) {
   const processes = new Set();
   let dashboardWorker;
   const workspace = () => {
-    if (!vscode.workspace.isTrusted) throw new Error('Karma requires a trusted workspace.');
+    if (!vscode.workspace.isTrusted) throw new Error('Sutra requires a trusted workspace.');
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (!folder || folder.uri.scheme !== 'file') throw new Error('Open a local folder in VS Code first.');
     return folder.uri.fsPath;
@@ -57,11 +57,11 @@ function activate(context) {
   async function waitForTelemetry(directory,token){
     const started=Date.now();
     while(Date.now()-started<8000){
-      if(token?.isCancellationRequested)throw new Error('Karma request cancelled while waiting for hardware readings.');
+      if(token?.isCancellationRequested)throw new Error('Sutra request cancelled while waiting for hardware readings.');
       try{const sample=JSON.parse(fs.readFileSync(path.join(directory,'telemetry.json'),'utf8'));const age=Date.now()/1000-sample.wall_time;if(age>=0&&age<8)return;}catch{}
       await new Promise(resolve=>setTimeout(resolve,100));
     }
-    throw new Error('Hardware readings are not available yet. Check the Karma dashboard and retry; no model call was made.');
+    throw new Error('Hardware readings are not available yet. Check the Sutra dashboard and retry; no model call was made.');
   }
   function hasDirtyFiles() {
     const base=workspace();return vscode.workspace.textDocuments.some(d=>d.isDirty && d.uri.scheme==='file' &&
@@ -93,11 +93,11 @@ function activate(context) {
     worker.pending={promise,resolve,reject,timer};worker.child.stdin.write('{}\n');return promise;
   }
   async function request(message, token, internal=false) {
-    if(token?.isCancellationRequested)throw new Error("Karma request cancelled before dispatch.");
+    if(token?.isCancellationRequested)throw new Error("Sutra request cancelled before dispatch.");
     const diagnostic=message?.op==='dashboard';
     if(diagnostic)return requestDashboard();
-    if ((busy || ((sequence || nativeController?.status().working) && !internal)) && !diagnostic) throw new Error('A Karma request is running. Switch models after it finishes.');
-    if (!['conversation_read','conversation','native_work','native_preview','native_execute','chat_answer','calibration_register','calibration_list','calibration_bind','calibration_revoke','calibration_evaluate','models','state','new','save','switch','review','work','preview','execute','dashboard','quarantine','review_new','architecture','repository_tool','api_build','api_verify','static_build','static_explain','auto_new','auto_step','auto_report'].includes(message?.op)) throw new Error('Unknown Karma request.');
+    if ((busy || ((sequence || nativeController?.status().working) && !internal)) && !diagnostic) throw new Error('A Sutra request is running. Switch models after it finishes.');
+    if (!['conversation_read','conversation','native_work','native_preview','native_execute','chat_answer','calibration_register','calibration_list','calibration_bind','calibration_revoke','calibration_evaluate','models','state','new','save','switch','review','work','preview','execute','dashboard','quarantine','review_new','architecture','repository_tool','api_build','api_verify','static_build','static_explain','auto_new','auto_step','auto_report'].includes(message?.op)) throw new Error('Unknown Sutra request.');
     if(['native_work','chat_answer','static_build','static_explain','auto_step','auto_report'].includes(message.op)&&hasDirtyFiles())throw new Error('Save or discard unsaved workspace buffers before mapping current source.');
     if(['execute','native_execute'].includes(message.op) && hasDirtyFiles())throw new Error('Save or discard unsaved workspace buffers before applying an edit or running tests.');
     const cwd = workspace(), stateDir = storage();
@@ -111,9 +111,9 @@ function activate(context) {
           '--workspace',cwd,'--storage',stateDir],{cwd,stdio:['pipe','pipe','pipe'],env:{...process.env,KARMA_STORAGE_LIMIT_MIB:String(vscode.workspace.getConfiguration('karma').get('storageLimitMiB',512)),KARMA_NODE:process.execPath,KARMA_TYPESCRIPT:path.join(context.extensionPath,'vendor','typescript','typescript.js')}});
         processes.add(child); let stdout='',stderr='';
         let stopReason,killTimer;const cancel=reason=>{if(stopReason)return;stopReason=reason;child.kill('SIGTERM');killTimer=setTimeout(()=>child.kill('SIGKILL'),10000);};
-        const cancellation=token?.onCancellationRequested(()=>cancel('Karma request cancelled. Interrupted work will be reconciled.'));
+        const cancellation=token?.onCancellationRequested(()=>cancel('Sutra request cancelled. Interrupted work will be reconciled.'));
         // Three attempts each have a 150 second transport deadline.
-        const timer=setTimeout(()=>cancel('Karma bridge exceeded its deadline. Interrupted work will be reconciled.'),480000);
+        const timer=setTimeout(()=>cancel('Sutra bridge exceeded its deadline. Interrupted work will be reconciled.'),480000);
         child.stdout.on('data',d=>{stdout+=d;if(stdout.length>4_000_000)child.kill();});
         child.stderr.on('data',d=>{stderr=(stderr+d).slice(-10000);});
         child.on('error',e=>{clearTimeout(timer);clearTimeout(killTimer);cancellation?.dispose();processes.delete(child);reject(e);});
@@ -158,13 +158,13 @@ function activate(context) {
     if(!catalog.models.some(m=>m.eligible))throw new Error('No local chat models found. Start Ollama, then refresh the model list.');
     return modelSelection.validate(modelSettings(),catalog);
   }
-  const helpMessage='Karma is ready. Ask about the open workspace, or use /new followed by a review request to start a separate read-only task. Open Model settings for installed-model dropdowns; open the dashboard for CPU/GPU temperatures. Existing task constraints stay in force.';
+  const helpMessage='Sutra is ready. Ask about the open workspace, or use /new followed by a review request to start a separate read-only task. Open Model settings for installed-model dropdowns; open the dashboard for CPU/GPU temperatures. Existing task constraints stay in force.';
   function notice(kind,message){const data={notice:{kind,message}};panel?.webview.postMessage({type:'chat-notice',data:data.notice});return data;}
   function entryButtons(stream,workflow=false){
     if(workflow)stream.button({command:'karma.openAdvanced',title:'Open current task controls'});
     stream.button({command:'karma.newChatReview',title:'Start separate review'});
     stream.button({command:'karma.configureModels',title:'Model settings'});
-    stream.button({command:'karma.open',title:'Open Karma dashboard'});
+    stream.button({command:'karma.open',title:'Open Sutra dashboard'});
   }
   async function newChatReview(){
     // Commands ignore arguments from other extensions. Only the user supplies the new goal.
@@ -173,11 +173,11 @@ function activate(context) {
     await showPanelSection('chat');return simpleChat(prompt,{fresh:true,progress:message=>panel?.webview.postMessage({type:'chat-progress',message})});
   }
   async function simpleChat(prompt,{fresh=false,tier='auto',token,conversationId,progress=()=>{}}={}){
-    if(token?.isCancellationRequested)throw new Error('Karma request cancelled before dispatch.');
+    if(token?.isCancellationRequested)throw new Error('Sutra request cancelled before dispatch.');
     prompt=String(prompt||'');if(!prompt.trim()||prompt.length>1800)throw new Error('Enter a request of 1–1800 characters.');
     if(!fresh&&/^(?:hi|hello|hey|help|hi karma|hello karma|hey karma)[.!?\s]*$/i.test(prompt))return notice('help',helpMessage);
-    if(busy||sequence)throw new Error('A Karma task is running. Stop it or wait for it to finish.');
-    if(hasDirtyFiles())throw new Error('Save or discard unsaved files so Karma can read current source.');
+    if(busy||sequence)throw new Error('A Sutra task is running. Stop it or wait for it to finish.');
+    if(hasDirtyFiles())throw new Error('Save or discard unsaved files so Sutra can read current source.');
     sequence=true;panel?.webview.postMessage({type:'busy',value:true});
     try{
       let st=await request({op:'state'},token,true);
@@ -189,14 +189,14 @@ function activate(context) {
       if(fresh||!st.session){
         st=await request({op:'auto_new',goal:prompt,roots:['.']},token,true);
       }
-      if(!st.auto)throw new Error('The review task could not be initialized. Open the Karma dashboard to inspect its state.');
+      if(!st.auto)throw new Error('The review task could not be initialized. Open the Sutra dashboard to inspect its state.');
       while(st.auto.pending_files>0){
         progress(`Mapping current source: ${st.auto.mapped_files}/${st.auto.source_files} files…`);
         const page=await request({op:'auto_step',explain:false},token,true);st=page.state;
         panel?.webview.postMessage({type:'state',data:st});
         if(!['ready','page_rejected'].includes(page.auto.status))break;
       }
-      if(token?.isCancellationRequested)throw new Error('Karma request cancelled. Task state and budgets were preserved.');
+      if(token?.isCancellationRequested)throw new Error('Sutra request cancelled. Task state and budgets were preserved.');
       progress('Choosing a local model and preparing fresh source excerpts…');
       const data=await request({op:'chat_answer',prompt,models,tier,conversation_id:conversationId},token,true);
       panel?.webview.postMessage({type:'state',data:data.state});panel?.webview.postMessage({type:'chat-result',data});
@@ -211,12 +211,12 @@ function activate(context) {
         if(token?.isCancellationRequested)return;
         if(req.command==='help'){stream.markdown(helpMessage);entryButtons(stream);return;}
         if(req.command==='models'){await configureModels();stream.markdown('Opened the installed-model dropdowns. Saved choices are preserved. To replace them, choose Use discovered defaults, then Save choices.');return;}
-        if(req.command==='dashboard'){await showPanelSection('dashboard');stream.markdown('Opened the live Karma dashboard.');return;}
+        if(req.command==='dashboard'){await showPanelSection('dashboard');stream.markdown('Opened the live Sutra dashboard.');return;}
         if(req.command==='new'&&!req.prompt.trim()){await newChatReview();return;}
         if(req.command==='status'){
           const d=await request({op:'dashboard'}),t=d.hardware.temperatures;
           const temperature=group=>t?.[group]?.available&&Number.isFinite(t[group].maximum_celsius)?t[group].maximum_celsius.toFixed(1)+' °C':'unavailable';
-          stream.markdown(`CPU sensor max: **${temperature('cpu')}** · GPU sensor max: **${temperature('gpu')}**. Thermal state: **${d.hardware.thermal_label||'unavailable'}**. Celsius readings are advisory.`);stream.button({command:'karma.open',title:'Open Karma dashboard'});return;
+          stream.markdown(`CPU sensor max: **${temperature('cpu')}** · GPU sensor max: **${temperature('gpu')}**. Thermal state: **${d.hardware.thermal_label||'unavailable'}**. Celsius readings are advisory.`);stream.button({command:'karma.open',title:'Open Sutra dashboard'});return;
         }
         const data=await simpleChat(req.prompt,{fresh:req.command==='new',tier:['low','mid','high'].includes(req.command)?req.command:'auto',token,progress:m=>stream.progress(m)});
         if(!data)return;
@@ -224,10 +224,10 @@ function activate(context) {
         stream.markdown(`**${data.route.tier} · ${data.route.model}** — ${data.route.reason}\n\n`);
         if(data.result.admission.admitted){const p=data.result.accepted_output;const md=new vscode.MarkdownString(p.answer);md.isTrusted=false;stream.markdown(md);
           stream.markdown(`\n\nMapped ${data.coverage.mapped_files}/${data.coverage.source_files} files. This answer inspected excerpts from ${data.source_files.join(', ')}.\n\nRemaining: ${p.remaining.join('; ')||'No further step proposed.'}`);
-        }else stream.markdown('The response was withheld by Karma checks. '+data.result.admission.errors.join('; '));
-        stream.markdown('\n\n---\nKarma · '+tokens.compact(data.result.token_usage)+' · Per-stage counts in **Karma → Usage**.');
+        }else stream.markdown('The response was withheld by Sutra checks. '+data.result.admission.errors.join('; '));
+        stream.markdown('\n\n---\nSutra · '+tokens.compact(data.result.token_usage)+' · Per-stage counts in **Sutra → Usage**.');
         if(data.diagramUri)stream.reference(data.diagramUri);
-        stream.button({command:'karma.open',title:'Open Karma dashboard'});
+        stream.button({command:'karma.open',title:'Open Sutra dashboard'});
         return {metadata:{model:data.route.model,tier:data.route.tier,invocationId:data.result.invocation_id}};
       }catch(error){entryButtons(stream);return {errorDetails:{message:error.message}};}
     });
@@ -235,7 +235,7 @@ function activate(context) {
   }
   async function runReview(prompt, steps=1, token, mode='explore') {
     if(!Number.isInteger(steps)||steps<1||steps>4)throw new Error('Choose 1..4 review steps.');
-    if(sequence||busy)throw new Error('A Karma request is running.');
+    if(sequence||busy)throw new Error('A Sutra request is running.');
     sequence=true;let data;
     try {
       for(let i=0;i<steps;i++) {
@@ -247,7 +247,7 @@ function activate(context) {
     }finally{sequence=false;panel?.webview.postMessage({type:'busy',value:false});}
   }
   async function runAuto(options={}){
-    if(busy||sequence)throw new Error('A Karma request is running.');
+    if(busy||sequence)throw new Error('A Sutra request is running.');
     sequence=true;stopAuto=false;panel?.webview.postMessage({type:'auto-running',value:true});let data;
     try{while(!stopAuto){data=await request({op:'auto_step',explain:options.explain!==false},undefined,true);publishReview(data);if(!['ready','page_rejected'].includes(data.auto.status))break;}return data;}
     finally{sequence=false;panel?.webview.postMessage({type:'auto-running',value:false});panel?.webview.postMessage({type:'busy',value:false});}
@@ -257,13 +257,13 @@ function activate(context) {
     previewDocuments.set(uri.toString(),data.report);await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));return data.report;
   }
   async function automaticReview(){
-    const goal=await vscode.window.showInputBox({title:'Karma: whole-codebase review',value:'Review the whole codebase and explain its architecture with a diagram.'});if(!goal)return;
+    const goal=await vscode.window.showInputBox({title:'Sutra: whole-codebase review',value:'Review the whole codebase and explain its architecture with a diagram.'});if(!goal)return;
     const roots=(await vscode.window.showInputBox({title:'Read-only scope: relative directories or files, comma separated',value:'.'}))?.split(',').map(x=>x.trim());if(!roots)return;
     const data=await request({op:'auto_new',goal,roots});await open();panel?.webview.postMessage({type:'state',data});return data;
   }
   async function reviewCodebase(options) {
     workspace();
-    const goal=await vscode.window.showInputBox({title:'Karma: architecture review goal',value:'Review this codebase and explain its architecture with a diagram.'});
+    const goal=await vscode.window.showInputBox({title:'Sutra: architecture review goal',value:'Review this codebase and explain its architecture with a diagram.'});
     if(!goal)return;
     const roots=(await vscode.window.showInputBox({title:'Read-only scope: relative directories or files, comma separated',value:'.'}))?.split(',').map(x=>x.trim());
     if(!roots)return;
@@ -291,7 +291,7 @@ function activate(context) {
     workspace();
     if(panel){panel.reveal();if(panelReady&&!busy&&!sequence)await refresh();return;}
     panelReady=false;
-    panel=vscode.window.createWebviewPanel('karmaLocalHarness','Karma Local Harness',vscode.ViewColumn.One,
+    panel=vscode.window.createWebviewPanel('karmaLocalHarness','Sutra',vscode.ViewColumn.One,
       {enableScripts:true,retainContextWhenHidden:true,localResourceRoots:[vscode.Uri.file(path.join(context.extensionPath,'media'))]});
     const nonce=crypto.randomBytes(18).toString('hex');
     const script=panel.webview.asWebviewUri(vscode.Uri.file(path.join(context.extensionPath,'media','panel.js')));
@@ -324,7 +324,7 @@ function activate(context) {
           await vscode.workspace.getConfiguration('karma').update('models',selected,vscode.ConfigurationTarget.Global);publishSettings();panel?.webview.postMessage({type:'models-saved'});return;
         }
         if(message.op==='chat_send'){
-          if(chatCancellation)throw new Error('A Karma chat turn is running.');
+          if(chatCancellation)throw new Error('A Sutra chat turn is running.');
           chatCancellation=new vscode.CancellationTokenSource();
           try{await simpleChat(message.prompt,{fresh:message.fresh===true,tier:message.tier,token:chatCancellation.token,progress:m=>panel?.webview.postMessage({type:'chat-progress',message:m})});}
           finally{chatCancellation.dispose();chatCancellation=undefined;}return;
@@ -346,7 +346,7 @@ function activate(context) {
           const before=vscode.Uri.parse('karma-preview:/'+message.invocation_id+'/before.py');
           const after=vscode.Uri.parse('karma-preview:/'+message.invocation_id+'/after.py');
           previewDocuments.set(before.toString(),change.before);previewDocuments.set(after.toString(),change.after);
-          await vscode.commands.executeCommand('vscode.diff',before,after,'Karma proposed edit: '+change.target);return;
+          await vscode.commands.executeCommand('vscode.diff',before,after,'Sutra proposed edit: '+change.target);return;
         }
         const data=await request(message);
         if(message.op==='review'||message.op==='work'||message.op==='architecture'){
@@ -383,12 +383,12 @@ function activate(context) {
     let st=await request({op:'state'});
     if(!st.architecture){await reviewCodebase({run:false});st=await request({op:'state'});}
     if(!st.architecture)return;
-    const files=options.files??await vscode.window.showQuickPick(st.architecture.catalog.filter(n=>/\.(py|js|jsx|ts|tsx)$/.test(n)||n.endsWith('tsconfig.json')),{canPickMany:true,title:'Karma: select up to 8 source/config files for a fresh map'});
+    const files=options.files??await vscode.window.showQuickPick(st.architecture.catalog.filter(n=>/\.(py|js|jsx|ts|tsx)$/.test(n)||n.endsWith('tsconfig.json')),{canPickMany:true,title:'Sutra: select up to 8 source/config files for a fresh map'});
     if(!files?.length)return;
     let model=options.model;
     if(explain&&!model){
       const {models}=await request({op:'models'}),preferred=st.static?.model||vscode.workspace.getConfiguration('karma').get('explanationModel','qwen3.6:35b');
-      model=await vscode.window.showQuickPick(models.map(m=>m.name).sort((a,b)=>(b===preferred)-(a===preferred)),{title:'Karma: local model to explain source facts'});
+      model=await vscode.window.showQuickPick(models.map(m=>m.name).sort((a,b)=>(b===preferred)-(a===preferred)),{title:'Sutra: local model to explain source facts'});
       if(!model)return;
     }
     const data=await request({op:explain?'static_explain':'static_build',files,...(options.offset!==undefined?{offset:options.offset}:{}),...(model?{model}:{})});
@@ -398,7 +398,7 @@ function activate(context) {
     let st=await request({op:'state'});
     if(!st.architecture){await reviewCodebase({run:false});st=await request({op:'state'});}
     if(!st.architecture)return;
-    const files=options?.files??await vscode.window.showQuickPick(st.architecture.catalog.filter(n=>/\.(py|js|jsx|ts|tsx)$/.test(n)),{canPickMany:true,title:'Karma: choose up to 8 API source files'});
+    const files=options?.files??await vscode.window.showQuickPick(st.architecture.catalog.filter(n=>/\.(py|js|jsx|ts|tsx)$/.test(n)),{canPickMany:true,title:'Sutra: choose up to 8 API source files'});
     if(!files?.length)return;await open();
     const draft=await request({op:'api_build',files,offset:options?.offset??0});publishReview(draft);
     if(!draft.result.admission.admitted||options?.review===false)return draft;
@@ -432,16 +432,16 @@ function activate(context) {
   }
   async function switchModel() {
     const {models}=await request({op:'models'});
-    const chosen=await vscode.window.showQuickPick(models.map(m=>m.name),{title:'Karma: choose the model for the next turn'});
+    const chosen=await vscode.window.showQuickPick(models.map(m=>m.name),{title:'Sutra: choose the model for the next turn'});
     if(chosen){const state=await request({op:'switch',model:chosen});panel?.webview.postMessage({type:'state',data:state});}
   }
   const status=vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right,20);
-  status.text='$(layers) Karma';status.command='karma.open';status.tooltip='Open the local harness';status.show();
+  status.text='$(layers) Sutra';status.command='karma.open';status.tooltip='Open the local harness';status.show();
   context.subscriptions.push(status,output,previewChanges,vscode.commands.registerCommand('karma.open',open),
     vscode.commands.registerCommand('karma.configureModels',()=>configureModels()),
     vscode.commands.registerCommand('karma.openAdvanced',()=>showPanelSection('advanced')),
     vscode.commands.registerCommand('karma.newChatReview',()=>newChatReview()),
-    vscode.workspace.registerTextDocumentContentProvider('karma-preview',{onDidChange:previewChanges.event,provideTextDocumentContent(uri){const match=uri.toString().match(/^karma-preview:\/conversation\/([a-f0-9]{32})\/Response\.md(?:\?checkpoint=[a-f0-9]{64})?$/);if(match)return request({op:'conversation_read',invocation_id:match[1]}).then(data=>{const p=data.result.accepted_output;return p.answer+'\n\n---\n\nModel: '+data.route.model+'\n\n'+tokens.markdown(data.result.token_usage)+'\nConversation receipt: '+match[1]+'\n\nWorkspace tools: not used by the conversation role.\n\n'+(p.diagram?'Open **Karma: Open Last Diagram** to view the latest diagram.\n\n```mermaid\n'+diagramView.mermaidSource(p.diagram)+'\n```':'');});return previewDocuments.get(uri.toString())||'';}}),
+    vscode.workspace.registerTextDocumentContentProvider('karma-preview',{onDidChange:previewChanges.event,provideTextDocumentContent(uri){const match=uri.toString().match(/^karma-preview:\/conversation\/([a-f0-9]{32})\/Response\.md(?:\?checkpoint=[a-f0-9]{64})?$/);if(match)return request({op:'conversation_read',invocation_id:match[1]}).then(data=>{const p=data.result.accepted_output;return p.answer+'\n\n---\n\nModel: '+data.route.model+'\n\n'+tokens.markdown(data.result.token_usage)+'\nConversation receipt: '+match[1]+'\n\nWorkspace tools: not used by the conversation role.\n\n'+(p.diagram?'Open **Sutra: Open Last Diagram** to view the latest diagram.\n\n```mermaid\n'+diagramView.mermaidSource(p.diagram)+'\n```':'');});return previewDocuments.get(uri.toString())||'';}}),
     vscode.commands.registerCommand('karma.exportDebug',async()=>{const data=await request({op:'dashboard'});
       const uri=await vscode.window.showSaveDialog({defaultUri:vscode.Uri.file(path.join(workspace(),'karma-debug.json')),filters:{JSON:['json']}});
       if(uri)await vscode.workspace.fs.writeFile(uri,Buffer.from(JSON.stringify(data,null,2)+'\n'));}),
@@ -480,9 +480,9 @@ function activate(context) {
     nativeController=nativeProvider.install(vscode,context,{request:(m,t)=>request(m,t,true),workspace,isBusy:()=>busy||sequence,
       modelSettings,configureModels:(force,t)=>configureModels(force,t,true),simpleChat,publishReview,
       async presentConversation(data){if(data.result.accepted_output.diagram)await diagrams.open(data);},
-      async showDiff(change,iid){const before=vscode.Uri.parse('karma-preview:/'+iid+'/before.py'),after=vscode.Uri.parse('karma-preview:/'+iid+'/after.py');previewDocuments.set(before.toString(),change.before);previewDocuments.set(after.toString(),change.after);await vscode.commands.executeCommand('vscode.diff',before,after,'Karma proposed edit: '+change.target);},
+      async showDiff(change,iid){const before=vscode.Uri.parse('karma-preview:/'+iid+'/before.py'),after=vscode.Uri.parse('karma-preview:/'+iid+'/after.py');previewDocuments.set(before.toString(),change.before);previewDocuments.set(after.toString(),change.after);await vscode.commands.executeCommand('vscode.diff',before,after,'Sutra proposed edit: '+change.target);},
       onRoute(value){output.appendLine('KARMA_NATIVE_ROUTE '+JSON.stringify(value));},
-      onStatus(value){status.text=(value.routing?.active?'$(sync~spin) ':'$(shield) ')+value.label;status.tooltip=value.explanation+' '+value.reason+(value.routing?' Last Karma request: '+value.routing.id+' · '+value.routing.stage:'');status.command='karma.useNativeChat';panel?.webview.postMessage({type:'native-status',data:value});}
+      onStatus(value){status.text=(value.routing?.active?'$(sync~spin) ':'$(shield) ')+value.label;status.tooltip=value.explanation+' '+value.reason+(value.routing?' Last Sutra request: '+value.routing.id+' · '+value.routing.stage:'');status.command='karma.useNativeChat';panel?.webview.postMessage({type:'native-status',data:value});}
     });context.subscriptions.push(nativeController);
   }
   // Public extension API cannot create contracts, widen scope, edit, or execute.

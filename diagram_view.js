@@ -34,14 +34,14 @@ function install(vscode,context,read){
       if(message.type==='layout'){await web.postMessage({type:'source',source:mermaidSource(d,message.direction)});return;}
       if(message.type==='copy'){await vscode.env.clipboard.writeText(mermaidSource(d,message.direction));return;}
       if(message.type==='export'){
-        const svg=safeSVG(message.svg),name=d.title.replace(/[^a-zA-Z0-9 _-]/g,'').slice(0,60)||'Karma diagram';
+        const svg=safeSVG(message.svg),name=d.title.replace(/[^a-zA-Z0-9 _-]/g,'').slice(0,60)||'Sutra diagram';
         const uri=await vscode.window.showSaveDialog({title:'Export diagram as SVG',defaultUri:vscode.Uri.file(path.join(require('node:os').tmpdir(),name+'.svg')),filters:{SVG:['svg']}});
         if(uri)await vscode.workspace.fs.writeFile(uri,Buffer.from(svg));
       }
-    }catch(error){void vscode.window.showErrorMessage('Karma diagram: '+error.message);}});
+    }catch(error){void vscode.window.showErrorMessage('Sutra diagram: '+error.message);}});
     context.subscriptions.push(panel);return panel;
   }
-  context.subscriptions.push(vscode.commands.registerCommand('karma.openLastDiagram',async()=>{if(!last){void vscode.window.showInformationMessage('Ask Karma Auto to draw a diagram first.');return;}try{await open(await read(last));}catch(e){void vscode.window.showErrorMessage(e.message);}}));
+  context.subscriptions.push(vscode.commands.registerCommand('karma.openLastDiagram',async()=>{if(!last){void vscode.window.showInformationMessage('Ask Sutra Auto to draw a diagram first.');return;}try{await open(await read(last));}catch(e){void vscode.window.showErrorMessage(e.message);}}));
   return {open};
 }
 module.exports={install,validate,mermaidSource,safeSVG};

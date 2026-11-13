@@ -1,8 +1,8 @@
 {
   "name": "karma-local-harness",
-  "displayName": "Karma Local Harness",
-  "description": "Karma Auto: per-stage token usage, local conversation, offline diagrams and governed workspace tools.",
-  "version": "0.15.1",
+  "displayName": "Sutra",
+  "description": "Local model orchestration with portable context, governed tools, diagrams and token visibility.",
+  "version": "0.16.0",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -24,111 +24,111 @@
     "commands": [
       {
         "command": "karma.open",
-        "title": "Karma: Open Local Harness"
+        "title": "Sutra: Open Local Harness"
       },
       {
         "command": "karma.switchModel",
-        "title": "Karma: Switch Local Model"
+        "title": "Sutra: Switch Local Model"
       },
       {
         "command": "karma.exportDebug",
-        "title": "Karma: Export Debug Snapshot"
+        "title": "Sutra: Export Debug Snapshot"
       },
       {
         "command": "karma.reviewCodebase",
-        "title": "Karma: Review Codebase"
+        "title": "Sutra: Review Codebase"
       },
       {
         "command": "karma.continueReview",
-        "title": "Karma: Continue Architecture Review"
+        "title": "Sutra: Continue Architecture Review"
       },
       {
         "command": "karma.apiMap",
-        "title": "Karma: Build and Review API Map"
+        "title": "Sutra: Build and Review API Map"
       },
       {
         "command": "karma.openAPIReport",
-        "title": "Karma: Open Reviewed API Map"
+        "title": "Sutra: Open Reviewed API Map"
       },
       {
         "command": "karma.staticMap",
-        "title": "Karma: Build Fresh Source Map"
+        "title": "Sutra: Build Fresh Source Map"
       },
       {
         "command": "karma.explainMap",
-        "title": "Karma: Explain Source Map"
+        "title": "Sutra: Explain Source Map"
       },
       {
         "command": "karma.openStaticReport",
-        "title": "Karma: Open Source Map"
+        "title": "Sutra: Open Source Map"
       },
       {
         "command": "karma.automaticReview",
-        "title": "Karma: Review Whole Codebase"
+        "title": "Sutra: Review Whole Codebase"
       },
       {
         "command": "karma.continueAutomaticReview",
-        "title": "Karma: Continue Automatic Review"
+        "title": "Sutra: Continue Automatic Review"
       },
       {
         "command": "karma.openAutomaticReport",
-        "title": "Karma: Open Automatic Review Report"
+        "title": "Sutra: Open Automatic Review Report"
       },
       {
         "command": "karma.openReport",
-        "title": "Karma: Open Architecture Report"
+        "title": "Sutra: Open Architecture Report"
       },
       {
         "command": "karma.importCalibration",
-        "title": "Karma: Import Calibration Profile"
+        "title": "Sutra: Import Calibration Profile"
       },
       {
         "command": "karma.selectCalibrations",
-        "title": "Karma: Select Task Calibration Profiles"
+        "title": "Sutra: Select Task Calibration Profiles"
       },
       {
         "command": "karma.revokeCalibration",
-        "title": "Karma: Revoke Calibration Profile"
+        "title": "Sutra: Revoke Calibration Profile"
       },
       {
         "command": "karma.evaluateCalibration",
-        "title": "Karma: Evaluate Calibration Sample"
+        "title": "Sutra: Evaluate Calibration Sample"
       },
       {
         "command": "karma.configureModels",
-        "title": "Karma: Configure Local Models"
+        "title": "Sutra: Configure Local Models"
       },
       {
         "command": "karma.openAdvanced",
-        "title": "Karma: Open Current Task Controls"
+        "title": "Sutra: Open Current Task Controls"
       },
       {
         "command": "karma.newChatReview",
-        "title": "Karma: Start Separate Chat Review"
+        "title": "Sutra: Start Separate Chat Review"
       },
       {
         "command": "karma.armNative",
-        "title": "Karma: Arm Task and Open Chat"
+        "title": "Sutra: Arm Task and Open Chat"
       },
       {
         "command": "karma.disarmNative",
-        "title": "Karma: Disarm Native Chat"
+        "title": "Sutra: Disarm Native Chat"
       },
       {
         "command": "karma.toggleNative",
-        "title": "Karma: Enable or Disable Native Chat"
+        "title": "Sutra: Enable or Disable Native Chat"
       },
       {
         "command": "karma.useNativeChat",
-        "title": "Karma: Open Governed Chat (Karma Auto)"
+        "title": "Sutra: Open Governed Chat (Sutra Auto)"
       },
       {
         "command": "karma.openLastDiagram",
-        "title": "Karma: Open Last Diagram"
+        "title": "Sutra: Open Last Diagram"
       }
     ],
     "configuration": {
-      "title": "Karma Local Harness",
+      "title": "Sutra",
       "properties": {
         "karma.pythonPath": {
           "type": "string",
@@ -178,13 +178,13 @@
               "description": "High tier installed local Ollama model."
             }
           },
-          "description": "Saved tier choices. For dropdowns populated from Ollama, run Karma: Configure Local Models from the Command Palette (or @karma /models). Use discovered defaults, then Save choices, to replace existing selections."
+          "description": "Saved tier choices. For dropdowns populated from Ollama, run Sutra: Configure Local Models from the Command Palette (or @sutra /models). Use discovered defaults, then Save choices, to replace existing selections."
         },
         "karma.nativeEnabled": {
           "type": "boolean",
           "default": true,
           "scope": "machine",
-          "description": "Make Karma Auto available for general conversation. Arm a task for workspace tools; arming is revoked on reload or contract changes."
+          "description": "Make Sutra Auto available for general conversation. Arm a task for workspace tools; arming is revoked on reload or contract changes."
         }
       }
     },
@@ -192,9 +192,9 @@
       {
         "name": "karma_review",
         "toolReferenceName": "karmaReview",
-        "displayName": "Continue the architecture review through the Karma invocation gateway",
-        "userDescription": "Continue the architecture review through the Karma invocation gateway",
-        "modelDescription": "Continue the architecture review through the Karma invocation gateway. Requires a read-only architecture task created by the user in Karma first. Scope and budgets cannot be changed by this tool. Returns Karma receipts. Other native agent calls are outside Karma.",
+        "displayName": "Continue the architecture review through the Sutra invocation gateway",
+        "userDescription": "Continue the architecture review through the Sutra invocation gateway",
+        "modelDescription": "Continue the architecture review through the Sutra invocation gateway. Requires a read-only architecture task created by the user in Sutra first. Scope and budgets cannot be changed by this tool. Returns Sutra receipts. Other native agent calls are outside Sutra.",
         "canBeReferencedInPrompt": true,
         "icon": "$(layers)",
         "inputSchema": {
@@ -226,9 +226,9 @@
       {
         "name": "karma_read_file",
         "toolReferenceName": "karmaRead",
-        "displayName": "Read an in-scope code file through Karma",
-        "userDescription": "Read an in-scope code file through Karma",
-        "modelDescription": "Read an in-scope code file through Karma. Requires a read-only architecture task created by the user in Karma first. Scope and budgets cannot be changed by this tool. Returns Karma receipts. Other native agent calls are outside Karma.",
+        "displayName": "Read an in-scope code file through Sutra",
+        "userDescription": "Read an in-scope code file through Sutra",
+        "modelDescription": "Read an in-scope code file through Sutra. Requires a read-only architecture task created by the user in Sutra first. Scope and budgets cannot be changed by this tool. Returns Sutra receipts. Other native agent calls are outside Sutra.",
         "canBeReferencedInPrompt": true,
         "icon": "$(layers)",
         "inputSchema": {
@@ -252,9 +252,9 @@
       {
         "name": "karma_search",
         "toolReferenceName": "karmaSearch",
-        "displayName": "Search the committed code catalog through Karma",
-        "userDescription": "Search the committed code catalog through Karma",
-        "modelDescription": "Search the committed code catalog through Karma. Requires a read-only architecture task created by the user in Karma first. Scope and budgets cannot be changed by this tool. Returns Karma receipts. Other native agent calls are outside Karma.",
+        "displayName": "Search the committed code catalog through Sutra",
+        "userDescription": "Search the committed code catalog through Sutra",
+        "modelDescription": "Search the committed code catalog through Sutra. Requires a read-only architecture task created by the user in Sutra first. Scope and budgets cannot be changed by this tool. Returns Sutra receipts. Other native agent calls are outside Sutra.",
         "canBeReferencedInPrompt": true,
         "icon": "$(layers)",
         "inputSchema": {
@@ -274,9 +274,9 @@
       {
         "name": "karma_api_map",
         "toolReferenceName": "karmaAPIMap",
-        "displayName": "Build a provisional API map under the existing read-only Karma contract. Requires karmaAPIVerify before publication.",
-        "userDescription": "Build a provisional API map under the existing read-only Karma contract. Requires karmaAPIVerify before publication.",
-        "modelDescription": "Build a provisional API map under the existing read-only Karma contract. Requires karmaAPIVerify before publication. Cannot widen scope or change permissions.",
+        "displayName": "Build a provisional API map under the existing read-only Sutra contract. Requires karmaAPIVerify before publication.",
+        "userDescription": "Build a provisional API map under the existing read-only Sutra contract. Requires karmaAPIVerify before publication.",
+        "modelDescription": "Build a provisional API map under the existing read-only Sutra contract. Requires karmaAPIVerify before publication. Cannot widen scope or change permissions.",
         "canBeReferencedInPrompt": true,
         "icon": "$(layers)",
         "inputSchema": {
@@ -326,7 +326,7 @@
         "toolReferenceName": "karmaSourceMap",
         "displayName": "karmaSourceMap",
         "userDescription": "Compile a fresh deterministic map from explicitly scoped source files. Never executes project code.",
-        "modelDescription": "Compile a fresh deterministic map from explicitly scoped source files. Never executes project code. Requires a user-created read-only Karma architecture task. Cannot widen scope or permissions.",
+        "modelDescription": "Compile a fresh deterministic map from explicitly scoped source files. Never executes project code. Requires a user-created read-only Sutra architecture task. Cannot widen scope or permissions.",
         "canBeReferencedInPrompt": true,
         "icon": "$(layers)",
         "inputSchema": {
@@ -351,8 +351,8 @@
         "name": "karma_explain_map",
         "toolReferenceName": "karmaExplainMap",
         "displayName": "karmaExplainMap",
-        "userDescription": "Recompile current source and explain a bounded call batch with an installed local model under the same Karma contract. Model prose cannot modify graph edges.",
-        "modelDescription": "Recompile current source and explain a bounded call batch with an installed local model under the same Karma contract. Model prose cannot modify graph edges. Requires a user-created read-only Karma architecture task. Cannot widen scope or permissions.",
+        "userDescription": "Recompile current source and explain a bounded call batch with an installed local model under the same Sutra contract. Model prose cannot modify graph edges.",
+        "modelDescription": "Recompile current source and explain a bounded call batch with an installed local model under the same Sutra contract. Model prose cannot modify graph edges. Requires a user-created read-only Sutra architecture task. Cannot widen scope or permissions.",
         "canBeReferencedInPrompt": true,
         "icon": "$(layers)",
         "inputSchema": {
@@ -383,7 +383,7 @@
       {
         "name": "karma_auto_review",
         "toolReferenceName": "karmaAutoReview",
-        "displayName": "Continue automatic Karma codebase review",
+        "displayName": "Continue automatic Sutra codebase review",
         "userDescription": "Discover and review the next source page under the existing task allocation.",
         "modelDescription": "Continue an automatic codebase task created by the user. Discovers files and pages source freshly, preserves constraints and global budget across model switches. Cannot widen scope or change allocations.",
         "canBeReferencedInPrompt": true,
@@ -402,9 +402,9 @@
       {
         "name": "karma_native_action",
         "toolReferenceName": "karmaAction",
-        "displayName": "Apply a governed Karma action",
-        "userDescription": "Apply a validated edit or run a permitted sandboxed Python test. Requires an armed task and a single-use action ticket from Karma Auto.",
-        "modelDescription": "Executes only the exact admitted proposal identified by a Karma Auto action ticket. Cannot accept patches, paths, shell commands, or task permissions.",
+        "displayName": "Apply a governed Sutra action",
+        "userDescription": "Apply a validated edit or run a permitted sandboxed Python test. Requires an armed task and a single-use action ticket from Sutra Auto.",
+        "modelDescription": "Executes only the exact admitted proposal identified by a Sutra Auto action ticket. Cannot accept patches, paths, shell commands, or task permissions.",
         "canBeReferencedInPrompt": false,
         "inputSchema": {
           "type": "object",
@@ -423,9 +423,9 @@
     "chatParticipants": [
       {
         "id": "karma.local",
-        "name": "karma",
-        "fullName": "Karma Local",
-        "description": "Route local code reviews through Karma with preserved task constraints.",
+        "name": "sutra",
+        "fullName": "Sutra",
+        "description": "Route local code reviews through Sutra with preserved task constraints.",
         "isSticky": true,
         "commands": [
           {
@@ -454,11 +454,11 @@
           },
           {
             "name": "help",
-            "description": "Show Karma entry points without starting a model call"
+            "description": "Show Sutra entry points without starting a model call"
           },
           {
             "name": "dashboard",
-            "description": "Open the Karma dashboard and live temperatures"
+            "description": "Open the Sutra dashboard and live temperatures"
           }
         ]
       }
@@ -466,9 +466,17 @@
     "languageModelChatProviders": [
       {
         "vendor": "karma",
-        "displayName": "Karma",
+        "displayName": "Sutra",
         "managementCommand": "karma.configureModels"
       }
     ]
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dtmohan/Sutra.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dtmohan/Sutra/issues"
+  },
+  "homepage": "https://github.com/dtmohan/Sutra#readme"
 }

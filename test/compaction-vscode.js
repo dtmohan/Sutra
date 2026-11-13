@@ -4,7 +4,7 @@ exports.run=async()=>{
  const report=prior.phase==='reload_pending'?prior:{checks:[]};
  const phase=name=>{report.phase=name;fs.writeFileSync(file,JSON.stringify(report,null,2));};
  try{
-  const ext=vscode.extensions.getExtension('deepak-local.karma-local-harness'),api=await ext.activate();assert.equal(api.version,'0.15.1');
+  const ext=vscode.extensions.getExtension('deepak-local.karma-local-harness'),api=await ext.activate();assert.equal(api.version,'0.16.0');
   async function routeAfter(previous){
    const start=Date.now();while(Date.now()-start<210000){
     try{const native=api.getRoutingStatus(),r=native.routing;if(r&&!r.active&&r.invocationId&&r.invocationId!==previous){assert.equal(r.stage,'conversation',JSON.stringify(r));assert(!native.armed);return r;}}catch(e){if(!/request is running/.test(e.message))throw e;}

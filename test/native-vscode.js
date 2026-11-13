@@ -10,7 +10,7 @@ exports.run=async()=>{
   await exec(process.env.KARMA_SMOKE_PYTHON||(process.platform==='win32'?'python':'python3'),['-B',path.join(process.env.KARMA_SMOKE_DRIVER,'native-prepare.py'),ext.extensionPath,storage,workspace]);
   const models=await vscode.lm.selectChatModels({vendor:'karma'});report.models=models.map(m=>({id:m.id,name:m.name}));assert.equal(models.length,4);
   const tool=vscode.lm.tools.find(t=>t.name==='karma_native_action');assert(tool);report.checks.push('real VS Code discovers all four native models and governed action tool');
-  const low=models.find(m=>m.name==='Karma Low'),high=models.find(m=>m.name==='Karma High');assert(low&&high);
+  const low=models.find(m=>m.name==='Sutra Low'),high=models.find(m=>m.name==='Sutra High');assert(low&&high);
   async function send(model,prompt){const r=await model.sendRequest(Array.isArray(prompt)?prompt:[vscode.LanguageModelChatMessage.User(prompt)],{tools:[tool]},token.token);const parts=[];for await(const part of r.stream)parts.push(part);return parts;}
   assert((await send(low,'Fix retry')).some(p=>p.value?.includes('Arm Task and Open Chat')));report.checks.push('real native model API refuses inference while disarmed');
   phase('arming',{storage});await vscode.commands.executeCommand('karma.armNative');const before=await api.getState();assert(before.native.armed);report.binding={session:before.session,contract:before.contract.contract_hash,calibration:before.calibration.binding.hash};
