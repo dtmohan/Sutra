@@ -129,4 +129,4 @@ This repository does not grant an open-source license for original project code.
 Bundled third-party components retain their own licenses; see
 [third-party notices](THIRD_PARTY_NOTICES.md).
 
-Current release: **0.20.1**. Saved requests have explicit Resume/Discard controls in Sutra Monitor. Resume focuses the existing chat without changing its draft; send the next message using a Sutra model to continue. Stop retains context, receipts and consumed allocation. A budget-limited resume can pause again; it does not allocate a new budget.
+Current release: **0.20.2**. Python source mapping uses the page work allocation rather than the small API packet limit. Mapping pauses show their causes and coverage in chat, with file diagnostics in Sutra Monitor. Saved requests have explicit Resume/Discard controls in Sutra Monitor. Resume focuses the existing chat without changing its draft; send the next message using a Sutra model to continue. Stop retains context, receipts and consumed allocation. A budget-limited resume can pause again; it does not allocate a new budget.

@@ -6,6 +6,7 @@ from context_manager import InvalidUpdate,canonical,sha
 import repository_tools as repo
 
 def analyze(texts,item_budget=1024):
+ if type(item_budget) is not int or not 1<=item_budget<=16384:raise InvalidUpdate('Invalid parser work-unit allocation')
  started=time.monotonic();nodes=[];calls=[];diagnostics=[];dependencies=[];profiles=[];toolchain={};diagnostic_count=0
  js={p:t for p,t in texts.items() if Path(p).suffix in ('.js','.jsx','.ts','.tsx')}
  py={p:t for p,t in texts.items() if Path(p).suffix=='.py'}
@@ -21,7 +22,11 @@ def analyze(texts,item_budget=1024):
   toolchain={'typescript':data['compiler'],'typescript_sha256':sha(Path(compiler).read_bytes().decode()),'library_hashes':data['library_hashes'],'options':data['compiler_options']}
  if py:
   import api_extract,api_facts,platform
-  parsed={p:api_extract.extract(p,t) for p,t in py.items()}
+  parsed={};binding_count=0;node_count=len(nodes);call_count=len(calls)
+  for p,t in py.items():
+   d=api_extract.extract(p,t,item_budget=item_budget);parsed[p]=d;binding_count+=len(d['bindings']);node_count+=len(d['symbols']);call_count+=len(d['calls'])
+   if node_count>item_budget or call_count>item_budget or binding_count>4*item_budget:
+    raise InvalidUpdate(f'Static graph work-unit allocation exceeded ({item_budget} nodes/calls; {4*item_budget} bindings)')
   for p,d in parsed.items():nodes += [{'id':n['id'],'name':n['name'],'kind':n['kind'],'path':p,'line':n['line'],'column':n['column'],'text':n['quote']} for n in d['symbols']]
   for c in api_facts.inventory(parsed):calls.append({'id':c['id'],'source':c['caller'],'target':c['target'],'expression':c['expression'],'relation':'static_call_reference' if c['target'] else 'unresolved','reason':c['reason'],'path':c['path'],'line':c['line'],'column':c['column'],'text':c['quote']})
   profiles.append('python-lexical-v1');toolchain['python']=platform.python_version()

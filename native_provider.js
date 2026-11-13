@@ -285,7 +285,16 @@ function install(vscode,context,deps){
         if(flow.state==='PAUSED')flow=await flowEvent(flow,'resume',tier,activeCancel.token);
         while(!['DONE','AWAITING_ACTION'].includes(flow.state)){
           if(armed!==a||activeCancel.token.isCancellationRequested)throw new Error('Native request disarmed or cancelled.');
-          if(['PAUSED','QUARANTINED','CANCELLING','EXECUTING_ACTION'].includes(flow.state))throw new Error('Sutra workflow '+flow.state+'. Saved request retained. Inspect Sutra Monitor, then choose Resume or Discard.');
+          if(flow.state==='PAUSED'){
+            const stop=flow.stop||{},failures=stop.failures||[];
+            const details=[stop.error,...failures.map(f=>f.path+': '+f.error)].filter(Boolean);
+            const coverage=Number.isInteger(stop.mapped_files)&&Number.isInteger(stop.source_files)?` Mapped ${stop.mapped_files} of ${stop.source_files} source files.`:'';
+            const reason=details.length?details.join('\n'):(stop.status||'Mapping needs attention. Inspect Sutra Monitor for details.');
+            audit.stage='paused';audit.message=reason;publish();
+            progress.report(new vscode.LanguageModelTextPart('**Sutra paused the review.**'+coverage+'\n\n'+reason+'\n\n'+(stop.failure_count>failures.length?`${stop.failure_count-failures.length} more file failures are recorded in the review details.\n\n`:'')+'The request, context, permissions and consumed budget are saved. Resolve the reported cause, then use **Resume** in Sutra Monitor and send **continue** here. Resume keeps the remaining allocation; it does not reset a limit. Use **Discard** to abandon this request.'));
+            return;
+          }
+          if(['QUARANTINED','CANCELLING','EXECUTING_ACTION'].includes(flow.state))throw new Error('Sutra workflow '+flow.state+'. Saved request retained. Inspect Sutra Monitor, then choose Resume or Discard.');
           let event='step',extra={};
           if(flow.state==='NEED_PERMISSION'){
             const grant=await approvePermission(flow.permission,activeCancel.token);

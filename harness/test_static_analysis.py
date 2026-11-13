@@ -83,6 +83,33 @@ class StaticCompilerTests(unittest.TestCase):
   data=analysis.analyze({'a.py':'def recurse(n): return recurse(n-1) if n else 0\ndef f(callback): return callback()\n'})
   self.assertEqual([c['target'] is None for c in data['calls']],[False,True]);self.assertEqual(data['calls'][0]['source'],data['calls'][0]['target'])
 
+ def test_python_large_file_uses_source_allocation_not_api_packet_limit(self):
+  import api_extract
+  text='def leaf(): return 1\n'+'leaf()\n'*1200
+  with self.assertRaisesRegex(InvalidUpdate,'API index bound'):api_extract.extract('many.py',text)
+  with tempfile.TemporaryDirectory() as tmp:
+   p=Path(tmp);(p/'many.py').write_text(text)
+   with self.assertRaisesRegex(InvalidUpdate,'work-unit allocation'):analysis.snapshot(p,['many.py'])
+   data=analysis.snapshot(p,['many.py'],max_total=65536)
+   self.assertEqual(len(data['graph']['calls']),1200);self.assertEqual(data['graph']['item_budget'],8192)
+   self.assertTrue(all(c['target'] for c in data['graph']['calls']))
+   self.assertFalse(data['graph']['cache_used'])
+
+ def test_python_allocation_counts_all_files_and_bindings(self):
+  text='def leaf(): return 1\n'+'leaf()\n'*70
+  with self.assertRaisesRegex(InvalidUpdate,'work-unit allocation'):analysis.analyze({'a.py':text,'b.py':text},item_budget=128)
+  with self.assertRaisesRegex(InvalidUpdate,'work-unit allocation'):analysis.analyze({'a.py':'\n'.join(f'x{i}=1' for i in range(513))},item_budget=128)
+
+ @requires_typescript
+ def test_mixed_language_page_shares_one_allocation(self):
+  with patch.dict(os.environ,ENV):
+   with self.assertRaisesRegex(InvalidUpdate,'work-unit allocation'):
+    analysis.analyze({'a.ts':'function leaf(){return 1;}\n'+'leaf();\n'*70,'b.py':'def leaf(): return 1\n'+'leaf()\n'*70},item_budget=128)
+
+ def test_invalid_parser_allocations_are_rejected(self):
+  for cap in (0,-1,True,128.0,16385):
+   with self.subTest(cap=cap),self.assertRaisesRegex(InvalidUpdate,'Invalid parser'):analysis.analyze({'a.py':'f()'},item_budget=cap)
+
 class Fake:
  model='test-static-explainer';budget=Budget()
  def __init__(self,fault=None):self.fault=fault;self.calls=0;self.payload=None

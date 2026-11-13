@@ -1,4 +1,6 @@
-Sutra 0.20.1 — recovery and UX stabilization
+Sutra 0.20.2 — larger Python maps and actionable pauses
+
+Whole-codebase Python mapping uses the same source-page work allocation as TypeScript, instead of the small API-review packet limit. Pauses show the underlying cause and mapped-file counts in chat; file failures also appear in Sutra Monitor.
 
 Resume or Discard a saved request from Sutra Monitor. Resume selects it for your next message in the existing Sutra chat; it does not submit a prompt or overwrite a draft. Paused mapping retries admission against the same contract and remaining budget. Interrupted actions are reconciled without replay.
 

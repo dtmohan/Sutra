@@ -92,7 +92,7 @@ def dependency_hints(graph,names):
 def step(s,meta,workspace,root,request,provider=None):
  c=s.snapshot(meta['active'])['constraints']
  if not c.get('auto_review'):raise InvalidUpdate('Start an automatic codebase review first')
- a=meta.setdefault('auto',{'pages':[],'failures':{}});a['status']='running';result=None
+ a=meta.setdefault('auto',{'pages':[],'failures':{}});a['status']='running';a.pop('error',None);a.pop('stop_frame',None);result=None
  try:
   # Refresh the directory TOC on every page; source bodies are never cached.
   catalog=repo.execute(s,meta['active'],workspace,root,'catalog',resource_check=provider is None)

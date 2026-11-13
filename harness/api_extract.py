@@ -66,7 +66,10 @@ def python_facts(path,text):
  v=Visitor();v.visit(tree)
  return {'symbols':symbols,'bindings':bindings,'scopes':scopes,'calls':calls}
 
-def extract(path,text):
+def extract(path,text,*,item_budget=None):
+ # Small API evidence packets retain their original bound. Whole-source maps
+ # use the host's page allocation, independent of the model's context window.
+ if item_budget is not None and (type(item_budget) is not int or not 1<=item_budget<=16384):raise InvalidUpdate('Invalid parser work-unit allocation')
  if Path(path).suffix=='.py':data=python_facts(path,text)
  elif Path(path).suffix in ('.js','.jsx','.ts','.tsx'):
   node=os.environ.get('KARMA_NODE');ts=os.environ.get('KARMA_TYPESCRIPT')
@@ -75,7 +78,9 @@ def extract(path,text):
   if result.returncode:raise InvalidUpdate('API parser rejected source: '+result.stderr[:300])
   data=json.loads(result.stdout)
  else:raise InvalidUpdate('API profile supports Python, JavaScript and TypeScript files')
- if len(data['calls'])>128 or len(data['symbols'])>128 or len(data['bindings'])>512:raise InvalidUpdate('API index bound exceeded: narrow the file before mapping')
+ cap=128 if item_budget is None else item_budget
+ if len(data['calls'])>cap or len(data['symbols'])>cap or len(data['bindings'])>4*cap:
+  raise InvalidUpdate('API index bound exceeded: narrow the file before mapping' if item_budget is None else f'Static graph work-unit allocation exceeded ({cap} nodes/calls; {4*cap} bindings)')
  data.update(path=path,sha256=sha(text),profile=PROFILE)
  for group in ('symbols','bindings','calls'):
   for item in data[group]:item['evidence_id']=identity('e',path,data['sha256'],group,item)

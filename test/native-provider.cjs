@@ -216,5 +216,19 @@ function setup(saved={}){
  const previous=named.deps.backendRequest;named.deps.backendRequest=async(m,t)=>{if(m.op==='native_permissions'){selected=m.test_paths;named.st.contract.contract.constraints.tests_allowed=true;return named.st;}const x=await previous(m,t);if(m.op==='conversation')x.result.accepted_output.workspace_request={operation:'test',paths:['checks/foo_test.py','tests/support.py']};return x;};
  await named.arm();await named.send();assert.deepEqual(selected,['checks/foo_test.py','tests/support.py']);checks.push('explicit test file names are preserved without a test-prefix filter');
  }
+ const paused=setup();paused.kind('report');await paused.arm();const flowRequest=paused.deps.request;let shouldPause=true;
+ paused.deps.request=async(m,t)=>{
+  const r=await flowRequest(m,t);
+  if(shouldPause&&m.op==='orchestrate'&&r.state==='CODING')return {...r,state:'PAUSED',stop:{status:'needs_attention',mapped_files:2,source_files:3,failure_count:1,failures:[{path:'large.py',error:'Static graph work-unit allocation exceeded'}]}};
+  return r;
+ };
+ const pausedReply=await paused.send();assert(pausedReply.some(p=>p.value?.includes('Sutra paused the review')));
+ assert(pausedReply.some(p=>p.value?.includes('large.py: Static graph work-unit allocation exceeded')));
+ assert(pausedReply.some(p=>p.value?.includes('Mapped 2 of 3')));assert.equal(paused.controller.status().routing.stage,'paused');
+ assert(!paused.controller.status().routing.active);assert(!paused.calls.some(c=>c.op==='native_work'));
+ assert.equal(paused.controller.status().pending.stop.failure_count,1);
+ shouldPause=false;await paused.send('high',[{role:1,content:[new Text('continue')]}]);
+ const afterPause=paused.calls.find(c=>c.op==='native_work');assert.equal(afterPause.prompt,'Fix retry');assert.equal(afterPause.tier,'high');assert.equal(afterPause.contract_hash,'contract-1');
+ checks.push('mapping pauses return actionable details without a client error; original context and permission binding resume on another model');
  console.log(JSON.stringify({passed:true,checks},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;});

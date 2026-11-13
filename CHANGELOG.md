@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.20.2 — larger Python maps and actionable pauses
+
+- Use the source-page allocation for Python static maps; retain the small API evidence packet limit and enforce aggregate graph bounds across languages.
+- Persist mapping pause diagnostics across restarts and expose file failures in chat and Sutra Monitor. Expected pauses no longer become generic native-chat request errors.
+- Preserve context, permission bindings and consumed budgets on Resume and model switches. Clear obsolete transient mapping errors after retry.
+- STP kernel unchanged. Existing policy-bound workspace tasks require a fresh review after upgrading; conversation memory is retained.
+
 ## 0.20.1 — recovery and UX stabilization
 
 - Explicit Resume/Discard, paused mapping recovery and pending-workflow discovery; retain context, permissions and spent allocations across restarts and model switches.

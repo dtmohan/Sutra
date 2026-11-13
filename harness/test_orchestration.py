@@ -197,6 +197,19 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(used,review_budget.usage(self.s,sid)['used']);self.assertEqual(contract,self.s.pinned(sid))
         self.assertTrue(self.until('DONE',out)['data']['result']['admission']['admitted'])
 
+    def test_mapping_failure_details_survive_reload_and_do_not_dispatch_children(self):
+        out=self.until('MAPPING');sid=self.meta['active'];used=review_budget.usage(self.s,sid)['used']
+        failure={'auto':{'status':'needs_attention','mapped_files':2,'source_files':9,
+                        'failures':{f'part{i}.py':'Static graph work-unit allocation exceeded' for i in range(7)}}}
+        with patch('auto_review.step',return_value=failure):out=self.step(out)
+        self.assertEqual(out['state'],'PAUSED');self.assertEqual(out['stop']['failure_count'],7)
+        self.assertEqual(len(out['stop']['failures']),5);self.assertEqual(out['stop']['mapped_files'],2)
+        self.s.close();self.s=InvocationLedger(self.root/'state.sqlite')
+        saved=flow.handle(self.s,self.meta,self.ws,self.root,{'event':'pending'})
+        self.assertEqual(saved['stop'],out['stop']);self.assertFalse(saved['children'])
+        self.assertEqual(review_budget.usage(self.s,sid)['used'],used)
+        self.tier='high';resumed=self.step(saved,event='resume');self.assertIsNone(resumed['stop'])
+
     def test_committed_child_receipt_recovers_without_duplicate_inference(self):
         out=self.children();cid=out['children'][0]['id']
         with patch('subagent_runtime.machine.complete',side_effect=KeyboardInterrupt):

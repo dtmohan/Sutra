@@ -28,6 +28,18 @@ class AutomaticTests(unittest.TestCase):
   self.step(explain=False);page=self.meta['auto']['pages'][0];target=self.ws/page['primary_files'][0];st=target.stat();target.write_text(target.read_text().replace('return 1','return 2'));os.utime(target,ns=(st.st_atime_ns,st.st_mtime_ns))
   self.assertEqual(auto.status(self.s,self.meta,self.ws)['mapped_files'],0)
   (self.ws/'new.py').write_text('def new(): return 1\n');self.assertEqual(auto.status(self.s,self.meta,self.ws)['source_files'],141);out=self.step(explain=False);self.assertEqual(out['auto']['source_files'],141);self.assertTrue(out['auto']['stale_pages'])
+ def test_large_python_file_completes_fresh_governed_mapping(self):
+  (self.ws/'large.py').write_text('def leaf(): return 1\n'+'leaf()\n'*300)
+  self.s.close();handle(self.storage,self.ws,{'op':'auto_new','goal':'Review large Python file.','roots':['large.py'],'review_page_kib':16})
+  self.meta=json.loads((self.storage/'workspace.json').read_text());self.s=InvocationLedger(self.storage/'state.sqlite');self.sid=self.meta['active']
+  contract=self.s.current_contract(self.sid);self.meta['auto'].update(error='OLD RESOURCE_WAIT',stop_frame={'decision':'FIN'})
+  out=self.step(explain=False);self.assertEqual(out['auto']['status'],'structural_pass_complete');self.assertEqual(out['auto']['mapped_files'],1)
+  self.assertEqual(out['auto']['last_page']['calls'],300);self.assertFalse(out['auto']['failures']);self.assertIsNone(out['auto']['error']);self.assertIsNone(out['auto']['stop_frame'])
+  self.assertEqual(self.s.current_contract(self.sid),contract);self.assertEqual(budget.usage(self.s,self.sid)['used']['calls'],0)
+  (self.ws/'large.py').write_text('def leaf(): return 2\n'+'leaf()\n'*300)
+  self.assertEqual(auto.status(self.s,self.meta,self.ws)['mapped_files'],0)
+  again=self.step(explain=False);self.assertEqual(again['auto']['status'],'structural_pass_complete')
+  self.assertNotEqual(out['auto']['last_page']['receipt'],again['auto']['last_page']['receipt'])
  def test_corrupted_progress_receipt_rejected(self):
   m=Fake();self.step(m);p=copy.deepcopy(m.payload);p['review_progress']['progress']['mapped_before_this_page']=99
   with self.assertRaises(InvalidUpdate):static_role.request_check(self.s,self.sid,p)

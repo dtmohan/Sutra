@@ -22,6 +22,7 @@ def response(s,fid,**extra):
     n,data=info(s,fid);history=m.events(s,fid)
     return dict(flow_id=fid,state=m.state(s,fid),cursor=history[-1]['receipt'] if history else None,
                 conversation_id=data.get('conversation_id'),binding=data.get('binding'),
+                stop=data.get('mapping_stop') if m.state(s,fid)=='PAUSED' else None,
                 children=[{'id':i,'state':m.state(s,i),'files':m.node(s,i)['files']} for i in data.get('children',[])],**extra)
 
 def identity(s,sid):
@@ -179,7 +180,12 @@ def handle(s,meta,workspace,root,req,providers=None):
             move(s,fid,'WORKSPACE','SOURCE_MAPPED')
             move(s,fid,'BRANCHING','PLAN_CHILDREN')
         elif status not in ('ready','page_rejected'):
-            move(s,fid,'PAUSED','MAPPING_STOPPED',reason=status)
+            detail=out.get('auto',out);failures=detail.get('failures') or {}
+            stop={'status':status,'error':detail.get('error'),'failure_count':len(failures),
+                  'failures':[{'path':p,'error':str(e)[:500]} for p,e in sorted(failures.items())[:5]],
+                  'mapped_files':detail.get('mapped_files'),'source_files':detail.get('source_files'),
+                  'budget':detail.get('stop_frame') or detail.get('budget')}
+            move(s,fid,'PAUSED','MAPPING_STOPPED',reason=status,mapping_stop=stop)
         return response(s,fid,progress='Fresh source mapping: '+str(status),mapping=out)
     if phase=='BRANCHING':
         parent,children,signals=plan(s,meta,workspace,prompt,d['conversation_id'])
