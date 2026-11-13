@@ -22,6 +22,8 @@ function install(vscode,context,deps){
     current.webview.onDidReceiveMessage(message=>{
       if(message?.type==='ready'){ready=true;publish();void refresh();}
       else if(message?.type==='refresh')void refresh();
+      else if(message?.type==='resume')void vscode.commands.executeCommand('karma.resumeWorkflow');
+      else if(message?.type==='discard')void vscode.commands.executeCommand('karma.discardWorkflow');
       else if(message?.type==='telemetry')void vscode.commands.executeCommand('karma.open');
     },null,context.subscriptions);
     current.onDidChangeVisibility(()=>{if(current.visible)void refresh();},null,context.subscriptions);
@@ -44,7 +46,7 @@ function install(vscode,context,deps){
     setStatus(value){
       const r=value?.routing;
       routing=r?{active:!!r.active,stage:r.stage,model:r.model,memoryUsed:r.memoryUsed,memorySource:r.memorySource,memoryAllocation:r.memoryAllocation,memoryStatus:r.memoryStatus,modelCapacity:r.modelCapacity,conversationBudget:r.conversationBudget,invocationId:r.invocationId}:undefined;
-      native=value?{enabled:value.enabled,armed:value.armed,label:value.label,compaction:value.compaction}:undefined;publish();
+      native=value?{enabled:value.enabled,armed:value.armed,label:value.label,compaction:value.compaction,pending:value.pending,working:value.working}:undefined;publish();
     },
     recordResponse(group){if(group?.calls?.length)item.tooltip='Latest completed stage / response: '+tokens.compact(group)+'\nClick for workspace history and per-stage counts.';},
     reset(){snapshot=undefined;routing=undefined;native=undefined;error=undefined;item.tooltip='Open tokens, system telemetry and kernel decisions';publish();}

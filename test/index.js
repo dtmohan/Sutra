@@ -5,10 +5,10 @@ exports.run=async()=>{
  const report={checks:[]},out=process.env.KARMA_SMOKE_OUTPUT;
  try{
   const extension=vscode.extensions.getExtension('deepak-local.karma-local-harness');const api=await extension.activate();
-  assert.equal(api.version,'0.12.3');assert.deepEqual(Object.keys(api).sort(),['getState','open','version']);report.checks.push('packaged extension activates with restricted API');
+  assert.equal(api.version,extension.packageJSON.version);assert.deepEqual(Object.keys(api).sort(),['getRoutingStatus','getState','open','version']);report.checks.push('packaged extension activates with restricted API');
   assert.equal(typeof vscode.chat?.createChatParticipant,'function');
-  assert(extension.packageJSON.contributes.chatParticipants.some(p=>p.id==='karma.local'&&p.name==='karma'));
-  for(const name of ['karma.configureModels','karma.openAdvanced','karma.newChatReview'])assert((await vscode.commands.getCommands(true)).includes(name));
+  assert(extension.packageJSON.contributes.chatParticipants.some(p=>p.id==='karma.local'&&p.name==='sutra'));
+  for(const name of ['karma.configureModels','karma.openAdvanced','karma.newChatReview','karma.resumeWorkflow','karma.discardWorkflow'])assert((await vscode.commands.getCommands(true)).includes(name));
   for(const command of ['help','models','dashboard','status','new'])assert(extension.packageJSON.contributes.chatParticipants[0].commands.some(c=>c.name===command));
   const html=fs.readFileSync(path.join(extension.extensionPath,'media/panel.html'),'utf8');
   assert(html.indexOf('id="chat-prompt"')<html.indexOf('id="advanced"'));assert(!/<details id="advanced"[^>]*\bopen\b/.test(html));

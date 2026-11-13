@@ -3,7 +3,7 @@
 Local model orchestration for VS Code. Switch models while keeping the task,
 constraints and accepted context in a local ledger.
 
-Sutra was previously called **Karma**. Version **0.16.0** changes the public name
+Sutra was previously called **Karma**. The **0.16.0** release changed the public name
 while retaining the extension identity and stored settings. This is an
 experimental local tool, not a guarantee that model answers are correct.
 
@@ -128,3 +128,5 @@ them without an explicit migration.
 This repository does not grant an open-source license for original project code.
 Bundled third-party components retain their own licenses; see
 [third-party notices](THIRD_PARTY_NOTICES.md).
+
+Current release: **0.20.1**. Saved requests have explicit Resume/Discard controls in Sutra Monitor. Resume focuses the existing chat without changing its draft; send the next message using a Sutra model to continue. Stop retains context, receipts and consumed allocation. A budget-limited resume can pause again; it does not allocate a new budget.

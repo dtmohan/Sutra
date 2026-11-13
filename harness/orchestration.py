@@ -19,7 +19,7 @@ EDGES = {
  'READY': {'RUNNING','WAITING_CHILDREN','DONE','PAUSED','CANCELLED','QUARANTINED'},
  'RUNNING': {'READY','DONE','PAUSED','CANCELLED','QUARANTINED'},
  'WAITING_CHILDREN': {'READY','PAUSED','CANCELLED','QUARANTINED'},
- 'PAUSED': {'READY','CANCELLED','QUARANTINED'},
+ 'PAUSED': {'READY','MAPPING','CANCELLED','QUARANTINED'},
  'CREATED': {'CLASSIFYING','CANCELLED','PAUSED'},
  'CLASSIFYING': {'NEED_ARM','BINDING','DONE','PAUSED','CANCELLED'},
  'NEED_ARM': {'BINDING','CANCELLED','PAUSED'},
@@ -32,7 +32,8 @@ EDGES = {
  'SYNTHESIS': {'DONE','PAUSED','CANCELLED'},
  'CODING': {'DONE','AWAITING_ACTION','PAUSED','CANCELLED'},
  'AWAITING_ACTION': {'EXECUTING_ACTION','CANCELLED'},
- 'EXECUTING_ACTION': {'DONE'},
+ 'EXECUTING_ACTION': {'DONE','CANCELLING'},
+ 'CANCELLING': {'DONE'},
 }
 
 def initialize(s):
@@ -296,7 +297,10 @@ def cancel(s,nid,reason='User cancelled'):
     with s.db:
         s.db.execute('BEGIN IMMEDIATE')
         for cid in reversed(descendants(s,nid)):
-            if state(s,cid) not in TERMINAL:
+            if state(s,cid) in ('EXECUTING_ACTION','CANCELLING'):
+                # An action remains owned and charged until process cleanup and receipt settlement.
+                transition(s,cid,'CANCELLING','CANCEL_REQUESTED',{'reason':reason})
+            elif state(s,cid) not in TERMINAL:
                 transition(s,cid,'CANCELLED','CANCELLED',{'reason':reason})
 
 def abandon_children(s,nid,reason):

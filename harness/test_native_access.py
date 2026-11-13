@@ -76,3 +76,9 @@ class NativeAccessTests(unittest.TestCase):
             return original(event,payload)
         with patch.object(self.s,'_audit',side_effect=fail),self.assertRaises(RuntimeError):native_access.grant(self.s,self.meta,self.ws,req)
         self.assertEqual(before['used'],usage(self.s,self.st['session'])['used'])
+
+    def test_ollama_connection_refused_has_actionable_recovery(self):
+        from unittest.mock import patch
+        from vscode_bridge import ollama
+        with patch('http.client.HTTPConnection.request',side_effect=ConnectionRefusedError):
+            with self.assertRaisesRegex(InvalidUpdate,'Start the Ollama app.*Retry model discovery'):ollama('/api/tags')

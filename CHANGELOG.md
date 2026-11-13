@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.20.1 — recovery and UX stabilization
+
+- Explicit Resume/Discard, paused mapping recovery and pending-workflow discovery; retain context, permissions and spent allocations across restarts and model switches.
+- Executing actions remain pending until cleanup and receipt settlement; recover accepted child receipts without repeated inference.
+- Preserve task drafts, source disclosures and keyboard focus during refresh; expire stale temperature readings.
+- Actionable model discovery errors, task permission duration, exact Python test selections and safer monitor navigation.
+- Current packaged smoke contract, regression journeys and bundled third-party notices. STP kernel unchanged.
+
 ## 0.20.0 — centralized orchestration
 
 - Move native workflow selection, source mapping, branching, child dispatch and

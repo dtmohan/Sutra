@@ -20,6 +20,7 @@ function latestRequest(vscode,messages){
   return {prompt,parent};
 }
 function install(vscode,context,deps){
+  let recoveryChoice;
   let armPromise,accessEpoch=0,armingStep='',armed,activeCancel,arming=false,running=false,selecting=false,lastRoute='',routing,reason='Open Sutra chat to talk. Arm Sutra when you need workspace access.';
   const memory=new NativeMemory(context);let lastCompaction;
   const tickets=new Map(),completed=new Map(),changed=new vscode.EventEmitter();
@@ -33,7 +34,7 @@ function install(vscode,context,deps){
     const label=!enabled()?'Sutra: off':arming?'Sutra: finish arming':selecting?'Sutra: opening chat':live?'Sutra: request received':running?'Sutra: action running':armed?'Sutra: armed · routing unverified':'Sutra: chat ready · workspace unarmed';
     const explanation=arming?armingStep:selecting?'Opening Local chat with Sutra Auto. No prompt is being sent.':live?'This request reached Sutra. Protocol admission is checked before model dispatch.':
       'No Sutra request is in flight. The current chat selection is unverified; check for Sutra Auto beneath the prompt. Direct Ollama and other chats bypass Sutra.';
-    return {enabled:enabled(),arming,armingStep,selecting,armed:!!armed&&enabled(),working:running||live,session:armed?.session,scope:'Sutra model requests and Sutra action tool only',defaultModel:chat.get('defaultModel',''),defaultsReady,reason,lastRoute,label,explanation,routing:routing?{...routing}:null,compaction:lastCompaction};
+    return {enabled:enabled(),arming,armingStep,selecting,armed:!!armed&&enabled(),working:running||live,session:armed?.session,scope:'Sutra model requests and Sutra action tool only',defaultModel:chat.get('defaultModel',''),defaultsReady,reason,lastRoute,label,explanation,routing:routing?{...routing}:null,compaction:lastCompaction,pending:context.workspaceState.get('sutra.pendingOrchestration')||null};
   }
   function publish(){deps.onStatus(status());}
   function disarm(why='Disarmed by user. Task and budget retained.'){accessEpoch++;armed=undefined;tickets.clear();completed.clear();activeCancel?.cancel();reason=why;publish();}
@@ -56,7 +57,7 @@ function install(vscode,context,deps){
     const stillValid=()=>{if(epoch!==accessEpoch||!enabled()||deps.workspace()!==workspace||owner&&(!ownsRequest()||owner.token.isCancellationRequested))throw new Error('Arming cancelled: Sutra was disarmed, disabled, or the request/workspace changed.');if(deps.isBusy())throw new Error('Workspace became busy while arming.');};
     let success=false;arming=true;setArmingStep('Confirm Arm Sutra in the dialog. This request will continue here; edits and tests ask when needed.');
     try{
-      const yes=await vscode.window.showWarningMessage('Arm Sutra for this workspace?',{modal:true,detail:workspace+'\nSutra may read project files for your requests. Existing task scope and permissions are retained. Edits and tests require specific permissions and action confirmation. Network access and new dependencies remain off.\n'+(owner?'Your pending request will continue in this chat.':'Your current chat stays open.')},'Arm Sutra');
+      const yes=await vscode.window.showWarningMessage('Arm Sutra for this workspace?',{modal:true,detail:workspace+'\nSutra may read project files for your requests. Existing task scope and permissions are retained. File grants persist with the task across model switches; disarm or reload stops execution until you arm again. Each edit or test still requires action confirmation. Native workspace tasks forbid network access and new dependencies.\n'+(owner?'Your pending request will continue in this chat.':'Your current chat stays open.')},'Arm Sutra');
       stillValid();
       if(yes!=='Arm Sutra')return false;
       const st=await deps.request({op:'state'},owner?.token);
@@ -77,16 +78,33 @@ function install(vscode,context,deps){
       if(!chosen?.length)return;
       paths=chosen.map(f=>path.relative(deps.workspace(),f.fsPath).split(path.sep).join('/'));
     }
-    const test_paths=descriptor.operation==='test'?paths.filter(n=>/(^|\/)test[^/]*\.py$/.test(n)):[];
+    if(descriptor.operation==='test'&&process.platform!=='darwin')throw new Error('Sandboxed test execution is currently available on macOS only. No test permission was granted.');
+    const test_paths=descriptor.operation==='test'?[...paths]:[];
     const label=descriptor.operation==='edit'?'Allow scoped edits':'Allow scoped tests';
-    const yes=await vscode.window.showWarningMessage('Sutra needs permission for this request.',{modal:true,detail:'Files: '+paths.join(', ')+'\nTask: '+descriptor.goal+'\nNetwork and dependencies remain off. Every edit/test still gets its own confirmation.'},label);
+    const yes=await vscode.window.showWarningMessage('Sutra needs permission for this request.',{modal:true,detail:'Files: '+paths.join(', ')+'\nTask: '+descriptor.goal+'\nNetwork and dependencies remain off. This file scope persists with the task across model switches. Disarm or reload stops execution until you arm again; it does not erase these grants. Every edit/test still gets its own confirmation.'},label);
     if(yes!==label||token.isCancellationRequested)return;
     return {operation:descriptor.operation,paths,test_paths};
   }
   const pendingKey='sutra.pendingOrchestration';
-  async function rememberFlow(flow){await context.workspaceState.update(pendingKey,flow.state==='DONE'||flow.state==='CANCELLED'?undefined:{...flow,workspace:deps.workspace(),conversation:undefined,child:undefined,data:undefined,mapping:undefined});}
+  async function rememberFlow(flow){await context.workspaceState.update(pendingKey,flow.state==='DONE'||flow.state==='CANCELLED'?undefined:{...flow,workspace:deps.workspace(),conversation:undefined,child:undefined,data:undefined,mapping:undefined});publish();}
+  async function recoverSaved(discard=false){
+    if(running||routing?.active||deps.isBusy())throw new Error('Stop the active request and wait for cleanup before changing the saved workflow.');
+    const pending=context.workspaceState.get(pendingKey);
+    if(!pending||pending.workspace!==deps.workspace()){void vscode.window.showInformationMessage('No saved workflow in this workspace.');return;}
+    if(discard){
+      const yes=await vscode.window.showWarningMessage('Discard the saved Sutra request?',{modal:true,detail:'Consumed budgets, receipts and task permissions are retained. Unused child reservations are released. Executed actions are not undone.'},'Discard request');
+      if(yes!=='Discard request')return;
+      const current=await deps.request({op:'orchestrate',event:'inspect',flow_id:pending.flow_id});
+      await rememberFlow(['DONE','CANCELLED'].includes(current.state)?current:await deps.request({op:'orchestrate',event:'cancel',flow_id:current.flow_id,cursor:current.cursor}));recoveryChoice=undefined;
+    }else{
+      recoveryChoice=pending.flow_id;
+      // Focus the existing chat without replacing its draft, model, or history.
+      await vscode.commands.executeCommand('workbench.action.chat.open');
+      void vscode.window.showInformationMessage('Resume selected. Send your next message with a Sutra model to continue the saved request with its original context and remaining budget.');
+    }
+  }
   async function flowEvent(flow,event,tier,token,extra={}){
-    const models=await deps.configureModels(false,token);
+    const models=['inspect','pending','cancel'].includes(event)?undefined:await deps.configureModels(false,token);
     let next;
     try{next=await deps.request({op:'orchestrate',event,flow_id:flow?.flow_id,cursor:flow?.cursor,armed:!!armed,binding:armed?.binding,models,tier,...extra},token);}
     catch(error){if(/Task changed|Workflow task|permissions changed|calibration.*changed/i.test(error.message))disarm('Task changed. Re-arm to accept the current contract.');throw error;}
@@ -147,7 +165,7 @@ function install(vscode,context,deps){
       // Live routing is shown in the status bar and dashboard; keep audit IDs out of the answer body.
       await invoke(audit);
       if(audit.stage==='received')audit.stage='stopped';
-    }catch(error){audit.stage=token.isCancellationRequested||/cancel|disarm/i.test(error.message)?'cancelled':'blocked';audit.message=error.message;throw error;}
+    }catch(error){audit.stage=token.isCancellationRequested||/cancel|disarm/i.test(error.message)?'cancelled':'blocked';audit.message=error.message;if(/Ollama|model.*unavailable|model.*discover|No local chat model/i.test(error.message))void vscode.window.showErrorMessage?.(error.message,'Model settings')?.then(choice=>{if(choice==='Model settings')return deps.configureModels(true);}).catch(()=>{});throw error;}
     finally{audit.active=false;audit.finishedAt=new Date().toISOString();publish();deps.onRoute?.({...audit});}
   }
   function ticket(input){const t=tickets.get(input?.ticket),a=assertArmed();if(!t||t.generation!==a.generation||Date.now()>t.expires)throw new Error('Missing, expired or revoked Sutra action ticket.');return t;}
@@ -175,7 +193,7 @@ function install(vscode,context,deps){
     }
   };
   const provider={onDidChangeLanguageModelChatInformation:changed.event,
-    provideLanguageModelChatInformation(){if(!enabled())return [];const models=deps.modelSettings();return ['auto','low','mid','high'].map(id=>({id:MODEL_IDS[id],name:id==='auto'?'Sutra Auto':'Sutra '+id[0].toUpperCase()+id.slice(1),family:'karma',version:'0.20.0',maxInputTokens:64000,maxOutputTokens:4096,detail:id==='auto'?'Governed local routing':models[id]||'Configure this tier',tooltip:'Chat normally; arm Sutra for workspace reading. Every local call uses the invocation gateway.',capabilities:{toolCalling:true,imageInput:false}}));},
+    provideLanguageModelChatInformation(){if(!enabled())return [];const models=deps.modelSettings();return ['auto','low','mid','high'].filter(id=>id==='auto'||models[id]).map(id=>({id:MODEL_IDS[id],name:id==='auto'?'Sutra Auto':'Sutra '+id[0].toUpperCase()+id.slice(1),family:'karma',version:require('./package.json').version,maxInputTokens:64000,maxOutputTokens:4096,detail:id==='auto'?'Governed local routing':models[id]||'Configure this tier',tooltip:'Chat normally; arm Sutra for workspace reading. Every local call uses the invocation gateway.',capabilities:{toolCalling:true,imageInput:false}}));},
     provideTokenCount(model,input,token){if(token?.isCancellationRequested)throw new Error('Token count cancelled.');return hostTokens.count(input);},
     async provideLanguageModelChatResponse(model,messages,options,progress,token){
       if(isCompaction(vscode,messages)){
@@ -219,14 +237,22 @@ function install(vscode,context,deps){
       try{
         let data,flow;
         if(!request.results){
-          const pending=context.workspaceState.get(pendingKey);
+          let pending=context.workspaceState.get(pendingKey);
+          if(!pending){const saved=await flowEvent(null,'pending',tier,activeCancel.token);if(saved.flow_id)pending={...saved,workspace:deps.workspace()};}
           if(pending?.workspace===deps.workspace()){
             const old=await deps.request({op:'orchestrate',event:'inspect',flow_id:pending.flow_id},activeCancel.token);
-            if(/^(continue|resume|please continue|please resume)[.! ]*$/i.test(prompt)){
-              flow=old;prompt=old.prompt;conversationId=old.conversation_id;audit.memoryUsed=true;audit.conversationInvocationId=conversationId;
-              footerSignature=await memory.remember(conversationId,options);footerId=conversationId;
-              progress.report(new vscode.LanguageModelTextPart('Resuming the saved Sutra workflow with its context and remaining budget.\n\n'));
-            }else await flowEvent(old,'cancel',tier,activeCancel.token);
+            if(['DONE','CANCELLED'].includes(old.state))await rememberFlow(old);
+            else {
+              const choice=recoveryChoice===old.flow_id||/^(continue|resume|please continue|please resume)[.! ]*$/i.test(prompt)?'Resume saved request':await vscode.window.showWarningMessage('A Sutra request is saved.',{modal:true,detail:'Saved request: '+old.prompt+'\nResume preserves its context and remaining budget. Discard releases unused child reservations; consumed budgets and receipts remain.'},'Resume saved request','Discard and use new request');
+              if(activeCancel.token.isCancellationRequested)return;
+              recoveryChoice=undefined;
+              if(choice==='Resume saved request'){
+                flow=old;prompt=old.prompt;conversationId=old.conversation_id;audit.memoryUsed=true;audit.conversationInvocationId=conversationId;
+                if(conversationId){footerSignature=await memory.remember(conversationId,options);footerId=conversationId;}
+                progress.report(new vscode.LanguageModelTextPart('Resuming the saved Sutra workflow with its context and remaining budget.\n\n'));
+              }else if(choice==='Discard and use new request')await flowEvent(old,'cancel',tier,activeCancel.token);
+              else {progress.report(new vscode.LanguageModelTextPart('Saved request retained. Use Resume or Discard in Sutra Monitor when ready.'));return;}
+            }
           }
           if(!flow)flow=await flowEvent(null,'start',tier,activeCancel.token,{prompt,parent:request.parent});
           const chat=flow.conversation;
@@ -256,9 +282,10 @@ function install(vscode,context,deps){
         }
         assertArmed();
         if(!flow)flow=await flowEvent(null,'start_existing',tier,activeCancel.token,{prompt,conversation_id:conversationId});
+        if(flow.state==='PAUSED')flow=await flowEvent(flow,'resume',tier,activeCancel.token);
         while(!['DONE','AWAITING_ACTION'].includes(flow.state)){
           if(armed!==a||activeCancel.token.isCancellationRequested)throw new Error('Native request disarmed or cancelled.');
-          if(flow.state==='PAUSED'||flow.state==='QUARANTINED')throw new Error('Sutra workflow stopped: '+flow.state+'. Inspect the monitor before continuing.');
+          if(['PAUSED','QUARANTINED','CANCELLING','EXECUTING_ACTION'].includes(flow.state))throw new Error('Sutra workflow '+flow.state+'. Saved request retained. Inspect Sutra Monitor, then choose Resume or Discard.');
           let event='step',extra={};
           if(flow.state==='NEED_PERMISSION'){
             const grant=await approvePermission(flow.permission,activeCancel.token);
@@ -295,13 +322,17 @@ function install(vscode,context,deps){
           const footer=footerId?`[${label}](karma-preview:/conversation/${footerId}/Response.md?checkpoint=${footerSignature})`:'Sutra · '+detail;
           if(!activeCancel.token.isCancellationRequested)progress.report(new vscode.LanguageModelTextPart('\n\n---\n'+footer+(footerId?(audit.memoryUsed?' · Memory restored':' · New conversation'):'')+' · Open tokens, system and kernel status with **Sutra Monitor** in the status bar.\n'));
         }
+        const stopped=activeCancel.token.isCancellationRequested;
         cancellation.dispose();activeCancel.dispose();activeCancel=undefined;running=false;publish();
+        if(stopped){try{await rememberFlow(await deps.request({op:'orchestrate',event:'pending'}));}catch{} }
+        if(stopped&&context.workspaceState.get(pendingKey))void vscode.window.showInformationMessage('Sutra stopped. The saved request, context and consumed budget are retained. Resume or Discard from Sutra Monitor.');
       }
       });
     }
   };
   context.subscriptions.push(changed,vscode.lm.registerLanguageModelChatProvider('karma',provider),vscode.lm.registerTool(ACTION,tool),
     vscode.commands.registerCommand('karma.useNativeChat',()=>useNativeChat()),
+    vscode.commands.registerCommand('karma.resumeWorkflow',()=>recoverSaved()),vscode.commands.registerCommand('karma.discardWorkflow',()=>recoverSaved(true)),
     vscode.commands.registerCommand('karma.armNative',()=>beginArm()),vscode.commands.registerCommand('karma.disarmNative',()=>disarm()),
     vscode.commands.registerCommand('karma.toggleNative',async()=>{disarm('Native chat setting changed.');await vscode.workspace.getConfiguration('karma').update('nativeEnabled',!enabled(),vscode.ConfigurationTarget.Global);changed.fire();publish();}));
   const listener=vscode.workspace.onDidChangeConfiguration?.(e=>{if(e.affectsConfiguration('karma.nativeEnabled')){disarm('Native chat setting changed.');changed.fire();}else if(e.affectsConfiguration('karma.models'))changed.fire();if(e.affectsConfiguration('chat'))publish();});if(listener)context.subscriptions.push(listener);

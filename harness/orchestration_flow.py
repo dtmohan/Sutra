@@ -84,6 +84,12 @@ def handle(s,meta,workspace,root,req,providers=None):
     from conversation import answer as converse
     event=req.get('event','step');models=req.get('models');tier=req.get('tier','auto')
     def provider(stage):return providers(stage) if providers else None
+    if event in ('pending','start','start_existing','start_review'):
+        pending=[]
+        for nid, in s.db.execute("SELECT id FROM orchestration_nodes WHERE json_extract(record_json,'$.kind')='flow' ORDER BY rowid DESC"):
+            if m.node(s,nid).get('workspace')==str(workspace) and m.state(s,nid) not in m.TERMINAL:pending.append(nid)
+        if event=='pending':return response(s,pending[0]) if pending else {'state':'DONE','flow_id':None}
+        if pending:raise InvalidUpdate('A saved workflow exists; explicitly resume or discard it before starting another request')
     if event in ('start','start_existing','start_review'):
         prompt=req.get('prompt','')
         if not isinstance(prompt,str) or not prompt.strip():raise InvalidUpdate('Empty workflow request')
@@ -111,6 +117,8 @@ def handle(s,meta,workspace,root,req,providers=None):
         if req.get('cursor')!=response(s,fid)['cursor']:raise InvalidUpdate('Workflow event is stale or replayed')
     f,d=info(s,fid);phase=m.state(s,fid);prompt=f['prompt']
     if event=='cancel':
+        if phase in ('EXECUTING_ACTION','CANCELLING'):
+            m.cancel(s,fid);return response(s,fid)
         if d.get('root_node'):m.abandon_children(s,d['root_node'],'Workflow cancelled')
         m.cancel(s,fid);return response(s,fid)
     if phase=='CLASSIFYING':
@@ -151,6 +159,13 @@ def handle(s,meta,workspace,root,req,providers=None):
         return response(s,fid)
     if d.get('binding')!=identity(s,meta.get('active')) or req.get('binding')!=d['binding']:raise InvalidUpdate('Workflow task, calibration or permissions changed')
     parent=m.checked(s,d['root_node']);sid=parent['session']
+    if phase=='PAUSED':
+        if event!='resume':raise InvalidUpdate('Workflow paused. Choose Resume or Discard; allocations remain unchanged.')
+        # Resume retries admission, never replenishes the task or child allocation.
+        stopped=[e for e in m.events(s,fid) if e['kind']=='MAPPING_STOPPED']
+        if not stopped:raise InvalidUpdate('Paused workflow requires inspection before recovery')
+        move(s,fid,'MAPPING','RESUME_REQUESTED',reason='User resumed with existing contract and allocation')
+        return response(s,fid)
     if phase=='WORKSPACE':
         c=s.snapshot(sid)['constraints']
         move(s,fid,'CODING' if c.get('native_task') else 'MAPPING','WORK_SELECTED')

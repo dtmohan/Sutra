@@ -12,7 +12,7 @@
   a per-chat binding hint. Missing authenticated context must be reported rather
   than filled with another chat's most recent context.
 - Conversation continuation currently uses the last admitted model-written
-  summary (at most 1,000 characters), with a separately retained diagram reference.
+- Conversation working memory is sized from the selected model/context allocation, with recent turns and selected Smriti pages. The complete transcript stays in the ledger; selected context is not a semantic completeness guarantee.
   A valid checkpoint authenticates this memory; it does not prove it retained all
   facts. Workspace contracts are stored separately and checked on each invocation.
 - VS Code host token sizing uses cl100k_base plus 15% headroom as a local-model

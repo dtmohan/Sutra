@@ -91,6 +91,20 @@ class ActionTests(unittest.TestCase):
         receipt=self.apply(r);self.assertEqual(receipt['result']['status'],'applied')
         self.assertEqual(m.state(self.s,fid),'DONE')
         self.assertEqual(m.events(self.s,fid)[-1]['data']['receipt'],receipt['id'])
+    def test_cancel_executing_action_waits_for_reconciliation_and_does_not_replay(self):
+        import orchestration as m
+        from lifecycle import reconcile
+        r=self.propose();fid=self.action_flow(r['result']['invocation_id'])
+        with patch('host_actions.replace_file',side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):self.apply(r)
+        self.assertEqual(m.state(self.s,fid),'EXECUTING_ACTION')
+        root=self.s.db.execute("SELECT id FROM orchestration_nodes WHERE json_extract(record_json,'$.kind')='task' ORDER BY rowid DESC LIMIT 1").fetchone()[0]
+        charged=m.spent(self.s,root);m.cancel(self.s,fid)
+        self.assertEqual(m.state(self.s,fid),'CANCELLING');self.assertEqual(charged,m.spent(self.s,root))
+        with patch('host_actions.replace_file',side_effect=AssertionError('replayed')):reconcile(self.s,self.workspace)
+        self.assertEqual(m.state(self.s,fid),'DONE');self.assertEqual(charged,m.spent(self.s,root))
+        self.assertEqual(m.events(self.s,fid)[-1]['data']['status'],'reconciled_before')
+
     def test_cancelled_workflow_cannot_execute_old_proposal(self):
         import orchestration as m
         r=self.propose();fid=self.action_flow(r['result']['invocation_id']);m.cancel(self.s,fid)
@@ -185,6 +199,17 @@ class HardwareTests(unittest.TestCase):
 
 @requires_sandbox
 class SandboxTests(unittest.TestCase):
+    def test_interrupt_kills_the_running_test_process_before_returning(self):
+        from lifecycle import deadline, Interrupted
+        import subprocess
+        real=subprocess.Popen;processes=[]
+        def track(*args,**kwargs):
+            p=real(*args,**kwargs);processes.append(p);return p
+        start=time.monotonic()
+        with patch('host_actions.subprocess.Popen',side_effect=track),deadline(.4):
+            with self.assertRaises(Interrupted):self.run_code('import time\ntime.sleep(60)\n',120000)
+        self.assertTrue(processes);self.assertTrue(all(p.poll() is not None for p in processes));self.assertLess(time.monotonic()-start,4)
+
     def run_code(self,text,timeout=3000):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp).resolve();canary=root/'outside.txt';canary.write_text('OUTSIDE_CANARY')

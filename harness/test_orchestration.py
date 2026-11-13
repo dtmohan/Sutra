@@ -185,3 +185,56 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(out['state'],'NEED_ARM');self.assertFalse(self.models)
         result=self.until('DONE',out);self.assertTrue(result['data']['result']['admission']['admitted'])
         self.assertFalse(any(stage=='conversation' for stage,p in self.models))
+
+    def test_paused_mapping_explicit_resume_retains_binding_and_spent_budget(self):
+        out=self.until('MAPPING');sid=self.meta['active'];contract=self.s.pinned(sid)
+        with patch('auto_review.step',return_value={'auto':{'status':'resource_wait'}}):out=self.step(out)
+        self.assertEqual(out['state'],'PAUSED');used=review_budget.usage(self.s,sid)['used']
+        with self.assertRaisesRegex(InvalidUpdate,'Choose Resume'):self.step(out)
+        with self.assertRaisesRegex(InvalidUpdate,'user-armed'):self.step(out,event='resume',armed=False)
+        self.s.close();self.s=InvocationLedger(self.root/'state.sqlite');self.tier='high'
+        out=self.step(out,event='resume');self.assertEqual(out['state'],'MAPPING')
+        self.assertEqual(used,review_budget.usage(self.s,sid)['used']);self.assertEqual(contract,self.s.pinned(sid))
+        self.assertTrue(self.until('DONE',out)['data']['result']['admission']['admitted'])
+
+    def test_committed_child_receipt_recovers_without_duplicate_inference(self):
+        out=self.children();cid=out['children'][0]['id']
+        with patch('subagent_runtime.machine.complete',side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):self.step(out)
+        self.assertEqual(m.state(self.s,cid),'READY');used=m.spent(self.s,cid)
+        self.s.close();self.s=InvocationLedger(self.root/'state.sqlite')
+        with patch('subagent_runtime.InvocationGateway.invoke',side_effect=AssertionError('duplicate inference')):
+            recovered=self.step(out)
+        self.assertTrue(recovered['child']['recovered']);self.assertEqual(m.state(self.s,cid),'DONE');self.assertEqual(used,m.spent(self.s,cid))
+
+    def test_pending_discovery_blocks_second_workflow_and_cancel_keeps_history(self):
+        out=self.children();sid=self.meta['active'];used=review_budget.usage(self.s,sid)['used']
+        found=flow.handle(self.s,self.meta,self.ws,self.root,{'event':'pending'})
+        self.assertEqual(found['flow_id'],out['flow_id'])
+        with self.assertRaisesRegex(InvalidUpdate,'saved workflow'):self.step()
+        inspected=self.step(out,event='inspect');self.assertEqual(inspected['prompt'],self.prompt)
+        self.step(out,event='cancel');self.assertEqual(used,review_budget.usage(self.s,sid)['used'])
+        self.assertIsNone(flow.handle(self.s,self.meta,self.ws,self.root,{'event':'pending'})['flow_id'])
+
+    def test_settlement_is_idempotent_and_illegal_transition_is_rejected(self):
+        out=self.children();cid=out['children'][0]['id'];self.step(out);used=m.spent(self.s,cid)
+        row=self.s.db.execute('SELECT id FROM orchestration_charges WHERE node_id=? LIMIT 1',(cid,)).fetchone()
+        with self.s.db:m.settle(self.s,{'node_id':cid,'charge_id':row[0]},'repeat',99999)
+        self.assertEqual(used,m.spent(self.s,cid))
+        with self.s.db,self.assertRaisesRegex(InvalidUpdate,'forbidden'):m.transition(self.s,cid,'CLASSIFYING','BAD')
+
+    def test_rejected_child_is_quarantined_and_cannot_join(self):
+        out=self.children();cid=out['children'][0]['id'];original=Child.call
+        def corrupt(child,*args):
+            proposal,record=original(child,*args);proposal['constraints']=[];return proposal,record
+        with patch.object(Child,'call',corrupt):out=self.step(out)
+        self.assertEqual(m.state(self.s,cid),'QUARANTINED')
+        self.assertEqual(m.spent(self.s,cid)['calls'],3)
+        with self.assertRaisesRegex(InvalidUpdate,'quarantined'):self.step(out)
+
+    def test_corrupt_transition_chain_is_detected_before_resume(self):
+        out=self.children();fid=out['flow_id']
+        # Simulate corruption outside the append-only API, not an allowed update.
+        self.s.db.execute('DROP TRIGGER immutable_orchestration_events_UPDATE')
+        self.s.db.execute("UPDATE orchestration_events SET digest='tampered' WHERE node_id=? AND seq=1",(fid,));self.s.db.commit()
+        with self.assertRaisesRegex(InvalidUpdate,'corrupted'):self.step(out,event='inspect')

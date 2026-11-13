@@ -4,7 +4,7 @@ exports.run=async()=>{
  const out=process.env.KARMA_SMOKE_OUTPUT,report={checks:[]};const phase=(name,extra={})=>{report.phase=name;Object.assign(report,extra);fs.writeFileSync(out,JSON.stringify(report,null,2)+'\n');};
  const token=new vscode.CancellationTokenSource();
  try{
-  const ext=vscode.extensions.getExtension('deepak-local.karma-local-harness'),api=await ext.activate();assert.equal(api.version,'0.12.3');assert.deepEqual(Object.keys(api).sort(),['getState','open','version']);
+  const ext=vscode.extensions.getExtension('deepak-local.karma-local-harness'),api=await ext.activate();assert.equal(api.version,require('../package.json').version);assert.deepEqual(Object.keys(api).sort(),['getRoutingStatus','getState','open','version']);
   const workspace=vscode.workspace.workspaceFolders[0].uri.fsPath,storage=path.join(process.env.KARMA_SMOKE_PROFILE,'User/globalStorage/deepak-local.karma-local-harness',crypto.createHash('sha256').update(workspace).digest('hex').slice(0,24));
   await vscode.workspace.getConfiguration('karma').update('models',{low:'qwen3:4b',mid:'qwen3.6:35b',high:'local-assistant:latest'},vscode.ConfigurationTarget.Global);
   await exec(process.env.KARMA_SMOKE_PYTHON||(process.platform==='win32'?'python':'python3'),['-B',path.join(process.env.KARMA_SMOKE_DRIVER,'native-prepare.py'),ext.extensionPath,storage,workspace]);

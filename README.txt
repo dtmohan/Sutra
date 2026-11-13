@@ -1,4 +1,9 @@
-Sutra 0.20.0 — one governed orchestration state machine
+Sutra 0.20.1 — recovery and UX stabilization
+
+Resume or Discard a saved request from Sutra Monitor. Resume selects it for your next message in the existing Sutra chat; it does not submit a prompt or overwrite a draft. Paused mapping retries admission against the same contract and remaining budget. Interrupted actions are reconciled without replay.
+
+Task form drafts and expanded source lists survive refreshes. Start Ollama, then use Retry model discovery in Settings if setup is unavailable. File permissions persist with the task; disarm or reload prevents execution until rearming, and every edit/test still needs action confirmation.
+
 
 Previously Karma. Your installed extension ID and saved settings are preserved.
 

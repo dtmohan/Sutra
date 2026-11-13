@@ -28,6 +28,7 @@ function setup(saved={}){
   flowRequests.push(structuredClone(m));let f;
   const bind=()=>({session:st.session,contract_hash:st.contract?.contract_hash,calibration_hash:st.calibration?.binding?.hash});
   const reply=extra=>structuredClone({...f,...extra});
+  if(m.event==='pending')return structuredClone([...flows.values()].reverse().find(f=>!['DONE','CANCELLED'].includes(f.state))||{state:'DONE',flow_id:null});
   if(m.event==='start'||m.event==='start_existing'){
    const c=m.event==='start'?await deps.backendRequest({...m,op:'conversation'},t):null;
    f={flow_id:'flow-'+(++flowCount),cursor:'1',state:c?.result.accepted_output.intent==='conversation'?'DONE':'NEED_ARM',conversation_id:c?.result.invocation_id||m.conversation_id,children:[],prompt:m.prompt,permission:c?.result.accepted_output.workspace_request||{operation:'read',paths:[]}};flows.set(f.flow_id,f);
@@ -194,5 +195,26 @@ function setup(saved={}){
  const resumedWork=resumed.calls.filter(c=>c.op==='native_work').at(-1);assert.equal(resumedWork.prompt,'Fix retry');assert.equal(resumedWork.tier,'high');assert.equal(resumedWork.contract_hash,'contract-1');
  checks.push('continue resumes the saved workflow with the original prompt and permissions on another model, without reclassifying or replaying history');
  assert(h.flowRequests.some(r=>r.event==='start'));assert(h.flowRequests.some(r=>r.event==='step'));checks.push('native UI sends workflow events; host state selects all workspace work');
+ const savedCase=setup();savedCase.kind('report');await savedCase.arm();savedCase.hold(()=>{throw Error('stopped fixture');});
+ await assert.rejects(savedCase.send(),/stopped/);savedCase.hold(null);
+ savedCase.v.window.showWarningMessage=async()=>undefined;
+ const retained=await savedCase.send('high',[{role:1,content:[new Text('A different request')]}]);
+ assert(retained.some(p=>p.value?.includes('Saved request retained')));assert(!savedCase.flowRequests.some(r=>r.event==='cancel'));
+ const oldConversationCount=savedCase.calls.filter(c=>c.op==='conversation').length;
+ await savedCase.commands['karma.resumeWorkflow']();assert.deepEqual(savedCase.uiCalls.find(c=>c[0]==='workbench.action.chat.open'),['workbench.action.chat.open']);
+ await savedCase.send('high',[{role:1,content:[new Text('Proceed with selected recovery')]}]);
+ assert.equal(savedCase.calls.filter(c=>c.op==='conversation').length,oldConversationCount);
+ assert.equal(savedCase.calls.filter(c=>c.op==='native_work').at(-1).prompt,'Fix retry');
+ checks.push('unrelated requests require an explicit recovery choice; Resume retains the original prompt and binding without replacing the chat draft');
+ const discarded=setup();discarded.kind('report');await discarded.arm();discarded.hold(()=>{throw Error('stopped fixture');});await assert.rejects(discarded.send(),/stopped/);discarded.hold(null);
+ discarded.v.window.showWarningMessage=async()=> 'Discard and use new request';
+ await discarded.send('high',[{role:1,content:[new Text('New request')]}]);assert(discarded.flowRequests.some(r=>r.event==='cancel'));
+ assert.equal(discarded.calls.filter(c=>c.op==='conversation').at(-1).prompt,'New request');
+ checks.push('explicit discard releases the saved workflow before classifying the new prompt');
+ if(process.platform==='darwin'){
+ const named=setup();named.kind('report');named.st.contract.contract.constraints.tests_allowed=false;let selected;
+ const previous=named.deps.backendRequest;named.deps.backendRequest=async(m,t)=>{if(m.op==='native_permissions'){selected=m.test_paths;named.st.contract.contract.constraints.tests_allowed=true;return named.st;}const x=await previous(m,t);if(m.op==='conversation')x.result.accepted_output.workspace_request={operation:'test',paths:['checks/foo_test.py','tests/support.py']};return x;};
+ await named.arm();await named.send();assert.deepEqual(selected,['checks/foo_test.py','tests/support.py']);checks.push('explicit test file names are preserved without a test-prefix filter');
+ }
  console.log(JSON.stringify({passed:true,checks},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;});

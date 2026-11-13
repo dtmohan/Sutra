@@ -1,13 +1,14 @@
 'use strict';
 const vscode=acquireVsCodeApi(),el=id=>document.getElementById(id),T=KarmaTokens;
 const node=(tag,text,cls)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;};
+let workflowSignature='';
 let snapshot,routing,native,error,filters={...vscode.getState()?.filters};
 const finite=n=>typeof n==='number'&&Number.isFinite(n);
 const decisions=new Set(['ALLOW','BRIDGE','FIN','COMPOUND_FIN']);
 function renderMonitor(){
  const d=snapshot?.monitor||{},h=d.hardware||{},s=h.sample||{},now=Date.now(),elapsed=(now-Date.parse(snapshot?.updatedAt))/1000;
  const snapshotFresh=!!snapshot&&!error&&finite(elapsed)&&elapsed>=0&&elapsed<=8;
- const hwFresh=snapshotFresh&&h.available===true&&finite(h.age_seconds)&&h.age_seconds>=0&&h.age_seconds+elapsed<=8;
+ const hwFresh=snapshotFresh&&h.available===true&&T.freshAge(h.age_seconds,elapsed);
  const why=error?'Readings unavailable':!snapshotFresh&&snapshot?'Readings expired':h.reason||'Waiting for system readings';
  const thermal={nominal:'Normal',fair:'Elevated',serious:'High',critical:'Critical'}[h.thermal_label]||'Unavailable';
  const hd=hwFresh&&decisions.has(h.decision)?h.decision:undefined;
@@ -17,7 +18,7 @@ function renderMonitor(){
  el('ram').textContent=hwFresh&&finite(h.reclaimable_estimate_gib)&&h.reclaimable_estimate_gib>=0?h.reclaimable_estimate_gib.toFixed(1)+' GiB':'—';
  el('ram-note').textContent=hwFresh?'Reclaimable estimate · pressure '+({1:'normal',2:'elevated',4:'critical'}[s.memory_pressure_raw]||'unavailable'):'Waiting for fresh memory data';
  for(const group of ['cpu','gpu']){
-  const t=h.temperatures,v=t?.[group],ok=hwFresh&&finite(t?.age_seconds)&&t.age_seconds>=0&&t.age_seconds+elapsed<=8&&v?.available===true&&finite(v.maximum_celsius)&&v.maximum_celsius>0&&v.maximum_celsius<=150;
+  const t=h.temperatures,v=t?.[group],ok=hwFresh&&T.freshAge(t?.age_seconds,elapsed)&&v?.available===true&&finite(v.maximum_celsius)&&v.maximum_celsius>0&&v.maximum_celsius<=150;
   el(group+'-temp').textContent=ok?v.maximum_celsius.toFixed(1)+' °C':'—';
   el(group+'-temp-note').textContent=ok?'Hottest readable sensor'+(finite(v.mean_celsius)?' · avg '+v.mean_celsius.toFixed(1)+' °C':''):hwFresh?(v?.reason||'No validated sensor available'):why;
  }
@@ -31,14 +32,23 @@ function renderMonitor(){
  }
  const workflow=d.orchestration,rows=(workflow?.nodes||[]).filter(n=>n.kind!=='task').slice(0,12);
  el('flow-status').textContent=!snapshotFresh?'Awaiting fresh snapshot':rows.length?(workflow.execution||'Recorded workflow'):'No workflow yet';
+ const pending=native?.pending;el('recovery-controls').hidden=!pending;
+ el('recovery-status').textContent=pending?'Saved request · '+pending.state+'. Context and consumed budget are retained. Resume selects it for your next Sutra message.':'';
+ for(const id of ['resume-workflow','discard-workflow'])el(id).disabled=!!native?.working;
+ const signature=JSON.stringify([rows,snapshotFresh]);
+ if(signature!==workflowSignature){workflowSignature=signature;
+ const opened=new Set([...el('flow-nodes').querySelectorAll('details[open]')].map(e=>e.parentElement.dataset.nodeId));
+ const focused=document.activeElement?.closest('#flow-nodes [data-node-id]')?.dataset.nodeId;
  el('flow-nodes').replaceChildren();
  for(const n of rows){
-  const box=node('div',undefined,'gate');box.dataset.decision=snapshotFresh?n.kernel?.decision||'':'';
+  const box=node('div',undefined,'gate');box.dataset.nodeId=n.id;box.dataset.decision=snapshotFresh?n.kernel?.decision||'':'';
   const title=node('div',(n.kind==='branch'?'Child review':'Request')+' · '+n.state+' · '+n.id.slice(0,8));
   box.append(title,node('div',n.kind==='branch'?n.files.slice(0,3).join(', ')+(n.files.length>3?' · '+(n.files.length-3)+' more files':''):n.objective));
-  if(n.kind==='branch'&&n.files.length>3){const details=node('details');details.append(node('summary','Full source scope'),node('div',n.files.join(', ')));box.append(details);}
+  if(n.kind==='branch'&&n.files.length>3){const details=node('details');details.open=opened.has(n.id);details.append(node('summary','Full source scope'),node('div',n.files.join(', ')));box.append(details);}
   if(n.kind==='branch')box.append(node('small',(n.model||'Model pending')+' · '+T.number(n.used?.calls)+' / '+T.number(n.limits?.calls)+' calls · '+T.number(n.used?.tokens)+' / '+T.number(n.limits?.tokens)+' token allocation · read only · last admission '+(n.kernel?.decision||'not dispatched')));
   el('flow-nodes').append(box);
+  if(focused===n.id)box.querySelector('summary')?.focus({preventScroll:true});
+ }
  }
  const c=d.context;
  el('context-packet').textContent=c?'Last workspace packet: '+T.number(c.conservative_input_charge)+' input charge + '+T.number(c.output_reserve)+' output reserve / '+T.number(c.limit)+' context allocation. Measured input: '+T.number(c.actual_prompt_tokens)+' tokens.':'No workspace model packet recorded. Conversation history and workspace task allocations are separate.';
@@ -74,7 +84,7 @@ function render(){
  const recent=[...rows].sort((a,b)=>a.created_at-b.created_at).slice(-20),max=Math.max(1,...recent.flatMap(c=>[c.input_tokens,c.output_tokens].filter(T.valid)));
  el('timeline').replaceChildren();
  for(const c of recent){const pair=node('div',undefined,'call-bar');pair.dataset.unknown=String(!T.valid(c.input_tokens)||!T.valid(c.output_tokens));pair.title=T.stage(c.stage)+' · '+c.model+' · '+T.number(c.input_tokens)+' input / '+T.number(c.output_tokens)+' output';
-  for(const [key,cls] of [['input_tokens','in'],['output_tokens','out']]){if(!T.valid(c[key]))continue;const bar=node('span',undefined,cls);bar.style.height=(100*c[key]/max)+'%';pair.append(bar);}el('timeline').append(pair);
+  for(const [key,cls] of [['input_tokens','in'],['output_tokens','out']]){const bar=node('span',undefined,cls);bar.style.height=(T.valid(c[key])?100*c[key]/max:0)+'%';pair.append(bar);}pair.tabIndex=0;pair.setAttribute('aria-label',pair.title);el('timeline').append(pair);
  }
  el('timeline').setAttribute('aria-label','Last '+recent.length+' matching calls. '+T.metric(t,'input_tokens')+' input and '+T.metric(t,'output_tokens')+' output tokens across all matching calls.');
  const groups=new Map();for(const c of rows){if(!groups.has(c.stage))groups.set(c.stage,[]);groups.get(c.stage).push(c);}
@@ -89,5 +99,7 @@ function render(){
 }
 window.addEventListener('message',({data:m})=>{if(m.type!=='usage')return;snapshot=m.snapshot;routing=m.routing;native=m.native;error=m.error;for(const key of ['model','stage'])fillOptions(key);if(!snapshot){for(const key of ['input','output','calls','unknown'])el(key).textContent='—';for(const key of ['input','output'])el(key+'-note').textContent='Waiting for measurements';el('scope').textContent='This workspace · waiting for recorded calls…';el('visuals').hidden=true;el('details').hidden=true;el('empty').hidden=true;el('window').textContent='';}render();});
 // Expire live readings even if the host/reader stops delivering messages.
-setInterval(renderMonitor,1000);
+el('resume-workflow').onclick=()=>vscode.postMessage({type:'resume'});el('discard-workflow').onclick=()=>vscode.postMessage({type:'discard'});
+setInterval(()=>{if(!document.hidden)renderMonitor();},1000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)renderMonitor();});
 vscode.postMessage({type:'ready'});

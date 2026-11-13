@@ -61,6 +61,16 @@ def validate(s,sid,p,proposal):
 
 def run(s,meta,workspace,root,nid,models,tier='auto',provider=None):
     n=machine.checked(s,nid);sid=n['session'];real=provider is None
+    for raw, in s.db.execute("SELECT record_json FROM invocations WHERE session=? ORDER BY rowid DESC",(sid,)):
+        env=json.loads(raw)
+        if env.get('orchestration',{}).get('node_id')!=nid:continue
+        receipt=s.db.execute('SELECT record_json FROM invocation_receipts WHERE invocation_id=?',(env['id'],)).fetchone()
+        if not receipt:continue
+        # Rejected calls remain charged and may be retried within the original limit.
+        rec=json.loads(receipt[0])
+        if rec.get('status')!='accepted':continue
+        output=s.load_result(sid,env['id']);machine.complete(s,nid,env['id'])
+        return {'result':{'invocation_id':env['id'],'admission':{'admitted':True,'errors':[]},'accepted_output':output},'route':{'model':env['model']},'branch_id':nid,'recovered':True}
     with machine.scope(nid):
         row=runtime.build(s,meta,workspace,root,n['files'],real=real);data=row['result'];graph=data['graph']
         signals={'source_files':len(n['context']['versions']),'selected_files':len(n['files']),'unresolved_calls':sum(c['target'] is None for c in graph['calls'])}

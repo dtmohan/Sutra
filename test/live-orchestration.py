@@ -53,6 +53,17 @@ def main(out):
                 binding=result['binding']
             if result.get('child'):
                 assert result['child']['result']['admission']['admitted'],result['child']['result']['admission'];children+=1
+                if children==1:
+                    # Drop the UI cursor and rediscover committed work from a new bridge.
+                    ledger=InvocationLedger(root/'state.sqlite');parent=m.node(ledger,result['children'][0]['id'])['parent_id'];before=m.spent(ledger,parent);ledger.close()
+                    saved=request({'op':'orchestrate','event':'pending'})
+                    assert saved['flow_id']==result['flow_id']
+                    recovered=request({'op':'orchestrate','event':'inspect','flow_id':saved['flow_id']})
+                    assert recovered['prompt']==prompt and recovered['binding']==binding
+                    ledger=InvocationLedger(root/'state.sqlite');assert m.spent(ledger,parent)==before;ledger.close()
+                    report['recovery_preserved']={'prompt':True,'binding':True,'spent_budget':before,'saved_child_state':recovered['children']}
+                    result=recovered
+
         assert result['state']=='DONE' and children>=2,result
         assert result['data']['result']['admission']['admitted'],result['data']['result']['admission']
         s=InvocationLedger(root/'state.sqlite')

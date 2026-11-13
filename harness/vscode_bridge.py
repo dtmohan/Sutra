@@ -20,6 +20,8 @@ def ollama(path, body=None):
         r=c.getresponse(); raw=r.read()
         if r.status!=200: raise InvalidUpdate('Local Ollama: HTTP '+str(r.status))
         return json.loads(raw)
+    except OSError as exc:
+        raise InvalidUpdate('Cannot reach Ollama at 127.0.0.1:11434. Start the Ollama app or run ollama serve, then choose Retry model discovery in Sutra Settings.') from exc
     finally: c.close()
 
 

@@ -109,7 +109,7 @@ function activate(context) {
     if(diagnostic)return requestDashboard();
     if ((busy || ((sequence || nativeController?.status().working) && !internal)) && !diagnostic) throw new Error('A Sutra request is running. Switch models after it finishes.');
     if (!['orchestrate','conversation_read','conversation','native_permissions','native_work','native_preview','native_execute','chat_answer','calibration_register','calibration_list','calibration_bind','calibration_revoke','calibration_evaluate','models','state','new','save','switch','review','work','preview','execute','dashboard','quarantine','review_new','architecture','repository_tool','api_build','api_verify','static_build','static_explain','auto_new','auto_step','auto_report'].includes(message?.op)) throw new Error('Unknown Sutra request.');
-    if((['native_work','chat_answer','static_build','static_explain','auto_step','auto_report'].includes(message.op)||(message.op==='orchestrate'&&!['start','inspect','cancel'].includes(message.event)))&&hasDirtyFiles())throw new Error('Save or discard unsaved workspace buffers before mapping current source.');
+    if((['native_work','chat_answer','static_build','static_explain','auto_step','auto_report'].includes(message.op)||(message.op==='orchestrate'&&!['start','inspect','pending','cancel'].includes(message.event)))&&hasDirtyFiles())throw new Error('Save or discard unsaved workspace buffers before mapping current source.');
     if(['execute','native_execute'].includes(message.op) && hasDirtyFiles())throw new Error('Save or discard unsaved workspace buffers before applying an edit or running tests.');
     const cwd = workspace(), stateDir = storage();
     fs.mkdirSync(stateDir,{recursive:true});startTelemetry();
@@ -159,7 +159,8 @@ function activate(context) {
     const config=vscode.workspace.getConfiguration('karma');panel?.webview.postMessage({type:'runtime-settings',settings:{storageLimitMiB:config.get('storageLimitMiB',512),pythonPath:config.get('pythonPath','')}});
   }
   async function discoverModels(token,internal=false){
-    const catalog=await request({op:'models'},token,internal);const current=modelSettings(),next=modelSelection.prefill(current,catalog);
+    let catalog;try{catalog=await request({op:'models'},token,internal);}catch(error){modelCatalog={models:[],suggested_tiers:{},error:'Cannot discover local models. Start Ollama, then choose Retry model discovery. '+error.message};publishSettings();throw new Error(modelCatalog.error);}
+    const current=modelSettings(),next=modelSelection.prefill(current,catalog);
     if(JSON.stringify(current)!==JSON.stringify(next))await vscode.workspace.getConfiguration('karma').update('models',next,vscode.ConfigurationTarget.Global);
     modelCatalog=catalog;publishSettings();return catalog;
   }
@@ -321,6 +322,8 @@ function activate(context) {
     panel.webview.onDidReceiveMessage(async message=>{
       try {
         if(message.type==='ready'){panelReady=true;publishSettings();if(!busy&&!sequence)await refresh();focusPanelSection();return;}
+        if(message.op==='resume_workflow'){await vscode.commands.executeCommand('karma.resumeWorkflow');return;}
+        if(message.op==='discard_workflow'){await vscode.commands.executeCommand('karma.discardWorkflow');return;}
         if(message.op==='open_usage'){await vscode.commands.executeCommand('karma.openUsage');return;}
         if(message.op==='native_use'){await vscode.commands.executeCommand('karma.useNativeChat');return;}
         if(message.op==='native_arm'){await vscode.commands.executeCommand('karma.armNative');return;}
@@ -370,6 +373,7 @@ function activate(context) {
           await vscode.commands.executeCommand('vscode.diff',before,after,'Sutra proposed edit: '+change.target);return;
         }
         const data=await request(message);
+        if(['save','new','auto_new','review_new'].includes(message.op))panel?.webview.postMessage({type:'draft-saved'});
         if(message.op==='review'||message.op==='work'||message.op==='architecture'){
           panel?.webview.postMessage({type:'result',data:data.result});
           panel?.webview.postMessage({type:'state',data:data.state});
@@ -502,7 +506,7 @@ function activate(context) {
       async presentConversation(data){if(data.result.accepted_output.diagram)await diagrams.open(data);},
       async showDiff(change,iid){const before=vscode.Uri.parse('karma-preview:/'+iid+'/before.py'),after=vscode.Uri.parse('karma-preview:/'+iid+'/after.py');previewDocuments.set(before.toString(),change.before);previewDocuments.set(after.toString(),change.after);await vscode.commands.executeCommand('vscode.diff',before,after,'Sutra proposed edit: '+change.target);},
       onRoute(value){output.appendLine('KARMA_NATIVE_ROUTE '+JSON.stringify(value));},
-      onStatus(value){status.text=(value.routing?.active?'$(sync~spin) ':'$(shield) ')+value.label;status.tooltip=value.explanation+' '+value.reason+(value.routing?' Last Sutra request: '+value.routing.id+' · '+value.routing.stage:'');status.command='karma.useNativeChat';panel?.webview.postMessage({type:'native-status',data:value});usage?.setStatus(value);}
+      onStatus(value){status.text=(value.routing?.active?'$(sync~spin) ':'$(shield) ')+value.label;status.tooltip=value.explanation+' '+value.reason+(value.routing?' Last Sutra request: '+value.routing.id+' · '+value.routing.stage:'');status.command='karma.openMonitor';panel?.webview.postMessage({type:'native-status',data:value});usage?.setStatus(value);}
     });context.subscriptions.push(nativeController);
   }
   // Public extension API cannot create contracts, widen scope, edit, or execute.

@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Local model orchestration with portable context, governed tools, diagrams and token visibility.",
-  "version": "0.20.0",
+  "version": "0.20.1",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -140,6 +140,14 @@
         "command": "karma.openMonitor",
         "title": "Sutra: Open Monitor",
         "icon": "$(dashboard)"
+      },
+      {
+        "command": "karma.resumeWorkflow",
+        "title": "Sutra: Resume Saved Request"
+      },
+      {
+        "command": "karma.discardWorkflow",
+        "title": "Sutra: Discard Saved Request"
       }
     ],
     "configuration": {

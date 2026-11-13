@@ -4,7 +4,7 @@ exports.run=async()=>{
  const save=phase=>{report.phase=phase;fs.writeFileSync(out,JSON.stringify(report,null,2));};
  const wait=async tag=>{const file=out+'.'+tag,start=Date.now();while(!fs.existsSync(file)){if(Date.now()-start>90000)throw Error('UI check timeout: '+tag);await new Promise(r=>setTimeout(r,150));}};
  try{
-  const ext=vscode.extensions.getExtension('deepak-local.karma-local-harness'),api=await ext.activate();assert.equal(api.version,'0.14.0');
+  const ext=vscode.extensions.getExtension('deepak-local.karma-local-harness'),api=await ext.activate();assert.equal(api.version,require('../package.json').version);
   const models=await vscode.lm.selectChatModels({vendor:'karma'});assert.deepEqual(models.map(m=>m.id).sort(),['karma-auto','karma-high','karma-low','karma-mid']);
   const chat=vscode.workspace.getConfiguration('chat');
   const verifyDefaults=()=>{const cfg=vscode.workspace.getConfiguration('chat');assert.equal(cfg.get('defaultModel'),'karma-auto');assert.equal(cfg.get('editor.preferCopilotHarness'),false);assert.equal(cfg.get('defaultToCopilotHarness'),false);assert.equal(cfg.get('editor.localAgent.enabled'),true);};

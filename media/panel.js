@@ -10,6 +10,7 @@ function updateButtons(){document.querySelectorAll('button,select').forEach(e=>e
   for(const id of ['native-use','overview-native-use','native-arm','overview-native-arm','native-toggle'])el(id).disabled=!!nativeBusy;
   for(const id of ['native-arm','overview-native-arm']){el(id).textContent=nativeState.armed?'Disarm Sutra':'Arm Sutra';el(id).disabled=nativeState.armed?false:!!nativeBusy;}
   el('native-disarm').disabled=!!nativeState.arming||!nativeState.armed;
+  el('save-model-tiers').disabled=busy||!modelCandidates.length;
 }
 function save(op){try{const extra={...preservedConstraints};
   for(const [id,key] of [['constraint-timeout','timeout_ms'],['constraint-attempts','max_attempts'],['constraint-rows','max_rows']]){
@@ -60,7 +61,7 @@ function budgetBar(parent,label,used,limit,format=v=>Math.round(v).toLocaleStrin
 function decisionLabel(d){return {ALLOW:'Ready',BRIDGE:'Adjustment needed',FIN:'Paused',COMPOUND_FIN:'Multiple limits reached'}[d]||'Unavailable';}
 function showDashboard(d){
  showUsage(d.token_usage);
- lastTemperatureUpdate=Date.now();const h=d.hardware||{},s=h.sample||{},b=d.review_budget,c=d.context;showTemperatures(h.temperatures);
+ const h=d.hardware||{},s=h.sample||{},b=d.review_budget,c=d.context;lastTemperatureUpdate=Date.now()-1000*Math.max(h.age_seconds||0,h.temperatures?.age_seconds||0);showTemperatures(h.available&&KarmaTokens.freshAge(h.age_seconds)?h.temperatures:null);
  const constrained=b&&b.decision!=='ALLOW'||d.storage&&d.storage.decision!=='ALLOW';
  el('overview-status').textContent=!h.available?'Waiting for system readings':!h.admitted?'Waiting for resources':constrained?'An allocation needs attention':busy||d.adapter_health==='busy'?'Working locally':'Ready for the next request';
  el('debug-state').textContent=!h.available?'Live measurements are unavailable. Sutra will wait for fresh data.':!h.admitted?(h.reason||'Resource checks have paused new work.'):constrained?'Review the allocation below before continuing. Your task is retained.':'Resource checks allow work. Task constraints and budgets still apply.';
@@ -68,7 +69,7 @@ function showDashboard(d){
  el('resource').textContent=h.available?'Resources: '+decisionLabel(h.decision):'Resources unavailable';el('resource').className='pill '+(h.admitted?'signal-ok':'signal-stop');
  el('thermal').textContent='OS thermal pressure: '+({nominal:'Normal',fair:'Elevated',serious:'High',critical:'Critical'}[h.thermal_label]||h.thermal_label||'unavailable');
  el('cpu').textContent=h.available&&Number.isFinite(s.cpu_busy_pct)?s.cpu_busy_pct.toFixed(0)+'%':'—';
- if(h.available&&Number.isFinite(s.cpu_busy_pct)){cpuHistory.push(s.cpu_busy_pct);cpuHistory=cpuHistory.slice(-60);el('cpu-line').setAttribute('points',cpuHistory.map((v,i)=>`${i*120/59},${35-v*.35}`).join(' '));}else{cpuHistory=[];el('cpu-line').setAttribute('points','');}
+ if(h.available&&Number.isFinite(s.cpu_busy_pct)){cpuHistory.push(s.cpu_busy_pct);cpuHistory=cpuHistory.slice(-60);el('cpu-line').setAttribute('points',cpuHistory.map((v,i)=>`${i*120/Math.max(1,cpuHistory.length-1)},${35-v*.35}`).join(' '));}else{cpuHistory=[];el('cpu-line').setAttribute('points','');}
  el('memory').textContent=h.available&&Number.isFinite(h.reclaimable_estimate_gib)?h.reclaimable_estimate_gib.toFixed(1)+' GiB':'—';
  el('pressure').textContent=h.available?'Reclaimable estimate · pressure '+({1:'normal',2:'elevated',4:'critical'}[s.memory_pressure_raw]||'unknown'):'Waiting for memory data';
  const bars=el('budget-bars');bars.replaceChildren();
@@ -109,7 +110,7 @@ window.addEventListener('message',({data:m})=>{
   if(m.type==='auto-running'){autoRunning=m.value;updateButtons();}
   if(m.type==='busy'){busy=m.value;updateButtons();el('status').textContent=busy?'Working locally…':'';}
   if(m.type==='error')el('error').textContent=m.message;
-  if(m.type==='dashboard')showDashboard(m.data);
+  if(m.type==='dashboard'){showDashboard(m.data);if(!m.data.hardware?.available||!KarmaTokens.freshAge(m.data.hardware.age_seconds))expireDashboard('Readings expired. Waiting for a fresh update.');}
   if(m.type==='models'){for(const id of ['model','review-model','api-model','static-model','auto-model']){el(id).replaceChildren(...m.data.map(x=>{const o=document.createElement('option');o.value=x.name;o.textContent=x.name;return o;}));const preferred=id==='api-model'?'qwen3:4b':id==='static-model'&&!current?.static?.model?'qwen3.6:35b':selectedModel;el(id).value=m.data.some(m=>m.name===preferred)?preferred:selectedModel;}}
   if(m.type==='state'){
     current=m.data;showTaskSummary(current);selectedModel=current.model;el('model').value=selectedModel;el('review-model').value=selectedModel;
@@ -158,7 +159,7 @@ window.addEventListener('message',({data:m})=>{
  if(m.type==='models-saved')el('model-save-status').textContent='Model choices saved.';
  if(m.type==='chat-notice'){el('chat-usage').textContent='';el('chat-progress').textContent='';el('chat-route').textContent='Sutra guidance · no model call';el('chat-answer').textContent=m.data.message;el('chat-diagram').disabled=true;if(m.data.kind==='workflow')el('workflow-notice').hidden=false;}
  if(m.type==='dashboard-error'){expireDashboard('Connection interrupted. Waiting for a fresh reading.');}
- if(m.type==='busy'){el('chat-send').disabled=m.value;el('chat-new').disabled=m.value;el('configure-models').disabled=m.value;el('chat-stop').disabled=!m.value;el('save-model-tiers').disabled=m.value;el('refresh-models').disabled=m.value;}
+ if(m.type==='busy'){el('chat-send').disabled=m.value;el('chat-new').disabled=m.value;el('configure-models').disabled=m.value;el('chat-stop').disabled=!m.value;el('save-model-tiers').disabled=m.value||!modelCandidates.length;el('refresh-models').disabled=m.value;}
  if(m.type==='chat-progress')el('chat-progress').textContent=m.message;
  if(m.type==='chat-result'){const d=m.data,p=d.result.accepted_output;el('chat-usage').textContent='Sutra · '+KarmaTokens.compact(d.result.token_usage)+' · Per-stage counts in Usage.';el('chat-progress').textContent='Mapped '+d.coverage.mapped_files+'/'+d.coverage.source_files+' files. Answer excerpts: '+d.source_files.join(', ');
   el('chat-route').textContent=d.route.tier+' · '+d.route.model+' · '+d.route.reason;
@@ -166,18 +167,18 @@ window.addEventListener('message',({data:m})=>{
 });
 
 function showTemperatures(t,reason='No current sensor sample'){
- const table=document.createElement('table');
+ const table=document.createElement('table');const caption=document.createElement('caption');caption.textContent='Readable CPU and GPU temperature sensors';table.append(caption);
  for(const group of ['cpu','gpu']){
-  const value=t?.[group],available=value?.available&&Number.isFinite(value.maximum_celsius);
+  const value=t?.[group],fresh=KarmaTokens.freshAge(t?.age_seconds),available=fresh&&value?.available&&Number.isFinite(value.maximum_celsius);
   el(group+'-temperature').textContent=available?value.maximum_celsius.toFixed(1)+' °C':'—';
   el(group+'-temperature-info').textContent=available?'Hottest readable sensor · avg '+value.mean_celsius.toFixed(1)+' °C':(value?.reason||reason);
-  if(available)for(const r of value.sensors){const tr=document.createElement('tr');for(const label of [group.toUpperCase(),r.key,r.celsius.toFixed(2)+' °C']){const td=document.createElement('td');td.textContent=label;tr.append(td);}table.append(tr);}
+  if(available)for(const r of value.sensors||[]){const tr=document.createElement('tr');for(const label of [group.toUpperCase(),r.key,r.celsius.toFixed(2)+' °C']){const td=document.createElement('td');td.textContent=label;tr.append(td);}table.append(tr);}
  }
  el('temperature-sensors').replaceChildren(table);
 }
 function expireDashboard(reason){lastTemperatureUpdate=0;showTemperatures(null,reason);el('overview-status').textContent='Waiting for system readings';el('debug-state').textContent=reason;el('sample-age').textContent='No recent sample';el('resource').textContent='Resources unavailable';el('resource').className='pill signal-stop';el('thermal').textContent='OS thermal pressure: unavailable';el('cpu').textContent='—';el('memory').textContent='—';el('pressure').textContent='Waiting for memory data';cpuHistory=[];el('cpu-line').setAttribute('points','');const resource=el('adapter-summary').querySelector('dd');if(resource)resource.textContent='Unavailable';}
-setInterval(()=>{if(lastTemperatureUpdate&&Date.now()-lastTemperatureUpdate>8000)expireDashboard('Readings expired. Waiting for a fresh update.');},1000);
-let suggestedModels=null;
+setInterval(()=>{if(!document.hidden&&lastTemperatureUpdate&&Date.now()-lastTemperatureUpdate>8000)expireDashboard('Readings expired. Waiting for a fresh update.');},1000);
+let modelCandidates=[],suggestedModels=null;
 function showView(view){if(!['dashboard','chat','usage','settings','tools'].includes(view))return;activeView=view;
  for(const [name,id] of Object.entries({dashboard:'dashboard-section',chat:'chat-section',usage:'usage-section',settings:'settings-section',tools:'advanced'})){el(id).hidden=name!==view;el('nav-'+name).setAttribute('aria-pressed',String(name===view));}
  if(view==='tools')el('advanced').open=true;vscode.setState?.({...vscode.getState?.(),view});window.scrollTo?.({top:0,behavior:'instant'});
@@ -188,8 +189,8 @@ el('overview-chat').onclick=()=>showSection('chat');el('overview-settings').oncl
 showView(vscode.getState?.()?.view||'dashboard');
 el('open-current-task').onclick=()=>showSection('advanced');
 function showModelChoices(m){
- if(!m.catalog)return;
- const candidates=m.catalog.models.filter(x=>x.eligible===true);
+ m={...m,catalog:m.catalog||{models:[],suggested_tiers:{},error:'Local models have not been discovered. Start Ollama, then choose Retry model discovery.'}};
+ const candidates=m.catalog.models.filter(x=>x.eligible===true);modelCandidates=candidates;
  for(const tier of ['low','mid','high']){
   const select=el('tier-'+tier);select.replaceChildren();
   for(const model of candidates){const o=document.createElement('option');o.value=model.name;o.textContent=model.name+(model.parameter_size?' · '+model.parameter_size:'')+(model.moe?' · MoE':'');select.append(o);}
@@ -201,8 +202,8 @@ function showModelChoices(m){
  el('use-model-defaults').disabled=busy||!suggestedModels;
  const differs=suggestedModels&&['low','mid','high'].some(t=>m.models[t]!==suggestedModels[t]);
  el('model-suggestions').textContent=suggestedModels?'Discovered defaults — '+['low','mid','high'].map(t=>t+': '+suggestedModels[t]).join(' · ')+(differs?'. Your saved choices were preserved. Use discovered defaults, then Save choices, to replace them.':'. These match your saved choices.'):'No complete defaults available; refresh after starting Ollama.';
- el('model-discovery').textContent=candidates.length+' eligible installed models. '+(m.catalog.selection_note||'')+(m.catalog.errors?.length?' Some model metadata could not be read; refresh to retry.':'');
- el('model-save-status').textContent='';
+ el('model-discovery').textContent=(m.catalog.error||candidates.length+' eligible installed models.')+' '+(m.catalog.selection_note||'')+(m.catalog.errors?.length?' Some model metadata could not be read; refresh to retry.':'');
+ el('model-save-status').textContent='';el('save-model-tiers').disabled=busy||!candidates.length;
 }
 el('use-model-defaults').onclick=()=>{if(!suggestedModels)return;for(const tier of ['low','mid','high'])el('tier-'+tier).value=suggestedModels[tier];el('model-save-status').textContent='Suggested choices selected. Click Save choices to apply.';};
 for(const tier of ['low','mid','high'])el('tier-'+tier).onchange=()=>{el('model-save-status').textContent='Unsaved model choices. Click Save choices to apply.';};
@@ -226,7 +227,7 @@ for(const key of ['model','stage','status','time']){
 el('usage-reset').onclick=()=>{usageFilters={};for(const key of ['model','stage','status','time'])el('usage-'+key).value='';persistUsageFilters();renderUsage();};
 function usageTable(id,headers,rows){
  const parent=el(id);parent.replaceChildren();
- if(!rows.length){parent.append(textNode('p','No model calls match these filters.','muted'));return;}
+ if(!rows.length){parent.append(textNode('p',usageData.calls.length?'No model calls match these filters.':'No model calls yet. Send a message using Sutra Auto.','muted'));return;}
  const table=document.createElement('table'),head=document.createElement('thead'),tr=document.createElement('tr');
  for(const label of headers){const th=textNode('th',label);th.setAttribute('scope','col');tr.append(th);}head.append(tr);table.append(head);
  const body=document.createElement('tbody');for(const values of rows){const row=document.createElement('tr');for(const value of values)row.append(textNode('td',String(value)));body.append(row);}table.append(body);parent.append(table);
@@ -254,3 +255,18 @@ function renderUsage(){
 }
 
 el('overview-usage').onclick=()=>send('open_usage');el('usage-dock').onclick=()=>send('open_usage');
+
+const draftIds=new Set(['goal','paths','network','dependencies','edits','tests','testpaths','testtimeout','maxactions','constraint-timeout','constraint-attempts','constraint-rows','constraint-format','auto-goal','auto-roots','auto-ops','auto-calls','auto-tokens','auto-source','auto-seconds','auto-page','review-goal','review-roots','review-budget','static-files','static-offset','api-files','api-offset']);
+let drafts={...vscode.getState?.()?.drafts};
+function draftNotice(){el('draft-status').hidden=!Object.keys(drafts).length;vscode.setState?.({...vscode.getState?.(),drafts});}
+function restoreDrafts(){for(const [id,d] of Object.entries(drafts)){if(!draftIds.has(id))continue;const e=el(id);e.value=d.value;e.checked=d.checked;}draftNotice();}
+for(const type of ['input','change'])document.addEventListener(type,e=>{if(draftIds.has(e.target.id)){drafts[e.target.id]={value:e.target.value,checked:e.target.checked};draftNotice();}});
+window.addEventListener('message',({data:m})=>{if(m.type==='draft-saved'){drafts={};draftNotice();}if(m.type==='state')restoreDrafts();if(m.type==='native-status'){el('recovery-controls').hidden=!m.data.pending;el('recovery-status').textContent=m.data.pending?'Saved request · '+m.data.pending.state+'. Resume selects it for your next Sutra message. Context and consumed budget are retained.':'';for(const id of ['resume-workflow','discard-workflow'])el(id).disabled=!!m.data.working;}});
+el('discard-draft').onclick=()=>{drafts={};draftNotice();if(current)window.dispatchEvent(new MessageEvent('message',{data:{type:'state',data:current}}));};
+el('resume-workflow').onclick=()=>send('resume_workflow');el('discard-workflow').onclick=()=>send('discard_workflow');
+restoreDrafts();
+
+const tabNames=['dashboard','chat','usage','settings','tools'];
+function syncTabs(){for(const view of tabNames){const tab=el('nav-'+view);tab.setAttribute('aria-selected',String(activeView===view));tab.tabIndex=activeView===view?0:-1;}}
+for(const view of tabNames){const tab=el('nav-'+view),click=tab.onclick;tab.onclick=()=>{click();syncTabs();};tab.onkeydown=e=>{let index=tabNames.indexOf(view);if(e.key==='ArrowRight')index=(index+1)%tabNames.length;else if(e.key==='ArrowLeft')index=(index+tabNames.length-1)%tabNames.length;else if(e.key==='Home')index=0;else if(e.key==='End')index=tabNames.length-1;else return;e.preventDefault();showView(tabNames[index]);syncTabs();el('nav-'+tabNames[index]).focus();};}
+syncTabs();

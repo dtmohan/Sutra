@@ -11,7 +11,7 @@ def package(source, output):
     pkg=json.loads((source/'package.json').read_text());version=pkg['version']
     tree=ast.parse((source/'harness/governance.py').read_text())
     policies=next(ast.literal_eval(n.value) for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='POLICY_FILES' for t in n.targets))
-    files={source/'harness'/name for name in policies}
+    files={source/'harness'/name for name in policies}|{source/'THIRD_PARTY_NOTICES.md'}
     pending=[p for p in files if p.suffix=='.py'];seen=set()
     while pending:
         p=pending.pop()
@@ -44,6 +44,8 @@ def package(source, output):
     source_files=set(files)|{source/name for name in ('package.py','README.md','CHANGELOG.md','THIRD_PARTY_NOTICES.md','.gitignore')}
     source_files.update(p for p in (source/'docs').rglob('*') if p.is_file())
     source_files.update((source/'harness').glob('*.py'));source_files.update((source/'test').glob('*'))
+    source_files.update(p for p in (source/'scripts').rglob('*') if p.is_file())
+    source_files.update(p for p in (source/'.github').rglob('*') if p.is_file())
     source_files.update(p for p in (source/'examples').rglob('*') if p.is_file())
     with zipfile.ZipFile(output/f'Sutra-{version}-source.zip','w',zipfile.ZIP_DEFLATED) as z:
         for p in sorted(source_files):
