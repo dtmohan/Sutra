@@ -1,0 +1,474 @@
+{
+  "name": "karma-local-harness",
+  "displayName": "Karma Local Harness",
+  "description": "Karma Auto: per-stage token usage, local conversation, offline diagrams and governed workspace tools.",
+  "version": "0.15.1",
+  "publisher": "deepak-local",
+  "engines": {
+    "vscode": "^1.104.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    },
+    "virtualWorkspaces": false
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "karma.open",
+        "title": "Karma: Open Local Harness"
+      },
+      {
+        "command": "karma.switchModel",
+        "title": "Karma: Switch Local Model"
+      },
+      {
+        "command": "karma.exportDebug",
+        "title": "Karma: Export Debug Snapshot"
+      },
+      {
+        "command": "karma.reviewCodebase",
+        "title": "Karma: Review Codebase"
+      },
+      {
+        "command": "karma.continueReview",
+        "title": "Karma: Continue Architecture Review"
+      },
+      {
+        "command": "karma.apiMap",
+        "title": "Karma: Build and Review API Map"
+      },
+      {
+        "command": "karma.openAPIReport",
+        "title": "Karma: Open Reviewed API Map"
+      },
+      {
+        "command": "karma.staticMap",
+        "title": "Karma: Build Fresh Source Map"
+      },
+      {
+        "command": "karma.explainMap",
+        "title": "Karma: Explain Source Map"
+      },
+      {
+        "command": "karma.openStaticReport",
+        "title": "Karma: Open Source Map"
+      },
+      {
+        "command": "karma.automaticReview",
+        "title": "Karma: Review Whole Codebase"
+      },
+      {
+        "command": "karma.continueAutomaticReview",
+        "title": "Karma: Continue Automatic Review"
+      },
+      {
+        "command": "karma.openAutomaticReport",
+        "title": "Karma: Open Automatic Review Report"
+      },
+      {
+        "command": "karma.openReport",
+        "title": "Karma: Open Architecture Report"
+      },
+      {
+        "command": "karma.importCalibration",
+        "title": "Karma: Import Calibration Profile"
+      },
+      {
+        "command": "karma.selectCalibrations",
+        "title": "Karma: Select Task Calibration Profiles"
+      },
+      {
+        "command": "karma.revokeCalibration",
+        "title": "Karma: Revoke Calibration Profile"
+      },
+      {
+        "command": "karma.evaluateCalibration",
+        "title": "Karma: Evaluate Calibration Sample"
+      },
+      {
+        "command": "karma.configureModels",
+        "title": "Karma: Configure Local Models"
+      },
+      {
+        "command": "karma.openAdvanced",
+        "title": "Karma: Open Current Task Controls"
+      },
+      {
+        "command": "karma.newChatReview",
+        "title": "Karma: Start Separate Chat Review"
+      },
+      {
+        "command": "karma.armNative",
+        "title": "Karma: Arm Task and Open Chat"
+      },
+      {
+        "command": "karma.disarmNative",
+        "title": "Karma: Disarm Native Chat"
+      },
+      {
+        "command": "karma.toggleNative",
+        "title": "Karma: Enable or Disable Native Chat"
+      },
+      {
+        "command": "karma.useNativeChat",
+        "title": "Karma: Open Governed Chat (Karma Auto)"
+      },
+      {
+        "command": "karma.openLastDiagram",
+        "title": "Karma: Open Last Diagram"
+      }
+    ],
+    "configuration": {
+      "title": "Karma Local Harness",
+      "properties": {
+        "karma.pythonPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Python 3.9+ executable. Empty uses python on Windows, python3 elsewhere."
+        },
+        "karma.explanationModel": {
+          "type": "string",
+          "default": "qwen3.6:35b",
+          "scope": "machine",
+          "description": "Preferred installed local model in the source-map explanation command."
+        },
+        "karma.storageLimitMiB": {
+          "type": "integer",
+          "default": 512,
+          "minimum": 64,
+          "maximum": 8192,
+          "scope": "machine",
+          "description": "Workspace history allocation in MiB. New work stops near the limit; immutable evidence is retained. Diagnostic traces and settled action snapshots are pruned separately."
+        },
+        "karma.models": {
+          "type": "object",
+          "scope": "machine",
+          "default": {
+            "low": "",
+            "mid": "",
+            "high": ""
+          },
+          "additionalProperties": false,
+          "required": [
+            "low",
+            "mid",
+            "high"
+          ],
+          "properties": {
+            "low": {
+              "type": "string",
+              "description": "Low tier installed local Ollama model."
+            },
+            "mid": {
+              "type": "string",
+              "description": "Mid tier installed local Ollama model."
+            },
+            "high": {
+              "type": "string",
+              "description": "High tier installed local Ollama model."
+            }
+          },
+          "description": "Saved tier choices. For dropdowns populated from Ollama, run Karma: Configure Local Models from the Command Palette (or @karma /models). Use discovered defaults, then Save choices, to replace existing selections."
+        },
+        "karma.nativeEnabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "description": "Make Karma Auto available for general conversation. Arm a task for workspace tools; arming is revoked on reload or contract changes."
+        }
+      }
+    },
+    "languageModelTools": [
+      {
+        "name": "karma_review",
+        "toolReferenceName": "karmaReview",
+        "displayName": "Continue the architecture review through the Karma invocation gateway",
+        "userDescription": "Continue the architecture review through the Karma invocation gateway",
+        "modelDescription": "Continue the architecture review through the Karma invocation gateway. Requires a read-only architecture task created by the user in Karma first. Scope and budgets cannot be changed by this tool. Returns Karma receipts. Other native agent calls are outside Karma.",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(layers)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "prompt": {
+              "type": "string"
+            },
+            "steps": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "explore",
+                "report"
+              ],
+              "description": "Use report for a final synthesis from current evidence; no more read/search calls in report mode."
+            }
+          },
+          "required": [
+            "prompt"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "karma_read_file",
+        "toolReferenceName": "karmaRead",
+        "displayName": "Read an in-scope code file through Karma",
+        "userDescription": "Read an in-scope code file through Karma",
+        "modelDescription": "Read an in-scope code file through Karma. Requires a read-only architecture task created by the user in Karma first. Scope and budgets cannot be changed by this tool. Returns Karma receipts. Other native agent calls are outside Karma.",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(layers)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Workspace-relative catalog path."
+            },
+            "line": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "karma_search",
+        "toolReferenceName": "karmaSearch",
+        "displayName": "Search the committed code catalog through Karma",
+        "userDescription": "Search the committed code catalog through Karma",
+        "modelDescription": "Search the committed code catalog through Karma. Requires a read-only architecture task created by the user in Karma first. Scope and budgets cannot be changed by this tool. Returns Karma receipts. Other native agent calls are outside Karma.",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(layers)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Literal content search, at most 80 characters."
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "karma_api_map",
+        "toolReferenceName": "karmaAPIMap",
+        "displayName": "Build a provisional API map under the existing read-only Karma contract. Requires karmaAPIVerify before publication.",
+        "userDescription": "Build a provisional API map under the existing read-only Karma contract. Requires karmaAPIVerify before publication.",
+        "modelDescription": "Build a provisional API map under the existing read-only Karma contract. Requires karmaAPIVerify before publication. Cannot widen scope or change permissions.",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(layers)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "maxItems": 8
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "files"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "karma_api_verify",
+        "toolReferenceName": "karmaAPIVerify",
+        "displayName": "Independently review the saved API draft using a local smaller model and host source checks.",
+        "userDescription": "Independently review the saved API draft using a local smaller model and host source checks.",
+        "modelDescription": "Independently review the saved API draft using a local smaller model and host source checks. Cannot widen scope or change permissions.",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(layers)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "Installed local reviewer model; default qwen3:4b."
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "karma_source_map",
+        "toolReferenceName": "karmaSourceMap",
+        "displayName": "karmaSourceMap",
+        "userDescription": "Compile a fresh deterministic map from explicitly scoped source files. Never executes project code.",
+        "modelDescription": "Compile a fresh deterministic map from explicitly scoped source files. Never executes project code. Requires a user-created read-only Karma architecture task. Cannot widen scope or permissions.",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(layers)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "maxItems": 8
+            }
+          },
+          "required": [
+            "files"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "karma_explain_map",
+        "toolReferenceName": "karmaExplainMap",
+        "displayName": "karmaExplainMap",
+        "userDescription": "Recompile current source and explain a bounded call batch with an installed local model under the same Karma contract. Model prose cannot modify graph edges.",
+        "modelDescription": "Recompile current source and explain a bounded call batch with an installed local model under the same Karma contract. Model prose cannot modify graph edges. Requires a user-created read-only Karma architecture task. Cannot widen scope or permissions.",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(layers)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "maxItems": 8
+            },
+            "model": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "files"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "karma_auto_review",
+        "toolReferenceName": "karmaAutoReview",
+        "displayName": "Continue automatic Karma codebase review",
+        "userDescription": "Discover and review the next source page under the existing task allocation.",
+        "modelDescription": "Continue an automatic codebase task created by the user. Discovers files and pages source freshly, preserves constraints and global budget across model switches. Cannot widen scope or change allocations.",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(layers)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "explain": {
+              "type": "boolean",
+              "description": "Include local model commentary; defaults true."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "karma_native_action",
+        "toolReferenceName": "karmaAction",
+        "displayName": "Apply a governed Karma action",
+        "userDescription": "Apply a validated edit or run a permitted sandboxed Python test. Requires an armed task and a single-use action ticket from Karma Auto.",
+        "modelDescription": "Executes only the exact admitted proposal identified by a Karma Auto action ticket. Cannot accept patches, paths, shell commands, or task permissions.",
+        "canBeReferencedInPrompt": false,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ticket": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ticket"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "karma.local",
+        "name": "karma",
+        "fullName": "Karma Local",
+        "description": "Route local code reviews through Karma with preserved task constraints.",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "new",
+            "description": "Start a separate read-only workspace review"
+          },
+          {
+            "name": "models",
+            "description": "Configure low, mid and high local model tiers"
+          },
+          {
+            "name": "status",
+            "description": "Show measured resource and thermal state"
+          },
+          {
+            "name": "low",
+            "description": "Use the low tier for this request"
+          },
+          {
+            "name": "mid",
+            "description": "Use the mid tier for this request"
+          },
+          {
+            "name": "high",
+            "description": "Use the high tier for this request"
+          },
+          {
+            "name": "help",
+            "description": "Show Karma entry points without starting a model call"
+          },
+          {
+            "name": "dashboard",
+            "description": "Open the Karma dashboard and live temperatures"
+          }
+        ]
+      }
+    ],
+    "languageModelChatProviders": [
+      {
+        "vendor": "karma",
+        "displayName": "Karma",
+        "managementCommand": "karma.configureModels"
+      }
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "canonical": "smriti_v0.2 four-decision kernel",
+  "source": "smriti_v0.2/smriti/kernel.py (upstream provenance; bundled copy: stp_canonical/kernel.py)",
+  "sha256": "9dfef2479b9af1b8f82282597f13b1205c31b19ba4ff52f60e305f1757ed4eac",
+  "unchanged": true,
+  "decision_order": [
+    "COMPOUND_FIN",
+    "ALLOW",
+    "BRIDGE",
+    "FIN"
+  ],
+  "compound_comparison": ">=",
+  "subject": "user selected four-decision kernel on 2026-11-12"
+}

@@ -1,4 +1,4 @@
-# Local state and build artifacts
+# Local execution and user state
 __pycache__/
 *.py[cod]
 .DS_Store
@@ -6,6 +6,7 @@ node_modules/
 .venv/
 .env
 .env.*
+!.env.example
 *.sqlite*
 *.db
 *.log
@@ -18,3 +19,5 @@ node_modules/
 /outputs/
 /calls/
 /actions/
+.coverage
+htmlcov/

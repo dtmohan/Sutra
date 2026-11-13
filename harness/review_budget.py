@@ -1,0 +1,43 @@
+"""Task allocations measured by the adapter; decisions from the canonical kernel."""
+import json
+from context_manager import InvalidUpdate
+from karma_adapter import KarmaAdapter
+
+DEFAULTS={'max_tools':1000,'review_calls':40,'review_tokens':250000,'review_source_kib':65536,'review_seconds':1800,'review_page_kib':512}
+
+def allocations(c):
+ if not (c.get('auto_review') or c.get('native_task') or c.get('conversation_only')):return None
+ for k in DEFAULTS:
+  if type(c.get(k)) is not int or not 0<c[k]<=1000000:raise InvalidUpdate('Missing positive task allocation: '+k)
+ return {'operations':c['max_tools'],'calls':c['review_calls'],'tokens':c['review_tokens'],'source_bytes':c['review_source_kib']*1024,'seconds':c['review_seconds']}
+
+def usage(s,session):
+ c=s.snapshot(session)['constraints'];limits=allocations(c)
+ if not limits:return None
+ used={k:0 for k in limits};digest=s.origin(session)['contract_hash']
+ if s.db.execute("SELECT 1 FROM sqlite_master WHERE name='repository_ops'").fetchone():
+  for raw,elapsed in s.db.execute("SELECT o.record_json,json_extract(r.record_json,'$.elapsed_seconds') FROM repository_ops o LEFT JOIN repository_receipts r ON r.operation_id=o.id WHERE o.session=?",(session,)):
+   op=json.loads(raw)
+   if op['contract_hash']!=digest:continue
+   used['operations']+=1;cost=op.get('task_cost',{});used['source_bytes']+=cost.get('source_bytes',0);used['seconds']+=elapsed if elapsed is not None else cost.get('seconds',20)
+ for raw,elapsed,payload in s.db.execute("SELECT i.record_json,json_extract(r.record_json,'$.elapsed_seconds'),d.payload_json FROM invocations i LEFT JOIN invocation_receipts r ON r.invocation_id=i.id JOIN deliveries d ON d.id=i.delivery_id WHERE i.session=?",(session,)):
+  inv=json.loads(raw)
+  if inv['contract_hash']!=digest:continue
+  if c.get('native_task'):
+   used['operations']+=1;used['source_bytes']+=sum(len(p.get('text','').encode()) for p in json.loads(payload).get('pages',[]))
+  used['calls']+=1;used['tokens']+=inv['charge']+inv['budget_profile']['response_reserve'];used['seconds']+=elapsed if elapsed is not None else 150
+ return {'limits':limits,'used':used}
+
+def decision(s,session,cost=None):
+ data=usage(s,session)
+ if data is None:return None
+ try:return KarmaAdapter().allocations(data['used'],data['limits'],cost)
+ except ValueError as exc:raise InvalidUpdate(str(exc)) from None
+
+class BudgetStop(InvalidUpdate):
+ def __init__(self,frame):self.frame=frame;super().__init__('Task budget '+frame['decision']+': '+frame['limiting_dimension'])
+
+def require(s,session,cost):
+ frame=decision(s,session,cost)
+ if frame and frame['decision']!='ALLOW':raise BudgetStop(frame)
+ return frame

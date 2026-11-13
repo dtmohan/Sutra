@@ -1,0 +1,11 @@
+{
+  "profile": "mac17-13-m5-pro-v1",
+  "machine": "Mac17,13",
+  "chip": "Apple M5 Pro",
+  "sensor_mapping_reference": "https://github.com/exelban/stats/blob/master/Modules/Sensors/values.swift",
+  "protocol_reference": "https://github.com/beltex/SMCKit/blob/master/SMCKit/SMC.swift",
+  "scope": "Read-only sensor values. Sensor groups are not physical core identities. Kernel decisions do not consume Celsius readings.",
+  "observed_cpu_keys": 18,
+  "observed_gpu_keys": 7,
+  "mapped_gpu_keys": 8
+}

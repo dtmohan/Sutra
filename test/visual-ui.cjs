@@ -1,0 +1,7 @@
+const {chromium}=require(process.env.KARMA_PLAYWRIGHT||'playwright'),fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+(async()=>{const root=path.join(__dirname,'..'),file=path.join(root,'visual-vscode.json'),cfg=JSON.parse(fs.readFileSync(path.join(root,'visual-paths.json')));let b;for(let i=0;i<100&&!b;i++){try{b=await chromium.connectOverCDP('http://127.0.0.1:'+cfg.port);}catch{await new Promise(r=>setTimeout(r,200));}}if(!b)throw Error('No isolated workbench');const done=new Set();
+ try{for(let i=0;i<2400;i++){const r=fs.existsSync(file)?JSON.parse(fs.readFileSync(file)):{};if(r.phase==='failed')throw Error(r.error);if(r.passed){console.log('PASS native diagrams and reload');return;}
+ if(['rendered','reopened'].includes(r.phase)&&!done.has(r.phase)){
+  for(const p of b.contexts().flatMap(c=>c.pages()))for(const f of p.frames()){try{if(!await f.locator('#canvas svg').count())continue;assert.equal(await f.locator('#error').textContent(),'');const text=await f.locator('#canvas').textContent();assert(/C2860/i.test(text));assert(/Valerion/i.test(text));assert.equal(await f.locator('#canvas .node').count(),9);await f.locator('body').screenshot({path:path.join(root,'Native-diagram-'+r.phase+'.png')});done.add(r.phase);fs.writeFileSync(file+'.'+r.phase,'verified');console.log('Verified '+r.phase);break;}catch(e){if(/Assertion/.test(String(e)))throw e;}}
+ }
+ await new Promise(r=>setTimeout(r,200));}throw Error('Native diagram UI timeout');}finally{await b.close();}})().catch(e=>{console.error(e);process.exitCode=1;});
