@@ -1,0 +1,14 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+const {count,textCount}=require('../host_tokens');
+const hello='Hello, how are you?';assert.equal(count(''),0);assert(count(hello)>0&&count(hello)<Buffer.byteLength(hello));
+assert.equal(count({role:1,content:[{value:hello}]}),count(hello)+4);
+for(const text of ['你好，今天怎么样？','नमस्ते दुनिया','🧵👩🏽‍💻','<|endoftext|>','const x = {a: "\\n"};'])assert(Number.isInteger(count(text))&&count(text)>0);
+const tool={callId:'one',name:'read_file',input:{path:'src/main.py'}};assert(count({content:[tool]})>count('read_file'));
+const instructions='Review the current task, preserve constraints, and use approved tools.\n'.repeat(1100);
+const old=Buffer.byteLength(instructions+hello),current=count({role:1,content:[{value:instructions},{value:hello}]});
+assert(old>64000);assert(current<64000*.8,'Short history plus ordinary instructions should fit without byte inflation');
+const oversized=count((instructions+' Historical conversation.').repeat(5));assert(oversized>64000,'Oversized history must still exceed the advertised host window');
+const multi=Array.from({length:40},(_,i)=>({role:i%2?2:1,content:[{value:i%2?'I can help review the repository.':hello}]})).reduce((n,m)=>n+count(m),current);assert(multi<64000*.8);
+assert(textCount('x'.repeat(10000))>0);
+const result={passed:true,old_bytes_reported_as_tokens:old,new_estimated_tokens:current,oversized_history_tokens:oversized,checks:['UTF-8 bytes are no longer reported as tokens','literal special tokens, Unicode and tool payloads count without inference','short exchanges remain below the host window','large history still exceeds the host window','no response/tokenized-prompt cache; only encoding vocabulary retained']};
+if(process.env.SUTRA_TEST_OUTPUT)fs.writeFileSync(path.join(process.env.SUTRA_TEST_OUTPUT,'Host-token-validation.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result));

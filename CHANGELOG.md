@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.18.0 — combined monitor and host token sizing
+
+- Expand the docked panel into **Sutra Monitor**: token history, CPU/GPU Celsius,
+  CPU usage, available memory, separate kernel decisions and context diagnostics.
+- Clear expired hardware readings even if the host stops sending updates; retain
+  recorded token totals with explicit stale-state labels. No inference for monitoring.
+- Show signed-checkpoint preservation and missing-checkpoint compaction events.
+- Replace UTF-8 byte length in VS Code's token-count callback with a bundled
+  offline BPE estimate plus 15% headroom. This is approximate for local models;
+  measured Ollama tokens and the harness's conservative allocation checks are unchanged.
+- Preserve all backend files, the STP kernel, settings and signed memory formats.
+
 ## 0.17.0 — docked token dashboard
 
 - Add **Sutra Usage** beside Terminal/Output and a persistent status-bar shortcut.

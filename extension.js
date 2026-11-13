@@ -99,7 +99,7 @@ function activate(context) {
     try{
       const data=await request({op:'dashboard'});
       panel?.webview.postMessage({type:'dashboard',data});
-      usage?.setData(data.token_usage||{calls:[],total_calls:0,limit:250},path.basename(workspace()));
+      usage?.setData(data,path.basename(workspace()));
     }catch(e){output.appendLine('Dashboard: '+e.message);panel?.webview.postMessage({type:'dashboard-error',message:e.message});usage?.setError(e.message);}
     finally{dashboardInFlight=false;}
   }
@@ -178,7 +178,7 @@ function activate(context) {
     stream.button({command:'karma.newChatReview',title:'Start separate review'});
     stream.button({command:'karma.configureModels',title:'Model settings'});
     stream.button({command:'karma.open',title:'Open Sutra dashboard'});
-    stream.button({command:'karma.openUsage',title:'Token usage'});
+    stream.button({command:'karma.openUsage',title:'Tokens, system & kernel'});
   }
   async function newChatReview(){
     // Commands ignore arguments from other extensions. Only the user supplies the new goal.
@@ -226,7 +226,7 @@ function activate(context) {
         if(req.command==='help'){stream.markdown(helpMessage);entryButtons(stream);return;}
         if(req.command==='models'){await configureModels();stream.markdown('Opened the installed-model dropdowns. Saved choices are preserved. To replace them, choose Use discovered defaults, then Save choices.');return;}
         if(req.command==='dashboard'){await showPanelSection('dashboard');stream.markdown('Opened the live Sutra dashboard.');return;}
-        if(req.command==='usage'){await vscode.commands.executeCommand('karma.openUsage');stream.markdown('Opened Sutra Usage beside Terminal and Output. You can also reopen it from the status bar.');return;}
+        if(req.command==='usage'){await vscode.commands.executeCommand('karma.openUsage');stream.markdown('Opened Sutra Monitor beside Terminal and Output. You can also reopen it from the status bar.');return;}
         if(req.command==='new'&&!req.prompt.trim()){await newChatReview();return;}
         if(req.command==='status'){
           const d=await request({op:'dashboard'}),t=d.hardware.temperatures;
@@ -241,7 +241,7 @@ function activate(context) {
           stream.markdown(`\n\nMapped ${data.coverage.mapped_files}/${data.coverage.source_files} files. This answer inspected excerpts from ${data.source_files.join(', ')}.\n\nRemaining: ${p.remaining.join('; ')||'No further step proposed.'}`);
         }else stream.markdown('The response was withheld by Sutra checks. '+data.result.admission.errors.join('; '));
         stream.markdown('\n\n---\nSutra · '+tokens.compact(data.result.token_usage));
-        stream.button({command:'karma.openUsage',title:'Open token dashboard'});
+        stream.button({command:'karma.openUsage',title:'Open Sutra Monitor'});
         if(data.diagramUri)stream.reference(data.diagramUri);
         stream.button({command:'karma.open',title:'Open Sutra dashboard'});
         return {metadata:{model:data.route.model,tier:data.route.tier,invocationId:data.result.invocation_id}};
@@ -498,7 +498,7 @@ function activate(context) {
       async presentConversation(data){if(data.result.accepted_output.diagram)await diagrams.open(data);},
       async showDiff(change,iid){const before=vscode.Uri.parse('karma-preview:/'+iid+'/before.py'),after=vscode.Uri.parse('karma-preview:/'+iid+'/after.py');previewDocuments.set(before.toString(),change.before);previewDocuments.set(after.toString(),change.after);await vscode.commands.executeCommand('vscode.diff',before,after,'Sutra proposed edit: '+change.target);},
       onRoute(value){output.appendLine('KARMA_NATIVE_ROUTE '+JSON.stringify(value));},
-      onStatus(value){status.text=(value.routing?.active?'$(sync~spin) ':'$(shield) ')+value.label;status.tooltip=value.explanation+' '+value.reason+(value.routing?' Last Sutra request: '+value.routing.id+' · '+value.routing.stage:'');status.command='karma.useNativeChat';panel?.webview.postMessage({type:'native-status',data:value});usage?.setRouting(value.routing);}
+      onStatus(value){status.text=(value.routing?.active?'$(sync~spin) ':'$(shield) ')+value.label;status.tooltip=value.explanation+' '+value.reason+(value.routing?' Last Sutra request: '+value.routing.id+' · '+value.routing.stage:'');status.command='karma.useNativeChat';panel?.webview.postMessage({type:'native-status',data:value});usage?.setStatus(value);}
     });context.subscriptions.push(nativeController);
   }
   // Public extension API cannot create contracts, widen scope, edit, or execute.

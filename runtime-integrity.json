@@ -115,7 +115,13 @@
     "bin/telemetry": "1099aa9b8ac502ad438ac49bf08ceb4759ab6fe37447441f70d8d740e0fc1d4c",
     "vendor/mermaid/mermaid.min.js": "336df803d87a38b70a01e736e666c8f7601d2ce42f5e47c8fafe5d721074b9a3",
     "vendor/mermaid/provenance.json": "3d83ccca3223d88d3acc555f85e3af6037f71653e5560f885a5efd98680d72a3",
-    "vendor/mermaid/LICENSE": "ec9fb67dcb25eccc416ed56e1aab819222c805a2a4bfe4cb19e7556bf2ffde80"
+    "vendor/mermaid/LICENSE": "ec9fb67dcb25eccc416ed56e1aab819222c805a2a4bfe4cb19e7556bf2ffde80",
+    "vendor/tokenizer/provenance.json": "c5092c798ac4dea4b42a7c84ff8e5a46b1a2dbc4ef1ed3f6e5d92437443404c7",
+    "vendor/tokenizer/LICENSE-base64-js": "5b37224c080cdcc97c871ada971c224e9926370fe74f11b539aa1cf9f3b1aca1",
+    "vendor/tokenizer/base64.cjs": "829eadd8a1a441d25be0cb93b00e16a0d0c20fd294db95d8f2ed87e6954b7182",
+    "vendor/tokenizer/lite.cjs": "595e8bd41ed18bcba232fab531b3dd60328dd40cd0c23fee1d3ec22663386922",
+    "vendor/tokenizer/cl100k_base.cjs": "f0a4af744f6bcdbe1d9748e0054543d180300785f063dd1b20c43fc99d93c67f",
+    "vendor/tokenizer/LICENSE-js-tiktoken": "418cb499b436128d653d79941333a5437b7be2ea9213dcc2f04d15d5d2c51d86"
   },
   "mermaid_version": "12.3.0"
 }

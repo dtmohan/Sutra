@@ -22,7 +22,7 @@ def package(source, output):
             for name in names:
                 dep=source/'harness'/(name.replace('.','/')+'.py')
                 if dep.is_file() and dep not in files:files.add(dep);pending.append(dep)
-    files.update(source/name for name in ('package.json','extension.js','model_selection.js','native_provider.js','native_memory.js','diagram_view.js','usage_view.js','README.txt','runtime-integrity.json','bin/telemetry','harness/canonical-kernel.json','harness/README.txt'))
+    files.update(source/name for name in ('package.json','extension.js','model_selection.js','native_provider.js','native_memory.js','diagram_view.js','usage_view.js','host_tokens.js','README.txt','runtime-integrity.json','bin/telemetry','harness/canonical-kernel.json','harness/README.txt'))
     files.update(p for directory in ('media','vendor') for p in (source/directory).rglob('*') if p.is_file())
     assert not any(p.name.startswith(('test_','experiment','validate_','audit_')) for p in files)
     kernel=hashlib.sha256((source/'harness/stp_canonical/kernel.py').read_bytes()).hexdigest()
@@ -35,7 +35,7 @@ def package(source, output):
 <Properties><Property Id="Microsoft.VisualStudio.Code.Engine" Value="{pkg['engines']['vscode']}"/><Property Id="Microsoft.VisualStudio.Code.ExtensionDependencies" Value=""/><Property Id="Microsoft.VisualStudio.Code.ExtensionPack" Value=""/><Property Id="Microsoft.VisualStudio.Code.ExtensionKind" Value="workspace"/></Properties></Metadata>
 <Installation><InstallationTarget Id="Microsoft.VisualStudio.Code"/></Installation><Dependencies/>
 <Assets><Asset Type="Microsoft.VisualStudio.Code.Manifest" Path="extension/package.json" Addressable="true"/></Assets></PackageManifest>'''
-    types='''<?xml version="1.0" encoding="utf-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="json" ContentType="application/json"/><Default Extension="js" ContentType="application/javascript"/><Default Extension="html" ContentType="text/html"/><Default Extension="py" ContentType="text/plain"/><Default Extension="txt" ContentType="text/plain"/><Default Extension="ts" ContentType="text/plain"/><Default Extension="svg" ContentType="image/svg+xml"/><Default Extension="h" ContentType="text/plain"/><Default Extension="vsixmanifest" ContentType="text/xml"/><Default Extension="m" ContentType="text/plain"/></Types>'''
+    types='''<?xml version="1.0" encoding="utf-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="json" ContentType="application/json"/><Default Extension="js" ContentType="application/javascript"/><Default Extension="cjs" ContentType="application/javascript"/><Default Extension="html" ContentType="text/html"/><Default Extension="py" ContentType="text/plain"/><Default Extension="txt" ContentType="text/plain"/><Default Extension="ts" ContentType="text/plain"/><Default Extension="svg" ContentType="image/svg+xml"/><Default Extension="h" ContentType="text/plain"/><Default Extension="vsixmanifest" ContentType="text/xml"/><Default Extension="m" ContentType="text/plain"/></Types>'''
     vsix=output/f"Sutra-{version}.vsix"
     with zipfile.ZipFile(vsix,'w',zipfile.ZIP_DEFLATED) as z:
         z.writestr('extension.vsixmanifest',manifest);z.writestr('[Content_Types].xml',types)

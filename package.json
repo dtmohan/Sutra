@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Local model orchestration with portable context, governed tools, diagrams and token visibility.",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -135,6 +135,11 @@
         "command": "karma.refreshUsage",
         "title": "Sutra: Refresh Token Usage",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "karma.openMonitor",
+        "title": "Sutra: Open Monitor",
+        "icon": "$(dashboard)"
       }
     ],
     "configuration": {
@@ -472,7 +477,7 @@
           },
           {
             "name": "usage",
-            "description": "Open token usage beside Terminal and Output"
+            "description": "Open tokens, system telemetry and kernel status"
           }
         ]
       }
@@ -488,7 +493,7 @@
       "panel": [
         {
           "id": "karma-monitor",
-          "title": "Sutra Usage",
+          "title": "Sutra Monitor",
           "icon": "media/karma.svg"
         }
       ]
@@ -497,11 +502,11 @@
       "karma-monitor": [
         {
           "id": "karma.usage",
-          "name": "Token Usage",
+          "name": "Sutra Monitor",
           "type": "webview",
           "visibility": "visible",
           "icon": "media/karma.svg",
-          "contextualTitle": "Sutra Usage"
+          "contextualTitle": "Sutra Monitor"
         }
       ]
     },

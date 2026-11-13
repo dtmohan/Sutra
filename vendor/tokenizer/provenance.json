@@ -1,0 +1,18 @@
+{
+  "purpose": "Approximate VS Code host context token count only; not Ollama measurement or kernel budget",
+  "js-tiktoken": {
+    "version": "1.0.21",
+    "tarball": "https://registry.npmjs.org/js-tiktoken/-/js-tiktoken-1.0.21.tgz",
+    "integrity": "sha512-biOj/6M5qdgx5TKjDnFT1ymSpM5tbd3ylwDtrQvFQSu0Z7bBYko2dF+W/aUkXUPuk6IVpRxk/3Q2sHOzGlS36g=="
+  },
+  "base64-js": {
+    "version": "1.5.1",
+    "tarball": "https://registry.npmjs.org/base64-js/-/base64-js-1.5.1.tgz",
+    "integrity": "sha512-AKpaYlHn8t4SVbOHCy+b5+KKgvR4vrsD8vbvrbiQJps7fKDTkjkDry6ji0rUJjC0kzbNePLwzxq8iypo41qeWA=="
+  },
+  "modifications": [
+    "lite.cjs: change base64-js import to bundled relative base64.cjs"
+  ],
+  "encoding": "cl100k_base",
+  "estimate_multiplier": 1.15
+}

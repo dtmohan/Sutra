@@ -7,7 +7,7 @@ exports.run=async()=>{
  try{
   const ext=vscode.extensions.getExtension('deepak-local.karma-local-harness'),api=await ext.activate();assert.equal(api.version,ext.packageJSON.version);
   await vscode.commands.executeCommand('karma.openUsage');save('opened');await wait('opened');report.checks.push('packaged extension opens the docked usage view with a working local reader');
-  await vscode.commands.executeCommand('workbench.action.closePanel');save('hidden');await wait('reopened');report.checks.push('status-bar Sutra Usage reopens the correct panel without arming or inference');
+  await vscode.commands.executeCommand('workbench.action.closePanel');save('hidden');await wait('reopened');report.checks.push('status-bar Sutra Monitor reopens the correct panel without arming or inference');
   assert.equal(api.getRoutingStatus().routing,null);report.passed=true;save('complete');
  }catch(e){report.passed=false;report.error=String(e.stack||e);save('failed');throw e;}
  finally{await vscode.commands.executeCommand('workbench.action.quit');}

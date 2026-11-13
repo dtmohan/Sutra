@@ -1,7 +1,43 @@
 'use strict';
 const vscode=acquireVsCodeApi(),el=id=>document.getElementById(id),T=KarmaTokens;
 const node=(tag,text,cls)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;};
-let snapshot,routing,error,filters={...vscode.getState()?.filters};
+let snapshot,routing,native,error,filters={...vscode.getState()?.filters};
+const finite=n=>typeof n==='number'&&Number.isFinite(n);
+const decisions=new Set(['ALLOW','BRIDGE','FIN','COMPOUND_FIN']);
+function renderMonitor(){
+ const d=snapshot?.monitor||{},h=d.hardware||{},s=h.sample||{},now=Date.now(),elapsed=(now-Date.parse(snapshot?.updatedAt))/1000;
+ const snapshotFresh=!!snapshot&&!error&&finite(elapsed)&&elapsed>=0&&elapsed<=8;
+ const hwFresh=snapshotFresh&&h.available===true&&finite(h.age_seconds)&&h.age_seconds>=0&&h.age_seconds+elapsed<=8;
+ const why=error?'Readings unavailable':!snapshotFresh&&snapshot?'Readings expired':h.reason||'Waiting for system readings';
+ const thermal={nominal:'Normal',fair:'Elevated',serious:'High',critical:'Critical'}[h.thermal_label]||'Unavailable';
+ const hd=hwFresh&&decisions.has(h.decision)?h.decision:undefined;
+ el('resource').textContent=hd?'Resources: '+hd:'Resources unavailable';el('resource').dataset.decision=hd||'';
+ el('thermal').textContent=hwFresh?'OS thermal pressure: '+thermal+' · sample '+(h.age_seconds+elapsed).toFixed(1)+'s old':why;
+ el('cpu-load').textContent=hwFresh&&finite(s.cpu_busy_pct)&&s.cpu_busy_pct>=0&&s.cpu_busy_pct<=100?s.cpu_busy_pct.toFixed(0)+'%':'—';
+ el('ram').textContent=hwFresh&&finite(h.reclaimable_estimate_gib)&&h.reclaimable_estimate_gib>=0?h.reclaimable_estimate_gib.toFixed(1)+' GiB':'—';
+ el('ram-note').textContent=hwFresh?'Reclaimable estimate · pressure '+({1:'normal',2:'elevated',4:'critical'}[s.memory_pressure_raw]||'unavailable'):'Waiting for fresh memory data';
+ for(const group of ['cpu','gpu']){
+  const t=h.temperatures,v=t?.[group],ok=hwFresh&&finite(t?.age_seconds)&&t.age_seconds>=0&&t.age_seconds+elapsed<=8&&v?.available===true&&finite(v.maximum_celsius)&&v.maximum_celsius>0&&v.maximum_celsius<=150;
+  el(group+'-temp').textContent=ok?v.maximum_celsius.toFixed(1)+' °C':'—';
+  el(group+'-temp-note').textContent=ok?'Hottest readable sensor'+(finite(v.mean_celsius)?' · avg '+v.mean_celsius.toFixed(1)+' °C':''):hwFresh?(v?.reason||'No validated sensor available'):why;
+ }
+ el('adapter').textContent=!snapshotFresh?'Awaiting fresh snapshot':d.adapter_health|| (d.session?'Task recorded':'No active workspace task');
+ const checks=[['Resources',h,hwFresh],['Task allocation',d.review_budget,snapshotFresh],['Repository tools',d.repository,snapshotFresh],['Edits / tests',d.action_budget,snapshotFresh],['Storage',d.storage,snapshotFresh],['Last dispatch',d.context?.last_kernel_budget,snapshotFresh],['Conversation · last response',routing?.conversationBudget,true]];
+ el('gates').replaceChildren();el('signals').replaceChildren();
+ for(const [label,frame,fresh] of checks){
+  const code=typeof frame==='string'?frame:frame?.decision,known=decisions.has(code),value=known?(fresh?code:'Stale · '+code):label==='Resources'?'Unavailable':'Not recorded';
+  const badge=node('div',undefined,'gate');badge.dataset.decision=known&&fresh?code:'';badge.append(node('span',label),node('b',value));el('gates').append(badge);
+  if(frame){const row=node('tr');for(const v of [label,value,...['omega','sigma','k','sigma_clause'].map(key=>finite(frame[key])?Number(frame[key].toPrecision(4)).toString():'—'),frame.profile||'Not reported'])row.append(node('td',v));el('signals').append(row);}
+ }
+ const c=d.context;
+ el('context-packet').textContent=c?'Last workspace packet: '+T.number(c.conservative_input_charge)+' input charge + '+T.number(c.output_reserve)+' output reserve / '+T.number(c.limit)+' context allocation. Measured input: '+T.number(c.actual_prompt_tokens)+' tokens.':'No workspace model packet recorded. Conversation history and workspace task allocations are separate.';
+ el('kernel-identity').textContent=d.kernel?'Kernel: '+d.kernel.name+' · SHA-256 '+d.kernel.sha256+' · check order '+(d.kernel.order||[]).join(' → '):'Kernel identity not available.';
+ const memory=routing?.memoryUsed===true?' · compact memory restored':routing?.memoryUsed===false?' · new conversation':'';
+ el('native-request').textContent=routing?'Last Sutra request: '+(routing.model||'model pending')+' · '+(routing.stage||'received')+memory+'. Workspace tools '+(native?.armed?'armed':'unarmed')+'.':'No Sutra request observed in this window. Selected chat routing is unverified.';
+ const compact=native?.compaction;el('compaction').dataset.missing=String(compact?.status==='missing_checkpoint');
+ el('compaction').textContent=compact?'Last VS Code compaction: '+(compact.status==='checkpoint_preserved'?'signed checkpoint retained; no model summary call':compact.status==='missing_checkpoint'?'no authenticated checkpoint; context may need restating':'unknown status')+' · '+new Date(compact.time).toLocaleTimeString()+'.':'No VS Code compaction observed in this window.';
+ el('activity').textContent=error?'Refresh unavailable':routing?.active?'Request in progress':snapshotFresh?'Snapshot current':snapshot?'Snapshot delayed':'Waiting for data';el('activity').dataset.active=String(!!routing?.active);
+}
 for(const key of ['model','stage','status','time']){el(key).value=filters[key]||'';el(key).onchange=()=>{filters[key]=el(key).value;vscode.setState({filters});render();};}
 el('reset').onclick=()=>{filters={};for(const key of ['model','stage','status','time'])el(key).value='';vscode.setState({filters});render();};
 el('refresh').onclick=()=>vscode.postMessage({type:'refresh'});
@@ -12,8 +48,8 @@ function fillOptions(key){
  for(const value of values){const option=node('option',key==='stage'?T.stage(value):value);option.value=value;el(key).append(option);}el(key).value=filters[key]||'';
 }
 function render(){
+ renderMonitor();
  el('error').hidden=!error;el('error').textContent=error?(snapshot?'Refresh unavailable — showing the last recorded snapshot. ':'')+error:'';
- el('activity').textContent=error?'Refresh unavailable':routing?.active?'Request in progress':snapshot?'Up to date':'Waiting for data';el('activity').dataset.active=String(!!routing?.active);
  if(!snapshot)return;
  el('scope').textContent=snapshot.workspace+' · updated '+new Date(snapshot.updatedAt).toLocaleTimeString();
  const rows=snapshot.calls.filter(c=>(!filters.model||c.model===filters.model)&&(!filters.stage||c.stage===filters.stage)&&(!filters.status||c.status===filters.status)&&(!filters.time||c.created_at>=Date.now()/1000-Number(filters.time))),t=T.totals(rows);
@@ -39,5 +75,7 @@ function render(){
   values.forEach((value,i)=>tr.append(node('td',value,i>=3?'num':undefined)));tr.title='Invocation '+c.invocation_id;el('rows').append(tr);
  }
 }
-window.addEventListener('message',({data:m})=>{if(m.type!=='usage')return;snapshot=m.snapshot;routing=m.routing;error=m.error;for(const key of ['model','stage'])fillOptions(key);if(!snapshot){for(const key of ['input','output','calls','unknown'])el(key).textContent='—';for(const key of ['input','output'])el(key+'-note').textContent='Waiting for measurements';el('scope').textContent='This workspace · waiting for recorded calls…';el('visuals').hidden=true;el('details').hidden=true;el('empty').hidden=true;el('window').textContent='';}render();});
+window.addEventListener('message',({data:m})=>{if(m.type!=='usage')return;snapshot=m.snapshot;routing=m.routing;native=m.native;error=m.error;for(const key of ['model','stage'])fillOptions(key);if(!snapshot){for(const key of ['input','output','calls','unknown'])el(key).textContent='—';for(const key of ['input','output'])el(key+'-note').textContent='Waiting for measurements';el('scope').textContent='This workspace · waiting for recorded calls…';el('visuals').hidden=true;el('details').hidden=true;el('empty').hidden=true;el('window').textContent='';}render();});
+// Expire live readings even if the host/reader stops delivering messages.
+setInterval(renderMonitor,1000);
 vscode.postMessage({type:'ready'});

@@ -23,17 +23,28 @@ The native model picker offers **Sutra Auto**, **Sutra Low**, **Sutra Mid** and
 **Sutra High**. The review participant is **@sutra**. The dashboard has Overview,
 Chat, Usage, Settings and Tools views.
 
-### Token dashboard
+### Combined monitor
 
-Click **Sutra Usage** in the status bar, or run **Sutra: Open Token Usage**.
+Click **Sutra Monitor** in the status bar, or run **Sutra: Open Monitor**.
 The dashboard opens in the bottom panel beside Terminal and Output, so it can
 stay visible alongside chat and code. `@sutra /usage` opens the same view.
+
+CPU/GPU temperatures, CPU usage, memory, kernel decisions and checkpoint status
+appear above token history. Expired hardware readings clear automatically. Each
+kernel check is shown separately; a resource ALLOW does not grant task permission.
+Temperature readings remain advisory. Expand diagnostics for normalized signals.
 
 Input/output cards, recent-call charts and stage breakdowns update from local
 receipts. Filter by model, stage, outcome or time; expand individual calls for
 budget allocations. Counts appear when each call finishes. Missing counts are
 marked unknown, and filters apply to the latest 250 workspace calls. Viewing
 usage never invokes a model. The original editor dashboard also links here.
+The previous **Sutra: Open Token Usage** command remains an alias.
+
+VS Code compacts its assembled conversation when its context budget is tight.
+Sutra preserves an authenticated checkpoint for recognized compaction requests;
+it does not send those requests to Ollama. See [context and compaction](docs/context-and-compaction.md)
+for the distinction between host estimates, measured tokens and lossy conversation memory.
 
 A ready or armed badge does not prove that every VS Code prompt uses Sutra.
 Check the selected model and the response's invocation details. Direct Ollama

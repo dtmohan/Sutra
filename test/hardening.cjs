@@ -37,7 +37,7 @@ const context={module:moduleFixture,exports:moduleFixture.exports,require:n=>n==
 vm.runInNewContext(fs.readFileSync(path.join(root,'extension.js'),'utf8'),context,{filename:'extension.js'});
 const subscriptions=[];
 (async()=>{
- const api=moduleFixture.exports.activate({subscriptions,extensionPath:root,globalStorageUri:uri(tmp),extension:{packageJSON:{version:'0.17.0'}}});
+ const api=moduleFixture.exports.activate({subscriptions,extensionPath:root,globalStorageUri:uri(tmp),extension:{packageJSON:{version:'0.18.0'}}});
  assert.deepEqual(Object.keys(api).sort(),['getRoutingStatus','getState','open','version']);assert(Object.isFrozen(api));const beforeRouting=requests.length;assert.equal(api.getRoutingStatus(),null);assert.equal(requests.length,beforeRouting);
  for(const name of ['karma.reviewCodebase','karma.automaticReview','karma.newChatReview']){
   const before=requests.length;await commands.get(name)({goal:'agent supplied scope',roots:['..'],run:false});
@@ -63,7 +63,7 @@ const subscriptions=[];
  assert.deepEqual(runtimeUpdates,[['storageLimitMiB',1024],['pythonPath','/test/python3']]);assert.equal(requests.length,beforeRuntime,'Runtime settings must not mutate the task or dispatch');
  const native=participants.get('karma.local'),rendered=[],buttons=[],token={isCancellationRequested:false,onCancellationRequested:()=>disposable()};
  const capture={markdown(m){rendered.push(typeof m==='string'?m:m.value);},progress(){},reference(){},button(b){buttons.push(b);}};
- assert(views.has('karma.usage'));assert(statusItems.some(i=>i.command==='karma.openUsage'));
+ assert(views.has('karma.usage'));assert(statusItems.some(i=>i.command==='karma.openMonitor'));
  const beforeUsage=requests.length;await native({command:'usage',prompt:''},{},capture,token);assert.equal(requests.length,beforeUsage);
  const beforeGreeting=requests.length,oldState=JSON.stringify(state);
  const greeting=await native({prompt:'hello'}, {},capture,token);
@@ -107,7 +107,7 @@ const subscriptions=[];
  pendingDashboard();await first;const second=intervals[0]();await Promise.resolve();assert.equal(bridgeCount,count+2);pendingDashboard();await second;assert.equal(dashboardSpawns,spawnCount,'Dashboard spawned a process for each sample');
  panel.visible=false;const dockOnly=intervals[0]();await Promise.resolve();assert.equal(bridgeCount,count+3);pendingDashboard();await dockOnly;
  dock.visible=false;await intervals[0]();assert.equal(bridgeCount,count+3,'Hidden dashboards should not read the bridge');
- dock.close();assert(statusItems.some(i=>i.command==='karma.openUsage'));
+ dock.close();assert(statusItems.some(i=>i.command==='karma.openMonitor'));
  const telemetry=require(path.join(root,'harness/telemetry_portable.js'));
  assert.equal(telemetry.darwinAvailable('Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages free: 1.\nPages inactive: 2000000.\n'),4096*2000001);
  assert.throws(()=>telemetry.darwinAvailable('unavailable'));

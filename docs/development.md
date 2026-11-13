@@ -15,6 +15,7 @@ node test/hardening.cjs
 node test/panel-entry.cjs
 node test/model-selection.cjs
 node test/branding.cjs
+node test/host-tokens.cjs
 python3 -B package.py --output dist
 ```
 
@@ -48,6 +49,7 @@ path; missing temperature sensors remain unavailable.
 | --- | --- |
 | `extension.js`, `native_provider.js` | VS Code integration and governed chat |
 | `native_memory.js` | Workspace-scoped authenticated receipt pointers |
+| `host_tokens.js`, `vendor/tokenizer/` | Offline approximate VS Code history sizing |
 | `usage_view.js` | Docked token dashboard and status-bar navigation |
 | `media/` | Dashboard, token tables and diagram views |
 | `harness/` | Contracts, tools, adapters, calibration and invocation gateway |
@@ -60,3 +62,9 @@ Changes to governed backend policy files affect the policy hash and may make old
 checkpoints inadmissible. The Sutra branding change leaves all `harness/` files
 byte-identical to the imported baseline. Public UI wording may change separately
 from protocol IDs, signed marker formats and ledger formats.
+
+`test/host-context-vscode.js` exercises native short turns and automatic compaction
+of intentionally oversized history. Run it only with the disposable fixture
+transport described in its header; it does not validate real model semantics.
+The monitor browser test covers all four decisions, missing sensors, stale
+snapshots, heartbeat expiry, context diagnostics and filter independence.

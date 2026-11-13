@@ -11,6 +11,13 @@
 - Native chat compaction relies on signed pointers and, when supplied by VS Code,
   a per-chat binding hint. Missing authenticated context must be reported rather
   than filled with another chat's most recent context.
+- Conversation continuation currently uses the last admitted model-written
+  summary (at most 1,000 characters), with a separately retained diagram reference.
+  A valid checkpoint authenticates this memory; it does not prove it retained all
+  facts. Workspace contracts are stored separately and checked on each invocation.
+- VS Code host token sizing uses cl100k_base plus 15% headroom as a local-model
+  approximation. It is not the model's exact tokenizer or the harness budget.
+  Large instructions, tools or history can still legitimately trigger compaction.
 - A zero test-process exit code is an observation, not independent proof that
   assertions are correct or even ran. Source-controlled test output is untrusted.
 - Editing/test execution is limited to supported scoped Python operations.

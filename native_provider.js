@@ -2,6 +2,7 @@
 const crypto=require('node:crypto'),path=require('node:path');
 const tokens=require('./media/token_usage');
 const {NativeMemory,isCompaction}=require('./native_memory');
+const hostTokens=require('./host_tokens');
 const ACTION='karma_native_action';
 const MODEL_IDS={auto:'karma-auto',low:'karma-low',mid:'karma-mid',high:'karma-high'};
 const CHAT_DEFAULTS={'defaultModel':MODEL_IDS.auto,'editor.preferCopilotHarness':false,'defaultToCopilotHarness':false,'editor.localAgent.enabled':true};
@@ -169,8 +170,8 @@ function install(vscode,context,deps){
     }
   };
   const provider={onDidChangeLanguageModelChatInformation:changed.event,
-    provideLanguageModelChatInformation(){if(!enabled())return [];const models=deps.modelSettings();return ['auto','low','mid','high'].map(id=>({id:MODEL_IDS[id],name:id==='auto'?'Sutra Auto':'Sutra '+id[0].toUpperCase()+id.slice(1),family:'karma',version:'0.17.0',maxInputTokens:64000,maxOutputTokens:4096,detail:id==='auto'?'Governed local routing':models[id]||'Configure this tier',tooltip:'Chat normally; arm a task for workspace tools. Every local call uses the invocation gateway.',capabilities:{toolCalling:true,imageInput:false}}));},
-    provideTokenCount(model,input){return Buffer.byteLength(typeof input==='string'?input:JSON.stringify(input),'utf8');},
+    provideLanguageModelChatInformation(){if(!enabled())return [];const models=deps.modelSettings();return ['auto','low','mid','high'].map(id=>({id:MODEL_IDS[id],name:id==='auto'?'Sutra Auto':'Sutra '+id[0].toUpperCase()+id.slice(1),family:'karma',version:'0.18.0',maxInputTokens:64000,maxOutputTokens:4096,detail:id==='auto'?'Governed local routing':models[id]||'Configure this tier',tooltip:'Chat normally; arm a task for workspace tools. Every local call uses the invocation gateway.',capabilities:{toolCalling:true,imageInput:false}}));},
+    provideTokenCount(model,input,token){if(token?.isCancellationRequested)throw new Error('Token count cancelled.');return hostTokens.count(input);},
     async provideLanguageModelChatResponse(model,messages,options,progress,token){
       if(isCompaction(vscode,messages)){
         if(token.isCancellationRequested)throw new Error('Sutra compaction cancelled.');
@@ -250,7 +251,7 @@ function install(vscode,context,deps){
         if(responseUsage.calls.length||footerId){
           const detail=tokens.compact(responseUsage),label='Sutra · '+detail+' · conversation details';
           const footer=footerId?`[${label}](karma-preview:/conversation/${footerId}/Response.md?checkpoint=${footerSignature})`:'Sutra · '+detail;
-          if(!activeCancel.token.isCancellationRequested)progress.report(new vscode.LanguageModelTextPart('\n\n---\n'+footer+(footerId?(audit.memoryUsed?' · Memory restored':' · New conversation'):'')+' · Open the token dashboard with **Sutra Usage** in the status bar.\n'));
+          if(!activeCancel.token.isCancellationRequested)progress.report(new vscode.LanguageModelTextPart('\n\n---\n'+footer+(footerId?(audit.memoryUsed?' · Memory restored':' · New conversation'):'')+' · Open tokens, system and kernel status with **Sutra Monitor** in the status bar.\n'));
         }
         cancellation.dispose();activeCancel.dispose();activeCancel=undefined;running=false;publish();
       }
