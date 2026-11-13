@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.20.0 — centralized orchestration
+
+- Move native workflow selection, source mapping, branching, child dispatch and
+  joins into one persisted host state machine. The UI renders states and asks
+  for user grants; it no longer selects the workspace execution path.
+- Reserve child allocations atomically against the parent, using source-map
+  measurements and available budgets. Every model, repository and action
+  commitment records its orchestration owner and kernel admission.
+- Run read-only child reviews sequentially through the invocation gateway, with
+  immutable lineage, inherited constraints, narrower permissions, fresh source
+  and receipt-backed Smriti working sets. Validate freshness again at synthesis.
+- Resume interrupted reviews across process/model changes; retain failed-call
+  costs and reject stale, quarantined or foreign child results. Track proposed
+  actions through confirmation, execution and receipt without replaying them.
+- Add workflow/child status to Sutra Monitor. Preserve 0.19.1 conversation data.
+- Keep the canonical STP kernel byte-identical. Partition signals are workload
+  heuristics, not a verified measure of semantic complexity or independence.
+
 ## 0.19.1 — continue in the same chat
 
 - Arming no longer opens or selects another chat. Workspace requests await one

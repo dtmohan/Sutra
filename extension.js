@@ -108,8 +108,8 @@ function activate(context) {
     const diagnostic=message?.op==='dashboard';
     if(diagnostic)return requestDashboard();
     if ((busy || ((sequence || nativeController?.status().working) && !internal)) && !diagnostic) throw new Error('A Sutra request is running. Switch models after it finishes.');
-    if (!['conversation_read','conversation','native_permissions','native_work','native_preview','native_execute','chat_answer','calibration_register','calibration_list','calibration_bind','calibration_revoke','calibration_evaluate','models','state','new','save','switch','review','work','preview','execute','dashboard','quarantine','review_new','architecture','repository_tool','api_build','api_verify','static_build','static_explain','auto_new','auto_step','auto_report'].includes(message?.op)) throw new Error('Unknown Sutra request.');
-    if(['native_work','chat_answer','static_build','static_explain','auto_step','auto_report'].includes(message.op)&&hasDirtyFiles())throw new Error('Save or discard unsaved workspace buffers before mapping current source.');
+    if (!['orchestrate','conversation_read','conversation','native_permissions','native_work','native_preview','native_execute','chat_answer','calibration_register','calibration_list','calibration_bind','calibration_revoke','calibration_evaluate','models','state','new','save','switch','review','work','preview','execute','dashboard','quarantine','review_new','architecture','repository_tool','api_build','api_verify','static_build','static_explain','auto_new','auto_step','auto_report'].includes(message?.op)) throw new Error('Unknown Sutra request.');
+    if((['native_work','chat_answer','static_build','static_explain','auto_step','auto_report'].includes(message.op)||(message.op==='orchestrate'&&!['start','inspect','cancel'].includes(message.event)))&&hasDirtyFiles())throw new Error('Save or discard unsaved workspace buffers before mapping current source.');
     if(['execute','native_execute'].includes(message.op) && hasDirtyFiles())throw new Error('Save or discard unsaved workspace buffers before applying an edit or running tests.');
     const cwd = workspace(), stateDir = storage();
     fs.mkdirSync(stateDir,{recursive:true});startTelemetry();
@@ -204,15 +204,19 @@ function activate(context) {
         st=await request({op:'auto_new',goal:prompt,roots:['.']},token,true);
       }
       if(!st.auto)throw new Error('The review task could not be initialized. Open the Sutra dashboard to inspect its state.');
-      while(st.auto.pending_files>0){
-        progress(`Mapping current source: ${st.auto.mapped_files}/${st.auto.source_files} files…`);
-        const page=await request({op:'auto_step',explain:false},token,true);st=page.state;
-        panel?.webview.postMessage({type:'state',data:st});
-        if(!['ready','page_rejected'].includes(page.auto.status))break;
+      const binding={session:st.session,contract_hash:st.contract.contract_hash,calibration_hash:st.calibration.binding.hash};
+      let childUsage={calls:[]};
+      let flow=await request({op:'orchestrate',event:'start_review',prompt,models,tier,binding,armed:true,conversation_id:conversationId},token,true);
+      while(flow.state!=='DONE'){
+        if(token?.isCancellationRequested)throw new Error('Sutra request cancelled. Task state and budgets were preserved.');
+        if(flow.state==='PAUSED')throw new Error('The review stopped at its allocation or source boundary. Inspect Sutra Monitor.');
+        flow=await request({op:'orchestrate',event:'step',flow_id:flow.flow_id,cursor:flow.cursor,binding:flow.binding||binding,armed:true,models,tier},token,true);
+        if(flow.progress)progress(flow.progress);
+        if(flow.child)childUsage=tokens.merge(childUsage,flow.child.result?.token_usage);
       }
-      if(token?.isCancellationRequested)throw new Error('Sutra request cancelled. Task state and budgets were preserved.');
-      progress('Choosing a local model and preparing fresh source excerpts…');
-      const data=await request({op:'chat_answer',prompt,models,tier,conversation_id:conversationId},token,true);
+      const data=flow.data;if(!data)throw new Error('No admitted review result is available.');
+      data.result.token_usage=tokens.merge(childUsage,data.result.token_usage);
+      data.state=await request({op:'state'},token,true);
       panel?.webview.postMessage({type:'state',data:data.state});panel?.webview.postMessage({type:'chat-result',data});
       output.appendLine('KARMA_CHAT_ROUTE '+JSON.stringify(data.route));
       if(data.diagram){const uri=vscode.Uri.parse('karma-preview:/'+data.state.session+'/'+data.result.invocation_id+'/Chat-source-map.md');previewDocuments.set(uri.toString(),data.diagram);data.diagramUri=uri;}

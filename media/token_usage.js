@@ -1,6 +1,6 @@
 'use strict';
 (function(root){
-  const labels={conversation:'Conversation / routing',parser:'Task parsing',selector:'Page selection',worker:'Worker',coder:'Coding',reviewer:'Code review',chat_reviewer:'Workspace review',architect:'Architecture review',api_mapper:'API mapping',api_reviewer:'API verification',static_explainer:'Source explanation'};
+  const labels={subagent:'Child review',conversation:'Conversation / routing',parser:'Task parsing',selector:'Page selection',worker:'Worker',coder:'Coding',reviewer:'Code review',chat_reviewer:'Workspace review',architect:'Architecture review',api_mapper:'API mapping',api_reviewer:'API verification',static_explainer:'Source explanation'};
   const valid=n=>Number.isSafeInteger(n)&&n>=0;
   const number=n=>valid(n)?n.toLocaleString('en-US'):'—';
   const stage=s=>labels[s]||s;

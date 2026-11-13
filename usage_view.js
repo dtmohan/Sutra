@@ -37,7 +37,7 @@ function install(vscode,context,deps){
     setData(data,workspace){
       const monitor={};
       // Only monitoring fields cross into the view; no source, prompt or action payloads.
-      for(const key of ['hardware','kernel','review_budget','repository','action_budget','storage','context','adapter_health','session','contract'])monitor[key]=data[key];
+      for(const key of ['orchestration','hardware','kernel','review_budget','repository','action_budget','storage','context','adapter_health','session','contract'])monitor[key]=data[key];
       snapshot={...(data.token_usage||{calls:[],total_calls:0,limit:250}),monitor,workspace,updatedAt:new Date().toISOString()};error=undefined;publish();
     },
     setError(message){error=message;publish();},

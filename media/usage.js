@@ -29,6 +29,17 @@ function renderMonitor(){
   const badge=node('div',undefined,'gate');badge.dataset.decision=known&&fresh?code:'';badge.append(node('span',label),node('b',value));el('gates').append(badge);
   if(frame){const row=node('tr');for(const v of [label,value,...['omega','sigma','k','sigma_clause'].map(key=>finite(frame[key])?Number(frame[key].toPrecision(4)).toString():'—'),frame.profile||'Not reported'])row.append(node('td',v));el('signals').append(row);}
  }
+ const workflow=d.orchestration,rows=(workflow?.nodes||[]).filter(n=>n.kind!=='task').slice(0,12);
+ el('flow-status').textContent=!snapshotFresh?'Awaiting fresh snapshot':rows.length?(workflow.execution||'Recorded workflow'):'No workflow yet';
+ el('flow-nodes').replaceChildren();
+ for(const n of rows){
+  const box=node('div',undefined,'gate');box.dataset.decision=snapshotFresh?n.kernel?.decision||'':'';
+  const title=node('div',(n.kind==='branch'?'Child review':'Request')+' · '+n.state+' · '+n.id.slice(0,8));
+  box.append(title,node('div',n.kind==='branch'?n.files.slice(0,3).join(', ')+(n.files.length>3?' · '+(n.files.length-3)+' more files':''):n.objective));
+  if(n.kind==='branch'&&n.files.length>3){const details=node('details');details.append(node('summary','Full source scope'),node('div',n.files.join(', ')));box.append(details);}
+  if(n.kind==='branch')box.append(node('small',(n.model||'Model pending')+' · '+T.number(n.used?.calls)+' / '+T.number(n.limits?.calls)+' calls · '+T.number(n.used?.tokens)+' / '+T.number(n.limits?.tokens)+' token allocation · read only · last admission '+(n.kernel?.decision||'not dispatched')));
+  el('flow-nodes').append(box);
+ }
  const c=d.context;
  el('context-packet').textContent=c?'Last workspace packet: '+T.number(c.conservative_input_charge)+' input charge + '+T.number(c.output_reserve)+' output reserve / '+T.number(c.limit)+' context allocation. Measured input: '+T.number(c.actual_prompt_tokens)+' tokens.':'No workspace model packet recorded. Conversation history and workspace task allocations are separate.';
  el('kernel-identity').textContent=d.kernel?'Kernel: '+d.kernel.name+' · SHA-256 '+d.kernel.sha256+' · check order '+(d.kernel.order||[]).join(' → '):'Kernel identity not available.';

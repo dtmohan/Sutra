@@ -69,41 +69,28 @@ function install(vscode,context,deps){
       return true;
     }finally{arming=false;armingStep='';if(!success&&epoch===accessEpoch)reason='Arming cancelled. Conversation remains available.';publish();}
   }
-  async function prepareWorkspace(a,prompt,conversationId,permission,token){
-    if(armed!==a||token.isCancellationRequested)throw new Error('Sutra disarmed or cancelled.');
-    let st;
-    if(a.binding)st=await check(token);else{
-      st=await deps.request({op:'state'},token);
-      if(!st.auto&&!st.contract?.contract.constraints.native_task){
-        st=await deps.request({op:'auto_new',goal:prompt.trim(),roots:['.'],conversation_id:conversationId},token);
-      }
-      if(armed!==a||token.isCancellationRequested)throw new Error('Sutra disarmed or cancelled.');
-      a.binding=identity(st);a.session=st.session;a.coding=!!st.contract.contract.constraints.native_task;
-    }
-    const k=st.contract.contract.constraints,roots=st.read_scope||k.allowed_paths,operation=permission?.operation||'read';
-    const requested=Array.isArray(permission?.paths)?permission.paths:[];
-    const missingPaths=a.coding&&requested.some(name=>!k.allowed_paths.includes(name));
-    const needed=(operation==='edit'?!k.edits_allowed:operation==='test'?!k.tests_allowed:false)||((operation==='edit'||operation==='test')&&missingPaths);
-    const outside=requested.some(name=>!roots.some(root=>root==='.'||name===root||name.startsWith(root+'/')));
-    if(outside)throw new Error('The requested files are outside the current task scope. Use task controls to explicitly change scope.');
-    if(!needed)return true;
-    let paths=requested;
+  // UI effects only: the host state machine selects work, forks and joins.
+  async function approvePermission(descriptor,token){
+    let paths=descriptor.paths;
     if(!paths.length){
-      const chosen=await vscode.window.showOpenDialog({title:'Select Python files needed for this '+operation,defaultUri:vscode.Uri.file(deps.workspace()),canSelectMany:true,filters:{Python:['py']}});
-      if(!chosen?.length)return false;
+      const chosen=await vscode.window.showOpenDialog({title:'Select Python files for '+descriptor.operation,defaultUri:vscode.Uri.file(deps.workspace()),canSelectMany:true,filters:{Python:['py']}});
+      if(!chosen?.length)return;
       paths=chosen.map(f=>path.relative(deps.workspace(),f.fsPath).split(path.sep).join('/'));
     }
-    if(a.coding)paths=[...new Set([...k.allowed_paths,...paths])];
-    if(paths.length>8||paths.some(n=>n.startsWith('../')||path.isAbsolute(n)||!n.endsWith('.py')||n.includes('\\')||!roots.some(root=>root==='.'||n===root||n.startsWith(root+'/'))))throw new Error('Choose up to eight existing Python files within the current task scope.');
-    const tests=operation==='test'?paths.filter(n=>/(^|\/)test[^/]*\.py$/.test(n)):[];
-    if(operation==='test'&&!tests.length)throw new Error('Select a Python unittest file named test*.py.');
-    const label=operation==='edit'?'Allow scoped edits':'Allow scoped tests';
-    const yes=await vscode.window.showWarningMessage('Sutra needs permission for this request.',{modal:true,detail:(operation==='edit'?'Edit scope: ':'Test scope: ')+paths.join(', ')+'\nTask: '+st.contract.contract.goal+'\nNetwork and dependencies remain off. Every proposed edit/test still gets its own confirmation.'},label);
-    if(yes!==label||armed!==a||token.isCancellationRequested)return false;
-    st=await deps.request({op:'native_permissions',...a.binding,operation,paths,test_paths:tests,conversation_id:conversationId},token);
-    if(armed!==a||token.isCancellationRequested)throw new Error('Sutra disarmed or cancelled during permission update.');
-    tickets.clear();completed.clear();a.generation=crypto.randomUUID();a.binding=identity(st);a.session=st.session;a.coding=true;publish();
-    return true;
+    const test_paths=descriptor.operation==='test'?paths.filter(n=>/(^|\/)test[^/]*\.py$/.test(n)):[];
+    const label=descriptor.operation==='edit'?'Allow scoped edits':'Allow scoped tests';
+    const yes=await vscode.window.showWarningMessage('Sutra needs permission for this request.',{modal:true,detail:'Files: '+paths.join(', ')+'\nTask: '+descriptor.goal+'\nNetwork and dependencies remain off. Every edit/test still gets its own confirmation.'},label);
+    if(yes!==label||token.isCancellationRequested)return;
+    return {operation:descriptor.operation,paths,test_paths};
+  }
+  const pendingKey='sutra.pendingOrchestration';
+  async function rememberFlow(flow){await context.workspaceState.update(pendingKey,flow.state==='DONE'||flow.state==='CANCELLED'?undefined:{...flow,workspace:deps.workspace(),conversation:undefined,child:undefined,data:undefined,mapping:undefined});}
+  async function flowEvent(flow,event,tier,token,extra={}){
+    const models=await deps.configureModels(false,token);
+    let next;
+    try{next=await deps.request({op:'orchestrate',event,flow_id:flow?.flow_id,cursor:flow?.cursor,armed:!!armed,binding:armed?.binding,models,tier,...extra},token);}
+    catch(error){if(/Task changed|Workflow task|permissions changed|calibration.*changed/i.test(error.message))disarm('Task changed. Re-arm to accept the current contract.');throw error;}
+    await rememberFlow(next);return next;
   }
   async function selectNativeChat(){
     if(selecting)throw new Error('Sutra chat selection is already in progress.');
@@ -188,7 +175,7 @@ function install(vscode,context,deps){
     }
   };
   const provider={onDidChangeLanguageModelChatInformation:changed.event,
-    provideLanguageModelChatInformation(){if(!enabled())return [];const models=deps.modelSettings();return ['auto','low','mid','high'].map(id=>({id:MODEL_IDS[id],name:id==='auto'?'Sutra Auto':'Sutra '+id[0].toUpperCase()+id.slice(1),family:'karma',version:'0.19.1',maxInputTokens:64000,maxOutputTokens:4096,detail:id==='auto'?'Governed local routing':models[id]||'Configure this tier',tooltip:'Chat normally; arm Sutra for workspace reading. Every local call uses the invocation gateway.',capabilities:{toolCalling:true,imageInput:false}}));},
+    provideLanguageModelChatInformation(){if(!enabled())return [];const models=deps.modelSettings();return ['auto','low','mid','high'].map(id=>({id:MODEL_IDS[id],name:id==='auto'?'Sutra Auto':'Sutra '+id[0].toUpperCase()+id.slice(1),family:'karma',version:'0.20.0',maxInputTokens:64000,maxOutputTokens:4096,detail:id==='auto'?'Governed local routing':models[id]||'Configure this tier',tooltip:'Chat normally; arm Sutra for workspace reading. Every local call uses the invocation gateway.',capabilities:{toolCalling:true,imageInput:false}}));},
     provideTokenCount(model,input,token){if(token?.isCancellationRequested)throw new Error('Token count cancelled.');return hostTokens.count(input);},
     async provideLanguageModelChatResponse(model,messages,options,progress,token){
       if(isCompaction(vscode,messages)){
@@ -230,21 +217,33 @@ function install(vscode,context,deps){
       const recordUsage=result=>{responseUsage=tokens.merge(responseUsage,result?.token_usage);audit.token_usage=responseUsage;};
       running=true;activeCancel=new vscode.CancellationTokenSource();const cancellation=token.onCancellationRequested(()=>activeCancel?.cancel());publish();
       try{
-        let data;
+        let data,flow;
         if(!request.results){
-          const models=await deps.configureModels(false,activeCancel.token);
-          const chat=await deps.request({op:'conversation',prompt,parent:request.parent,models,tier},activeCancel.token);
+          const pending=context.workspaceState.get(pendingKey);
+          if(pending?.workspace===deps.workspace()){
+            const old=await deps.request({op:'orchestrate',event:'inspect',flow_id:pending.flow_id},activeCancel.token);
+            if(/^(continue|resume|please continue|please resume)[.! ]*$/i.test(prompt)){
+              flow=old;prompt=old.prompt;conversationId=old.conversation_id;audit.memoryUsed=true;audit.conversationInvocationId=conversationId;
+              footerSignature=await memory.remember(conversationId,options);footerId=conversationId;
+              progress.report(new vscode.LanguageModelTextPart('Resuming the saved Sutra workflow with its context and remaining budget.\n\n'));
+            }else await flowEvent(old,'cancel',tier,activeCancel.token);
+          }
+          if(!flow)flow=await flowEvent(null,'start',tier,activeCancel.token,{prompt,parent:request.parent});
+          const chat=flow.conversation;
+          if(chat){
           if(armed!==a||!enabled()||activeCancel.token.isCancellationRequested)throw new Error('Native request disarmed or cancelled. Response withheld.');
           const r=chat.result;recordUsage(r);lastRoute=chat.route.model;audit.model=lastRoute;audit.memoryUsed=chat.memory_used;audit.memoryAllocation=chat.memory_allocation;audit.memoryStatus=chat.memory_status;audit.modelCapacity=chat.model_capacity;audit.conversationBudget=chat.budget;audit.invocationId=r.invocation_id;audit.stage=r.admission.admitted?'conversation':'withheld';publish();
           if(!r.admission.admitted){progress.report(new vscode.LanguageModelTextPart('Sutra withheld the conversation response: '+r.admission.errors.join('; ')));return;}
           const p=r.accepted_output;
-          if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&p.intent!=='workspace')throw new Error('No admitted action is available to satisfy required tool mode.');
+          if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&flow.state==='DONE')throw new Error('No admitted action is available to satisfy required tool mode.');
           footerSignature=await memory.remember(r.invocation_id,options);footerId=r.invocation_id;
           // Routing prose is not an authority on host capabilities or permissions.
           // Present a host-owned transition; publish model prose for conversation.
-          progress.report(new vscode.LanguageModelTextPart((p.intent==='workspace'?'Continuing this request through Sutra’s workspace workflow.':p.answer)+'\n\n'));
+          progress.report(new vscode.LanguageModelTextPart((flow.state!=='DONE'?'Continuing this request through Sutra’s workspace workflow.':p.answer)+'\n\n'));
           if(p.diagram){try{await deps.presentConversation?.(chat);progress.report(new vscode.LanguageModelTextPart('Diagram opened beside the chat. Use **Sutra: Open Last Diagram** to reopen it.\n\n'));}catch(error){progress.report(new vscode.LanguageModelTextPart('Diagram preview could not open: '+error.message+'\n\n'));}}
-          if(p.intent!=='workspace')return;
+          if(flow.state==='DONE')return;
+          conversationId=r.invocation_id;audit.conversationInvocationId=r.invocation_id;
+          }
           if(!a){
             audit.stage='awaiting_workspace_permission';publish();
             progress.report(new vscode.LanguageModelTextPart('Workspace access needs your confirmation. Choose **Arm Sutra** to continue this request here.\n\n'));
@@ -253,14 +252,28 @@ function install(vscode,context,deps){
             }
             a=armed;audit.stage='workspace';publish();
           }
-          conversationId=r.invocation_id;audit.conversationInvocationId=r.invocation_id;
-          if(!await prepareWorkspace(a,prompt,conversationId,p.workspace_request,activeCancel.token)){audit.stage='permission_declined';progress.report(new vscode.LanguageModelTextPart('Permission was not granted. Sutra remains armed for reading; no edit or test ran.'));return;}
-          progress.report(new vscode.LanguageModelTextPart('Checking the armed workspace task before accessing source…\n\n'));
+
         }
-        assertArmed();audit.session=a.session;await check(activeCancel.token);
-        if(armed!==a||activeCancel.token.isCancellationRequested)throw new Error('Native request disarmed or cancelled.');
-        if(a.coding){const models=await deps.configureModels(false,activeCancel.token);data=await deps.request({op:'native_work',...a.binding,prompt,models,tier,conversation_id:conversationId},activeCancel.token);}
-        else data=await deps.simpleChat(prompt,{tier,token:activeCancel.token,conversationId});
+        assertArmed();
+        if(!flow)flow=await flowEvent(null,'start_existing',tier,activeCancel.token,{prompt,conversation_id:conversationId});
+        while(!['DONE','AWAITING_ACTION'].includes(flow.state)){
+          if(armed!==a||activeCancel.token.isCancellationRequested)throw new Error('Native request disarmed or cancelled.');
+          if(flow.state==='PAUSED'||flow.state==='QUARANTINED')throw new Error('Sutra workflow stopped: '+flow.state+'. Inspect the monitor before continuing.');
+          let event='step',extra={};
+          if(flow.state==='NEED_PERMISSION'){
+            const grant=await approvePermission(flow.permission,activeCancel.token);
+            if(!grant||armed!==a){audit.stage='permission_declined';progress.report(new vscode.LanguageModelTextPart('Permission was not granted. No edit or test ran.'));return;}
+            event='grant';extra={grant};
+          }
+          flow=await flowEvent(flow,event,tier,activeCancel.token,extra);
+          const bound=flow.binding||flow.bound_task;
+          if(bound){a.binding=bound;a.session=bound.session;audit.session=a.session;}
+          audit.orchestration={flowId:flow.flow_id,state:flow.state,children:flow.children};publish();
+          if(flow.progress)progress.report(new vscode.LanguageModelTextPart(flow.progress+'\n\n'));
+          if(flow.child)recordUsage(flow.child.result);
+        }
+        data=flow.data;
+        if(!data){progress.report(new vscode.LanguageModelTextPart(flow.state==='AWAITING_ACTION'?'The saved proposal is awaiting action confirmation. Ask for a fresh proposal if its confirmation is no longer available.':'This workflow has finished. Send a new request to continue.'));return;}
         if(armed!==a||!enabled()||activeCancel.token.isCancellationRequested)throw new Error('Native request disarmed or cancelled. Proposal withheld.');
         if(data?.notice){audit.stage='guidance';progress.report(new vscode.LanguageModelTextPart(data.notice.message+'\n\nSutra setup guidance — no model invocation.'));return;}
         if(!data?.result)throw new Error(data?.notice?.message||'No governed response available.');

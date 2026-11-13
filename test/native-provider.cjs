@@ -20,9 +20,38 @@ function setup(saved={}){
   if(m.op==='native_execute')return {action_receipt:{id:'receipt',result:{status:'applied'}}};
   throw new Error(m.op);
  }};
+ // Mock host effects remain in calls; flowRequests records actual UI traffic.
+ const flowRequests=[],flows=new Map();let flowCount=0;
+ deps.backendRequest=deps.request;
+ deps.request=async(m,t)=>{
+  if(m.op!=='orchestrate')return deps.backendRequest(m,t);
+  flowRequests.push(structuredClone(m));let f;
+  const bind=()=>({session:st.session,contract_hash:st.contract?.contract_hash,calibration_hash:st.calibration?.binding?.hash});
+  const reply=extra=>structuredClone({...f,...extra});
+  if(m.event==='start'||m.event==='start_existing'){
+   const c=m.event==='start'?await deps.backendRequest({...m,op:'conversation'},t):null;
+   f={flow_id:'flow-'+(++flowCount),cursor:'1',state:c?.result.accepted_output.intent==='conversation'?'DONE':'NEED_ARM',conversation_id:c?.result.invocation_id||m.conversation_id,children:[],prompt:m.prompt,permission:c?.result.accepted_output.workspace_request||{operation:'read',paths:[]}};flows.set(f.flow_id,f);
+   return reply(c?{conversation:c}:{});
+  }
+  f=flows.get(m.flow_id);if(!f)throw Error('Unknown flow');
+  if(m.event==='inspect')return reply();
+  if(m.event==='cancel'){f.state='CANCELLED';return reply();}
+  if(!m.armed)throw Error('Unarmed workflow');
+  if(m.binding&&JSON.stringify(m.binding)!==JSON.stringify(bind()))throw Error('Task changed during arming');
+  f.cursor=String(Number(f.cursor)+1);
+  if(f.state==='NEED_ARM'||f.state==='NEED_PERMISSION'){
+   if(!st.auto&&!st.contract?.contract.constraints.native_task)await deps.backendRequest({op:'auto_new',goal:f.prompt,roots:['.'],conversation_id:f.conversation_id},t);
+   const k=st.contract.contract.constraints,p=f.permission;
+   if(f.state==='NEED_PERMISSION')await deps.backendRequest({op:'native_permissions',...bind(),...m.grant,conversation_id:f.conversation_id},t);
+   else if((p.operation==='edit'&&!k.edits_allowed)||(p.operation==='test'&&!k.tests_allowed)){f.state='NEED_PERMISSION';return reply({bound_task:bind(),permission:{...p,goal:st.contract.contract.goal}});}
+   f.binding=bind();f.state='CODING';return reply();
+  }
+  const data=await deps.backendRequest({op:'native_work',...f.binding,prompt:f.prompt,conversation_id:f.conversation_id,models:m.models,tier:m.tier},t);
+  f.state='DONE';return reply({data});
+ };
  const controller=install(v,{subscriptions:[],workspaceState:{get:k=>saved[k],update:async(k,value)=>{saved[k]=structuredClone(value);}}},deps),token=new CTS();
  const send=async(tier='low',messages=[{role:1,content:[new Text('Fix retry')]}],options={tools:[{name:'karma_native_action'},{name:'run_in_terminal'}]})=>{const parts=[];await provider.provideLanguageModelChatResponse({id:'karma-'+tier},messages,options,{report:p=>parts.push(p)},token.token);return parts;};
- return {statuses,routeEvents,policies,overrides,v,provider,tool,commands,uiCalls,calls,st,controller,cfg,token,send,arm:()=>commands['karma.armNative']({goal:'BYPASS',roots:['/']}),kind:k=>{kind=k;},hold:h=>{hold=h;},picks:()=>pick,discoveries:()=>discoveries,deps};
+ return {flowRequests,statuses,routeEvents,policies,overrides,v,provider,tool,commands,uiCalls,calls,st,controller,cfg,token,send,arm:()=>commands['karma.armNative']({goal:'BYPASS',roots:['/']}),kind:k=>{kind=k;},hold:h=>{hold=h;},picks:()=>pick,discoveries:()=>discoveries,deps};
 }
 (async()=>{
  const checks=[];const h=setup();
@@ -80,8 +109,8 @@ function setup(saved={}){
  const required=setup();await assert.rejects(required.send('low',[{role:1,content:[new Text('Hello')]}],{toolMode:2,tools:[{name:'karma_native_action'}]}),/No admitted action/);assert(!required.calls.some(c=>c.op!=='conversation'));
  const off=setup();await off.commands['karma.toggleNative']();await off.send('low',[{role:1,content:[new Text('Hello')]}]);assert.equal(off.calls.length,0);
  checks.push('user-supplied markers do not select memory; blank prompts and required actions fail closed; disabled native chat never dispatches');
- const metered=setup(),originalRequest=metered.deps.request;
- metered.deps.request=async(m,t)=>{const data=await originalRequest(m,t);if(data.result){const iid=data.result.invocation_id;data.result.token_usage={calls:m.op==='conversation'?[{invocation_id:iid+'repair',stage:'conversation',model:'model-a',input_tokens:1000,output_tokens:50,status:'quarantined'},{invocation_id:iid,stage:'conversation',model:'model-a',input_tokens:1200,output_tokens:80,status:'accepted'}]:[{invocation_id:iid,stage:'coder',model:'model-c',input_tokens:4000,output_tokens:200,status:'accepted'}]};}return data;};
+ const metered=setup(),originalRequest=metered.deps.backendRequest;
+ metered.deps.backendRequest=async(m,t)=>{const data=await originalRequest(m,t);if(data.result){const iid=data.result.invocation_id;data.result.token_usage={calls:m.op==='conversation'?[{invocation_id:iid+'repair',stage:'conversation',model:'model-a',input_tokens:1000,output_tokens:50,status:'quarantined'},{invocation_id:iid,stage:'conversation',model:'model-a',input_tokens:1200,output_tokens:80,status:'accepted'}]:[{invocation_id:iid,stage:'coder',model:'model-c',input_tokens:4000,output_tokens:200,status:'accepted'}]};}return data;};
  await metered.arm();metered.kind('report');const counted=await metered.send('high');
  assert(counted.some(p=>p.value?.includes('6,200 in · 330 out · 3 calls')));
  assert.equal(metered.controller.status().routing.token_usage.calls.length,3);
@@ -118,8 +147,8 @@ function setup(saved={}){
  const backgroundSummary=await background.send('low',[{role:1,content:priorBackground},{role:1,content:[new Text(SUMMARY)]}]);assert(backgroundSummary.some(p=>p.value?.includes('KARMA_CONTEXT_V1')));assert.equal(background.controller.status().routing.id,activeId);assert(background.controller.status().routing.active);background.commands['karma.disarmNative']();resumeWork();await assert.rejects(workRunning,/disarmed or cancelled/);
  checks.push('current user text cannot supply a checkpoint; workspace secrets isolate signatures; background compaction does not race or overwrite active inference state');
  const scoped=setup();scoped.st.auto={pending_files:0};scoped.st.contract.contract.constraints={allowed_paths:['.'],edits_allowed:false,tests_allowed:false,network_allowed:false,dependencies_allowed:false};
- const baseRequest=scoped.deps.request;let allow=false,grants=0;
- scoped.deps.request=async(m,t)=>{
+ const baseRequest=scoped.deps.backendRequest;let allow=false,grants=0;
+ scoped.deps.backendRequest=async(m,t)=>{
   if(m.op==='native_permissions'){grants++;assert.equal(m.operation,'edit');assert.deepEqual(m.paths,['code.py']);scoped.st.contract.contract_hash='permitted-v2';Object.assign(scoped.st.contract.contract.constraints,{native_task:true,allowed_paths:['code.py'],edits_allowed:true});return structuredClone(scoped.st);}
   const data=await baseRequest(m,t);if(m.op==='conversation')data.result.accepted_output.workspace_request={operation:'edit',paths:['code.py']};return data;
  };
@@ -129,9 +158,9 @@ function setup(saved={}){
  allow=true;const approved=await scoped.send();assert.equal(grants,1);assert(approved.some(p=>p instanceof Call));assert.equal(scoped.calls.find(x=>x.op==='native_work').contract_hash,'permitted-v2');
  scoped.kind('report');await scoped.send('high');assert.equal(grants,1);assert.equal(scoped.calls.filter(x=>x.op==='native_work').at(-1).contract_hash,'permitted-v2');
  checks.push('contextual permission decline keeps reading armed; approval binds exact files; switching models retains the new contract without repeating permission setup');
- const fresh=setup();delete fresh.st.session;delete fresh.st.contract;let created=0;const freshRequest=fresh.deps.request;
- fresh.deps.simpleChat=async()=>({notice:{message:'Read-only review fixture'}});
- fresh.deps.request=async(m,t)=>{if(m.op==='auto_new'){created++;assert.equal(m.goal,'Review this project');assert.deepEqual(m.roots,['.']);assert(m.conversation_id);Object.assign(fresh.st,{session:'read-task',auto:{},contract:{contract_hash:'read-hash',contract:{goal:m.goal,constraints:{allowed_paths:['.'],edits_allowed:false,tests_allowed:false}}}});return structuredClone(fresh.st);}return freshRequest(m,t);};
+ const fresh=setup();delete fresh.st.session;delete fresh.st.contract;let created=0;const freshRequest=fresh.deps.backendRequest;
+ fresh.kind('report');
+ fresh.deps.backendRequest=async(m,t)=>{if(m.op==='auto_new'){created++;assert.equal(m.goal,'Review this project');assert.deepEqual(m.roots,['.']);assert(m.conversation_id);Object.assign(fresh.st,{session:'read-task',auto:{},contract:{contract_hash:'read-hash',contract:{goal:m.goal,constraints:{allowed_paths:['.'],edits_allowed:false,tests_allowed:false}}}});return structuredClone(fresh.st);}return freshRequest(m,t);};
  await fresh.arm();assert.equal(created,0);await fresh.send('low',[{role:1,content:[new Text('Review this project')]}]);assert.equal(created,1);assert.equal(fresh.picks(),0);assert(fresh.controller.status().armed);
  checks.push('arming does not create a task; first workspace request creates a read-only task from the prompt without goal or mode pickers');
  const inline=setup();inline.kind('report');let confirmations=0;
@@ -157,5 +186,13 @@ function setup(saved={}){
  }
  const stale=setup();let accept;stale.v.window.showWarningMessage=()=>new Promise(r=>accept=r);const waiting=stale.arm();const invalidated=assert.rejects(waiting,/cancelled/);while(!accept)await new Promise(r=>setImmediate(r));stale.commands['karma.disarmNative']();accept('Arm Sutra');await invalidated;assert(!stale.controller.status().armed);
  checks.push('cancel, disarm, disable and workspace changes invalidate delayed approval; concurrent requests cannot steal the pending handoff');
+ const resumed=setup();resumed.kind('report');await resumed.arm();resumed.hold(()=>{throw Error('interrupted fixture');});
+ await assert.rejects(resumed.send('low'),/interrupted/);resumed.hold(null);
+ const beforeResume=resumed.calls.filter(c=>c.op==='conversation').length;
+ const resumedReply=await resumed.send('high',[{role:1,content:[new Text('continue')]}]);
+ assert.equal(resumed.calls.filter(c=>c.op==='conversation').length,beforeResume);assert(resumedReply.some(p=>p.value?.includes('Memory restored')));
+ const resumedWork=resumed.calls.filter(c=>c.op==='native_work').at(-1);assert.equal(resumedWork.prompt,'Fix retry');assert.equal(resumedWork.tier,'high');assert.equal(resumedWork.contract_hash,'contract-1');
+ checks.push('continue resumes the saved workflow with the original prompt and permissions on another model, without reclassifying or replaying history');
+ assert(h.flowRequests.some(r=>r.event==='start'));assert(h.flowRequests.some(r=>r.event==='step'));checks.push('native UI sends workflow events; host state selects all workspace work');
  console.log(JSON.stringify({passed:true,checks},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;});

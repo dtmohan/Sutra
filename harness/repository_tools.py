@@ -168,8 +168,14 @@ def execute(s,session,workspace,root,kind,*,target='',query='',line=1,invocation
  op={'id':uuid.uuid4().hex,'session':session,'request_id':request_id,'invocation_id':invocation_id,
      'actor':'governed_model' if invocation_id else 'host_tool','kind':kind,'target':target,'query':query,'line':line,
      'contract_hash':s.origin(session)['contract_hash'],'logic_hash':s.logic_hash,'kernel':budget,'resource':hardware,'started_at':time.time(),'task_cost':cost if automatic else {},'task_budget_kernel':task_frame}
- digest=sha('repository-op-v1:'+canonical(op))
  with s.db:
+  s.db.execute('BEGIN IMMEDIATE')
+  from orchestration import admit
+  from orchestration import ACTIVE,node
+  if ACTIVE.get() and node(s,ACTIVE.get())['kind']=='branch' and kind not in ('read','api_index','static_map'):
+   raise InvalidUpdate('Child repository operation requires an exact scoped target')
+  op['orchestration']=admit(s,session,'repository',op['id'],cost,paths=target.split('\n') if target else [],resource=hardware)
+  digest=sha('repository-op-v1:'+canonical(op))
   s.db.execute('INSERT INTO repository_ops VALUES(?,?,?,?,?)',(op['id'],session,request_id,canonical(op),digest));s._audit('REPOSITORY_DISPATCH',op)
  started_op=time.monotonic()
  try:
@@ -215,6 +221,8 @@ def finish(s,op,digest,result,elapsed_seconds):
  rid=sha('repository-receipt-v1:'+canonical(receipt))
  with s.db:
   s.db.execute('INSERT INTO repository_receipts VALUES(?,?,?,?,?)',(rid,session,prior[0]+1,op['id'],canonical(receipt)));s._audit('REPOSITORY_RECEIPT',{'id':rid,'record':receipt})
+  from orchestration import settle
+  settle(s,op.get('orchestration'),rid,elapsed_seconds)
  return {'id':rid,'operation':op,'result':result}
 
 def record_by_id(s,session,rid):

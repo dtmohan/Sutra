@@ -6,15 +6,15 @@ const views=new Map(),statusItems=[],commands=new Map(),tools=new Map(),particip
 const tierModels={low:'fixture-small',mid:'fixture-mid',high:'fixture-large'};
 const runtimeUpdates=[];
 let provider,panel,holdDashboard=false,pendingDashboard,bridgeCount=0,dashboardSpawns=0;
-let state={session:'fixture',model:'fixture-model',report:'architecture v1',api:{report:'API v1'}};
+let state={contract:{contract_hash:'fixture-contract',contract:{constraints:{}}},calibration:{binding:{hash:'fixture-calibration'}},session:'fixture',model:'fixture-model',report:'architecture v1',api:{report:'API v1'}};
 const disposable=()=>({dispose(){}}),uri=value=>({scheme:'file',fsPath:value,toString(){return value;}});
 class Emitter{event=(cb)=>{this.cb=cb;return disposable();};fire(value){changes.push(value.toString());this.cb?.(value);}dispose(){}}
 function spawn(exe,args){
  const streaming=args.includes('--dashboard-stream');if(streaming)dashboardSpawns++;
  const child=new EventEmitter();child.stdout=new EventEmitter();child.stderr=new EventEmitter();child.stdin=new EventEmitter();child.kill=()=>true;
  child.stdin.end=child.stdin.write=raw=>{const req=streaming?{op:'dashboard'}:JSON.parse(raw);requests.push(req);bridgeCount++;
-  const finish=()=>{if(req.op==='auto_new')state={...state,session:'new-review',auto:{pending_files:0,mapped_files:2,source_files:2}};
-   const data=req.op==='models'?{models:Object.values(tierModels).map(name=>({name,eligible:true})),suggested_tiers:tierModels}:req.op==='chat_answer'?{state,route:{tier:'low',model:tierModels.low,reason:'focused request'},result:{invocation_id:'fixture-invocation',admission:{admitted:true},accepted_output:{answer:'Fixture answer',remaining:[]}},coverage:{mapped_files:2,source_files:2},source_files:['a.py']}:req.op==='calibration_list'?{binding:{hash:'fixture',profiles:[]},profiles:[]}:req.op==='dashboard'?{hardware:{available:false,temperatures:{cpu:{available:true,maximum_celsius:42.12},gpu:{available:true,maximum_celsius:40.82}}},runs:[],invocations:{},actions:[]}:state;
+  const finish=()=>{if(req.op==='auto_new')state={...state,contract:{contract_hash:'fixture-contract',contract:{constraints:{auto_review:true}}},calibration:{binding:{hash:'fixture-calibration'}},session:'new-review',auto:{pending_files:0,mapped_files:2,source_files:2}};
+   const data=req.op==='orchestrate'?{flow_id:'fixture-flow',state:'DONE',data:{state,route:{tier:'low',model:tierModels.low},result:{invocation_id:'fixture',admission:{admitted:true},accepted_output:{answer:'Fixture answer',remaining:[]}},coverage:{mapped_files:2,source_files:2},source_files:['a.py']}}:req.op==='models'?{models:Object.values(tierModels).map(name=>({name,eligible:true})),suggested_tiers:tierModels}:req.op==='chat_answer'?{state,route:{tier:'low',model:tierModels.low,reason:'focused request'},result:{invocation_id:'fixture-invocation',admission:{admitted:true},accepted_output:{answer:'Fixture answer',remaining:[]}},coverage:{mapped_files:2,source_files:2},source_files:['a.py']}:req.op==='calibration_list'?{binding:{hash:'fixture',profiles:[]},profiles:[]}:req.op==='dashboard'?{hardware:{available:false,temperatures:{cpu:{available:true,maximum_celsius:42.12},gpu:{available:true,maximum_celsius:40.82}}},runs:[],invocations:{},actions:[]}:state;
    child.stdout.emit('data',Buffer.from(JSON.stringify({ok:true,data})+'\n'));if(!streaming)child.emit('close',0,null);};
   if(req.op==='dashboard'&&holdDashboard)pendingDashboard=finish;else queueMicrotask(finish);
  };return child;
@@ -77,7 +77,7 @@ const subscriptions=[];
  const beforeFresh=requests.length;
  await native({command:'new',prompt:'Review fresh sources'}, {},capture,token);
  const freshCalls=requests.slice(beforeFresh);assert.equal(freshCalls.filter(r=>r.op==='auto_new').length,1);
- const creation=freshCalls.find(r=>r.op==='auto_new');assert.equal(creation.goal,'Review fresh sources');assert.deepEqual(creation.roots,['.']);assert(freshCalls.some(r=>r.op==='chat_answer'));
+ const creation=freshCalls.find(r=>r.op==='auto_new');assert.equal(creation.goal,'Review fresh sources');assert.deepEqual(creation.roots,['.']);assert(freshCalls.some(r=>r.op==='orchestrate'&&r.event==='start_review'));
  state=JSON.parse(oldState);
  await native({command:'status',prompt:''}, {},capture,token);assert(rendered.some(m=>m.includes('42.1 °C')&&m.includes('40.8 °C')));
  const errorsBefore=rendered.length;vscode.workspace.textDocuments=[{isDirty:true,uri:uri(path.join(tmp,'a.py'))}];
@@ -85,8 +85,8 @@ const subscriptions=[];
  assert.equal(participants.size,1);state={...state,auto:{pending_files:0,mapped_files:2,source_files:2}};
  const stream={markdown(){},progress(){},reference(){},button(){}},beforeChat=requests.length;
  await participants.get('karma.local')({prompt:'Explain start.',model:{sendRequest(){throw Error('Must never use VS Code model provider');}}},{history:[{content:'Do not forward transcript'}]},stream,{isCancellationRequested:false,onCancellationRequested:()=>disposable()});
- const chatCalls=requests.slice(beforeChat);assert(chatCalls.some(r=>r.op==='chat_answer'));
- const chatRequest=chatCalls.find(r=>r.op==='chat_answer');assert.deepEqual(chatRequest.models,tierModels);assert.equal(chatRequest.prompt,'Explain start.');assert(!('history' in chatRequest));assert(!chatCalls.some(r=>r.op==='auto_new'));
+ const chatCalls=requests.slice(beforeChat);assert(chatCalls.some(r=>r.op==='orchestrate'&&r.event==='start_review'));
+ const chatRequest=chatCalls.find(r=>r.op==='orchestrate');assert.deepEqual(chatRequest.models,tierModels);assert.equal(chatRequest.prompt,'Explain start.');assert(!('history' in chatRequest));assert(!chatCalls.some(r=>r.op==='auto_new'));
  const cancelledBefore=requests.length;await participants.get('karma.local')({prompt:'Cancelled'}, {},stream,{isCancellationRequested:true});assert.equal(requests.length,cancelledBefore);
  await commands.get('karma.openReport')();await commands.get('karma.openAPIReport')();
  assert.equal(provider.provideTextDocumentContent(uri('karma-preview:/fixture/Architecture.md')),'architecture v1');

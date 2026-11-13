@@ -1,4 +1,4 @@
-Sutra 0.19.1 — continue workspace requests in the same chat
+Sutra 0.20.0 — one governed orchestration state machine
 
 Previously Karma. Your installed extension ID and saved settings are preserved.
 
@@ -18,9 +18,21 @@ model and response invocation details. Other providers can bypass this harness.
 Reloading preserves settings and conversation checkpoints, but disarms workspace
 actions. Legacy Karma receipt pointers remain valid under the same host checks.
 
+WORKFLOW
+Native chat now sends events to one persisted host state machine. It classifies
+the request, waits for user grants, maps fresh source, allocates child reviews,
+joins accepted results and prepares actions. Children run sequentially in the
+same chat. Their model calls inherit the full contract, Smriti context and a
+narrower source scope. Parent and child allocations are checked by the unchanged
+STP kernel. Switching models never refreshes spent budgets or grants permissions.
+After an interrupted review, select another Sutra tier and send "continue" to
+resume its saved workflow. A different request cancels unused child reservations
+while retaining consumed budget and evidence. Arming may be required after reload.
+
 DASHBOARD
 Click Sutra Monitor in the status bar, or run Sutra: Open Monitor.
-The combined dashboard opens beside Terminal and Output. It shows CPU/GPU
+The combined dashboard opens beside Terminal and Output. Workflow & child
+reviews shows stages, model assignments and reserved/consumed child allocations. It shows CPU/GPU
 temperatures, CPU usage, memory, individual kernel decisions and input/output
 totals, recent-call charts and per-stage counts, with model, stage, outcome and
 time filters. @sutra /usage opens it too. Counts arrive after each model call;

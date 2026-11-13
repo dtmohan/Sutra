@@ -76,6 +76,26 @@ class ActionTests(unittest.TestCase):
         return dispatch(self.s,self.meta,self.workspace,self.storage,{'op':'work','mode':mode,'model':'fixture-model-A',
             'prompt':'Continue this bounded task.','pages':['src/retry.py#1','tests/test_retry.py#1']},model or Coder())
     def apply(self,r):return execute(self.s,self.session,r['result']['invocation_id'],self.workspace,self.storage,resource_check=False)
+    def action_flow(self,iid):
+        import orchestration as m
+        with self.s.db:
+            f=m.create(self.s,'flow',objective='Fix retries')
+            for state in ('CLASSIFYING','NEED_ARM','BINDING','WORKSPACE','CODING'):
+                m.transition(self.s,f['id'],state,'TEST_TRANSITION')
+            m.transition(self.s,f['id'],'AWAITING_ACTION','ACTION_PROPOSED',{'invocation_id':iid})
+        return f['id']
+    def test_workflow_action_tracks_confirmation_execution_and_receipt(self):
+        import orchestration as m
+        r=self.propose();fid=self.action_flow(r['result']['invocation_id'])
+        self.assertEqual(m.state(self.s,fid),'AWAITING_ACTION')
+        receipt=self.apply(r);self.assertEqual(receipt['result']['status'],'applied')
+        self.assertEqual(m.state(self.s,fid),'DONE')
+        self.assertEqual(m.events(self.s,fid)[-1]['data']['receipt'],receipt['id'])
+    def test_cancelled_workflow_cannot_execute_old_proposal(self):
+        import orchestration as m
+        r=self.propose();fid=self.action_flow(r['result']['invocation_id']);m.cancel(self.s,fid)
+        with self.assertRaisesRegex(InvalidUpdate,'no longer pending'):self.apply(r)
+        self.assertIn('range(MAX_ATTEMPTS - 1)',(self.workspace/'src/retry.py').read_text())
     def test_edit_is_bound_to_exact_preimage_and_receipted(self):
         before=self.s.current_contract(self.session);r=self.propose();p=preview(self.s,self.session,r['result']['invocation_id'],self.workspace)
         self.assertIn('-    for attempt in range(MAX_ATTEMPTS - 1):',p['diff'])

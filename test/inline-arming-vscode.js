@@ -24,6 +24,7 @@ exports.run=async()=>{
   assert(hello.includes('conversation details'));assert(!api.getRoutingStatus().armed);
   const review=await send('Mid','Now inspect the current workspace source. The earlier instruction to defer inspection applied only to the acknowledgement turn and is no longer applicable. Read entry.py and leaf.py to review their architecture and start-to-run relationship. No edits, network access, or new dependencies.');
   assert(review.startsWith('Continuing this request through Sutra’s workspace workflow.'),review);assert(review.includes('Sutra routing confirmed'),review);assert(!review.includes('withheld'),review);
+  const workflow=api.getRoutingStatus().routing.orchestration;assert.equal(workflow.state,'DONE');assert(workflow.children.length>=2);assert(workflow.children.every(c=>c.state==='DONE'));report.workflow=workflow;report.checks.push('Native review uses persisted child reviews and joins them in the same request');
   const before=await api.getState();assert(api.getRoutingStatus().armed);assert(before.contract);
   assert.equal(before.contract.contract.constraints.edits_allowed,false);assert.equal(before.contract.contract.constraints.tests_allowed,false);
   report.checks.push('One real host confirmation resumes the original native request and produces an admitted source review');

@@ -47,7 +47,7 @@ class InvocationLedger(GovernedContext):
                 self.db.execute(f"CREATE TRIGGER IF NOT EXISTS immutable_{table}_{op} BEFORE {op} ON {table} BEGIN SELECT RAISE(ABORT,'immutable invocation record'); END")
         self.db.commit()
 
-    def register(self, run_id, call_id, role, payload, system, schema, delivery_id, model, charge, budget=None):
+    def register(self, run_id, call_id, role, payload, system, schema, delivery_id, model, charge, budget=None, resource=None):
         expected_system, expected_schema = expected_request(role, payload)
         if system != expected_system or schema != expected_schema:
             raise InvalidUpdate('Role system/schema mismatch')
@@ -79,8 +79,13 @@ class InvocationLedger(GovernedContext):
             else:
                 if payload['contract']['contract_hash'] != config['contract_hash']:
                     raise Conflict('Invocation contract changed')
-                if role in ('reviewer','coder','architect','api_mapper','api_reviewer','static_explainer','chat_reviewer','conversation'):
-                    if role=='conversation':
+                if role in ('reviewer','coder','architect','api_mapper','api_reviewer','static_explainer','chat_reviewer','conversation','subagent'):
+                    if role=='subagent':
+                        from subagent_runtime import request_check
+                        request_check(self,session,payload)
+                        if payload['route']['model']!=model:raise InvalidUpdate('Child model differs from host route')
+                        if payload['memory_budget']!=envelope['budget_profile']:raise InvalidUpdate('Child context budget differs from provider')
+                    elif role=='conversation':
                         from conversation import request_check
                         request_check(self,session,payload)
                         if payload['route']['model']!=model:raise InvalidUpdate('Dispatch model differs from conversation route')
@@ -90,6 +95,7 @@ class InvocationLedger(GovernedContext):
                         from chat_runtime import request_check
                         request_check(self,session,payload)
                         if payload['route']['record']['choice']['model']!=model:raise InvalidUpdate('Dispatch model differs from committed route')
+                        if payload.get('memory_budget')!=envelope['budget_profile']:raise InvalidUpdate('Review context budget differs from provider')
                     elif role=='static_explainer':
                         from static_role import request_check
                         request_check(self,session,payload)
@@ -114,6 +120,9 @@ class InvocationLedger(GovernedContext):
             cost={'calls':1,'tokens':charge+envelope['budget_profile']['response_reserve'],'seconds':150}
             if state['constraints'].get('native_task'):cost.update(operations=1,source_bytes=sum(len(p.get('text','').encode()) for p in payload.get('pages',[])))
             envelope['task_budget_kernel']=require(self,session,cost)
+            from orchestration import admit
+            envelope['orchestration']=admit(self,session,'model',envelope['id'],cost,
+                paths=payload.get('source_paths',[]),role=role,payload=payload,model=model,resource=resource)
             envelope['budget_kernel'] = self.reserve(run_id, 'DISPATCH', {'call_id': call_id, 'invocation_id': envelope['id'], 'role': role})
             raw = canonical(envelope); digest = sha('invocation-v1:' + raw)
             self.db.execute('INSERT INTO invocations VALUES(?,?,?,?,?,?,?)',
@@ -164,6 +173,8 @@ class InvocationLedger(GovernedContext):
             raw = canonical(receipt); digest = sha('invocation-receipt-v1:' + raw)
             self.db.execute('INSERT INTO invocation_receipts VALUES(?,?,?,?,?)', (session,seq+1,envelope['id'],digest,raw))
             self._audit('INVOCATION_RECEIPT', {'id': digest, 'record': receipt})
+            from orchestration import settle
+            settle(self,envelope.get('orchestration'),digest,receipt['elapsed_seconds'])
         if envelope['role'] == 'parser' and admitted: self.current_contract(session)
         result.update(invocation_id=envelope['id'], invocation_receipt_id=digest,
                       accepted_output=copy.deepcopy(proposal) if admitted else None,
@@ -223,6 +234,9 @@ class InvocationLedger(GovernedContext):
         if env['role']=='chat_reviewer':
             from chat_runtime import request_check
             request_check(self,session,payload)
+        if env['role']=='subagent':
+            from subagent_runtime import request_check
+            request_check(self,session,payload)
         if env['role'] in ('api_mapper','api_reviewer'):
             from api_roles import check_sources
             check_sources(self,session,payload)
@@ -261,7 +275,10 @@ class InvocationGateway:
         ledger = InvocationLedger(self.db)
         try:
             charge = self.provider.budget.check(system, payload, schema)
-            envelope = ledger.register(self.run_id, call_id, role, payload, system, schema, delivery_id, name, charge, budget={'context_limit':self.provider.budget.context_limit,'response_reserve':self.provider.budget.response_reserve,'template_reserve':self.provider.budget.template_reserve})
+            from local_model import LocalModel
+            from monitoring import require_resources
+            resource=require_resources(Path(self.db).parent) if isinstance(self.provider,LocalModel) else {'profile':'injected-test-provider'}
+            envelope = ledger.register(self.run_id, call_id, role, payload, system, schema, delivery_id, name, charge, budget={'context_limit':self.provider.budget.context_limit,'response_reserve':self.provider.budget.response_reserve,'template_reserve':self.provider.budget.template_reserve},resource=resource)
         finally: ledger.close()
         permit = {'hash': envelope['request_hash'], 'used': False}
         token = _permit.set(permit); error = None; proposal = None;started=time.monotonic()

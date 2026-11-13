@@ -40,6 +40,8 @@ def dashboard(root):
         tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         from token_usage import history
         data['token_usage']=history(db)
+        from orchestration import overview as orchestration_overview
+        data['orchestration']=orchestration_overview(db)
         meta=json.loads((root/'workspace.json').read_text()) if (root/'workspace.json').exists() else {}
         session=meta.get('active');data['session']=session;data['model']=meta.get('model');data['checkpoint']=meta.get('checkpoint')
         from types import SimpleNamespace

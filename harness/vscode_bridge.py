@@ -253,6 +253,18 @@ def handle(root,workspace,request):
             return catalog(ollama)
         s=InvocationLedger(root/'state.sqlite')
         try:
+            if request.get('op')=='orchestrate':
+                from orchestration_flow import handle as orchestrate
+                from storage_policy import prune,require_space
+                prune(root);require_space(root)
+                meta=json.loads(metadata.read_text()) if metadata.exists() else {'workspace':str(Path(workspace).resolve())}
+                if not metadata.exists():metadata.write_text(canonical(meta))
+                # Classification is tool-free; later events reconcile committed work.
+                if request.get('event')!='start':reconcile(s,workspace)
+                try:return orchestrate(s,meta,Path(workspace).resolve(),root,request)
+                except BaseException:
+                    if request.get('event')!='start':reconcile(s,workspace)
+                    raise
             if request.get('op')=='conversation_read':
                 from conversation import read
                 return read(s,request.get('invocation_id'))

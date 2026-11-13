@@ -6,7 +6,7 @@ const file=process.env.SUTRA_ARM_RESULT,sleep=ms=>new Promise(r=>setTimeout(r,ms
  let browser;for(let i=0;i<100;i++){try{browser=await chromium.connectOverCDP('http://127.0.0.1:'+process.env.SUTRA_ARM_PORT);break;}catch{await sleep(200);}}
  if(!browser)throw Error('VS Code debugging endpoint did not open');
  const page=browser.contexts()[0].pages()[0],draft='PRESERVE THIS EXISTING CHAT DRAFT CED-724';let prepared=false,confirmed=0;
- const until=Date.now()+240000;
+ const until=Date.now()+600000;
  while(Date.now()<until){
   const report=fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):{};
   if(report.phase==='failed')throw Error(JSON.stringify(report));

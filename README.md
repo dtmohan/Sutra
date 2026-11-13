@@ -24,6 +24,31 @@ The native model picker offers **Sutra Auto**, **Sutra Low**, **Sutra Mid** and
 **Sutra High**. The review participant is **@sutra**. The dashboard has Overview,
 Chat, Usage, Settings and Tools views.
 
+### Governed orchestration
+
+Native chat uses a persisted host state machine for classification, user grants,
+source mapping, child reviews, joins, synthesis and action settlement. The UI
+sends events; model output cannot create or widen permissions. The adapter proposes
+source partitions from measured file/call counts and remaining allocations. The
+unchanged STP kernel admits or stops the proposed work.
+
+Children run sequentially in the same request. Each has a reserved share of its
+parent budget, an immutable context binding and a narrower read scope. Their fresh
+calls receive the full contract and a budgeted Smriti working set. Failed calls
+consume allocation. Model switches and reloads cannot reset that use. Source
+versions and child receipts are checked again before synthesis.
+
+After interruption, choose a Sutra tier and send **continue** to resume the saved
+workflow. A different prompt cancels its unused child reservations; consumed
+budget and evidence remain. Reloading still requires arming workspace access.
+The monitor shows request/child states, model assignments and allocation use.
+
+This version branches read-only reviews. Editing and tests remain governed parent
+actions with exact-action confirmation. Local children are sequential, not parallel
+inference. Source partitions do not prove semantic independence; reviewers explain
+bounded excerpts and static relationships, not every function's correctness.
+The host's role/source/permission validators remain necessary alongside the kernel.
+
 ### Combined monitor
 
 Click **Sutra Monitor** in the status bar, or run **Sutra: Open Monitor**.

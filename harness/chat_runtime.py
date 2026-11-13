@@ -52,9 +52,20 @@ def facts(graph,sites):
                 'meaning':'No call sites were found in this snapshot. Declarations are a bounded sample; source excerpts support explanation, not runtime proof.'}
     return analysis.compact(graph,sites)
 
+def conversation_pages(s,p,budget,materialize=False):
+    iid=(p.get('conversation_handoff') or {}).get('invocation_id')
+    if not iid:return None
+    import conversation_memory as cm
+    row=s.db.execute('SELECT session FROM invocations WHERE id=?',(iid,)).fetchone()
+    if not row:raise InvalidUpdate('Missing parent conversation receipt')
+    if materialize:cm.materialize(s,row[0],cm.history(s,row[0],iid))
+    base={k:v for k,v in p.items() if k not in ('memory','repair')}
+    return cm.working_set(s,row[0],iid,p['request'],budget,base,SYSTEM,schema)
+
 def request_check(s,sid,p):
     from conversation import check_workspace_handoff
     check_workspace_handoff(s,sid,p)
+    if p.get('memory_budget') and p.get('memory')!=conversation_pages(s,p,Budget(**p['memory_budget'])):raise InvalidUpdate('Parent synthesis memory changed')
     if p['contract']!=s.validation_contract(sid) or p['constraint_echo']!=constraint_rows(p['contract']):raise InvalidUpdate('Chat task or constraints changed')
     if not re.fullmatch('[a-f0-9]{32}',p['_request_nonce']):raise InvalidUpdate('Missing fresh chat identity')
     data=analysis.load(s,sid,p['workspace'],p['snapshot_receipt'])
@@ -69,7 +80,12 @@ def request_check(s,sid,p):
         if type(rec['choice']['signals'].get(key)) is not int:raise InvalidUpdate('Invalid routing signals')
     expected=KarmaAdapter().route(p['request'],rec['choice']['models'],rec['choice']['mode'],rec['choice']['signals'])
     if rec['choice']!=expected:raise InvalidUpdate('Routing policy mismatch')
+    if p.get('child_results'):
+        from subagent_runtime import joined_results
+        expected=joined_results(s,sid,p['orchestration_parent'],[r['invocation_id'] for r in p['child_results']],p['request'])
+        if p['child_results']!=expected:raise InvalidUpdate('Child synthesis context changed')
     if p.get('handoff'):
+
         h=p['handoff'];prior=s.load_result(sid,h['invocation_id'])
         env=json.loads(s.db.execute('SELECT record_json FROM invocations WHERE id=?',(h['invocation_id'],)).fetchone()[0])
         if env['role']!='chat_reviewer' or h!=compact(prior,h['invocation_id'],env['model']):raise InvalidUpdate('Chat handoff differs from admitted receipt')
@@ -105,6 +121,11 @@ def answer(s,meta,workspace,root,request,provider=None):
         from conversation import workspace_handoff
         p['conversation_handoff']=workspace_handoff(s,sid,request['conversation_id'],prompt)
     p['constraint_echo']=constraint_rows(p['contract']);p['facts']=facts(graph,p['sites'])
+    if request.get('child_results'):
+        from subagent_runtime import joined_results
+        p['orchestration_parent']=request['orchestration_parent']
+        p['child_results']=joined_results(s,sid,request['orchestration_parent'],request['child_results'],prompt)
+
     old=meta.get('chat',{}).get('checkpoint')
     if old:
         try:
@@ -115,9 +136,12 @@ def answer(s,meta,workspace,root,request,provider=None):
     if real:
         from api_runtime import provider_for
         provider=provider_for(root,choice['model'],review=True);provider.budget=Budget(16384,2048,256);provider.keep_alive=0
+    p['memory_budget']=vars(provider.budget).copy()
     while True:
         p['excerpts']=excerpts(data['sources'],prompt,p['excerpt_bytes']);fmt=schema(p)
-        try:provider.budget.check(SYSTEM,dict(p,repair={'errors':['x'*140]*2}),fmt);break
+        try:
+            p['memory']=conversation_pages(s,p,provider.budget,True)
+            provider.budget.check(SYSTEM,dict(p,repair={'errors':['x'*140]*2}),fmt);break
         except ContextBudgetExceeded:
             if p['excerpt_bytes']==64:raise
             p['excerpt_bytes']=max(64,p['excerpt_bytes']//2)
