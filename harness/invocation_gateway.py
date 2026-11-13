@@ -84,6 +84,8 @@ class InvocationLedger(GovernedContext):
                         from conversation import request_check
                         request_check(self,session,payload)
                         if payload['route']['model']!=model:raise InvalidUpdate('Dispatch model differs from conversation route')
+                        if any(payload['memory_allocation'][k]!=v for k,v in envelope['budget_profile'].items()):
+                            raise InvalidUpdate('Conversation allocation differs from provider budget')
                     elif role=='chat_reviewer':
                         from chat_runtime import request_check
                         request_check(self,session,payload)
@@ -214,7 +216,10 @@ class InvocationLedger(GovernedContext):
             from static_role import request_check
             request_check(self,session,payload)
         if env['role']=='conversation' and payload.get('memory'):
-            self.load_result(session,payload['memory']['invocation_id'])
+            from conversation_memory import history
+            history(self,session,payload['memory']['invocation_id'])
+        if env['role']=='conversation' and payload.get('memory_selection'):
+            self.load_result(session,payload['memory_selection'])
         if env['role']=='chat_reviewer':
             from chat_runtime import request_check
             request_check(self,session,payload)

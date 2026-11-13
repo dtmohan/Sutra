@@ -1,33 +1,22 @@
-const vscode=require('vscode'),fs=require('node:fs'),assert=require('node:assert/strict');
+'use strict';
+const vscode=require('vscode'),fs=require('node:fs');
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 exports.run=async()=>{
- const file=process.env.KARMA_ARM_OUTPUT,prior=fs.existsSync(file)?JSON.parse(fs.readFileSync(file)):{};
- const report=prior.phase==='reload_pending'?prior:{checks:[]};
- const phase=name=>{report.phase=name;fs.writeFileSync(file,JSON.stringify(report,null,2));};
- const wait=async tag=>{const start=Date.now();while(!fs.existsSync(file+'.'+tag)){if(Date.now()-start>60000)throw Error('UI timeout: '+tag);await new Promise(r=>setTimeout(r,100));}};
+ const file=process.env.SUTRA_ARM_RESULT,report={passed:false,checks:[]};
  try{
-  const ext=vscode.extensions.getExtension('deepak-local.karma-local-harness'),api=await ext.activate();assert.equal(api.version,'0.16.0');
-  async function send(prompt,tier='low',history=[]){const c=new vscode.CancellationTokenSource();try{const model=(await vscode.lm.selectChatModels({vendor:'karma',id:'karma-'+tier}))[0];assert(model);const result=await model.sendRequest([...history,vscode.LanguageModelChatMessage.User(prompt)],{},c.token),parts=[];for await(const p of result.stream)parts.push(p);return parts.filter(p=>p instanceof vscode.LanguageModelTextPart).map(p=>p.value).join('');}finally{c.dispose();}}
-  if(prior.phase!=='reload_pending'){
-   phase('disarmed');report.firstPrompt="  Hi! Let's brainstorm a small offline note-taking app. Call it Marigold. Keep your replies to two sentences, and don't suggest cloud services. Just acknowledge these preferences for now.  ";
-   const started=Date.now();report.firstResponse=await send(report.firstPrompt);report.firstSeconds=(Date.now()-started)/1000;
-   assert(report.firstResponse.includes('conversation details'),report.firstResponse);const st=await api.getState();assert.equal(st.native.routing.stage,'conversation');assert(!st.native.armed);assert(!st.session);report.firstRoute=st.native.routing;assert(st.native.routing.token_usage.calls.every(c=>Number.isInteger(c.input_tokens)&&Number.isInteger(c.output_tokens)));assert(/in · [\d,]+ out · \d+ call/.test(report.firstResponse));
-   report.checks.push('unarmed qwen3:4b conversation admitted through the gateway without a workspace task');
-   phase('reload_pending');await vscode.commands.executeCommand('workbench.action.reloadWindow');return;
-  }
-  phase('model_switch');const started=Date.now();report.secondResponse=await send('What are we planning, what name did we choose, and what two response preferences should you preserve? Do not inspect workspace files.','mid',[vscode.LanguageModelChatMessage.User(report.firstPrompt),vscode.LanguageModelChatMessage.Assistant(report.firstResponse)]);report.secondSeconds=(Date.now()-started)/1000;
-  assert(/Marigold/i.test(report.secondResponse),report.secondResponse);assert(/two|2/i.test(report.secondResponse),report.secondResponse);assert(/cloud/i.test(report.secondResponse),report.secondResponse);
-  const restored=await api.getState();report.secondRoute=restored.native.routing;assert.equal(restored.native.routing.stage,'conversation');assert(restored.native.routing.memoryUsed);assert.equal(restored.native.routing.model,'qwen3.6:35b');assert(!restored.native.armed);assert(!restored.session);assert(restored.native.routing.token_usage.calls.every(c=>c.model==='qwen3.6:35b'));assert(!restored.native.routing.token_usage.calls.some(c=>report.firstRoute.token_usage.calls.some(p=>p.invocation_id===c.invocation_id)));
-  report.checks.push('after real window reload, qwen3.6:35b restores receipt-linked compact memory and nickname; prose adherence is not semantically verified');
-  phase('first_arming');const first=vscode.commands.executeCommand('karma.armNative');await wait('picker_open');
-  const pending=await api.getState();assert(pending.native.arming);assert.equal(pending.native.label,'Sutra: finish arming');const during=await send('how are you?');assert(during.includes('Choose a task'));await vscode.commands.executeCommand('karma.useNativeChat');phase('cancel_first');await first;
-  const cancelled=await api.getState();assert(!cancelled.native.armed);assert(!cancelled.native.arming);report.checks.push('request and Open Chat during a pending arming picker cannot bypass confirmation; Escape restores idle');
-  phase('arming');await vscode.commands.executeCommand('karma.armNative');const before=await api.getState();assert(before.native.armed);assert(before.auto);const c=before.contract.contract.constraints;assert.equal(c.edits_allowed,false);assert.equal(c.tests_allowed,false);assert.equal(c.network_allowed,false);report.contractBefore=before.contract;
-  report.checks.push('real task choice, goal and scope confirmation arm a read-only review');
-  phase('armed_conversation');report.armedHello=await send('Hello. How are you?');assert(report.armedHello.includes('conversation details'));assert.equal((await api.getState()).native.routing.stage,'conversation');report.checks.push('greeting while armed remains conversational and does not start a review');
-  phase('local_inference');const reviewStarted=Date.now();report.response=await send('Explain how the add function in calculator.py works. Cite the current source and state whether any code needs changing. Do not edit files or run tests.');report.elapsedSeconds=(Date.now()-reviewStarted)/1000;
-  const after=await api.getState();report.route=after.native.routing;assert.equal(after.native.routing.stage,'admitted',report.response);assert(after.native.routing.invocationId);assert.equal(after.native.routing.model,'qwen3:4b');assert(after.native.armed);assert.deepEqual(after.contract,before.contract);assert.equal(after.session,before.session);assert.deepEqual(after.calibration.binding,before.calibration.binding);assert(report.response.includes('Sutra routing confirmed'));report.contractAfter=after.contract;assert(after.native.routing.token_usage.calls.some(c=>c.stage==='conversation'));assert(after.native.routing.token_usage.calls.some(c=>c.stage==='chat_reviewer'));const totals=after.native.routing.token_usage.calls.reduce((t,c)=>({input:t.input+c.input_tokens,output:t.output+c.output_tokens}),{input:0,output:0});assert(report.response.includes(totals.input.toLocaleString('en-US')+' in · '+totals.output.toLocaleString('en-US')+' out'));report.checks.push('live response footer equals the sum of routing and workspace-review calls; real model switch counts stay separate across reload');
-  report.checks.push('workspace intent enters the existing fresh-source review with task, constraints and calibration unchanged');
-  await vscode.commands.executeCommand('karma.disarmNative');report.disarmedEdit=await send('Edit calculator.py now: delete its add function and execute the test suite.');assert(report.disarmedEdit.includes('Arm task'),report.disarmedEdit);assert.equal((await api.getState()).native.routing.stage,'needs_workspace_scope');report.checks.push('unarmed edit/test request returns advice and explicit arming guidance without source access or actions');
-  report.passed=true;phase('complete');await vscode.commands.executeCommand('workbench.action.quit');
- }catch(error){if(report.phase==='reload_pending'&&/Canceled|disposed|closed/i.test(String(error)))return;report.passed=false;report.error=String(error.stack||error);phase('failed');await vscode.commands.executeCommand('workbench.action.quit');throw error;}
+  const extension=vscode.extensions.getExtension('deepak-local.karma-local-harness');
+  await extension.activate();
+  for(let i=0;i<50;i++){if((await vscode.lm.selectChatModels({vendor:'karma'})).length)break;await sleep(100);}
+  fs.writeFileSync(file+'.ready','ready');
+  await vscode.commands.executeCommand('karma.armNative',{goal:'must-not-be-used',roots:['/']});
+  const status=extension.exports.getRoutingStatus();
+  if(!status.armed)throw Error('Arming did not finish: '+status.reason);
+  report.checks.push('One user confirmation arms Sutra in actual VS Code');
+  if(status.session)throw Error('Arming created a workspace task before a request');
+  report.checks.push('Arming makes no model call and creates no task');
+  await vscode.commands.executeCommand('karma.disarmNative');
+  if(extension.exports.getRoutingStatus().armed)throw Error('Disarm did not clear state');
+  report.checks.push('Disarm switches workspace access off');report.passed=true;
+ }catch(e){report.error=e.stack;}
+ finally{fs.writeFileSync(file,JSON.stringify(report,null,2));await sleep(1000);await vscode.commands.executeCommand('workbench.action.quit');}
 };

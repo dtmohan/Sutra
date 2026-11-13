@@ -35,7 +35,7 @@ def safe_path(workspace, name):
 
 def save_contract(s, session, data, workspace):
     goal=data.get('goal','').strip(); constraints=data.get('constraints',{})
-    if not goal or len(goal)>1000: raise InvalidUpdate('Goal must be 1..1000 characters')
+    if not goal or len(goal)>1800: raise InvalidUpdate('Goal must be 1..1800 characters')
     if not isinstance(constraints,dict) or set(constraints)-CONSTRAINT_KEYS: raise InvalidUpdate('Unsupported constraint')
     paths=constraints.get('allowed_paths',[])
     if not isinstance(paths,list) or not 1<=len(paths)<=8: raise InvalidUpdate('Choose 1..8 exact workspace paths')
@@ -148,10 +148,11 @@ def state(s,meta,workspace):
         try:note=s.load_result(session,checkpoint)
         except (PageFault,InvalidUpdate) as exc:warning='Previous working note withheld: '+str(exc);checkpoint=None
     from host_actions import execution_context
+    from native_access import read_scope
     return {'session':session,'workspace':str(workspace),'model':meta.get('model','local-assistant:latest'),
             'contract':s.current_contract(session),'sources':sources,'checkpoint':checkpoint,
             'last_result':note,'warning':warning,'ledger_valid':s.verify_invocations(session,complete=False),
-            'execution':execution_context(s,session,workspace)}
+            'execution':execution_context(s,session,workspace),'read_scope':read_scope(s,session)}
 
 
 def dispatch(s,meta,workspace,root,request,provider=None):
@@ -349,6 +350,13 @@ def _handle(root,workspace,request):
             temp=metadata.with_suffix('.tmp');temp.write_text(canonical(meta));temp.replace(metadata)
             from repository_tools import execute
             execute(s,meta['active'],workspace,root,'catalog',resource_check=False)
+            if request.get('conversation_id'):
+                from native_access import bind
+                bind(s,meta['active'],request['conversation_id'])
+            result=state(s,meta,workspace)
+        elif op=='native_permissions':
+            from native_access import grant
+            grant(s,meta,workspace,request)
             result=state(s,meta,workspace)
         elif op=='chat_answer':
             if not meta.get('active') or not s.snapshot(meta['active'])['constraints'].get('auto_review'):raise InvalidUpdate('Start a Karma chat review task first')

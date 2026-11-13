@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.19.0 — model-aware conversation memory and one-step arming
+
+- Replace the fixed 1,000-character working note with a generation-budget-derived
+  limit and installed-model context metadata (including configured `num_ctx`).
+- Keep exact recent turns, user-quoted facts and explicit constraints; store older
+  turns as immutable Smriti pages. Budgeted TOC, lexical retrieval and governed
+  model page requests avoid replaying the complete long conversation.
+- Restore compatible 0.16–0.18 conversation data without accepting stale action
+  approvals. Missing, corrupt or quarantined ancestors still stop restoration.
+- Arm with one yes/no confirmation for workspace reading. Create/resume a task
+  from the prompt. Request exact Python edit/test permissions when needed and
+  retain budgets across permission changes, including interruption recovery.
+- Show conversation allocation and saved/omitted turn counts in Sutra Monitor.
+- Preserve the canonical STP kernel byte for byte.
+
+
 ## 0.18.0 — combined monitor and host token sizing
 
 - Expand the docked panel into **Sutra Monitor**: token history, CPU/GPU Celsius,

@@ -16,6 +16,7 @@ MODELS = {'low': 'small', 'mid': 'medium', 'high': 'large'}
 
 class Fake:
     budget = Budget(24576, 4096, 256)
+    context_metadata = {'model_info': {'general.architecture': 'qwen', 'qwen.context_length': 32768}}
     def __init__(self, model='small', fault=None):
         self.model, self.fault, self.payloads = model, fault, []
     def call(self, cid, system, p, schema):
@@ -47,7 +48,7 @@ class ConversationTests(unittest.TestCase):
         return chat.answer(self.s, self.meta, self.storage,
                            {'prompt': prompt, 'parent': parent, 'tier': tier, 'models': MODELS}, provider or Fake())
 
-    def test_fresh_call_and_model_switch_use_receipted_summary_not_transcript(self):
+    def test_fresh_call_and_model_switch_restore_recent_verbatim_turns(self):
         m = Fake()
         first = self.ask('Old raw conversation detail that should not be replayed', provider=m)
         iid = first['result']['invocation_id']
@@ -58,7 +59,7 @@ class ConversationTests(unittest.TestCase):
         self.assertTrue(second['result']['admission']['admitted'])
         self.assertEqual(first['session'], second['session'])
         self.assertEqual(m.payloads[0]['contract'], n.payloads[0]['contract'])
-        self.assertNotIn('Old raw conversation', canonical(n.payloads))
+        self.assertIn('Old raw conversation', canonical(n.payloads))
         self.assertIn('Marigold', n.payloads[0]['memory']['summary_unverified'])
         self.assertEqual(usage(self.s, first['session'])['used']['calls'], 2)
         self.assertTrue(self.s.verify_invocations(first['session']))
@@ -89,7 +90,7 @@ class ConversationTests(unittest.TestCase):
                   lambda r,p:r.pop('context_binding'),
                   lambda r,p:r.update(context_binding='forged'),
                   lambda r,p:r.update(intent='run_tests'),
-                  lambda r,p:r.update(summary='x'*1001)]
+                  lambda r,p:r.update(summary='x'*(p['memory_allocation']['summary_max_chars']+1))]
         for fault in faults:
             with self.subTest(fault=fault):
                 m = Fake(fault=fault); out = self.ask(provider=m)

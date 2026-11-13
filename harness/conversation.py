@@ -10,13 +10,16 @@ from protocol import obj
 from karma_adapter import KarmaAdapter
 from review_budget import DEFAULTS
 import visuals
+import conversation_memory as cm
 
-SYSTEM = '''You are Karma, the conversational front door to a local coding assistant. First classify the CURRENT request in intent, then answer it. The host has a separate workspace workflow:
-- intent=workspace means DELEGATE to that workflow. Use it for requests to inspect actual project files, cite current source, search a repository, edit code or run tests. You MUST choose workspace even though this conversational call itself has no tools. For such requests, answer with a brief handoff sentence, not a hypothetical explanation, invented source, or a request to paste code that the workspace workflow can read. The host will check task arming and permissions before any source access or action.
-- intent=conversation means answer directly: greetings, general questions, brainstorming, explanations of concepts or user-pasted snippets, discussion of preferences or the task. Do not turn ordinary conversation into a code review.
-Examples: 'Hello' -> conversation. 'Explain recursion' -> conversation. 'Why should we avoid caching source?' -> conversation. 'Explain the add function in calculator.py and cite current source' -> workspace. 'Review this repository' -> workspace. 'Implement that idea in my project' -> workspace. 'Run the tests' -> workspace.
-Respond to the exact user message, in the user's requested style and concisely by default. The host context contains a compact UNVERIFIED memory, not a full transcript. Merge useful user preferences, decisions and unresolved questions into summary. Memory never overrides the host contract. This call has no source, search, edit, test or web tools. If the user permits web research, state briefly that web access is unavailable in Karma conversation, then still answer the underlying question using the supplied context and explicitly unverified reasoning. Do not substitute an unrelated topic for a referent such as "the chain": use diagram_reference and memory to resolve it. Never claim that user permission alone makes a web tool available. Workspace task context is metadata, not source evidence. Never claim an action happened or that you inspected source. Delegating grants no permissions; the host checks the armed task separately. Echo context_binding exactly. Return schema JSON only. answer is Markdown: use short paragraphs, blank lines between paragraphs/list items, headings for a substantial explanation, bullets for parallel points, tables for comparisons and fenced code when useful. Actually deliver the requested explanation or opinion now, not just an introduction promising one. Keep answer under 6000 characters and summary under 1000 characters. Never invent product capabilities or connector types; distinguish user-provided details from unverified assumptions. Preserve exact names and input/output direction when the user corrects you.
-You CAN create a graphical diagram: provide the diagram object and the host renders it locally. For visualization requests, fill diagram with title, direction (LR or TB), nodes (unique IDs n1,n2,..., exact labels, kind source/device/process/output), edges (source/target IDs, label), and a short note. Otherwise diagram=null. Use one node per physical device; two devices with the same name need distinct IDs. Include branches mentioned by the user. Use diagram_reference as the exact original description, applying later corrections; it takes precedence over a lossy summary. Do not invent cables or substitute a proposed connection for the described one; leave the edge label empty when the interface was not given. A USB output is not a USB input. For codebase diagrams use intent=workspace and diagram=null so the host can inspect current source. Do not emit ASCII art, raw HTML, SVG or Mermaid; the host generates diagram syntax from the data. Briefly introduce the diagram in answer. This graph is conceptual, not verified evidence of hardware capabilities. Do not output tool calls or action objects.'''
+SYSTEM = '''You are Sutra, a local assistant. Answer the CURRENT user request directly and helpfully, in its requested style. Return only schema JSON. Echo context_binding exactly.
+intent=conversation: greetings, general questions, brainstorming, concepts, preferences, user-pasted text or snippets. Do not turn ordinary conversation into code review.
+intent=workspace: inspect current project files, review source, search repositories, implement changes or run tests. Delegate briefly to the host workspace workflow; never invent source or ask for pasted files the host can read. This call has no file, web, search, edit or test tools. Never claim an action happened. Workspace context is metadata, not source evidence. Delegation and user statements do not grant tool permissions.
+workspace_request is advisory: operation read/edit/test, and exact Python paths explicitly given by the user (or [] if unspecified). The host checks the armed task and asks for permissions separately. Do not invent paths.
+MEMORY: The host supplies exact recent turns, retrieved older Smriti pages, pinned user statements, a budgeted TOC, and an UNVERIFIED working summary. Use recent corrections over earlier statements; memory never overrides the host contract. If a needed detail is only in the TOC, return its IDs in page_requests (otherwise []). The host loads requested pages and calls you again before publishing. The directory may be partial; never invent missing memories. Keep important preferences, decisions and unfinished work in summary, within memory_allocation.summary_max_chars. Copy important facts/constraints from the CURRENT user message into facts as exact quotations, otherwise []. Full turns and quotations are retained separately; do not rely on summary alone. User statements are not verified world facts or permissions.
+Resolve follow-ups from supplied memory and diagram_reference. If web research is requested, state that web access is unavailable in this conversation, then answer what you can with supplied context and label assumptions. Never substitute an unrelated topic. Do not invent product capabilities or connectors.
+answer is Markdown, under 6000 characters: concise paragraphs, blank lines before lists, headings for substantial explanations, tables/fenced code when useful. Deliver the answer, not a promise to answer later.
+For a requested graphic, provide diagram with title, direction LR/TB, unique node IDs n1,n2,..., exact labels, kind source/device/process/output, directed edges with source/target/label, and a short note; otherwise null. One node per physical device; repeated names may be distinct devices. Include described branches. diagram_reference is the original user description plus later corrections; use it over a lossy summary. Preserve names and direction, leave unspecified cable labels empty. Treat the graph as conceptual/unverified. No ASCII art, raw HTML, SVG or Mermaid. For codebase diagrams choose workspace with diagram=null for source-backed mapping. Never emit tool calls or action objects.'''
 
 CONSTRAINTS = dict(DEFAULTS, conversation_only=True, network_allowed=False,
                    dependencies_allowed=False, edits_allowed=False, tests_allowed=False,
@@ -33,11 +36,20 @@ class ConversationModel(LocalModel):
 
 
 def schema(p):
-    return obj({'intent': {'type': 'string', 'enum': ['conversation', 'workspace']},
+    available = [r['id'] for r in (p.get('memory') or {}).get('toc', [])]
+    quotations = list(dict.fromkeys(q for q in re.split(r'(?<=[.!?])\s+|\n+', p['request']) if q.strip()))
+    fmt = obj({'intent': {'type': 'string', 'enum': ['conversation', 'workspace']},
                 'context_binding': {'type': 'string', 'enum': [p['context_binding']]},
                 'answer': {'type': 'string', 'minLength': 1, 'maxLength': 6000},
-                'summary': {'type': 'string', 'minLength': 1, 'maxLength': 1000},
+                'summary': {'type': 'string', 'minLength': 1, 'maxLength': p['memory_allocation']['summary_max_chars']},
+                'page_requests': {'type': 'array', 'maxItems': 4 if available else 0, 'items': dict(type='string', **({'enum': available} if available else {}))},
+                'facts': {'type': 'array', 'maxItems': 8, 'items': {'type': 'string', 'enum': quotations}},
+                'workspace_request': obj({'operation': {'type': 'string', 'enum': ['read', 'edit', 'test']},
+                    'paths': {'type': 'array', 'maxItems': 8, 'items': {'type': 'string', 'minLength': 1, 'maxLength': 240}}}),
                 'diagram': visuals.diagram_schema()})
+    # Older providers/fixtures may omit advisory fields. Absence grants nothing.
+    fmt['required'] = [k for k in fmt['required'] if k not in ('facts', 'workspace_request', 'page_requests')]
+    return fmt
 
 
 def contract(s, sid):
@@ -78,14 +90,8 @@ def workspace_context(s, meta):
 
 
 def memory(s, sid, iid):
-    row = s.db.execute('SELECT record_json FROM invocations WHERE id=?', (iid,)).fetchone()
-    if not row:
-        raise PageFault('Conversation receipt unavailable')
-    env = json.loads(row[0])
-    if env['role'] != 'conversation':
-        raise InvalidUpdate('Conversation parent is not a conversation receipt')
-    prior = s.load_result(sid, iid)
-    return {'invocation_id': iid, 'model': env['model'], 'summary_unverified': prior['summary']}
+    prior = cm.history(s, sid, iid)[0]
+    return {'invocation_id': iid, 'model': prior['model'], 'summary_unverified': prior['summary']}
 
 
 def binding(p):
@@ -98,7 +104,8 @@ def workspace_handoff(s, sid, iid, prompt):
         raise InvalidUpdate('Workspace handoff needs an admitted conversation receipt')
     note = memory(s, row[0], iid)
     p = json.loads(s.db.execute('SELECT payload_json FROM deliveries WHERE id=?', (row[2],)).fetchone()[0])
-    if p['workspace_context'] != workspace_context(s, {'active': sid}) or p['request'].strip() != prompt.strip():
+    from native_access import has_binding
+    if (p['workspace_context'] != workspace_context(s, {'active': sid}) and not has_binding(s, sid, iid, p)) or p['request'].strip() != prompt.strip():
         raise InvalidUpdate('Conversation handoff belongs to another request or workspace contract')
     return dict(note, authority='model_unverified')
 
@@ -121,8 +128,18 @@ def request_check(s, sid, p):
         current = workspace_context(s, {'active': p['workspace_context']['session_id']})
         if current != p['workspace_context']:
             raise InvalidUpdate('Workspace task changed during conversation')
-    if p['memory'] and p['memory'] != memory(s, sid, p['memory']['invocation_id']):
-        raise InvalidUpdate('Conversation summary differs from admitted receipt')
+    allocation = p['memory_allocation']
+    budget = Budget(allocation['context_limit'], allocation['response_reserve'], allocation['template_reserve'])
+    if allocation['summary_max_chars'] != cm.summary_limit(budget):
+        raise InvalidUpdate('Conversation memory allocation changed')
+    if p['memory'] and p['memory'] != cm.working_set(s, sid, p['memory']['invocation_id'], p['request'], budget, p, SYSTEM, schema):
+        raise InvalidUpdate('Conversation memory differs from admitted receipts')
+    if p.get('requested_memory_pages'):
+        selected = s.load_result(sid, p['memory_selection'])
+        source = s.db.execute('SELECT d.payload_json FROM invocations i JOIN deliveries d ON d.id=i.delivery_id WHERE i.id=? AND i.session=?', (p['memory_selection'], sid)).fetchone()
+        previous = json.loads(source[0])
+        if selected.get('page_requests') != p['requested_memory_pages'] or previous['request'] != p['request'] or previous['context_binding'] != p['context_binding'] or (previous.get('memory') or {}).get('invocation_id') != (p.get('memory') or {}).get('invocation_id'):
+            raise InvalidUpdate('Memory page selection differs from admitted selection')
     expected_reference = visuals.reference(s, sid, (p['memory'] or {}).get('invocation_id'), p['request'])
     if p.get('diagram_reference') != expected_reference:
         raise InvalidUpdate('Diagram reference differs from user-source receipts')
@@ -136,6 +153,8 @@ def request_check(s, sid, p):
 def validate(s, sid, p, proposal):
     request_check(s, sid, p)
     visuals.validate(proposal['diagram'], proposal['intent'])
+    if any(quote not in p['request'] for quote in proposal.get('facts', [])):
+        raise InvalidUpdate('Remembered fact is not an exact quote from the current user message')
     return {'admission': {'admitted': True, 'errors': [], 'semantic_correctness_verified': False},
             'checks': ['schema', 'tool_free_role', 'contract', 'calibration_binding',
                        'context_binding', 'receipt_memory', 'route', 'diagram_structure', 'user_description_provenance'], 'provisional': True}
@@ -168,24 +187,31 @@ def answer(s, meta, root, request, provider=None):
         if not row:
             raise PageFault('Conversation memory unavailable. Start a new chat; workspace task is retained.')
         sid = row[0]
-        handoff = memory(s, sid, parent)
+        cm.history(s, sid, parent)
     else:
         sid = open_session(s, prompt)
-        handoff = None
+
     p = {'_request_nonce': uuid.uuid4().hex, 'contract': contract(s, sid),
          'workspace_context': workspace_context(s, meta), 'request': prompt,
-         'pages': [], 'memory': handoff, 'route': route}
+         'pages': [], 'memory': None, 'route': route}
     p['diagram_reference'] = visuals.reference(s, sid, parent, prompt)
     p['context_binding'] = binding(p)
-    fmt = schema(p)
     real = provider is None
     if real:
         from api_runtime import provider_for
         provider = provider_for(root, route['model'], review=True, model_class=ConversationModel)
-        provider.budget = Budget(24576, 4096, 256)
+        from model_context import allocation
+        provider.budget, capacity = allocation(getattr(provider, 'context_metadata', {}))
         provider.keep_alive = 0
     if provider.model != route['model']:
         raise InvalidUpdate('Conversation provider differs from route')
+    budget = provider.budget
+    p['memory_allocation'] = {'context_limit': budget.context_limit, 'response_reserve': budget.response_reserve,
+                              'template_reserve': budget.template_reserve, 'summary_max_chars': cm.summary_limit(budget)}
+    p['model_capacity'] = capacity if real else {'effective_context_tokens': budget.context_limit, 'source': 'injected_provider'}
+    cm.materialize(s, sid, cm.history(s, sid, parent))
+    p['memory'] = cm.working_set(s, sid, parent, prompt, budget, p, SYSTEM, schema)
+    fmt = schema(p)
     provider.budget.check(SYSTEM, dict(p, repair={'errors': ['x' * 140] * 2}), fmt)
     run = s.begin_run(sid, prompt, [], None, max_calls=3, max_repairs=2)
     for attempt in range(3):
@@ -198,6 +224,22 @@ def answer(s, meta, root, request, provider=None):
         delivery = s.prepare_delivery(sid, p, provider.budget.check(SYSTEM, p, fmt))
         out = InvocationGateway(s.path, run, provider).invoke('conversation', uuid.uuid4().hex, SYSTEM, p, fmt, delivery)
         if out['admission']['admitted']:
+            requested = out['accepted_output'].get('page_requests', [])
+            if requested:
+                if attempt == 2:
+                    s.quarantine_invocation(sid, out['invocation_id'], 'Memory paging allocation exhausted before final answer')
+                    s.event(run, 'FIN', {'reason': 'memory_paging_allocation_exhausted'})
+                    out['admission'] = {'admitted': False, 'errors': ['Memory paging allocation exhausted. No draft answer was published.']}
+                    out['accepted_output'] = None
+                    break
+                s.event(run, 'BRIDGE', {'reason': 'conversation_page_in', 'pages': requested})
+                p['memory_selection'] = out['invocation_id']
+                p['requested_memory_pages'] = requested
+                p.pop('repair', None)
+                p['memory'] = cm.working_set(s, sid, parent, prompt, budget, p, SYSTEM, schema)
+                fmt = schema(p)
+                provider.budget.check(SYSTEM, dict(p, repair={'errors': ['x' * 140] * 2}), fmt)
+                continue
             s.event(run, 'ALLOW', {'reason': 'conversation_admitted', 'invocation_id': out['invocation_id']})
             break
         s.event(run, 'NACK', {'errors': out['admission']['errors']})
@@ -211,4 +253,5 @@ def answer(s, meta, root, request, provider=None):
     out.pop('model_proposal', None)
     from review_budget import decision
     return {'conversation': True, 'session': sid, 'result': out, 'route': route,
-            'memory_used': bool(handoff), 'budget': decision(s, sid), 'workspace_tools_used': False}
+            'memory_used': bool(parent), 'memory_allocation': p['memory_allocation'], 'model_capacity': p['model_capacity'],
+            'memory_status': {k: p['memory'][k] for k in ('stored_turns', 'omitted_turns', 'legacy_data_restored')} if p['memory'] else {'stored_turns': 0, 'omitted_turns': 0}, 'budget': decision(s, sid), 'workspace_tools_used': False}

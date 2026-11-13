@@ -33,9 +33,9 @@ function setup(saved={}){
  assert.deepEqual(h.uiCalls[0],['workbench.panel.chat.view.copilot.focus']);assert.deepEqual(h.uiCalls[1],['workbench.action.chat.newLocalChat']);
  assert.deepEqual(h.uiCalls[2],['workbench.action.chat.open',{modelSelector:{vendor:'karma',id:'karma-auto',family:'karma'},toolsInclude:['karma_native_action']}]);
  assert(!('query' in h.uiCalls[2][1]));checks.push('explicit native chat command saves unique default, selects scoped chat model, preserves disarming and never submits a prompt');
- const setupReply=await h.send();assert(setupReply.some(p=>p.value?.includes('Arm task')));assert.equal(h.calls.length,1);assert.equal(h.calls[0].op,'conversation');checks.push('disarmed workspace request is conversational advice and cannot access source or create a task');
+ const setupReply=await h.send();assert(setupReply.some(p=>p.value?.includes('Arm Sutra')));assert.equal(h.calls.length,1);assert.equal(h.calls[0].op,'conversation');checks.push('disarmed workspace request is conversational advice and cannot access source or create a task');
  assert.equal(h.controller.status().routing.stage,'needs_workspace_scope');assert(!h.controller.status().routing.active);assert(!h.controller.status().label.includes('enabled'));
- await h.arm();assert.equal(h.picks(),2);assert(h.controller.status().armed);assert(h.controller.status().label.includes('routing unverified'));assert(!h.calls.some(c=>c.op==='new'));checks.push('command arguments cannot bypass task selection and arming confirmation');
+ await h.arm();assert.equal(h.picks(),0);assert(h.controller.status().armed);assert(h.controller.status().label.includes('routing unverified'));assert(!h.calls.some(c=>c.op==='new'));checks.push('one confirmation arms reading; command arguments cannot bypass it or create a task');
  const history=[{role:1,content:[new Text('OLD SECRET HISTORY')]},{role:2,content:[new Text('old answer')]},{role:1,content:[new Text('<userRequest>Fix retry</userRequest>')]}];
  const parts=await h.send('low',history),call=parts.find(p=>p instanceof Call);assert.equal(call.name,'karma_native_action');assert(!h.calls.some(c=>c.op==='native_execute'));
  assert(parts.some(p=>p instanceof Text&&p.value.includes('Sutra routing confirmed')&&p.value.includes('protocol invocation inv-')));assert(h.routeEvents.some(r=>r.stage==='received'&&r.active));assert.equal(h.routeEvents.at(-1).stage,'admitted');assert(!h.routeEvents.at(-1).active);assert(h.controller.status().label.includes('routing unverified'));checks.push('routing proof comes from actual provider entry and protocol invocation; idle and armed status never claims focused-chat coverage');
@@ -61,11 +61,11 @@ function setup(saved={}){
  const unsupported=setup();unsupported.v.commands.getCommands=async()=>[];await assert.rejects(unsupported.commands['karma.useNativeChat'](),/cannot open/);assert.equal(unsupported.cfg.defaultModel,undefined);
  const failed=setup();failed.cfg.defaultModel='old';failed.cfg.defaultToCopilotHarness=true;failed.v.commands.executeCommand=async()=>{throw Error('Open failed');};await assert.rejects(failed.commands['karma.useNativeChat'](),/Open failed/);assert.equal(failed.cfg.defaultModel,'old');assert.equal(failed.cfg.defaultToCopilotHarness,true);assert.equal(failed.cfg['editor.preferCopilotHarness'],undefined);
  checks.push('policy, workspace overrides, unsupported chat and opening failures do not leave misleading defaults or claim routing');
- const pendingArm=setup();let pickDone;pendingArm.v.window.showQuickPick=()=>new Promise(resolve=>{pickDone=resolve;});const arming=pendingArm.arm();
+ const pendingArm=setup();let pickDone;pendingArm.v.window.showWarningMessage=()=>new Promise(resolve=>{pickDone=resolve;});const arming=pendingArm.arm();
  while(!pickDone)await new Promise(r=>setImmediate(r));assert(pendingArm.controller.status().arming);assert.equal(pendingArm.controller.status().label,'Sutra: finish arming');
- const again=pendingArm.arm();assert.equal(again,arming);const during=await pendingArm.send();assert(during.some(p=>p.value?.includes('Choose a task')));assert.equal(pendingArm.controller.status().routing.stage,'awaiting_confirmation');
+ const again=pendingArm.arm();assert.equal(again,arming);const during=await pendingArm.send();assert(during.some(p=>p.value?.includes('Confirm Arm Sutra')));assert.equal(pendingArm.controller.status().routing.stage,'awaiting_confirmation');
  await pendingArm.commands['karma.useNativeChat']();assert(!pendingArm.uiCalls.some(c=>c[0]==='workbench.action.chat.newLocalChat'));pickDone(undefined);await arming;assert(!pendingArm.controller.status().arming);assert(!pendingArm.controller.status().armed);assert(pendingArm.controller.status().reason.includes('cancelled'));assert(!pendingArm.calls.some(c=>c.op==='native_work'));
- pendingArm.v.window.showQuickPick=async choices=>choices[0];await pendingArm.arm();assert(pendingArm.controller.status().armed);assert(pendingArm.uiCalls.some(c=>c[0]==='notice'&&c[1].startsWith('Sutra is armed')));
+ pendingArm.v.window.showWarningMessage=async(_m,_o,label)=>label;await pendingArm.arm();assert(pendingArm.controller.status().armed);assert(pendingArm.uiCalls.some(c=>c[0]==='notice'&&c[1].startsWith('Sutra is armed')));
  checks.push('pending arming is visible; repeated arm/open and requests cannot interrupt or bypass the confirmation; cancellation recovers');
  const greeting=setup();const raw='  Hello\nPlease brainstorm with me.  ';const hello=await greeting.send('low',[{role:1,content:[new Text(raw)]}]);
  assert(hello.some(p=>p.value?.includes('conversation details')));assert.equal(greeting.calls[0].prompt,raw);assert.equal(greeting.calls[0].op,'conversation');assert.equal(greeting.calls.length,1);assert.equal(greeting.controller.status().routing.stage,'conversation');assert(!greeting.controller.status().armed);assert(greeting.controller.status().label.includes('chat ready'));
@@ -116,5 +116,22 @@ function setup(saved={}){
  const background=setup(),priorBackground=await background.send('low',[{role:1,content:[new Text('Hello')]}]);await background.arm();let resumeWork,workStarted;const workEntered=new Promise(r=>workStarted=r);background.hold(()=>new Promise(r=>{resumeWork=r;workStarted();}));const workRunning=background.send();await workEntered;const activeId=background.controller.status().routing.id;
  const backgroundSummary=await background.send('low',[{role:1,content:priorBackground},{role:1,content:[new Text(SUMMARY)]}]);assert(backgroundSummary.some(p=>p.value?.includes('KARMA_CONTEXT_V1')));assert.equal(background.controller.status().routing.id,activeId);assert(background.controller.status().routing.active);background.commands['karma.disarmNative']();resumeWork();await assert.rejects(workRunning,/disarmed or cancelled/);
  checks.push('current user text cannot supply a checkpoint; workspace secrets isolate signatures; background compaction does not race or overwrite active inference state');
+ const scoped=setup();scoped.st.auto={pending_files:0};scoped.st.contract.contract.constraints={allowed_paths:['.'],edits_allowed:false,tests_allowed:false,network_allowed:false,dependencies_allowed:false};
+ const baseRequest=scoped.deps.request;let allow=false,grants=0;
+ scoped.deps.request=async(m,t)=>{
+  if(m.op==='native_permissions'){grants++;assert.equal(m.operation,'edit');assert.deepEqual(m.paths,['code.py']);scoped.st.contract.contract_hash='permitted-v2';Object.assign(scoped.st.contract.contract.constraints,{native_task:true,allowed_paths:['code.py'],edits_allowed:true});return structuredClone(scoped.st);}
+  const data=await baseRequest(m,t);if(m.op==='conversation')data.result.accepted_output.workspace_request={operation:'edit',paths:['code.py']};return data;
+ };
+ await scoped.arm();assert.equal(scoped.picks(),0);
+ scoped.v.window.showWarningMessage=async(_m,_o,label)=>allow?label:undefined;
+ const decline=await scoped.send();assert.equal(grants,0);assert(scoped.controller.status().armed);assert(!scoped.calls.some(x=>x.op==='native_work'));assert(decline.some(p=>p.value?.includes('Permission was not granted')));
+ allow=true;const approved=await scoped.send();assert.equal(grants,1);assert(approved.some(p=>p instanceof Call));assert.equal(scoped.calls.find(x=>x.op==='native_work').contract_hash,'permitted-v2');
+ scoped.kind('report');await scoped.send('high');assert.equal(grants,1);assert.equal(scoped.calls.filter(x=>x.op==='native_work').at(-1).contract_hash,'permitted-v2');
+ checks.push('contextual permission decline keeps reading armed; approval binds exact files; switching models retains the new contract without repeating permission setup');
+ const fresh=setup();delete fresh.st.session;delete fresh.st.contract;let created=0;const freshRequest=fresh.deps.request;
+ fresh.deps.simpleChat=async()=>({notice:{message:'Read-only review fixture'}});
+ fresh.deps.request=async(m,t)=>{if(m.op==='auto_new'){created++;assert.equal(m.goal,'Review this project');assert.deepEqual(m.roots,['.']);assert(m.conversation_id);Object.assign(fresh.st,{session:'read-task',auto:{},contract:{contract_hash:'read-hash',contract:{goal:m.goal,constraints:{allowed_paths:['.'],edits_allowed:false,tests_allowed:false}}}});return structuredClone(fresh.st);}return freshRequest(m,t);};
+ await fresh.arm();assert.equal(created,0);await fresh.send('low',[{role:1,content:[new Text('Review this project')]}]);assert.equal(created,1);assert.equal(fresh.picks(),0);assert(fresh.controller.status().armed);
+ checks.push('arming does not create a task; first workspace request creates a read-only task from the prompt without goal or mode pickers');
  console.log(JSON.stringify({passed:true,checks},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;});

@@ -1,4 +1,4 @@
-Sutra 0.18.0 — tokens, system telemetry and kernel status together
+Sutra 0.19.0 — model-aware memory and one-step arming
 
 Previously Karma. Your installed extension ID and saved settings are preserved.
 
@@ -6,8 +6,10 @@ GET STARTED
 Run Sutra: Configure Local Models to select installed Ollama models.
 Run Sutra: Open Governed Chat (Sutra Auto). This saves the compatible Local chat
 and model for new chats. Existing chats retain their own selected model.
-Chat normally. Arm a scoped task only when workspace tools are needed.
-Use Sutra: Arm Task and Open Chat for source access, proposed edits and tests.
+Chat normally. Use Sutra: Arm and Open Chat when workspace reading is needed.
+One yes/no confirmation arms Sutra. Your next workspace prompt creates or resumes
+a task. Edits/tests ask for concrete file permissions at the point of need, then
+confirm the exact action. There are no goal or workflow pickers during arming.
 The review participant is @sutra. Model tiers are Sutra Auto / Low / Mid / High.
 
 ROUTING AND CONTEXT
@@ -31,10 +33,18 @@ installed-model dropdowns. Temperature readings are advisory.
 
 COMPATIBILITY
 Internal karma.* settings, command IDs and model IDs are retained intentionally.
-The canonical STP kernel and all harness policy files are unchanged in 0.18.0.
+The canonical STP kernel is unchanged. Harness adapters/policies are updated.
+Conversation data from 0.16–0.18 is validated and restored; historical executable
+proposals remain subject to stale-policy checks.
 VS Code now receives an offline tokenizer estimate instead of a byte count.
 Its compaction threshold remains under VS Code's control. Harness budget charges
-and measured Ollama token counts are unchanged. Conversation memory is still lossy.
+and measured Ollama token counts remain distinct. Smriti now preserves full turns
+in receipt-backed pages, includes exact recent turns and pinned user quotations,
+and retrieves older pages by relevance or model request. The working summary
+uses the output allocation instead of a fixed 1,000-character cap. Model context
+comes from installed metadata/configuration, capped at the tested 65,536-token
+runtime allocation. Pinned statements that cannot fit cause a visible stop.
+This preserves provenance, not guaranteed semantic comprehension or recall.
 Conversation has no web tools. Diagrams are conceptual, not factual verification.
 Python edits/tests are limited to supported operating-system sandbox adapters.
 

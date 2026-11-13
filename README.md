@@ -16,8 +16,9 @@ experimental local tool, not a guarantee that model answers are correct.
    installed models.
 4. Run **Sutra: Open Governed Chat (Sutra Auto)**. This saves the compatible Local
    chat and model selection for new chats. Existing chats retain their selection.
-5. Chat normally. For workspace access, use **Sutra: Arm Task and Open Chat** to
-   select a task and scope. Proposed edits and tests require confirmation.
+5. Chat normally. For workspace access, use **Sutra: Arm and Open Chat**. One confirmation enables reading. The first
+   workspace prompt creates or resumes a task; scoped edits and tests request
+   additional permissions when needed, followed by confirmation of the exact action.
 
 The native model picker offers **Sutra Auto**, **Sutra Low**, **Sutra Mid** and
 **Sutra High**. The review participant is **@sutra**. The dashboard has Overview,
@@ -44,7 +45,7 @@ The previous **Sutra: Open Token Usage** command remains an alias.
 VS Code compacts its assembled conversation when its context budget is tight.
 Sutra preserves an authenticated checkpoint for recognized compaction requests;
 it does not send those requests to Ollama. See [context and compaction](docs/context-and-compaction.md)
-for the distinction between host estimates, measured tokens and lossy conversation memory.
+for model-specific allocations, verbatim recent turns, pinned quotations and older-page retrieval. The working note is still unverified and retrieval is not a guarantee of semantic recall.
 
 A ready or armed badge does not prove that every VS Code prompt uses Sutra.
 Check the selected model and the response's invocation details. Direct Ollama

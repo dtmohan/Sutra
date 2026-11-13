@@ -1,45 +1,78 @@
 # Context and compaction
 
-VS Code sizes the assembled chat: instructions, tools, history, attachments and
-the current request. A one-sentence request can arrive in a nearly full chat.
-Compaction is a capacity operation, not a time expiry. VS Code reserves room for
-output and applies its own threshold. Sutra does not disable that mechanism.
+VS Code sizes its assembled chat: instructions, tools, history, attachments and
+the current request. Compaction is a capacity operation, not a time expiry. Sutra
+returns a signed local receipt pointer for the recognized host summary request,
+without calling Ollama. The next real request validates that pointer and its
+ancestry. Missing checkpoints are reported; unrelated chats are never used as a
+fallback. Recognition still depends on the host's summary-request format.
 
-Before 0.18.0, Sutra's `provideTokenCount` returned UTF-8 byte length. English
-text and code could therefore appear much larger than their tokenized size.
-Version 0.18.0 uses an offline cl100k_base BPE estimate with 15% headroom. It is
-approximate for Ollama models. It changes only the VS Code sizing callback; the
-64,000-token advertised host input window, measured receipts and conservative
-backend admission checks stay unchanged. No prompt text or response is cached.
+The VS Code token-count callback uses an offline cl100k estimate with 15% headroom,
+rather than the old UTF-8 byte count. This is approximate for Qwen. The advertised
+host input window remains 64,000 tokens. Host chat sizing, actual Ollama counts,
+and conservative backend allocation charges are three different quantities.
 
-The installed VS Code harness issues a known conversation-summary instruction
-when compacting. Sutra recognizes that instruction and returns a signed local
-receipt pointer without a model call. A later invocation revalidates the pointer.
-If no authenticated checkpoint can be recovered, Sutra reports missing context.
-This integration depends on the recognized host instruction; future host changes
-may require compatibility updates.
+## Model-aware conversation memory
 
-The compact model input is different from VS Code's assembled history. Sutra
-passes the current extracted user request as the user message, with its approved
-contract and compact memory in a separate system context. Ordinary conversation
-memory is the last admitted model-written summary, capped at 1,000 characters.
-Diagram references retain selected original user wording separately. Workspace
-goals, permissions and constraints are stored and validated separately from prose.
+Starting in 0.19, the conversation adapter reads the installed model's declared
+context length and configured `num_ctx`. It allocates the lower of those limits
+and the tested local runtime cap of 65,536 tokens. Missing model metadata uses an
+explicit conservative 8,192-token fallback. OS memory/thermal admission still
+applies: an advertised model maximum is not a promise that its KV cache fits RAM.
+The dashboard shows the effective allocation and output reservation.
 
-| Current choice | Benefit | Limitation |
-| --- | --- | --- |
-| Fresh model calls with compact context | Lower input cost; portable across models | Older conversational nuance can be lost |
-| Signed checkpoint and versioned contracts | Verifiable ancestry and stable workspace constraints | Authenticity does not establish semantic completeness |
-| Host compaction intercepted as a pointer | No extra local summarization call or repeated summary-of-summary | Depends on host request format and checkpoint availability |
-| Approximate host tokenizer | Avoids byte inflation without runtime network calls | Not an exact tokenizer for every installed model |
+The output reservation is the lower of 4,096 tokens and one eighth of the context
+allocation. Half that reservation determines the working-note character cap.
+This is an output safety allocation, not a tokenizer-equivalence claim. Context
+admission still uses a conservative UTF-8 byte upper bound, including schema and
+reply reserve, through the unchanged Smriti adapter/kernel boundary. This can
+underuse the model's token window; it does not silently over-admit it.
 
-The monitor's token cards are measured model-call counts, not VS Code's current
-history size. The left-hand total can aggregate several calls. Neither quantity
-by itself establishes that the host is near its compaction threshold.
+Memory is assembled in this order:
 
-A future fidelity improvement is bounded verbatim recent turns plus explicit
-user facts/constraints and retrieval of older evidence. Disabling compaction or
-raising the advertised window arbitrarily would not repair missing summary facts.
+1. The full host contract, current request, pinned user quotations and explicit
+   constraint statements. A model can select important facts, but each must be an
+   exact quotation from the current user message. Statements are not verified
+   world facts or tool permissions. Explicit constraint-like lines are also
+   retained independently of model-selected facts.
+2. The immediately previous user/model turn verbatim, followed by a contiguous
+   recent window within its allocation. Later corrections remain visible in
+   chronological order; older statements are not silently rewritten.
+3. Relevant older turns from receipt-backed Smriti pages, plus a budgeted table
+   of contents. Lexical retrieval is deterministic. A model can request TOC IDs;
+   the host validates, pages them in and makes another fresh governed call before
+   publishing. Paging shares the three-call repair/dispatch allocation.
 
-References: [VS Code context](https://code.visualstudio.com/docs/agents/concepts/context)
-and [session compaction](https://code.visualstudio.com/docs/agents/run/sessions/manage-sessions).
+The model's working note is explicitly unverified and supplementary. Full turns
+remain in immutable invocation receipts, independently of summary length. Pages
+are derived from those receipts and checked against them. Conversation pages use
+an archival ten-year TTL; they are not assertions that old world facts remain
+current. Source-code reads continue to use their existing freshness checks.
+
+If protected statements, the latest turn or an explicitly requested page cannot
+fit, Sutra stops with an explanation instead of silently dropping them. Other
+older turns remain stored but may be outside the delivered working set. The TOC
+is itself budgeted, and fact selection/retrieval cannot guarantee perfect recall.
+A very long accumulation of pinned statements can require a larger allocation or
+a separate conversation. No semantic claims are delegated to the STP kernel.
+
+Compatible 0.16–0.18 conversation receipts are checked as historical data. This
+migration does not make old executable proposals or workspace checkpoints valid
+under a new policy. Quarantined ancestors remain blocked across migration and
+model changes. Native signed-checkpoint identifiers remain compatible.
+
+## Arming and permissions
+
+**Sutra: Arm and Open Chat** asks one yes/no question for workspace reading. It
+reuses an existing compatible task or creates a read-only task from the first
+workspace prompt. Conversation remains available without arming. Reload retains
+chat defaults and memory; workspace access is disarmed until the next confirmation.
+
+Edit/test permissions are requested in context. Exact paths supplied in the
+request avoid file pickers; unspecified paths require selection at that point.
+The current executor supports existing Python files (up to eight) and sandboxed
+unittest runs. Permission changes preserve the goal, other constraints and spent
+allocations, and invalidate stale proposals. Subsequent model switches use the
+same current contract. Network and dependencies remain disabled. The exact edit
+or test still receives an action confirmation. Arming does not intercept prompts
+sent to another provider; routing proof comes from a request entering Sutra.

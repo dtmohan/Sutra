@@ -43,7 +43,7 @@ function install(vscode,context,deps){
     setError(message){error=message;publish();},
     setStatus(value){
       const r=value?.routing;
-      routing=r?{active:!!r.active,stage:r.stage,model:r.model,memoryUsed:r.memoryUsed,memorySource:r.memorySource,conversationBudget:r.conversationBudget,invocationId:r.invocationId}:undefined;
+      routing=r?{active:!!r.active,stage:r.stage,model:r.model,memoryUsed:r.memoryUsed,memorySource:r.memorySource,memoryAllocation:r.memoryAllocation,memoryStatus:r.memoryStatus,modelCapacity:r.modelCapacity,conversationBudget:r.conversationBudget,invocationId:r.invocationId}:undefined;
       native=value?{enabled:value.enabled,armed:value.armed,label:value.label,compaction:value.compaction}:undefined;publish();
     },
     recordResponse(group){if(group?.calls?.length)item.tooltip='Latest completed stage / response: '+tokens.compact(group)+'\nClick for workspace history and per-stage counts.';},
