@@ -20,7 +20,7 @@ function latestRequest(vscode,messages){
   return {prompt,parent};
 }
 function install(vscode,context,deps){
-  let armPromise,armNotice=false,armingStep='',armed,activeCancel,arming=false,running=false,selecting=false,lastRoute='',routing,reason='Open Sutra chat to talk. Arm Sutra when you need workspace access.';
+  let armPromise,accessEpoch=0,armingStep='',armed,activeCancel,arming=false,running=false,selecting=false,lastRoute='',routing,reason='Open Sutra chat to talk. Arm Sutra when you need workspace access.';
   const memory=new NativeMemory(context);let lastCompaction;
   const tickets=new Map(),completed=new Map(),changed=new vscode.EventEmitter();
   const enabled=()=>vscode.workspace.getConfiguration('karma').get('nativeEnabled',true);
@@ -36,41 +36,38 @@ function install(vscode,context,deps){
     return {enabled:enabled(),arming,armingStep,selecting,armed:!!armed&&enabled(),working:running||live,session:armed?.session,scope:'Sutra model requests and Sutra action tool only',defaultModel:chat.get('defaultModel',''),defaultsReady,reason,lastRoute,label,explanation,routing:routing?{...routing}:null,compaction:lastCompaction};
   }
   function publish(){deps.onStatus(status());}
-  function disarm(why='Disarmed by user. Task and budget retained.'){armed=undefined;tickets.clear();completed.clear();activeCancel?.cancel();reason=why;publish();}
+  function disarm(why='Disarmed by user. Task and budget retained.'){accessEpoch++;armed=undefined;tickets.clear();completed.clear();activeCancel?.cancel();reason=why;publish();}
   const identity=st=>({session:st.session,contract_hash:st.contract?.contract_hash,calibration_hash:st.calibration?.binding?.hash});
-  function assertArmed(){if(arming)throw new Error('Task arming is in progress.');if(!enabled()||!armed)throw new Error('Sutra is not armed. Run Sutra: Arm and Open Chat.');if(deps.workspace()!==armed.workspace){disarm('Workspace changed.');throw new Error(reason);}return armed;}
+  function assertArmed(){if(arming)throw new Error('Task arming is in progress.');if(!enabled()||!armed)throw new Error('Sutra is not armed. Run Sutra: Arm Workspace Access.');if(deps.workspace()!==armed.workspace){disarm('Workspace changed.');throw new Error(reason);}return armed;}
   async function check(token){const a=assertArmed();if(!a.binding)throw new Error('No workspace task is bound yet.');const st=await deps.request({op:'state'},token);if(armed!==a||JSON.stringify(identity(st))!==JSON.stringify(a.binding)){disarm('Task or calibration changed. Re-arm to accept the current contract.');throw new Error(reason);}return st;}
   function setArmingStep(message){armingStep=message;publish();}
-  function beginArm(){
+  function beginArm(owner){
     if(armPromise)return armPromise;
-    armPromise=arm().finally(()=>{armPromise=undefined;});return armPromise;
+    armPromise=arm(owner).finally(()=>{armPromise=undefined;});return armPromise;
   }
-  function offerArm(){
-    if(armNotice||arming||armed||!enabled())return;
-    armNotice=true;
-    void vscode.window.showInformationMessage('Sutra received your prompt. Arm Sutra to authorize workspace reading. Conversation is already available.', 'Arm Sutra').then(choice=>{
-      if(choice==='Arm Sutra')return beginArm();
-    }).catch(error=>vscode.window.showErrorMessage(error.message));
-  }
-  async function arm(){
-    if(arming||running||routing?.active||selecting||deps.isBusy())throw new Error('Wait for the active Sutra request before arming.');
+  async function arm(owner){
+    // Only the current provider request may ask for access while it is running.
+    // Public commands ignore arguments; another extension cannot supply this owner.
+    const ownsRequest=()=>owner&&routing===owner.audit&&routing.active&&running&&activeCancel?.token===owner.token;
+    if(arming||selecting||deps.isBusy()||((running||routing?.active)&&!ownsRequest()))throw new Error('Wait for the active Sutra request before arming.');
     if(!enabled())throw new Error('Enable Sutra native chat first.');
-    if(armed)return;
-    let success=false;arming=true;armNotice=false;setArmingStep('Confirm Arm Sutra in the dialog. Workspace reading is enabled; edits and tests ask when needed.');
+    if(armed)return true;
+    const epoch=accessEpoch,workspace=deps.workspace();
+    const stillValid=()=>{if(epoch!==accessEpoch||!enabled()||deps.workspace()!==workspace||owner&&(!ownsRequest()||owner.token.isCancellationRequested))throw new Error('Arming cancelled: Sutra was disarmed, disabled, or the request/workspace changed.');if(deps.isBusy())throw new Error('Workspace became busy while arming.');};
+    let success=false;arming=true;setArmingStep('Confirm Arm Sutra in the dialog. This request will continue here; edits and tests ask when needed.');
     try{
-      const workspace=deps.workspace();
-      const yes=await vscode.window.showWarningMessage('Arm Sutra for this workspace?',{modal:true,detail:workspace+'\nSutra may read project files for your requests. Edits and tests require specific permissions and action confirmation. Network access and new dependencies remain off.'},'Arm Sutra');
-      if(yes!=='Arm Sutra')return;
-      if(deps.workspace()!==workspace||deps.isBusy())throw new Error('Workspace changed or became busy while arming.');
-      await selectNativeChat();
-      const st=await deps.request({op:'state'});
-      if(!enabled()||deps.workspace()!==workspace)throw new Error('Sutra was disabled or workspace changed while arming.');
+      const yes=await vscode.window.showWarningMessage('Arm Sutra for this workspace?',{modal:true,detail:workspace+'\nSutra may read project files for your requests. Existing task scope and permissions are retained. Edits and tests require specific permissions and action confirmation. Network access and new dependencies remain off.\n'+(owner?'Your pending request will continue in this chat.':'Your current chat stays open.')},'Arm Sutra');
+      stillValid();
+      if(yes!=='Arm Sutra')return false;
+      const st=await deps.request({op:'state'},owner?.token);
+      stillValid();
       const current=st.auto||st.contract?.contract.constraints.native_task;
       armed={workspace,generation:crypto.randomUUID(),session:current?st.session:undefined,binding:current?identity(st):undefined,coding:!!(current&&st.contract.contract.constraints.native_task)};
       reason='Armed for workspace reading. Describe the work in chat; Sutra asks for additional permissions when needed.';
       success=true;
-      void vscode.window.showInformationMessage('Sutra is armed. Ask your question in Sutra Auto.');
-    }finally{arming=false;armingStep='';if(!success)reason='Arming cancelled. Conversation remains available.';publish();}
+      if(!owner)void vscode.window.showInformationMessage('Sutra is armed. Your current chat is unchanged. Use Sutra Auto for governed requests.');
+      return true;
+    }finally{arming=false;armingStep='';if(!success&&epoch===accessEpoch)reason='Arming cancelled. Conversation remains available.';publish();}
   }
   async function prepareWorkspace(a,prompt,conversationId,permission,token){
     if(armed!==a||token.isCancellationRequested)throw new Error('Sutra disarmed or cancelled.');
@@ -191,7 +188,7 @@ function install(vscode,context,deps){
     }
   };
   const provider={onDidChangeLanguageModelChatInformation:changed.event,
-    provideLanguageModelChatInformation(){if(!enabled())return [];const models=deps.modelSettings();return ['auto','low','mid','high'].map(id=>({id:MODEL_IDS[id],name:id==='auto'?'Sutra Auto':'Sutra '+id[0].toUpperCase()+id.slice(1),family:'karma',version:'0.19.0',maxInputTokens:64000,maxOutputTokens:4096,detail:id==='auto'?'Governed local routing':models[id]||'Configure this tier',tooltip:'Chat normally; arm Sutra for workspace reading. Every local call uses the invocation gateway.',capabilities:{toolCalling:true,imageInput:false}}));},
+    provideLanguageModelChatInformation(){if(!enabled())return [];const models=deps.modelSettings();return ['auto','low','mid','high'].map(id=>({id:MODEL_IDS[id],name:id==='auto'?'Sutra Auto':'Sutra '+id[0].toUpperCase()+id.slice(1),family:'karma',version:'0.19.1',maxInputTokens:64000,maxOutputTokens:4096,detail:id==='auto'?'Governed local routing':models[id]||'Configure this tier',tooltip:'Chat normally; arm Sutra for workspace reading. Every local call uses the invocation gateway.',capabilities:{toolCalling:true,imageInput:false}}));},
     provideTokenCount(model,input,token){if(token?.isCancellationRequested)throw new Error('Token count cancelled.');return hostTokens.count(input);},
     async provideLanguageModelChatResponse(model,messages,options,progress,token){
       if(isCompaction(vscode,messages)){
@@ -215,7 +212,7 @@ function install(vscode,context,deps){
       if(token.isCancellationRequested)throw new Error('Sutra request cancelled.');
       if(arming||!enabled()){
         audit.stage=arming?'awaiting_confirmation':'needs_arming';
-        const guidance=arming?armingStep:!enabled()?'Enable native chat in Sutra Settings, then arm a task.':'Choose Arm task in Sutra, or run **Sutra: Arm and Open Chat** from the Command Palette. Confirm the task and scope, then resend your request.';
+        const guidance=arming?armingStep:!enabled()?'Enable native chat in Sutra Settings, then arm a task.':'Choose Arm task in Sutra, or run **Sutra: Arm Workspace Access** from the Command Palette. Confirm the task and scope, then resend your request.';
         progress.report(new vscode.LanguageModelTextPart('You are connected to Sutra. '+guidance+'\n\nSetup guidance only — no model call, source read, edit, or test was performed.'));
         return;
       }
@@ -224,7 +221,7 @@ function install(vscode,context,deps){
       if(!request.results){const saved=memory.resolve(vscode,messages,options,request.parent);request.parent=saved.parent;audit.memorySource=saved.source;}
       let prompt=request.prompt,conversationId;
       if(request.results){assertArmed();if(request.results.length!==1)throw new Error('Unexpected tool results for Sutra.');const known=completed.get(request.results[0].callId);if(!known||known.generation!==armed.generation)throw new Error('Tool result lacks a current Sutra host receipt.');if(!['applied','process_exited_zero','process_failed'].includes(known.result.result.status)){progress.report(new vscode.LanguageModelTextPart('Sutra stopped after '+known.result.result.status+'. Inspect the host action receipt before continuing.'));return;}prompt=known.prompt;conversationId=known.conversationId;}
-      const a=armed;
+      let a=armed;
       const tier=Object.keys(MODEL_IDS).find(key=>MODEL_IDS[key]===model.id);
       if(!tier)throw new Error('Unknown Sutra tier');
       const tools=options.tools||[],canAct=tools.some(t=>t.name===ACTION);
@@ -241,12 +238,21 @@ function install(vscode,context,deps){
           const r=chat.result;recordUsage(r);lastRoute=chat.route.model;audit.model=lastRoute;audit.memoryUsed=chat.memory_used;audit.memoryAllocation=chat.memory_allocation;audit.memoryStatus=chat.memory_status;audit.modelCapacity=chat.model_capacity;audit.conversationBudget=chat.budget;audit.invocationId=r.invocation_id;audit.stage=r.admission.admitted?'conversation':'withheld';publish();
           if(!r.admission.admitted){progress.report(new vscode.LanguageModelTextPart('Sutra withheld the conversation response: '+r.admission.errors.join('; ')));return;}
           const p=r.accepted_output;
-          if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&(p.intent!=='workspace'||!a))throw new Error('No admitted action is available to satisfy required tool mode.');
+          if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&p.intent!=='workspace')throw new Error('No admitted action is available to satisfy required tool mode.');
           footerSignature=await memory.remember(r.invocation_id,options);footerId=r.invocation_id;
-          progress.report(new vscode.LanguageModelTextPart(p.answer+'\n\n'));
+          // Routing prose is not an authority on host capabilities or permissions.
+          // Present a host-owned transition; publish model prose for conversation.
+          progress.report(new vscode.LanguageModelTextPart((p.intent==='workspace'?'Continuing this request through Sutra’s workspace workflow.':p.answer)+'\n\n'));
           if(p.diagram){try{await deps.presentConversation?.(chat);progress.report(new vscode.LanguageModelTextPart('Diagram opened beside the chat. Use **Sutra: Open Last Diagram** to reopen it.\n\n'));}catch(error){progress.report(new vscode.LanguageModelTextPart('Diagram preview could not open: '+error.message+'\n\n'));}}
           if(p.intent!=='workspace')return;
-          if(!a){audit.stage='needs_workspace_scope';progress.report(new vscode.LanguageModelTextPart('To inspect or change workspace files, choose **Arm Sutra**, then resend your request. Edits and tests ask for permission when needed. General conversation can continue without arming.'));offerArm();return;}
+          if(!a){
+            audit.stage='awaiting_workspace_permission';publish();
+            progress.report(new vscode.LanguageModelTextPart('Workspace access needs your confirmation. Choose **Arm Sutra** to continue this request here.\n\n'));
+            if(!await beginArm({audit,token:activeCancel.token})){
+              audit.stage='permission_declined';progress.report(new vscode.LanguageModelTextPart('Workspace access was not granted. No source was read, edited, or tested. You can keep chatting.'));return;
+            }
+            a=armed;audit.stage='workspace';publish();
+          }
           conversationId=r.invocation_id;audit.conversationInvocationId=r.invocation_id;
           if(!await prepareWorkspace(a,prompt,conversationId,p.workspace_request,activeCancel.token)){audit.stage='permission_declined';progress.report(new vscode.LanguageModelTextPart('Permission was not granted. Sutra remains armed for reading; no edit or test ran.'));return;}
           progress.report(new vscode.LanguageModelTextPart('Checking the armed workspace task before accessing source…\n\n'));

@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Local model orchestration with portable context, governed tools, diagrams and token visibility.",
-  "version": "0.19.0",
+  "version": "0.19.1",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -108,7 +108,7 @@
       },
       {
         "command": "karma.armNative",
-        "title": "Sutra: Arm and Open Chat"
+        "title": "Sutra: Arm Workspace Access"
       },
       {
         "command": "karma.disarmNative",

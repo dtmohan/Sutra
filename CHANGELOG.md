@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.19.1 — continue in the same chat
+
+- Arming no longer opens or selects another chat. Workspace requests await one
+  confirmation, then resume with their original prompt, conversation receipt,
+  task contract and existing permissions. No manual resend is needed.
+- Cancel, disarm, disable and workspace changes revoke pending confirmations.
+  Model switches retain the approved scope; edits/tests keep their action checks.
+- Display host-owned workspace progress instead of unverified routing prose that
+  may incorrectly claim source access is unavailable or that a child agent exists.
+- Clarify that read-only reviews require source access and that permission is
+  checked by the host after routing. Model intent classification remains fallible.
+- Offer source-derived citation choices to avoid paraphrased quotes. Fresh-source,
+  cross-file attribution and bounded-repair checks remain enforced.
+- Restore 0.19 conversation data across this policy update. Old executable
+  proposals remain stale. The canonical STP kernel is unchanged.
+
 ## 0.19.0 — model-aware conversation memory and one-step arming
 
 - Replace the fixed 1,000-character working note with a generation-budget-derived

@@ -1,4 +1,4 @@
-Sutra 0.19.0 — model-aware memory and one-step arming
+Sutra 0.19.1 — continue workspace requests in the same chat
 
 Previously Karma. Your installed extension ID and saved settings are preserved.
 
@@ -6,9 +6,9 @@ GET STARTED
 Run Sutra: Configure Local Models to select installed Ollama models.
 Run Sutra: Open Governed Chat (Sutra Auto). This saves the compatible Local chat
 and model for new chats. Existing chats retain their own selected model.
-Chat normally. Use Sutra: Arm and Open Chat when workspace reading is needed.
-One yes/no confirmation arms Sutra. Your next workspace prompt creates or resumes
-a task. Edits/tests ask for concrete file permissions at the point of need, then
+Chat normally. Workspace requests offer one Arm Sutra confirmation and resume
+in the same chat after approval. Sutra: Arm Workspace Access also arms in place.
+Your workspace prompt creates or resumes a task. Edits/tests ask for concrete file permissions at the point of need, then
 confirm the exact action. There are no goal or workflow pickers during arming.
 The review participant is @sutra. Model tiers are Sutra Auto / Low / Mid / High.
 
@@ -34,7 +34,7 @@ installed-model dropdowns. Temperature readings are advisory.
 COMPATIBILITY
 Internal karma.* settings, command IDs and model IDs are retained intentionally.
 The canonical STP kernel is unchanged. Harness adapters/policies are updated.
-Conversation data from 0.16–0.18 is validated and restored; historical executable
+Conversation data from 0.16–0.19 is validated and restored; historical executable
 proposals remain subject to stale-policy checks.
 VS Code now receives an offline tokenizer estimate instead of a byte count.
 Its compaction threshold remains under VS Code's control. Harness budget charges

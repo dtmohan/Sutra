@@ -16,7 +16,7 @@ experimental local tool, not a guarantee that model answers are correct.
    installed models.
 4. Run **Sutra: Open Governed Chat (Sutra Auto)**. This saves the compatible Local
    chat and model selection for new chats. Existing chats retain their selection.
-5. Chat normally. For workspace access, use **Sutra: Arm and Open Chat**. One confirmation enables reading. The first
+5. Chat normally. For workspace access, use **Sutra: Arm Workspace Access**. One confirmation enables reading without opening a new chat. A pending workspace request resumes immediately after approval. The first
    workspace prompt creates or resumes a task; scoped edits and tests request
    additional permissions when needed, followed by confirmation of the exact action.
 

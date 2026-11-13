@@ -79,6 +79,24 @@ class ChatTests(unittest.TestCase):
         out=self.ask(provider=m);self.assertFalse(out['result']['admission']['admitted']);self.assertEqual(len(m.payloads),3)
         with self.assertRaises(PageFault):self.s.load_result(self.sid,out['result']['invocation_id'])
 
+    def test_citation_choices_are_exact_bounded_source_and_wrong_file_still_rejected(self):
+        m=Fake();self.ask(provider=m);p=m.payloads[0]
+        choices=chat.schema(p)['properties']['citations']['items']['properties']['quote']['enum']
+        self.assertTrue(choices)
+        for quote in choices:
+            self.assertTrue(any(quote in text for text in p['excerpts'].values()))
+            self.assertLessEqual(len(quote),160)
+        def wrong_file(r,p):
+            r['citations']=[{'path':'leaf.py','quote':'from leaf import run'}]
+        out=self.ask(provider=Fake(fault=wrong_file));self.assertFalse(out['result']['admission']['admitted'])
+
+    def test_citation_choices_keep_indentation_unicode_and_long_lines_exact(self):
+        p={'excerpts':{'a.py':'\n    def café():\r\n        return "✓"\r\n'+'x'*240,'b.py':'   '}}
+        for quote in chat.citation_quotes(p):
+            self.assertTrue(any(quote in text for text in p['excerpts'].values()))
+            self.assertLessEqual(len(quote),160)
+        self.assertIn('    def café():',chat.citation_quotes(p))
+
     def test_omitted_or_changed_constraints_and_false_completion_rejected(self):
         for fault in (lambda r,p:r['constraints'].pop(),lambda r,p:r.update(complete=True),lambda r,p:r.update(task_id='other')):
             with self.subTest(fault=fault):self.assertFalse(self.ask(provider=Fake(fault=fault))['result']['admission']['admitted'])

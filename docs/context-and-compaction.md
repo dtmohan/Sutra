@@ -63,8 +63,9 @@ model changes. Native signed-checkpoint identifiers remain compatible.
 
 ## Arming and permissions
 
-**Sutra: Arm and Open Chat** asks one yes/no question for workspace reading. It
-reuses an existing compatible task or creates a read-only task from the first
+**Sutra: Arm Workspace Access** asks one yes/no question for workspace reading. It
+keeps the current chat open. A workspace request waits for that confirmation and
+continues with the same prompt and conversation receipt. It reuses an existing compatible task or creates a read-only task from the first
 workspace prompt. Conversation remains available without arming. Reload retains
 chat defaults and memory; workspace access is disarmed until the next confirmation.
 
@@ -76,3 +77,14 @@ allocations, and invalidate stale proposals. Subsequent model switches use the
 same current contract. Network and dependencies remain disabled. The exact edit
 or test still receives an action confirmation. Arming does not intercept prompts
 sent to another provider; routing proof comes from a request entering Sutra.
+
+This handoff is an internal Sutra workflow, not a VS Code child chat. It retains
+the current task contract and permissions; it cannot grant unrelated agents
+access. Cancelling the request or disarming while a dialog is open invalidates
+its approval. The separate Open Governed Chat command still opens a new chat.
+
+Intent classification remains a model judgment. In live testing the 4B model
+sometimes treated a prior temporary inspection deferral or an unbound workspace
+as a reason to answer conversationally instead of delegating. The mid-tier model
+can be selected for such requests. Arming manually stays in the current chat;
+it never substitutes a model interpretation for host permission checks.

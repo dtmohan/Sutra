@@ -33,8 +33,9 @@ function setup(saved={}){
  assert.deepEqual(h.uiCalls[0],['workbench.panel.chat.view.copilot.focus']);assert.deepEqual(h.uiCalls[1],['workbench.action.chat.newLocalChat']);
  assert.deepEqual(h.uiCalls[2],['workbench.action.chat.open',{modelSelector:{vendor:'karma',id:'karma-auto',family:'karma'},toolsInclude:['karma_native_action']}]);
  assert(!('query' in h.uiCalls[2][1]));checks.push('explicit native chat command saves unique default, selects scoped chat model, preserves disarming and never submits a prompt');
- const setupReply=await h.send();assert(setupReply.some(p=>p.value?.includes('Arm Sutra')));assert.equal(h.calls.length,1);assert.equal(h.calls[0].op,'conversation');checks.push('disarmed workspace request is conversational advice and cannot access source or create a task');
- assert.equal(h.controller.status().routing.stage,'needs_workspace_scope');assert(!h.controller.status().routing.active);assert(!h.controller.status().label.includes('enabled'));
+ const confirm=h.v.window.showWarningMessage;h.v.window.showWarningMessage=async()=>undefined;
+ const setupReply=await h.send();assert(setupReply.some(p=>p.value?.includes('Arm Sutra')));assert.equal(h.calls.length,1);assert.equal(h.calls[0].op,'conversation');checks.push('declining workspace access cannot read source or create a task');h.v.window.showWarningMessage=confirm;
+ assert.equal(h.controller.status().routing.stage,'permission_declined');assert(!h.controller.status().routing.active);assert(!h.controller.status().label.includes('enabled'));
  await h.arm();assert.equal(h.picks(),0);assert(h.controller.status().armed);assert(h.controller.status().label.includes('routing unverified'));assert(!h.calls.some(c=>c.op==='new'));checks.push('one confirmation arms reading; command arguments cannot bypass it or create a task');
  const history=[{role:1,content:[new Text('OLD SECRET HISTORY')]},{role:2,content:[new Text('old answer')]},{role:1,content:[new Text('<userRequest>Fix retry</userRequest>')]}];
  const parts=await h.send('low',history),call=parts.find(p=>p instanceof Call);assert.equal(call.name,'karma_native_action');assert(!h.calls.some(c=>c.op==='native_execute'));
@@ -133,5 +134,28 @@ function setup(saved={}){
  fresh.deps.request=async(m,t)=>{if(m.op==='auto_new'){created++;assert.equal(m.goal,'Review this project');assert.deepEqual(m.roots,['.']);assert(m.conversation_id);Object.assign(fresh.st,{session:'read-task',auto:{},contract:{contract_hash:'read-hash',contract:{goal:m.goal,constraints:{allowed_paths:['.'],edits_allowed:false,tests_allowed:false}}}});return structuredClone(fresh.st);}return freshRequest(m,t);};
  await fresh.arm();assert.equal(created,0);await fresh.send('low',[{role:1,content:[new Text('Review this project')]}]);assert.equal(created,1);assert.equal(fresh.picks(),0);assert(fresh.controller.status().armed);
  checks.push('arming does not create a task; first workspace request creates a read-only task from the prompt without goal or mode pickers');
+ const inline=setup();inline.kind('report');let confirmations=0;
+ inline.v.window.showWarningMessage=async(_m,_o,label)=>{confirmations++;return label;};
+ const intro=await inline.send('low',[{role:1,content:[new Text('Hello, remember this project')]}]);
+ const inlinePrompt='Review this project architecture';
+ const inlineReply=await inline.send('low',[{role:2,content:intro},{role:1,content:[new Text(inlinePrompt)]}]);
+ const conversations=inline.calls.filter(c=>c.op==='conversation'),inlineWork=inline.calls.find(c=>c.op==='native_work');
+ assert.equal(conversations.length,2);assert.equal(conversations[1].parent,'1'.padStart(32,'0'));assert.equal(inlineWork.prompt,inlinePrompt);assert.equal(inlineWork.conversation_id,'2'.padStart(32,'0'));assert.equal(inlineWork.contract_hash,'contract-1');assert.equal(inlineWork.calibration_hash,'cal-1');assert.equal(confirmations,1);
+ assert(inlineReply.some(p=>p.value?.includes('routing confirmed')));assert(!inlineReply.some(p=>p.value?.includes('Conversational answer')));assert(inlineReply.some(p=>p.value?.includes('Sutra’s workspace workflow')));assert(!inline.uiCalls.some(c=>c[0].startsWith('workbench.')));
+ await inline.send('high',[{role:2,content:inlineReply},{role:1,content:[new Text('Continue review')]}]);
+ assert.equal(confirmations,1);const switched=inline.calls.filter(c=>c.op==='native_work').at(-1);assert.equal(switched.contract_hash,inlineWork.contract_hash);assert.equal(switched.session,inlineWork.session);assert(!inline.calls.some(c=>['auto_new','native_permissions'].includes(c.op)));
+ checks.push('inline arming resumes the exact pending request with its conversation receipt and existing permissions, without opening any chat; model switches keep that binding');
+ const standalone=setup();await standalone.arm();assert(!standalone.uiCalls.some(c=>c[0].startsWith('workbench.')));assert.equal(standalone.cfg.defaultModel,undefined);
+ checks.push('standalone arming changes no chat selection, saved model, or conversation');
+ for(const stop of ['cancel','disarm','disable','workspace']){
+  const race=setup();let approve;race.v.window.showWarningMessage=()=>new Promise(resolve=>{approve=resolve;});
+  const work=race.send();const rejected=assert.rejects(work,/cancelled|changed/i);
+  while(!approve)await new Promise(r=>setImmediate(r));assert.equal(race.controller.status().routing.stage,'awaiting_workspace_permission');
+  await assert.rejects(race.send('high'),/running/);
+  if(stop==='cancel')race.token.cancel();else if(stop==='disarm')race.commands['karma.disarmNative']();else if(stop==='disable')await race.commands['karma.toggleNative']();else race.deps.workspace=()=>'/different';
+  approve('Arm Sutra');await rejected;assert(!race.controller.status().armed);assert(!race.controller.status().arming);assert.deepEqual(race.calls.map(c=>c.op),['conversation']);
+ }
+ const stale=setup();let accept;stale.v.window.showWarningMessage=()=>new Promise(r=>accept=r);const waiting=stale.arm();const invalidated=assert.rejects(waiting,/cancelled/);while(!accept)await new Promise(r=>setImmediate(r));stale.commands['karma.disarmNative']();accept('Arm Sutra');await invalidated;assert(!stale.controller.status().armed);
+ checks.push('cancel, disarm, disable and workspace changes invalidate delayed approval; concurrent requests cannot steal the pending handoff');
  console.log(JSON.stringify({passed:true,checks},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;});

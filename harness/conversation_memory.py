@@ -9,9 +9,10 @@ import re
 from context_manager import InvalidUpdate, ContextBudgetExceeded, canonical, sha
 from paging import Budget, PageFault
 
-# Explicit compatibility for data-only conversations shipped in Sutra 0.16–0.18.
+# Explicit compatibility for data-only conversations shipped in Sutra 0.16–0.19.
 # Old executable proposals, workspace checkpoints and permissions remain stale.
-LEGACY_POLICIES = {'6537eca1817b943a6d6f8c546428d09e461bf93e6f0d41ea70fc7c0bb47d6665'}
+LEGACY_POLICIES = {'6537eca1817b943a6d6f8c546428d09e461bf93e6f0d41ea70fc7c0bb47d6665',
+                   'd71f0acf70b42a1d0cb1332c1413bfb85b90156d5820d590cdb19b41ea79ce04'}
 PIN = re.compile(r'\b(remember|must|never|always|constraint|prefer|do not|don.t|keep|only|important)\b', re.I)
 WORDS = re.compile(r'[^\W_]{3,}', re.UNICODE)
 STOP = {'the', 'and', 'this', 'that', 'what', 'with', 'please', 'about', 'could', 'would', 'tell', 'have', 'were'}
