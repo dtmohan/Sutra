@@ -1,0 +1,20 @@
+# Local state and build artifacts
+__pycache__/
+*.py[cod]
+.DS_Store
+node_modules/
+.venv/
+.env
+.env.*
+*.sqlite*
+*.db
+*.log
+*.vsix
+*.zip
+/build/
+/dist/
+/work/
+/reports/
+/outputs/
+/calls/
+/actions/
