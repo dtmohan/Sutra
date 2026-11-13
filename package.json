@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Local model orchestration with portable context, governed tools, diagrams and token visibility.",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -125,6 +125,16 @@
       {
         "command": "karma.openLastDiagram",
         "title": "Sutra: Open Last Diagram"
+      },
+      {
+        "command": "karma.openUsage",
+        "title": "Sutra: Open Token Usage",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "karma.refreshUsage",
+        "title": "Sutra: Refresh Token Usage",
+        "icon": "$(refresh)"
       }
     ],
     "configuration": {
@@ -459,6 +469,10 @@
           {
             "name": "dashboard",
             "description": "Open the Sutra dashboard and live temperatures"
+          },
+          {
+            "name": "usage",
+            "description": "Open token usage beside Terminal and Output"
           }
         ]
       }
@@ -469,7 +483,37 @@
         "displayName": "Sutra",
         "managementCommand": "karma.configureModels"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "panel": [
+        {
+          "id": "karma-monitor",
+          "title": "Sutra Usage",
+          "icon": "media/karma.svg"
+        }
+      ]
+    },
+    "views": {
+      "karma-monitor": [
+        {
+          "id": "karma.usage",
+          "name": "Token Usage",
+          "type": "webview",
+          "visibility": "visible",
+          "icon": "media/karma.svg",
+          "contextualTitle": "Sutra Usage"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "karma.refreshUsage",
+          "when": "view == karma.usage",
+          "group": "navigation"
+        }
+      ]
+    }
   },
   "repository": {
     "type": "git",

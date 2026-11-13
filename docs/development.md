@@ -25,7 +25,10 @@ execution is currently read-only. Do not weaken the adapter to make a test pass.
 Optional browser checks need Playwright and a Chromium browser. Set
 `KARMA_PLAYWRIGHT` to the installed Playwright module path and `KARMA_BROWSER` to
 the browser executable, then run `node test/dashboard-browser.cjs` and
-`node test/diagram-browser.cjs`. Native VS Code integration drivers in `test/`
+`node test/diagram-browser.cjs`. Set `KARMA_UI_OUTPUT` to an artifact directory
+and run `node test/usage-browser.cjs` for the docked token dashboard. The usage
+view's read-only message boundary, shared reader and hidden-view polling behavior
+are covered by `test/hardening.cjs`. Native VS Code integration drivers in `test/`
 need an isolated VS Code profile, installed local models and their documented
 environment variables; they are not ordinary Node unit tests.
 
@@ -45,6 +48,7 @@ path; missing temperature sensors remain unavailable.
 | --- | --- |
 | `extension.js`, `native_provider.js` | VS Code integration and governed chat |
 | `native_memory.js` | Workspace-scoped authenticated receipt pointers |
+| `usage_view.js` | Docked token dashboard and status-bar navigation |
 | `media/` | Dashboard, token tables and diagram views |
 | `harness/` | Contracts, tools, adapters, calibration and invocation gateway |
 | `harness/stp_canonical/` | Unmodified supplied four-decision kernel |

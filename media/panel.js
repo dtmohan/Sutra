@@ -232,6 +232,7 @@ function usageTable(id,headers,rows){
 }
 function showUsage(data){
  usageData=data||{calls:[],total_calls:0};
+ el('overview-usage-summary').textContent=KarmaTokens.compact(usageData)+' · latest '+usageData.calls.length+' workspace calls';
  for(const key of ['model','stage']){
   const select=el('usage-'+key),values=[...new Set(usageData.calls.map(c=>c[key]))].sort();
   if(usageFilters[key]&&!values.includes(usageFilters[key]))values.push(usageFilters[key]);
@@ -250,3 +251,5 @@ function renderUsage(){
  usageTable('usage-stages',['Stage','Calls','Input tokens','Output tokens'],[...groups].map(([key,calls])=>{const t=KarmaTokens.totals(calls);return [KarmaTokens.stage(key),calls.length,KarmaTokens.metric(t,'input_tokens'),KarmaTokens.metric(t,'output_tokens')];}));
  usageTable('usage-rows',['Time / invocation','Stage / model','Outcome','Input','Output','Budget input / output reserve'],rows.map(c=>[new Date(c.created_at*1000).toLocaleString()+' · '+c.invocation_id,KarmaTokens.stage(c.stage)+' · '+c.model,c.status==='quarantined'?'Withheld':c.status==='pending'?'Pending / interrupted':'Accepted',KarmaTokens.number(c.input_tokens),KarmaTokens.number(c.output_tokens),KarmaTokens.number(c.conservative_input_charge)+' / '+KarmaTokens.number(c.output_reserve)]));
 }
+
+el('overview-usage').onclick=()=>send('open_usage');el('usage-dock').onclick=()=>send('open_usage');

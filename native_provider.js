@@ -169,7 +169,7 @@ function install(vscode,context,deps){
     }
   };
   const provider={onDidChangeLanguageModelChatInformation:changed.event,
-    provideLanguageModelChatInformation(){if(!enabled())return [];const models=deps.modelSettings();return ['auto','low','mid','high'].map(id=>({id:MODEL_IDS[id],name:id==='auto'?'Sutra Auto':'Sutra '+id[0].toUpperCase()+id.slice(1),family:'karma',version:'0.16.0',maxInputTokens:64000,maxOutputTokens:4096,detail:id==='auto'?'Governed local routing':models[id]||'Configure this tier',tooltip:'Chat normally; arm a task for workspace tools. Every local call uses the invocation gateway.',capabilities:{toolCalling:true,imageInput:false}}));},
+    provideLanguageModelChatInformation(){if(!enabled())return [];const models=deps.modelSettings();return ['auto','low','mid','high'].map(id=>({id:MODEL_IDS[id],name:id==='auto'?'Sutra Auto':'Sutra '+id[0].toUpperCase()+id.slice(1),family:'karma',version:'0.17.0',maxInputTokens:64000,maxOutputTokens:4096,detail:id==='auto'?'Governed local routing':models[id]||'Configure this tier',tooltip:'Chat normally; arm a task for workspace tools. Every local call uses the invocation gateway.',capabilities:{toolCalling:true,imageInput:false}}));},
     provideTokenCount(model,input){return Buffer.byteLength(typeof input==='string'?input:JSON.stringify(input),'utf8');},
     async provideLanguageModelChatResponse(model,messages,options,progress,token){
       if(isCompaction(vscode,messages)){
@@ -250,7 +250,7 @@ function install(vscode,context,deps){
         if(responseUsage.calls.length||footerId){
           const detail=tokens.compact(responseUsage),label='Sutra · '+detail+' · conversation details';
           const footer=footerId?`[${label}](karma-preview:/conversation/${footerId}/Response.md?checkpoint=${footerSignature})`:'Sutra · '+detail;
-          if(!activeCancel.token.isCancellationRequested)progress.report(new vscode.LanguageModelTextPart('\n\n---\n'+footer+(footerId?(audit.memoryUsed?' · Memory restored':' · New conversation'):'')+' · Per-stage counts in **Sutra → Usage**.\n'));
+          if(!activeCancel.token.isCancellationRequested)progress.report(new vscode.LanguageModelTextPart('\n\n---\n'+footer+(footerId?(audit.memoryUsed?' · Memory restored':' · New conversation'):'')+' · Open the token dashboard with **Sutra Usage** in the status bar.\n'));
         }
         cancellation.dispose();activeCancel.dispose();activeCancel=undefined;running=false;publish();
       }

@@ -23,6 +23,18 @@ The native model picker offers **Sutra Auto**, **Sutra Low**, **Sutra Mid** and
 **Sutra High**. The review participant is **@sutra**. The dashboard has Overview,
 Chat, Usage, Settings and Tools views.
 
+### Token dashboard
+
+Click **Sutra Usage** in the status bar, or run **Sutra: Open Token Usage**.
+The dashboard opens in the bottom panel beside Terminal and Output, so it can
+stay visible alongside chat and code. `@sutra /usage` opens the same view.
+
+Input/output cards, recent-call charts and stage breakdowns update from local
+receipts. Filter by model, stage, outcome or time; expand individual calls for
+budget allocations. Counts appear when each call finishes. Missing counts are
+marked unknown, and filters apply to the latest 250 workspace calls. Viewing
+usage never invokes a model. The original editor dashboard also links here.
+
 A ready or armed badge does not prove that every VS Code prompt uses Sutra.
 Check the selected model and the response's invocation details. Direct Ollama
 models and other providers can bypass this harness.

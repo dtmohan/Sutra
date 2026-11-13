@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.17.0 — docked token dashboard
+
+- Add **Sutra Usage** beside Terminal/Output and a persistent status-bar shortcut.
+- Show measured input/output totals, recent-call charts and stage breakdowns;
+  filter by model, stage, outcome and time. Preserve filters when the view closes.
+- Provide `@sutra /usage`, an overview shortcut and clear chat-footer guidance.
+- Share one persistent reader and one nonoverlapping refresh loop across both
+  dashboards; stop polling when neither view is visible. No inference is needed.
+- Distinguish unknown counts, real zero, empty results and stale snapshots.
+- Keep every harness backend file and the STP kernel unchanged.
+
 ## 0.16.0 — Sutra
 
 - Rebrand native models, chat participant, commands, dashboard and response

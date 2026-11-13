@@ -2,7 +2,7 @@
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),os=require('node:os'),vm=require('node:vm');
 const {EventEmitter}=require('node:events');
 const root=path.resolve(__dirname,'..'),tmp=fs.mkdtempSync(path.join(os.tmpdir(),'karma-host-test-'));
-const commands=new Map(),tools=new Map(),participants=new Map(),intervals=[],timers=[],prompts=[],requests=[],changes=[],panelMessages=[];
+const views=new Map(),statusItems=[],commands=new Map(),tools=new Map(),participants=new Map(),intervals=[],timers=[],prompts=[],requests=[],changes=[],panelMessages=[];
 const tierModels={low:'fixture-small',mid:'fixture-mid',high:'fixture-large'};
 const runtimeUpdates=[];
 let provider,panel,holdDashboard=false,pendingDashboard,bridgeCount=0,dashboardSpawns=0;
@@ -26,18 +26,18 @@ const vscode={
  workspace:{isTrusted:true,workspaceFolders:[{uri:uri(tmp)}],textDocuments:[],getConfiguration(){return {get(k,d){return k==='models'?tierModels:d;},async update(k,v){if(k==='models')throw Error('Existing model choices must not be overwritten by discovery');runtimeUpdates.push([k,v]);}};},
   registerTextDocumentContentProvider(s,p){provider=p;return disposable();},async openTextDocument(u){return {uri:u};},fs:{writeFile:async()=>{}}},
  commands:{registerCommand(n,f){commands.set(n,f);return disposable();},async executeCommand(n,...a){return commands.get(n)?.(...a);}},
- window:{createOutputChannel(){return {appendLine(){},dispose(){}};},createStatusBarItem(){return {show(){},dispose(){}};},
+ window:{createOutputChannel(){return {appendLine(){},dispose(){}};},registerWebviewViewProvider(id,provider){views.set(id,provider);return disposable();},createStatusBarItem(){const item={show(){},dispose(){}};statusItems.push(item);return item;},
   async showInputBox(options){prompts.push(options);return undefined;},async showQuickPick(items,options){prompts.push(options);},async showOpenDialog(options){prompts.push(options);},async showTextDocument(){},
   createWebviewPanel(){panel={visible:true,reveal(){},onDidDispose(){return disposable();},webview:{postMessage(m){panelMessages.push(m);},asWebviewUri:u=>u,onDidReceiveMessage(cb){this.receive=cb;return disposable();}}};return panel;}},
  lm:{registerTool(n,t){tools.set(n,t);return disposable();}},LanguageModelToolResult:class{constructor(content){this.content=content;}},LanguageModelTextPart:class{constructor(value){this.value=value;}}
 };
 const moduleFixture={exports:{}};
-const context={module:moduleFixture,exports:moduleFixture.exports,require:n=>n==='vscode'?vscode:n==='node:child_process'?{spawn}:n==='./media/token_usage'?require('../media/token_usage'):n==='./diagram_view'?require('../diagram_view'):n==='./model_selection'?require('../model_selection'):n==='./native_provider'?require('../native_provider'):require(n),process,Buffer,console,queueMicrotask,structuredClone,
+const context={module:moduleFixture,exports:moduleFixture.exports,require:n=>n==='vscode'?vscode:n==='node:child_process'?{spawn}:n==='./media/token_usage'?require('../media/token_usage'):n==='./usage_view'?require('../usage_view'):n==='./diagram_view'?require('../diagram_view'):n==='./model_selection'?require('../model_selection'):n==='./native_provider'?require('../native_provider'):require(n),process,Buffer,console,queueMicrotask,structuredClone,
  setInterval:fn=>{intervals.push(fn);return fn;},clearInterval(){},setTimeout:(fn,ms)=>{timers.push({fn,ms});return fn;},clearTimeout(){}};
 vm.runInNewContext(fs.readFileSync(path.join(root,'extension.js'),'utf8'),context,{filename:'extension.js'});
 const subscriptions=[];
 (async()=>{
- const api=moduleFixture.exports.activate({subscriptions,extensionPath:root,globalStorageUri:uri(tmp),extension:{packageJSON:{version:'0.16.0'}}});
+ const api=moduleFixture.exports.activate({subscriptions,extensionPath:root,globalStorageUri:uri(tmp),extension:{packageJSON:{version:'0.17.0'}}});
  assert.deepEqual(Object.keys(api).sort(),['getRoutingStatus','getState','open','version']);assert(Object.isFrozen(api));const beforeRouting=requests.length;assert.equal(api.getRoutingStatus(),null);assert.equal(requests.length,beforeRouting);
  for(const name of ['karma.reviewCodebase','karma.automaticReview','karma.newChatReview']){
   const before=requests.length;await commands.get(name)({goal:'agent supplied scope',roots:['..'],run:false});
@@ -63,6 +63,8 @@ const subscriptions=[];
  assert.deepEqual(runtimeUpdates,[['storageLimitMiB',1024],['pythonPath','/test/python3']]);assert.equal(requests.length,beforeRuntime,'Runtime settings must not mutate the task or dispatch');
  const native=participants.get('karma.local'),rendered=[],buttons=[],token={isCancellationRequested:false,onCancellationRequested:()=>disposable()};
  const capture={markdown(m){rendered.push(typeof m==='string'?m:m.value);},progress(){},reference(){},button(b){buttons.push(b);}};
+ assert(views.has('karma.usage'));assert(statusItems.some(i=>i.command==='karma.openUsage'));
+ const beforeUsage=requests.length;await native({command:'usage',prompt:''},{},capture,token);assert.equal(requests.length,beforeUsage);
  const beforeGreeting=requests.length,oldState=JSON.stringify(state);
  const greeting=await native({prompt:'hello'}, {},capture,token);
  assert(!greeting?.errorDetails);assert.equal(requests.length,beforeGreeting);assert.equal(JSON.stringify(state),oldState);
@@ -94,9 +96,18 @@ const subscriptions=[];
  assert.equal(provider.provideTextDocumentContent(uri('karma-preview:/fixture/Reviewed-API-map.md')),'API v2');
  assert(changes.includes('karma-preview:/fixture/Architecture.md'));
  state={...state,report:undefined,api:undefined};await api.getState();assert(provider.provideTextDocumentContent(uri('karma-preview:/fixture/Architecture.md')).includes('withheld'));
- await api.open();holdDashboard=true;const count=bridgeCount;const first=intervals[0]();await Promise.resolve();
+ await api.open();await new Promise(setImmediate);
+ const dock={visible:true,webview:{asWebviewUri:u=>u,postMessage(m){this.latest=m;},onDidReceiveMessage(cb){this.receive=cb;return disposable();}},onDidChangeVisibility(cb){this.visibility=cb;return disposable();},onDidDispose(cb){this.close=cb;return disposable();}};
+ views.get('karma.usage').resolveWebviewView(dock);
+ assert(dock.webview.html.includes("default-src 'none'"));assert(!dock.webview.html.includes('NONCE_VALUE'));
+ const beforeUntrusted=requests.length;for(const op of ['new','execute','work'])dock.webview.receive({type:op,op,edits_allowed:true});assert.equal(requests.length,beforeUntrusted);
+ dock.webview.receive({type:'ready'});await new Promise(setImmediate);assert.equal(dock.webview.latest.type,'usage');
+ holdDashboard=true;const count=bridgeCount,spawnCount=dashboardSpawns;const first=intervals[0]();await Promise.resolve();
  await intervals[0]();assert.equal(bridgeCount,count+1,'Dashboard polls overlapped');
- pendingDashboard();await first;const second=intervals[0]();await Promise.resolve();assert.equal(bridgeCount,count+2);pendingDashboard();await second;assert.equal(dashboardSpawns,1,'Dashboard spawned a process for each sample');
+ pendingDashboard();await first;const second=intervals[0]();await Promise.resolve();assert.equal(bridgeCount,count+2);pendingDashboard();await second;assert.equal(dashboardSpawns,spawnCount,'Dashboard spawned a process for each sample');
+ panel.visible=false;const dockOnly=intervals[0]();await Promise.resolve();assert.equal(bridgeCount,count+3);pendingDashboard();await dockOnly;
+ dock.visible=false;await intervals[0]();assert.equal(bridgeCount,count+3,'Hidden dashboards should not read the bridge');
+ dock.close();assert(statusItems.some(i=>i.command==='karma.openUsage'));
  const telemetry=require(path.join(root,'harness/telemetry_portable.js'));
  assert.equal(telemetry.darwinAvailable('Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages free: 1.\nPages inactive: 2000000.\n'),4096*2000001);
  assert.throws(()=>telemetry.darwinAvailable('unavailable'));

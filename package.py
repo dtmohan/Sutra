@@ -22,7 +22,7 @@ def package(source, output):
             for name in names:
                 dep=source/'harness'/(name.replace('.','/')+'.py')
                 if dep.is_file() and dep not in files:files.add(dep);pending.append(dep)
-    files.update(source/name for name in ('package.json','extension.js','model_selection.js','native_provider.js','native_memory.js','diagram_view.js','README.txt','runtime-integrity.json','bin/telemetry','harness/canonical-kernel.json','harness/README.txt'))
+    files.update(source/name for name in ('package.json','extension.js','model_selection.js','native_provider.js','native_memory.js','diagram_view.js','usage_view.js','README.txt','runtime-integrity.json','bin/telemetry','harness/canonical-kernel.json','harness/README.txt'))
     files.update(p for directory in ('media','vendor') for p in (source/directory).rglob('*') if p.is_file())
     assert not any(p.name.startswith(('test_','experiment','validate_','audit_')) for p in files)
     kernel=hashlib.sha256((source/'harness/stp_canonical/kernel.py').read_bytes()).hexdigest()
