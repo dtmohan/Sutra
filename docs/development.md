@@ -83,3 +83,7 @@ of intentionally oversized history. Run it only with the disposable fixture
 transport described in its header; it does not validate real model semantics.
 The monitor browser test covers all four decisions, missing sensors, stale
 snapshots, heartbeat expiry, context diagnostics and filter independence.
+
+### Conversation compatibility during policy upgrades
+
+When changing a policy-hashed runtime file, verify a saved conversation from the previous installed release as well as a fresh session. Recompute the previous release's policy hash from its shipped `POLICY_FILES` bytes. If its tool-free conversation data remains compatible, record that exact released hash in `conversation_memory.RELEASE_POLICIES`. Never learn trusted hashes from receipts at runtime, restore old action authority, skip receipt validation, or silently discard user memory. Exercise same-session handoff using a read-only backup of saved state before installing the upgrade.

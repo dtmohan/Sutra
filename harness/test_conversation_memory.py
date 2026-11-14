@@ -107,6 +107,22 @@ class MemoryTests(unittest.TestCase):
         self.s.quarantine_invocation(first['session'], first['result']['invocation_id'], 'Rejected ancestor')
         with self.assertRaises(PageFault): self.ask(parent=out['result']['invocation_id'])
 
+    def test_released_020_and_021_conversation_data_restores_without_execution_authority(self):
+        current=self.s.logic_hash
+        for version,previous in cm.RELEASE_POLICIES.items():
+            with self.subTest(version=version):
+                self.s.logic_hash=previous
+                with patch('governance.policy_hash',return_value=previous):
+                    first=self.ask('Remember the same-session request '+version)
+                self.s.logic_hash=current
+                with self.assertRaises(PageFault):
+                    self.s.load_result(first['session'],first['result']['invocation_id'])
+                m=Fake();out=self.ask('Continue the conversation',first['result']['invocation_id'],m)
+                self.assertTrue(out['result']['admission']['admitted'])
+                self.assertTrue(m.payloads[0]['memory']['legacy_data_restored'])
+                self.assertIn(version,canonical(m.payloads[0]['memory']))
+                self.assertEqual(out['session'],first['session'])
+
     def test_unknown_policy_is_not_implicitly_trusted_as_legacy(self):
         current=self.s.logic_hash;self.s.logic_hash='f'*64
         with patch('governance.policy_hash', return_value=self.s.logic_hash):

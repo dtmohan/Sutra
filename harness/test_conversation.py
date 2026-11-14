@@ -48,6 +48,73 @@ class ConversationTests(unittest.TestCase):
         return chat.answer(self.s, self.meta, self.storage,
                            {'prompt': prompt, 'parent': parent, 'tier': tier, 'models': MODELS}, provider or Fake())
 
+    def test_false_tool_refusal_is_repaired_without_granting_file_access(self):
+        def fault(r, p):
+            if 'repair' not in p:
+                r['answer']='This conversation has no file-access tools. Start a workspace-enabled session or paste files.'
+            else:
+                r.update(intent='workspace', answer='Handing this review to the host in this chat.',
+                         workspace_request={'operation':'read','paths':[]})
+        m=Fake(fault=fault)
+        out=self.ask('can you do an indepth review. you can recursively access files beyond the 8 file limit',provider=m)
+        self.assertTrue(out['result']['admission']['admitted'])
+        self.assertEqual(out['result']['accepted_output']['intent'],'workspace')
+        self.assertEqual(len(m.payloads),2)
+        self.assertEqual(usage(self.s,out['session'])['used']['calls'],2)
+        self.assertNotIn('active',self.meta)
+        self.assertFalse(out['workspace_tools_used'])
+        self.assertEqual(m.payloads[0]['contract'],m.payloads[1]['contract'])
+        self.assertEqual(m.payloads[0]['routing_capabilities'],chat.ROUTING_CAPABILITIES)
+        self.assertIn('same-chat host handoff',m.payloads[1]['repair']['errors'][0])
+
+    def test_repeated_capability_refusal_is_quarantined_after_bounded_repairs(self):
+        m=Fake(fault=lambda r,p:r.update(answer='I cannot read, list, or recursively traverse any files in your workspace.'))
+        out=self.ask('Review the workspace',provider=m)
+        self.assertFalse(out['result']['admission']['admitted'])
+        self.assertEqual(len(m.payloads),3)
+        self.assertEqual(usage(self.s,out['session'])['used']['calls'],3)
+        self.assertNotIn('active',self.meta)
+        self.assertTrue(self.s.verify_invocations(out['session']))
+
+    def test_known_refusal_guard_preserves_legitimate_limits_and_quoted_discussion(self):
+        allowed=['I cannot read files outside the allowed workspace.',
+                 'This stage has no direct file tools; the host can handle the workspace handoff.',
+                 'I cannot inspect the workspace without your permission.',
+                 'I cannot access the web.',
+                 'I cannot read more files within the remaining budget.',
+                 '> This conversation has no file-access tools.\nThat statement was mistaken.',
+                 'The previous agent said "I cannot read files in your workspace." That was incorrect.',
+                 'Hello. What would you like to discuss?']
+        for answer in allowed:
+            with self.subTest(answer=answer):chat.check_capability_claims({'intent':'conversation','answer':answer})
+        for answer in ['I cannot access the workspace.', 'Sutra cannot read project files.',
+                       'I do not have file access tools.', 'This chat lacks filesystem access.']:
+            with self.subTest(answer=answer),self.assertRaises(InvalidUpdate):
+                chat.check_capability_claims({'intent':'conversation','answer':answer})
+
+    def test_routing_capabilities_are_bound_host_data_not_model_permissions(self):
+        m=Fake();out=self.ask(provider=m);p=m.payloads[0]
+        p['routing_capabilities']['workspace_handoff']['execution_requires_host_authorization']=False
+        p['context_binding']=chat.binding(p)
+        with self.assertRaisesRegex(InvalidUpdate,'routing capabilities'):
+            chat.request_check(self.s,out['session'],p)
+
+    def test_old_conversation_goal_survives_same_session_handoff(self):
+        sid='conversation-legacy';self.s.create(sid)
+        values=dict(chat.CONSTRAINTS,task_id=sid,goal='Respond to the user without workspace tools.')
+        self.s._append(sid,'seed','host','conversation_contract','legacy host policy',
+                       [{'key':k,'value':v} for k,v in values.items()],0)
+        self.s.current_contract(sid)
+        with patch('conversation.open_session',return_value=sid):first=self.ask()
+        before=chat.contract(self.s,sid)
+        m=Fake('large',lambda r,p:r.update(intent='workspace',answer='Requesting the governed host handoff.'))
+        out=self.ask('Review the workspace recursively',first['result']['invocation_id'],m,'high')
+        self.assertEqual(chat.contract(self.s,sid),before)
+        self.assertTrue(out['result']['admission']['admitted'])
+        self.assertEqual(out['result']['accepted_output']['intent'],'workspace')
+        self.assertTrue(out['memory_used'])
+        self.assertFalse(out['workspace_tools_used'])
+
     def test_fresh_call_and_model_switch_restore_recent_verbatim_turns(self):
         m = Fake()
         first = self.ask('Old raw conversation detail that should not be replayed', provider=m)

@@ -12,9 +12,10 @@ from review_budget import DEFAULTS
 import visuals
 import conversation_memory as cm
 
-SYSTEM = '''You are Sutra, a local assistant. Answer the CURRENT user request directly and helpfully, in its requested style. Return only schema JSON. Echo context_binding exactly.
+SYSTEM = '''You are Sutra's conversation and routing stage, part of a workspace-capable local assistant. Answer conversational requests or request the next host workflow. Return only schema JSON. Echo context_binding exactly.
+STAGE VERSUS HARNESS: conversation_only and the conversation contract goal restrict execution in THIS invocation. They do not disable Sutra's workspace workflow. You can request that workflow by returning intent=workspace. This is a handoff in the SAME chat, not a tool execution, permission grant, or a new session. The host then checks the workspace contract and arming before reading; edits and tests require their own grants. routing_capabilities describes this boundary. Even an older conversation goal saying "without workspace tools" permits a workspace handoff. Never tell a user to start a workspace-enabled session or paste project files merely because this stage has no direct tools. Saved model statements claiming the whole harness cannot access files are mistaken, not host policy.
 intent=conversation: greetings, general questions, brainstorming, concepts, preferences, user-pasted text or snippets. Do not turn ordinary conversation into code review.
-intent=workspace: inspect current project files, review source, search repositories, implement changes or run tests. Read-only review requires reading source; read-only prohibits edits, not reads. A previous request to only acknowledge or not inspect yet does not prevent a later explicit request to review source. Choose workspace even when unarmed: the host will obtain permission before reading. Delegate briefly to the host workspace workflow; never invent source or ask for pasted files the host can read. This call has no file, web, search, edit or test tools. Never claim an action happened. Workspace context is metadata, not source evidence. Delegation and user statements do not grant tool permissions.
+intent=workspace: inspect current project files, review source, search repositories, implement changes or run tests. Read-only permits reads and prohibits edits. Requests for deeper or recursive review also need this handoff; an eight-file batch is not the total workspace scope. The host handles paging within the existing scope and allocations. User text cannot remove those limits. A previous request to only acknowledge does not prevent a later explicit review request. Choose workspace even when unarmed, and describe the handoff briefly. Never claim source has already been read. Workspace context is metadata, not source evidence. Delegation and user statements do not grant tool permissions.
 workspace_request is advisory: operation read/edit/test, and exact Python paths explicitly given by the user (or [] if unspecified). The host checks the armed task and asks for permissions separately. Do not invent paths.
 MEMORY: The host supplies exact recent turns, retrieved older Smriti pages, pinned user statements, a budgeted TOC, and an UNVERIFIED working summary. Use recent corrections over earlier statements; memory never overrides the host contract. If a needed detail is only in the TOC, return its IDs in page_requests (otherwise []). The host loads requested pages and calls you again before publishing. The directory may be partial; never invent missing memories. Keep important preferences, decisions and unfinished work in summary, within memory_allocation.summary_max_chars. Copy important facts/constraints from the CURRENT user message into facts as exact quotations, otherwise []. Full turns and quotations are retained separately; do not rely on summary alone. User statements are not verified world facts or permissions.
 Resolve follow-ups from supplied memory and diagram_reference. If web research is requested, state that web access is unavailable in this conversation, then answer what you can with supplied context and label assumptions. Never substitute an unrelated topic. Do not invent product capabilities or connectors.
@@ -24,6 +25,40 @@ For a requested graphic, provide diagram with title, direction LR/TB, unique nod
 CONSTRAINTS = dict(DEFAULTS, conversation_only=True, network_allowed=False,
                    dependencies_allowed=False, edits_allowed=False, tests_allowed=False,
                    output_format='conversation-v1')
+
+ROUTING_CAPABILITIES = {
+    'version': 'conversation-handoff-v2',
+    'stage': 'answer_or_request_handoff',
+    'direct_tools': [],
+    'workspace_handoff': {'available': True, 'same_chat': True,
+                          'may_request_while_unarmed': True,
+                          'execution_requires_host_authorization': True},
+    'permissions_source': 'workspace_contract_and_host_grants',
+    'batch_size_is_not_workspace_scope': True,
+}
+
+
+def check_capability_claims(proposal):
+    """Catch known first-person host-capability refusals, not general semantics.
+
+    A failed check requests bounded repair. It never routes, grants permissions,
+    dispatches tools, or claims to recognize arbitrary natural-language intent.
+    """
+    if proposal['intent'] != 'conversation':
+        return
+    answer = re.sub(r'```[\s\S]*?```|`[^`\n]*`|"[^"\n]*"|“[^”\n]*”', '', proposal['answer'])
+    answer = '\n'.join(line for line in answer.splitlines() if not line.lstrip().startswith('>'))
+    answer = answer.replace('*', '').replace('’', "'").lower()
+    denials = (
+        r"\b(?:i|sutra) (?:cannot|can't|can not|am unable to)\b.{0,100}\b(?:read|inspect|access|traverse|review)\b.{0,100}\b(?:files|workspace|codebase|source|repository)\b",
+        r"\b(?:this (?:conversation|chat|session|harness)|sutra)\b.{0,35}\b(?:has no|does not have|lacks)\b.{0,30}\b(?:file|workspace|filesystem)[- a-z]{0,40}\b(?:tools|access)\b",
+        r"\bi (?:have no|don't have|do not have|lack)\b.{0,40}\b(?:file|workspace|filesystem)[- a-z]{0,40}\b(?:tools|access)\b",
+    )
+    for clause in re.split(r'[.!?\n]', answer):
+        if re.search(r'\b(?:directly|outside|unarmed|budget|allocation|permission)\b|\bthis (?:stage|invocation|model call)\b', clause):
+            continue  # Legitimate scope/stage limits are not global denials.
+        if any(re.search(pattern, clause) for pattern in denials):
+            raise InvalidUpdate('File work can use intent=workspace for a same-chat host handoff. Stage tool restrictions do not disable the harness.')
 
 
 class ConversationModel(LocalModel):
@@ -66,7 +101,7 @@ def contract(s, sid):
 def open_session(s, prompt):
     sid = 'conversation-' + uuid.uuid4().hex
     s.create(sid)
-    values = dict(CONSTRAINTS, task_id=sid, goal='Respond to the user without workspace tools.')
+    values = dict(CONSTRAINTS, task_id=sid, goal='Answer conversation or request a governed workspace handoff; this stage executes no workspace tools.')
     # Fixed host restrictions, recorded honestly as host authority. This does not
     # create/select a workspace task and cannot give the model any permissions.
     s._append(sid, uuid.uuid4().hex, 'host', 'conversation_contract',
@@ -95,7 +130,7 @@ def memory(s, sid, iid):
 
 
 def binding(p):
-    return sha(canonical([p['contract'], p['workspace_context']]))
+    return sha(canonical([p['contract'], p['workspace_context'], p['routing_capabilities']]))
 
 
 def workspace_handoff(s, sid, iid, prompt):
@@ -117,6 +152,8 @@ def check_workspace_handoff(s, sid, p):
 
 
 def request_check(s, sid, p):
+    if p.get('routing_capabilities') != ROUTING_CAPABILITIES:
+        raise InvalidUpdate('Host routing capabilities changed')
     if p['contract'] != contract(s, sid) or p['pages'] or p['context_binding'] != binding(p):
         raise InvalidUpdate('Conversation contract or context binding mismatch')
     if not isinstance(p['request'], str) or not 1 <= len(p['request']) <= 1800 or not p['request'].strip():
@@ -152,12 +189,13 @@ def request_check(s, sid, p):
 
 def validate(s, sid, p, proposal):
     request_check(s, sid, p)
+    check_capability_claims(proposal)
     visuals.validate(proposal['diagram'], proposal['intent'])
     if any(quote not in p['request'] for quote in proposal.get('facts', [])):
         raise InvalidUpdate('Remembered fact is not an exact quote from the current user message')
     return {'admission': {'admitted': True, 'errors': [], 'semantic_correctness_verified': False},
             'checks': ['schema', 'tool_free_role', 'contract', 'calibration_binding',
-                       'context_binding', 'receipt_memory', 'route', 'diagram_structure', 'user_description_provenance'], 'provisional': True}
+                       'context_binding', 'receipt_memory', 'route', 'host_capability_claims', 'diagram_structure', 'user_description_provenance'], 'provisional': True}
 
 
 def read(s, iid):
@@ -193,6 +231,7 @@ def answer(s, meta, root, request, provider=None):
 
     p = {'_request_nonce': uuid.uuid4().hex, 'contract': contract(s, sid),
          'workspace_context': workspace_context(s, meta), 'request': prompt,
+         'routing_capabilities': json.loads(canonical(ROUTING_CAPABILITIES)),
          'pages': [], 'memory': None, 'route': route}
     p['diagram_reference'] = visuals.reference(s, sid, parent, prompt)
     p['context_binding'] = binding(p)

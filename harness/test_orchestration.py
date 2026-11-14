@@ -40,6 +40,30 @@ class OrchestrationTests(unittest.TestCase):
             if out['state']==phase:return out
         self.fail('Flow never reached '+phase+': '+str(out))
     def children(self):return self.until('CHILDREN')
+    def test_repaired_handoff_still_requires_host_arming_and_retains_limits(self):
+        original=self.provider
+        def provider(stage):
+            if stage!='conversation':return original(stage)
+            def reply(r,p):
+                if 'repair' not in p:r['answer']='This conversation has no file-access tools.'
+                else:r.update(intent='workspace',answer='Handing off in this chat.',workspace_request={'operation':'read','paths':[]})
+            model=Conversation(MODELS[self.tier],reply);self.models.append((stage,model));return model
+        self.provider=provider
+        out=self.step(armed=False)
+        self.assertEqual(out['state'],'NEED_ARM')
+        self.assertNotIn('active',self.meta)
+        self.assertEqual(len(self.models[0][1].payloads),2)
+        with self.assertRaisesRegex(InvalidUpdate,'user-armed'):
+            self.step(out,armed=False)
+        out=self.until('CHILDREN',out)
+        sid=self.meta['active'];contract=self.s.pinned(sid)
+        self.assertFalse(contract['constraints']['edits_allowed'])
+        self.assertFalse(contract['constraints']['network_allowed'])
+        self.s.close();self.s=InvocationLedger(self.root/'state.sqlite');self.tier='high'
+        out=self.until('DONE',out)
+        self.assertTrue(out['data']['result']['admission']['admitted'])
+        self.assertEqual(contract,self.s.pinned(sid))
+
     def test_fresh_models_keep_context_permissions_budget_and_join(self):
         out=self.children();self.assertGreaterEqual(len(out['children']),2)
         contract=self.s.pinned(self.meta['active']);sid=self.meta['active']

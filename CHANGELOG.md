@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.21.1
+
+- Distinguish conversation-stage execution limits from the available same-chat workspace handoff. Bind explicit host routing capabilities into every new conversation packet.
+- Reject known misleading file-access refusals and use bounded repair without granting permissions or resetting budgets. Preserve legacy conversation contracts and memory.
+- Restore data-only conversation history from known 0.20.x and 0.21.0 policies after upgrade; historical executable proposals remain stale.
+- Keep the canonical STP kernel unchanged.
+
 ## 0.21.0
 
 - Stream local-model reasoning with parent/child invocation identity; show expandable Monitor details and native thinking where the host supports it.

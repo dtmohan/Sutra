@@ -9,11 +9,22 @@ import re
 from context_manager import InvalidUpdate, ContextBudgetExceeded, canonical, sha
 from paging import Budget, PageFault
 
-# Explicit compatibility for data-only conversations shipped in Sutra 0.16–0.19.
+# Explicit compatibility for data-only conversations from known released policies.
 # Old executable proposals, workspace checkpoints and permissions remain stale.
 LEGACY_POLICIES = {'2319f693bfd23c67bda96909572c6a5646d1a299497aa3ab9c23fc9907215812','6537eca1817b943a6d6f8c546428d09e461bf93e6f0d41ea70fc7c0bb47d6665',
                    '8091e394c2cdf9939f47a51ba9eceb3efc9cb751cb7e086b18e800a9f18414ea',
                    'd71f0acf70b42a1d0cb1332c1413bfb85b90156d5820d590cdb19b41ea79ce04'}
+# Recomputed from the released VSIX policy manifests; never from an untrusted receipt.
+RELEASE_POLICIES = {
+    '0.20.0': '2319f693bfd23c67bda96909572c6a5646d1a299497aa3ab9c23fc9907215812',
+    '0.20.1': '61332b3eb5cccd619d104a09d2b8a4bd85b624a1c16421d6d3ae23b592650a71',
+    '0.20.2': '2298c6857d65bd34f7a1a66f0a600cce61fd25e5aaf41ad77c310988ea54bb07',
+    '0.20.3': '29c074206b03ed59904b2731cca8ffbd44c0a891dbf8d59696335e0236fa7cb9',
+    '0.20.4': 'dcf365b64bb12612e7d943a5569dee58d4af2a19fc428a687426bf21ca355faa',
+    '0.20.5': '6149eeeb9253a725d34196ce458b32b851a00a30b36b18b7dcc8b0875fe64f91',
+    '0.21.0': '2f51a703bdee4c69bcf2987314828083f2c3083710d644aeae0bedaa5d18bdd2',
+}
+LEGACY_POLICIES.update(RELEASE_POLICIES.values())
 PIN = re.compile(r'\b(remember|must|never|always|constraint|prefer|do not|don.t|keep|only|important)\b', re.I)
 WORDS = re.compile(r'[^\W_]{3,}', re.UNICODE)
 STOP = {'the', 'and', 'this', 'that', 'what', 'with', 'please', 'about', 'could', 'would', 'tell', 'have', 'were'}

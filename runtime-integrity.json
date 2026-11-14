@@ -1,7 +1,7 @@
 {
   "typescript_version": "6.0.3",
   "sha256": {
-    "README.txt": "1e14ffebb4c2e6ce3994a08368608d548b58341ca412c76cb8191411e9aa0fc0",
+    "README.txt": "80ce1eb2ccaa9a3ff9d2252f3f535d03cd9302a708db4eb33b386e8a5e67f150",
     "THIRD_PARTY_NOTICES.md": "dbfa70ae71aae03e80a75c1107a417922578ac5c2f472eb3464477995b0e22b0",
     "bin/telemetry": "d8e0a5ce712a0f0b78864c258bf374ebb815d4b7c80d1a84d0c34e7e6e80fdbd",
     "bin/telemetry-build.json": "a95d64ef6665d9796683ac0ed331288f4c9dc2d272e27ccf2914abe1153d19ca",
@@ -22,8 +22,8 @@
     "harness/checked_protocol.py": "726e6833a30e0b5661a695e515cf24ef7ec8527fb25bc4ecaf2d35eb404dcf7a",
     "harness/coding_role.py": "bd1f2e64693a27dd3ffefa6a3615d67ee4d756a5adf6ed85d8e5907a406a00d1",
     "harness/context_manager.py": "3b9e4f7d0aa2a2d455dec9d72f1403cf6af96bfcd5c3d51dccb87a54033ca0eb",
-    "harness/conversation.py": "5d9bb3045f48dd32d46c2f960a8df1d917fe6bd95da4b7771eb558bda199aa09",
-    "harness/conversation_memory.py": "7c09628a64a7bc82f4fc4808e43822dcbaf51692c831aa5e2bf4a35428c3204d",
+    "harness/conversation.py": "3f13c4b6905177dd482debd2a58d25a75703cbd200509c706241cd5de5666fcf",
+    "harness/conversation_memory.py": "5a6fe6bd2fa0c5cc8a050d2958b058a2498368501ed6c8ae990cc91569316082",
     "harness/dag_protocol.py": "6ba07be6f24acd580c443581d1075a2df72b5ea2590a6de6849e04b37a7adcb4",
     "harness/dag_runtime.py": "33b60eb1c4f1c5141a0618d5e614d98a369fbb4b00fb1bb40781d0fb6ea564ab",
     "harness/evidence.py": "02e74562ef896428315240ce76b85516065892d63551bf77e6ec5cdc16ece35b",
@@ -79,7 +79,7 @@
     "media/diagram.html": "157aed4286eaac528072ba8dc6f9e1eebee5cd07e97cf07cdbcf9df21c95a3a3",
     "media/diagram.js": "5f28b189e4ef99da5f58159f4732f273c70b3c55faeeb5ab9850b83053474488",
     "media/karma.svg": "b03df2cae85a168fa449e2850c80a3dbe0c88940052f9a5fa531fbcaf1002004",
-    "media/panel.html": "0d5c21ba8f6e245e6e6e1d18498899b314d316a9261c5b3dea87cb4b8773bb5c",
+    "media/panel.html": "4fd086464e7cbd610ec2613be60a9201fd19ffef1a68f4a796908ee335ee79ed",
     "media/panel.js": "87e471bec0a93fa91ac19a3bd8ec2baef6abbecc1a4f7c68a895ec65809511bd",
     "media/token_usage.js": "1e9cf37f4793800a88ca265fbf86e6c2001aaa5682b76bb119d4fa830af13a88",
     "media/usage.html": "c92e66f8ed8cd9a48adef185634346dc39a1a8fa85a0d19e8143a95113ede779",
