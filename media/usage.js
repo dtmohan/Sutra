@@ -105,8 +105,12 @@ function renderActivity(calls){
  for(const child of [...box.children])if(!ids.has(child.dataset.id))child.remove();
  for(const c of calls){
   let card=[...box.children].find(n=>n.dataset.id===c.id);
-  if(!card){card=node('details',undefined,'reasoning-card');card.dataset.id=c.id;card.append(node('summary'),node('p',undefined,'plot-note'),node('pre'),node('p',undefined,'plot-note'));box.prepend(card);}
-  card.children[0].textContent=(c.role==='subagent'?'Child review':'Model call')+' · '+c.model+' · '+c.role+' · '+c.status;
+  if(!card){
+   card=node('details',undefined,'reasoning-card');card.dataset.id=c.id;
+   const open=node('button','Open reasoning details');open.onclick=()=>vscode.postMessage({type:'activity_details',id:c.id});
+   card.append(node('summary'),node('p',undefined,'plot-note'),node('pre'),node('p',undefined,'plot-note'),open);box.prepend(card);
+  }
+  card.children[0].textContent=(c.role==='subagent'?'Child review':c.role==='chat_reviewer'?'Workspace review':c.role==='conversation'?'Conversation / routing':'Model call')+' · '+c.model+' · '+c.role+' · '+c.status;
   card.children[1].textContent='Invocation '+c.id+(c.node_id?' · task '+c.node_id:'')+' · reasoning requested: '+(c.requested===null?'model default':c.requested??'pending');
   card.children[2].textContent=c.text||'No reasoning emitted yet. The model may have reasoning disabled or may not support a separate thinking stream.';
   const usage=c.usage,elapsed=((c.finishedAt||Date.now())-c.startedAt)/1000;
@@ -114,7 +118,7 @@ function renderActivity(calls){
  }
  el('reasoning-empty').hidden=calls.length>0;
 }
-window.addEventListener('message',({data:m})=>{if(m.type!=='usage')return;renderActivity(m.activity||[]);snapshot=m.snapshot;routing=m.routing;native=m.native;error=m.error;for(const key of ['model','stage'])fillOptions(key);if(!snapshot){for(const key of ['input','output','calls','unknown'])el(key).textContent='—';for(const key of ['input','output'])el(key+'-note').textContent='Waiting for measurements';el('scope').textContent='This workspace · waiting for recorded calls…';el('visuals').hidden=true;el('details').hidden=true;el('empty').hidden=true;el('window').textContent='';}render();});
+window.addEventListener('message',({data:m})=>{if(m.type!=='usage')return;renderActivity(m.activity||[]);el('reasoning-error').textContent=m.activityError||'';el('reasoning-error').hidden=!m.activityError;snapshot=m.snapshot;routing=m.routing;native=m.native;error=m.error;for(const key of ['model','stage'])fillOptions(key);if(!snapshot){for(const key of ['input','output','calls','unknown'])el(key).textContent='—';for(const key of ['input','output'])el(key+'-note').textContent='Waiting for measurements';el('scope').textContent='This workspace · waiting for recorded calls…';el('visuals').hidden=true;el('details').hidden=true;el('empty').hidden=true;el('window').textContent='';}render();});
 // Expire live readings even if the host/reader stops delivering messages.
 el('resume-workflow').onclick=()=>vscode.postMessage({type:'resume'});el('discard-workflow').onclick=()=>vscode.postMessage({type:'discard'});
 setInterval(()=>{if(!document.hidden)renderMonitor();},1000);

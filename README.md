@@ -1,10 +1,12 @@
 # Sutra
 
+Sutra 0.21.2 retains separate reasoning details for every routing, child and workspace-review call. Click a call’s **reasoning details** link in chat or **Open reasoning details** in Sutra Monitor. The read-only pane updates during generation and stays available after a reload within the retention window. Native thinking remains available, but VS Code controls how its inline blocks are grouped.
+
 Sutra 0.21.1 fixes same-chat workspace handoff: tool-free conversation-stage restrictions no longer describe the whole harness. Known false file-access refusals go through bounded repair. Verified conversation history from released 0.20.x and 0.21.0 policies remains available after reload; old action authority is not restored. Workspace arming, scope and remaining budgets still apply.
 
 Sutra 0.21.0 streams local-model reasoning separately from accepted answers. Open **Sutra Monitor → Calls & reasoning** for expandable parent/child details, their model, status and final token usage. Compatible VS Code hosts also show native thinking parts inline; hosts without that capability use the Monitor. Choose **Sutra → Settings → Model reasoning**, then save runtime settings, to request reasoning on (lowest supported level) or model defaults. Off remains the default; some models always reason.
 
-Reasoning is unverified diagnostic text, never a task-memory page, permission, test proof or accepted answer. Reasoning and answers share the existing output allocation. Ollama supplies total output counts, not separate reasoning-token counts. The view retains the latest 12 calls with up to 16,000 characters each until the window reloads; existing diagnostic traces remain subject to the storage policy.
+Reasoning is unverified diagnostic text, never a task-memory page, permission, test proof or accepted answer. Reasoning and answers share the existing output allocation. Ollama supplies total output counts, not separate reasoning-token counts. Diagnostic history is saved locally as plain text in the extension’s per-workspace `reasoning.json`, bounded to 12 calls, 7 days, 1 MiB and 16,000 characters per call. It may include source references emitted by the model. This is separate from Smriti/task memory and immutable protocol evidence. A window closing mid-call is shown as interrupted, never as completed. Retention errors appear in the Monitor without aborting governed work. Older vanished reasoning cannot be recovered; previous versions omitted response bodies from disk traces.
 
 Local model orchestration for VS Code. Switch models while keeping the task,
 constraints and accepted context in a local ledger.

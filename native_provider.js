@@ -246,14 +246,20 @@ function install(vscode,context,deps){
       const activityToken=activeCancel.token;let activityOpen=true;
       activityProgress=e=>{
         if(!activityOpen||activityToken.isCancellationRequested)return;
+        const label=e.role==='subagent'?'Child review':e.role==='chat_reviewer'?'Workspace review':e.role==='conversation'?'Conversation / routing':'Model call';
+        if(e.kind==='start'){
+          const uri=deps.activityLink?.(e);
+          if(uri)progress.report(new vscode.LanguageModelTextPart(`\n\n[${label} · reasoning details](${uri})\n\n`));
+        }
         // Optional host capability: no proposed-API flags required. Older hosts
         // retain the same diagnostic stream in Sutra Monitor.
         if(typeof vscode.LanguageModelThinkingPart!=='function')return;
         let text='';
-        if(e.kind==='start')text=(e.role==='subagent'?'Child review':'Model call')+' · '+e.model+' · '+e.role+'\n'+(e.node_id?'Task '+e.node_id+'\n':'')+'Unverified local-model reasoning.\n';
+        if(e.kind==='start')text=label+' · '+e.model+' · '+e.role+'\n'+(e.node_id?'Task '+e.node_id+'\n':'')+'Unverified local-model reasoning.\n';
         else if(e.kind==='thinking')text=e.text;
         else if(e.kind==='finish')text='\nProtocol: '+e.status+' · '+(e.usage?.input_tokens??'?')+' input / '+(e.usage?.output_tokens??'?')+' output tokens (reasoning included).'+(e.display_truncated?' Display shortened; full generation still charged.':'')+'\n';
         if(text)progress.report(new vscode.LanguageModelThinkingPart(text,e.id));
+        if(e.kind==='finish')progress.report(new vscode.LanguageModelThinkingPart('',e.id,{vscode_reasoning_done:true}));
       };
       try{
         let data,flow,restartReview=false;

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.21.2
+
+- Keep separate bounded reasoning records across reloads, with per-call links in native chat and read-only details panes in Sutra Monitor.
+- Distinguish conversation routing, child review and workspace review; close each native thinking stream explicitly.
+- Retain diagnostic model/stage identity and interrupted status without adding reasoning to task memory, permissions or protocol evidence.
+- Keep the STP kernel, model transport, policy hashes and remaining task budgets unchanged.
+
 ## 0.21.1
 
 - Distinguish conversation-stage execution limits from the available same-chat workspace handoff. Bind explicit host routing capabilities into every new conversation packet.

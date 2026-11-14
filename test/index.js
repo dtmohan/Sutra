@@ -4,7 +4,24 @@ const {execFile}=require('node:child_process');const {promisify}=require('node:u
 exports.run=async()=>{
  const report={checks:[]},out=process.env.KARMA_SMOKE_OUTPUT;
  try{
-  const extension=vscode.extensions.getExtension('deepak-local.karma-local-harness');const api=await extension.activate();
+  const extension=vscode.extensions.getExtension('deepak-local.karma-local-harness');
+  const workspace=vscode.workspace.workspaceFolders[0].uri.fsPath;
+  const storage=path.join(process.env.KARMA_SMOKE_PROFILE,'User','globalStorage','deepak-local.karma-local-harness',crypto.createHash('sha256').update(workspace).digest('hex').slice(0,24));
+  const {ActivityArchive,activityUri}=require(path.join(extension.extensionPath,'model_activity'));
+  const history=new ActivityArchive(storage),parent='1'.repeat(32),child='2'.repeat(32);
+  history.accept({kind:'start',id:parent,model:'fixture-small',role:'conversation'});
+  history.accept({kind:'thinking',id:parent,text:'Router fixture retained separately'});
+  history.accept({kind:'finish',id:parent,status:'accepted'});
+  history.accept({kind:'start',id:child,model:'fixture-large',role:'subagent',node_id:'child-fixture'});
+  history.accept({kind:'thinking',id:child,text:'Child fixture reasoning survives reload'});history.dispose();
+  const api=await extension.activate();
+  const details=await vscode.workspace.openTextDocument(vscode.Uri.parse(activityUri(storage,child)));
+  assert(details.getText().includes('Child fixture reasoning survives reload'));assert(details.getText().includes('Status: interrupted'));
+  assert(!details.getText().includes('Router fixture'));assert.equal(details.uri.scheme,'karma-preview');assert.equal(details.languageId,'plaintext');
+  await vscode.window.showTextDocument(details,{viewColumn:vscode.ViewColumn.Beside,preview:false});
+  const foreign=await vscode.workspace.openTextDocument(vscode.Uri.parse('karma-preview:/activity/'+'f'.repeat(24)+'/'+child+'/Reasoning.txt'));
+  assert(foreign.getText().includes('different workspace'));assert(!foreign.getText().includes('Child fixture reasoning'));
+  report.checks.push('packaged reasoning details open in a read-only plain-text pane with restored child identity, interrupted status and workspace isolation');
   assert.equal(api.version,extension.packageJSON.version);assert.deepEqual(Object.keys(api).sort(),['getRoutingStatus','getState','open','version']);report.checks.push('packaged extension activates with restricted API');
   assert.equal(typeof vscode.chat?.createChatParticipant,'function');
   assert(extension.packageJSON.contributes.chatParticipants.some(p=>p.id==='karma.local'&&p.name==='sutra'));
@@ -19,8 +36,6 @@ exports.run=async()=>{
   report.checks.push('native chat API registers @sutra; model setup command available','simple prompt precedes collapsed advanced controls');
   assert((await vscode.commands.getCommands(true)).includes('karma.openReport'));
   for(const name of ['importCalibration','selectCalibrations','revokeCalibration','evaluateCalibration'])assert((await vscode.commands.getCommands(true)).includes('karma.'+name));
-  const workspace=vscode.workspace.workspaceFolders[0].uri.fsPath;
-  const storage=path.join(process.env.KARMA_SMOKE_PROFILE,'User','globalStorage','deepak-local.karma-local-harness',crypto.createHash('sha256').update(workspace).digest('hex').slice(0,24));
   // Fixture setup is a direct host request; no public extension mutation API.
   const setup=path.join(process.env.KARMA_SMOKE_DRIVER,'prepare.py');
   await exec(process.env.KARMA_SMOKE_PYTHON||'python3',[setup,extension.extensionPath,storage,workspace]);

@@ -1,9 +1,9 @@
-Sutra 0.21.1 — same-chat workspace handoff
+Sutra 0.21.2 — persistent per-call reasoning details
 
 The conversation stage can request a workspace review in the same chat. Its lack of direct file tools does not disable the harness. Known false file-access refusals are withheld and sent through bounded repair; arming, task scope and remaining budgets still govern execution. Existing conversations keep their saved memory and contracts.
 
 
-Use Sutra → Settings → Model reasoning to enable reasoning at the lowest supported level or use model defaults. Reasoning remains off by default where supported. Calls & reasoning in Sutra Monitor shows live expandable details for parent and child calls, protocol outcome and final input/output tokens. Compatible VS Code hosts also show thinking inline; older hosts use the Monitor. Reasoning is unverified model commentary and is never saved as task memory or authority. It shares the existing output budget with the answer. Display history is bounded and cleared on reload.
+Use Sutra → Settings → Model reasoning to enable reasoning at the lowest supported level or use model defaults. Reasoning remains off by default where supported. Calls & reasoning in Sutra Monitor shows live expandable details for parent and child calls, protocol outcome and final input/output tokens. Compatible VS Code hosts also show thinking inline; older hosts use the Monitor. Reasoning is unverified model commentary and is never saved as task memory or authority. It shares the existing output budget with the answer. Open each call’s reasoning details link in chat, or Sutra Monitor → Calls & reasoning → Open reasoning details. Plain-text diagnostic history survives reloads, bounded to 12 calls, 7 days, 1 MiB per workspace and 16,000 characters per call. It may contain source references. Older vanished streams cannot be recovered because previous versions did not save reasoning.
 
 
 Workspace access waits for the Arm Sutra dialog, then explicitly reports granted or declined. Already armed requests say they reuse the current grant. Sutra Monitor and routing logs include the permission outcome. File operations cannot proceed while confirmation is pending or declined.

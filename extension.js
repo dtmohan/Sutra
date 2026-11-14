@@ -470,7 +470,7 @@ function activate(context) {
     vscode.commands.registerCommand('karma.configureModels',()=>configureModels()),
     vscode.commands.registerCommand('karma.openAdvanced',()=>showPanelSection('advanced')),
     vscode.commands.registerCommand('karma.newChatReview',()=>newChatReview()),
-    vscode.workspace.registerTextDocumentContentProvider('karma-preview',{onDidChange:previewChanges.event,provideTextDocumentContent(uri){const match=uri.toString().match(/^karma-preview:\/conversation\/([a-f0-9]{32})\/Response\.md(?:\?checkpoint=[a-f0-9]{64})?$/);if(match)return request({op:'conversation_read',invocation_id:match[1]}).then(data=>{const p=data.result.accepted_output;return p.answer+'\n\n---\n\nModel: '+data.route.model+'\n\n'+tokens.markdown(data.result.token_usage)+'\nConversation receipt: '+match[1]+'\n\nWorkspace tools: not used by the conversation role.\n\n'+(p.diagram?'Open **Sutra: Open Last Diagram** to view the latest diagram.\n\n```mermaid\n'+diagramView.mermaidSource(p.diagram)+'\n```':'');});return previewDocuments.get(uri.toString())||'';}}),
+    vscode.workspace.registerTextDocumentContentProvider('karma-preview',{onDidChange:previewChanges.event,provideTextDocumentContent(uri){if(uri.toString().startsWith('karma-preview:/activity/'))return usage?.activityDocument(uri.toString())||'Reasoning history is not ready.';const match=uri.toString().match(/^karma-preview:\/conversation\/([a-f0-9]{32})\/Response\.md(?:\?checkpoint=[a-f0-9]{64})?$/);if(match)return request({op:'conversation_read',invocation_id:match[1]}).then(data=>{const p=data.result.accepted_output;return p.answer+'\n\n---\n\nModel: '+data.route.model+'\n\n'+tokens.markdown(data.result.token_usage)+'\nConversation receipt: '+match[1]+'\n\nWorkspace tools: not used by the conversation role.\n\n'+(p.diagram?'Open **Sutra: Open Last Diagram** to view the latest diagram.\n\n```mermaid\n'+diagramView.mermaidSource(p.diagram)+'\n```':'');});return previewDocuments.get(uri.toString())||'';}}),
     vscode.commands.registerCommand('karma.exportDebug',async()=>{const data=await request({op:'dashboard'});
       const uri=await vscode.window.showSaveDialog({defaultUri:vscode.Uri.file(path.join(workspace(),'karma-debug.json')),filters:{JSON:['json']}});
       if(uri)await vscode.workspace.fs.writeFile(uri,Buffer.from(JSON.stringify(data,null,2)+'\n'));}),
@@ -491,7 +491,7 @@ function activate(context) {
     vscode.commands.registerCommand('karma.evaluateCalibration',()=>evaluateCalibration()),
     vscode.commands.registerCommand('karma.switchModel',switchModel),{dispose(){clearInterval(dashboardTimer);telemetry?.kill();for(const p of processes)p.kill('SIGTERM');}});
   const diagrams=diagramView.install(vscode,context,id=>request({op:'conversation_read',invocation_id:id}));
-  usage=usageView.install(vscode,context,{refresh:refreshDashboard});
+  usage=usageView.install(vscode,context,{refresh:refreshDashboard,storage,activityChanged:uri=>previewChanges.fire(uri)});
   dashboardTimer=setInterval(refreshDashboard,2000);
   const externalTools={
     karma_auto_review:async(input,token)=>request({op:'auto_step',explain:input.explain!==false},token),
@@ -509,7 +509,7 @@ function activate(context) {
   }));
   if(vscode.lm.registerLanguageModelChatProvider){
     nativeController=nativeProvider.install(vscode,context,{request:(m,t,a)=>request(m,t,true,a),workspace,isBusy:()=>busy||sequence,
-      modelSettings,configureModels:(force,t)=>configureModels(force,t,true),simpleChat,publishReview,
+      activityLink:event=>usage?.activityLink(event),modelSettings,configureModels:(force,t)=>configureModels(force,t,true),simpleChat,publishReview,
       async presentConversation(data){if(data.result.accepted_output.diagram)await diagrams.open(data);},
       async showDiff(change,iid){const before=vscode.Uri.parse('karma-preview:/'+iid+'/before.py'),after=vscode.Uri.parse('karma-preview:/'+iid+'/after.py');previewDocuments.set(before.toString(),change.before);previewDocuments.set(after.toString(),change.after);await vscode.commands.executeCommand('vscode.diff',before,after,'Sutra proposed edit: '+change.target);},
       onRoute(value){output.appendLine('KARMA_NATIVE_ROUTE '+JSON.stringify(value));},

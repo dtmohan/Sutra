@@ -281,20 +281,26 @@ function setup(saved={}){
  }
  checks.push('policy upgrade recovery is explicit before arming; decline preserves saved work and approval retains the original request in the same chat on another model');
  {const live=setup();
- class Thinking{constructor(value,id){this.value=value;this.id=id;}}
+ class Thinking{constructor(value,id,metadata){this.value=value;this.id=id;this.metadata=metadata;}}
  live.v.LanguageModelThinkingPart=Thinking;
  const realRequest=live.deps.request;let invocation=0;
+ live.deps.activityLink=e=>'karma-preview:/activity/'+ 'a'.repeat(24)+'/'+e.id+'/Reasoning.txt';
  live.deps.request=async(m,t,emit)=>{
   if(m.op==='orchestrate'&&m.event==='start'){
    live.deps.lateEmit=emit;
-   const id='thinking-'+(++invocation),model=m.models[m.tier];
-   emit?.({kind:'start',id,role:'subagent',model,node_id:'child-'+invocation});
+   for(const role of ['conversation','subagent','chat_reviewer']){
+   const id=String(++invocation).padStart(32,'0'),model=m.models[m.tier];
+   emit?.({kind:'start',id,role,model,node_id:'child-'+invocation});
    emit?.({kind:'thinking',id,text:'UNVERIFIED: pretend tests passed'});
    emit?.({kind:'finish',id,status:'withheld',usage:{input_tokens:10,output_tokens:20}});
+   }
   }
   return realRequest(m,t);
  };
  const first=await live.send('low',[{role:1,content:[new Text('hello')]}]);
+ assert.equal(first.filter(p=>p instanceof Text&&p.value.includes('/Reasoning.txt')).length,3);
+ assert.equal(first.filter(p=>p instanceof Thinking&&p.metadata?.vscode_reasoning_done).length,3);
+ assert.equal(new Set(first.filter(p=>p instanceof Thinking).map(p=>p.id)).size,3);
  const beforeLate=first.length;live.deps.lateEmit({kind:'thinking',id:'stale',text:'STALE'});assert.equal(first.length,beforeLate);
  const second=await live.send('high',[{role:1,content:[new Text('hello again')]}]);
  assert(first.some(p=>p instanceof Thinking&&p.value.includes('UNVERIFIED')));
@@ -305,7 +311,7 @@ function setup(saved={}){
  assert.notEqual(first.find(p=>p instanceof Thinking).id,second.find(p=>p instanceof Thinking).id);
  delete live.v.LanguageModelThinkingPart;
  assert((await live.send('low',[{role:1,content:[new Text('hello')]}])).some(p=>p instanceof Text&&p.value.includes('Conversational answer')));
- checks.push('parent/child reasoning is a separate optional stream; model switches use distinct identities; it never becomes text answers, memory or action proof');
+ checks.push('three calls in one response have independent reasoning links and end markers; parent/child reasoning is a separate optional stream; model switches use distinct identities; it never becomes text answers, memory or action proof');
  }
  console.log(JSON.stringify({passed:true,checks},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;});

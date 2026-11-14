@@ -1,15 +1,26 @@
 'use strict';
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
 const tokens=require('./media/token_usage');
-const {ActivityLog}=require('./model_activity');
+const {ActivityArchive,activityUri,parseActivityUri}=require('./model_activity');
 
 // A read-only view of existing receipts. This surface cannot dispatch models or tools.
 function install(vscode,context,deps){
-  let view,ready=false,snapshot,routing,native,error;const activity=new ActivityLog();
+  let view,ready=false,snapshot,routing,native,error,activity;
+  const currentActivity=()=>{
+    let directory;try{directory=deps.storage();}catch{return undefined;}
+    if(activity?.directory!==directory){activity?.dispose();activity=new ActivityArchive(directory);}
+    activity.prune();return activity;
+  };
   const item=vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right,19);
   item.name='Sutra Monitor';item.text='$(dashboard) Sutra Monitor';item.command='karma.openMonitor';
   item.tooltip='Open tokens, system telemetry and kernel decisions';item.show();
-  const publish=()=>{if(ready)view?.webview.postMessage({type:'usage',snapshot,routing,native,error,activity:activity.calls});};
+  const publish=()=>{const a=currentActivity();if(ready)view?.webview.postMessage({type:'usage',snapshot,routing,native,error,activity:a?.calls||[],activityError:a?.error||''});};
+  const link=id=>{const a=currentActivity();return a?activityUri(a.directory,id):null;};
+  const openDetails=async id=>{
+    const uri=link(id);if(!uri)return;
+    const doc=await vscode.workspace.openTextDocument(vscode.Uri.parse(uri));
+    await vscode.window.showTextDocument(doc,{viewColumn:vscode.ViewColumn.Beside,preview:false,preserveFocus:false});
+  };
   const refresh=()=>deps.refresh();
   const provider={resolveWebviewView(current){
     view=current;ready=false;
@@ -26,6 +37,7 @@ function install(vscode,context,deps){
       else if(message?.type==='resume')void vscode.commands.executeCommand('karma.resumeWorkflow');
       else if(message?.type==='discard')void vscode.commands.executeCommand('karma.discardWorkflow');
       else if(message?.type==='telemetry')void vscode.commands.executeCommand('karma.open');
+      else if(message?.type==='activity_details')void openDetails(message.id);
     },null,context.subscriptions);
     current.onDidChangeVisibility(()=>{if(current.visible)void refresh();},null,context.subscriptions);
     current.onDidDispose(()=>{if(view===current){view=undefined;ready=false;}},null,context.subscriptions);
@@ -34,7 +46,7 @@ function install(vscode,context,deps){
     vscode.window.registerWebviewViewProvider('karma.usage',provider),
     vscode.commands.registerCommand('karma.openMonitor',()=>vscode.commands.executeCommand('karma.usage.focus')),
     vscode.commands.registerCommand('karma.openUsage',()=>vscode.commands.executeCommand('karma.usage.focus')),
-    vscode.commands.registerCommand('karma.refreshUsage',refresh));
+    vscode.commands.registerCommand('karma.refreshUsage',refresh),{dispose(){activity?.dispose();}});
   return {
     get visible(){return !!view?.visible;},
     setData(data,workspace){
@@ -43,7 +55,16 @@ function install(vscode,context,deps){
       for(const key of ['orchestration','hardware','kernel','review_budget','repository','action_budget','storage','context','adapter_health','session','contract'])monitor[key]=data[key];
       snapshot={...(data.token_usage||{calls:[],total_calls:0,limit:250}),monitor,workspace,updatedAt:new Date().toISOString()};error=undefined;publish();
     },
-    activity(event){activity.accept(event);publish();},
+    activity(event){
+      const a=currentActivity();if(!a)return;a.accept(event);
+      const uri=link(event.id);if(uri)deps.activityChanged?.(vscode.Uri.parse(uri));publish();
+    },
+    activityLink:event=>link(event.id),
+    activityDocument(uri){
+      const parsed=parseActivityUri(uri),a=currentActivity();
+      if(!parsed||!a||path.basename(a.directory)!==parsed.workspace)return 'Reasoning details belong to a different workspace. Open the original workspace to inspect this call.';
+      return a.document(parsed.id);
+    },
     setError(message){error=message;publish();},
     setStatus(value){
       const r=value?.routing;
@@ -51,7 +72,7 @@ function install(vscode,context,deps){
       native=value?{enabled:value.enabled,armed:value.armed,label:value.label,compaction:value.compaction,pending:value.pending,working:value.working}:undefined;publish();
     },
     recordResponse(group){if(group?.calls?.length)item.tooltip='Latest completed stage / response: '+tokens.compact(group)+'\nClick for workspace history and per-stage counts.';},
-    reset(){activity.clear();snapshot=undefined;routing=undefined;native=undefined;error=undefined;item.tooltip='Open tokens, system telemetry and kernel decisions';publish();}
+    reset(){snapshot=undefined;routing=undefined;native=undefined;error=undefined;item.tooltip='Open tokens, system telemetry and kernel decisions';publish();}
   };
 }
 module.exports={install};
