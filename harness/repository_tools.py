@@ -111,10 +111,14 @@ def usage(s,session):
  used=sum(json.loads(raw)['contract_hash']==origin['contract_hash'] for raw, in s.db.execute('SELECT record_json FROM repository_ops WHERE session=?',(session,))) if c.get('auto_review') else sum(r['operation']['contract_hash']==origin['contract_hash'] for r in records(s,session))
  return budget_decision(used,c['max_tools'])
 
-def request_check(s,session,kind,target='',query='',line=1):
+def request_check(s,session,kind,target='',query='',line=1,cursor=None):
  c=settings(s,session)
  if kind not in ('catalog','read','search','list','api_index','static_map'):raise InvalidUpdate('Unsupported repository operation')
  if type(line) is not int or line<1:raise InvalidUpdate('Line/offset must be positive')
+ if cursor is not None:
+  if kind!='read' or not isinstance(cursor,dict) or set(cursor)!={'line','column','sha256'}:raise InvalidUpdate('Invalid read continuation')
+  if type(cursor['line']) is not int or cursor['line']!=line or type(cursor['column']) is not int or cursor['column']<0:raise InvalidUpdate('Invalid read continuation position')
+  if not isinstance(cursor['sha256'],str) or len(cursor['sha256'])!=64 or any(c not in '0123456789abcdef' for c in cursor['sha256']):raise InvalidUpdate('Invalid read continuation version')
  if kind=='catalog':
   if target or query or line!=1:raise InvalidUpdate('Unexpected catalog arguments')
   return
@@ -133,7 +137,16 @@ def request_check(s,session,kind,target='',query='',line=1):
   if target or not isinstance(query,str) or not 1<=len(query)<=80 or '\n' in query or line!=1:raise InvalidUpdate('Search requires one bounded literal query')
  elif target or query or line>len(names):raise InvalidUpdate('Invalid catalog page')
 
-def execute(s,session,workspace,root,kind,*,target='',query='',line=1,invocation_id=None,request_id=None,resource_check=True):
+def read_excerpt(text,line,column=0):
+ lines=text.splitlines(True)
+ if line>len(lines) or column>=len(lines[line-1]):raise InvalidUpdate('Requested position is beyond source')
+ body=''.join(lines[line-1:line+29])[column:].encode()[:1200].decode('utf-8','ignore')
+ index=line-1;position=column+len(body)
+ while index<len(lines) and position>=len(lines[index]):
+  position-=len(lines[index]);index+=1
+ return body,({'line':index+1,'column':position} if index<len(lines) else None)
+
+def execute(s,session,workspace,root,kind,*,target='',query='',line=1,cursor=None,invocation_id=None,request_id=None,resource_check=True):
  from lifecycle import timeout
  timeout(20)
  initialize(s);c=settings(s,session);automatic=c.get('auto_review',False);rows=[] if automatic else records(s,session)
@@ -147,12 +160,14 @@ def execute(s,session,workspace,root,kind,*,target='',query='',line=1,invocation
   if row['operation']['request_id']==request_id:
    op=row['operation']
    if (op['kind'],op['target'],op['query'],op['line'])!=(kind,target,query,line):raise InvalidUpdate('Replayed request has changed arguments')
+   if op.get('cursor')!=cursor:raise InvalidUpdate('Replayed request has changed continuation')
    if op['contract_hash']!=s.origin(session)['contract_hash'] or op['logic_hash']!=s.logic_hash:raise InvalidUpdate('Replayed tool receipt is stale')
    return dict(row,replayed=True)
- request_check(s,session,kind,target,query,line)
+ request_check(s,session,kind,target,query,line,cursor)
  if invocation_id:
   p=s.load_result(session,invocation_id)
   expected={'kind':kind,'target':target,'query':query,'line':line}
+  if cursor is not None:expected['cursor']=cursor
   if p.get('tool')!=expected:raise InvalidUpdate('Tool request differs from accepted model proposal')
  from review_budget import require
  source_charge=sum((Path(workspace)/p).stat().st_size for p in target.split('\n')) if kind=='static_map' else 0 if kind in ('catalog','list') else MAX_FILE
@@ -168,6 +183,7 @@ def execute(s,session,workspace,root,kind,*,target='',query='',line=1,invocation
  op={'id':uuid.uuid4().hex,'session':session,'request_id':request_id,'invocation_id':invocation_id,
      'actor':'governed_model' if invocation_id else 'host_tool','kind':kind,'target':target,'query':query,'line':line,
      'contract_hash':s.origin(session)['contract_hash'],'logic_hash':s.logic_hash,'kernel':budget,'resource':hardware,'started_at':time.time(),'task_cost':cost if automatic else {},'task_budget_kernel':task_frame}
+ if cursor is not None:op['cursor']=cursor
  with s.db:
   s.db.execute('BEGIN IMMEDIATE')
   from orchestration import admit
@@ -192,14 +208,15 @@ def execute(s,session,workspace,root,kind,*,target='',query='',line=1,invocation
    result={'status':'ok','api':facts,'versions':{target:facts['sha256']},'excerpts':[]}
   else:
    names=catalog(s,session) if automatic else next(r['result']['files'] for r in reversed(rows) if r['operation']['kind']=='catalog' and r['operation']['contract_hash']==op['contract_hash'] and r['result']['status']=='ok')
-   selected=[target] if kind=='read' else names;excerpts=[];versions={};started=time.monotonic();truncated=False
+   selected=[target] if kind=='read' else names;excerpts=[];versions={};started=time.monotonic();truncated=False;next_position=None
    for name in selected:
     if time.monotonic()-started>3:truncated=True;break
     raw=read_bytes(workspace,name);text=raw.decode();version=hashlib.sha256(raw).hexdigest();versions[name]=version;lines=text.splitlines(True)
     if kind=='read':
-     if line>len(lines):raise InvalidUpdate('Requested line is beyond EOF')
-     body=''.join(lines[line-1:line+29]);body=body.encode()[:1200].decode('utf-8','ignore')
-     excerpts.append({'path':name,'line':line,'text':body,'sha256':version});truncated=line-1+body.count('\n')<len(lines)
+     if cursor and cursor['sha256']!=version:raise InvalidUpdate('Source changed since read continuation; restart the read')
+     column=cursor['column'] if cursor else 0
+     body,next_position=read_excerpt(text,line,column)
+     excerpts.append({'path':name,'line':line,'column':column,'text':body,'sha256':version});truncated=next_position is not None
     else:
      for n,body in enumerate(lines,1):
       if query in body:
@@ -208,7 +225,9 @@ def execute(s,session,workspace,root,kind,*,target='',query='',line=1,invocation
        if len(excerpts)>=5:truncated=True;break
      if len(excerpts)>=5:break
    result={'status':'ok','excerpts':excerpts,'versions':versions,'truncated':truncated,'scanned_files':len(versions)}
-   if kind=='read':result['next_line']=max(line+1,line+body.count('\n')) if truncated else None
+   if kind=='read':
+    result['next_line']=next_position['line'] if next_position else None
+    result['next_cursor']=dict(next_position,sha256=version) if next_position else None
  except Exception as exc:result={'status':'failed','error':type(exc).__name__+': '+str(exc),'excerpts':[]}
  for i,e in enumerate(result.get('excerpts',[])):e['id']='e'+op['id'][:10]+'_'+str(i)
  return finish(s,op,digest,result,time.monotonic()-started_op)
@@ -264,7 +283,7 @@ def feedback(s,session):
  row=rows[-1];op=row['operation'];result=row['result']
  item={'receipt':row['id'],'kind':op['kind'],'target':op['target'],'query':op['query'],'status':result['status'],
        'matches_or_excerpts':len(result.get('excerpts',[])),'truncated':result.get('truncated',False)}
- for key in ('error','scanned_files','next_line'):
+ for key in ('error','scanned_files','next_line','next_cursor'):
   if key in result:item[key]=result[key]
  if op['kind']=='list':item['files']=result.get('files',[])
  return item

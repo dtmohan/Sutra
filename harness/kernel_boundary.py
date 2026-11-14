@@ -24,8 +24,10 @@ class KernelBoundary:
     def evaluate(self,omega,sigma):
         return CanonicalKernel(self.k,self.sigma_clause).evaluate(
             measurement(omega,'omega',nonnegative=True),measurement(sigma,'sigma'))
+    def frame(self,adapter,profile,omega,sigma):
+        v=self.evaluate(omega,sigma)
+        return {'adapter':adapter,'profile':profile,'profile_version':1,'omega':v.omega,
+                'sigma':v.sigma,'k':v.k,'sigma_clause':self.sigma_clause,'decision':v.decision.value}
 
 def frame(adapter,profile,omega,sigma,*,k=.15,sigma_clause=1.):
-    v=KernelBoundary(k,sigma_clause).evaluate(omega,sigma)
-    return {'adapter':adapter,'profile':profile,'profile_version':1,'omega':v.omega,
-            'sigma':v.sigma,'k':v.k,'sigma_clause':sigma_clause,'decision':v.decision.value}
+    return KernelBoundary(k,sigma_clause).frame(adapter,profile,omega,sigma)

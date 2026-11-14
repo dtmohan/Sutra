@@ -11,7 +11,6 @@
 - Native chat compaction relies on signed pointers and, when supplied by VS Code,
   a per-chat binding hint. Missing authenticated context must be reported rather
   than filled with another chat's most recent context.
-- Conversation continuation currently uses the last admitted model-written
 - Conversation working memory is sized from the selected model/context allocation, with recent turns and selected Smriti pages. The complete transcript stays in the ledger; selected context is not a semantic completeness guarantee.
   A valid checkpoint authenticates this memory; it does not prove it retained all
   facts. Workspace contracts are stored separately and checked on each invocation.
@@ -22,6 +21,19 @@
   assertions are correct or even ran. Source-controlled test output is untrusted.
 - Editing/test execution is limited to supported scoped Python operations.
   The Windows adapter is currently read-only.
+- Test snapshots contain only the task's explicitly granted files: at most eight
+  files, each at most 64,000 bytes. Required project modules must be included in
+  that grant, otherwise imports fail. A broader read scope allows inspection and
+  dependency recognition; it does not add files to an executable test snapshot.
+  Test confirmation lists the snapshot contents. This is not yet a whole-project
+  test runner.
+- Audit verification still scans the full chain on reopening a ledger or after
+  database changes. Repeated checks on the same unchanged connection reuse the
+  verified result. There is no persisted trusted-prefix checkpoint.
+- Runtime hashes detect changes against the bundled manifest, including application
+  code and the canonical kernel. They are not a signature or protection against an
+  actor who can replace the extension entry point and manifest together. VS Code's
+  mutable package metadata and the manifest itself are excluded from hashing.
 - Temperature sensor mapping is verified for the original Apple Silicon test
   machine. Celsius values are advisory; resource admission uses OS pressure and
   memory measurements.

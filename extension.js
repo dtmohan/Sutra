@@ -1,20 +1,24 @@
-const tokens=require('./media/token_usage');
 const vscode = require('vscode');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const {spawn} = require('node:child_process');
-const modelSelection=require('./model_selection');
-const nativeProvider=require('./native_provider');
-const diagramView=require('./diagram_view');
-const usageView=require('./usage_view');
 
 function activate(context) {
-  // Bundled runtime inputs are versioned and verified before execution.
+  // Detect changed runtime files before loading local modules. This is a
+  // consistency check, not protection against replacement of this entry point.
   const integrity=JSON.parse(fs.readFileSync(path.join(context.extensionPath,'runtime-integrity.json'),'utf8'));
+  const kernel='harness/stp_canonical/kernel.py';
+  if(integrity.format!==2||integrity.sha256[kernel]!=='9dfef2479b9af1b8f82282597f13b1205c31b19ba4ff52f60e305f1757ed4eac')throw new Error('Sutra canonical kernel integrity metadata is invalid');
   for(const [name,expected] of Object.entries(integrity.sha256)){
+    if(path.isAbsolute(name)||name.split(/[\\/]/).includes('..'))throw new Error('Sutra runtime integrity path is invalid');
     if(crypto.createHash('sha256').update(fs.readFileSync(path.join(context.extensionPath,name))).digest('hex')!==expected)throw new Error('Sutra runtime integrity check failed: '+name);
   }
+  const tokens=require('./media/token_usage');
+  const modelSelection=require('./model_selection');
+  const nativeProvider=require('./native_provider');
+  const diagramView=require('./diagram_view');
+  const usageView=require('./usage_view');
   const output = vscode.window.createOutputChannel('Sutra');
   let nativeController, usage, panel, panelReady=false, panelSection, busy = false, sequence = false, telemetry, telemetryDir, dashboardTimer, dashboardInFlight=false, stopAuto=false, chatCancellation;
   const previewDocuments=new Map(), previewChanges=new vscode.EventEmitter();
@@ -491,7 +495,7 @@ function activate(context) {
     karma_review:async(input,token)=>runReview(input.prompt,input.steps??1,token,input.mode??'explore'),
     karma_source_map:async(input,token)=>request({op:'static_build',files:input.files,offset:input.offset??0},token),
     karma_explain_map:async(input,token)=>request({...input,op:'static_explain'},token),
-    karma_read_file:async(input,token)=>request({op:'repository_tool',kind:'read',target:input.path,line:input.line??1},token),
+    karma_read_file:async(input,token)=>request({op:'repository_tool',kind:'read',target:input.path,line:input.cursor?.line??input.line??1,cursor:input.cursor},token),
     karma_api_map:async(input,token)=>request({op:'api_build',files:input.files,offset:input.offset??0},token),
     karma_api_verify:async(input,token)=>request({op:'api_verify',reviewer_model:input.model??'qwen3:4b'},token),
     karma_search:async(input,token)=>request({op:'repository_tool',kind:'search',query:input.query},token)

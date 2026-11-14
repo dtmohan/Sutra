@@ -1,0 +1,11 @@
+{
+  "compiler": "Apple clang version 21.0.0 (clang-2100.4.1.1)",
+  "sdk": "27.2",
+  "architecture": "arm64",
+  "sample_checked": true,
+  "sha256": {
+    "harness/telemetry.m": "e3dea8b5cb77a96f5b228b7a5ad985ad54d24df9945686f3460cc4f4bc05a213",
+    "harness/smc_temperature.h": "ff13a316f289c03d91a88742715dfffc0941aff3dc9bb51154759bed3948cb47",
+    "bin/telemetry": "d8e0a5ce712a0f0b78864c258bf374ebb815d4b7c80d1a84d0c34e7e6e80fdbd"
+  }
+}

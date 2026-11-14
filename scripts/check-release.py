@@ -4,6 +4,10 @@ import hashlib
 import json
 from pathlib import Path
 import zipfile
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from package import verify_integrity
+
 
 root = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser()
@@ -11,6 +15,10 @@ parser.add_argument('--package-dir', type=Path)
 args = parser.parse_args()
 manifest = json.loads((root / 'package.json').read_text())
 version = manifest['version']
+verify_integrity(root)
+provenance = json.loads((root / 'bin/telemetry-build.json').read_text())
+for name, digest in provenance['sha256'].items():
+    assert hashlib.sha256((root / name).read_bytes()).hexdigest() == digest, name
 kernel = '9dfef2479b9af1b8f82282597f13b1205c31b19ba4ff52f60e305f1757ed4eac'
 assert hashlib.sha256((root / 'harness/stp_canonical/kernel.py').read_bytes()).hexdigest() == kernel
 assert (root / 'README.txt').read_text().startswith('Sutra ' + version)

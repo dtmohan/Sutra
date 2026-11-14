@@ -170,7 +170,7 @@ function install(vscode,context,deps){
   }
   function ticket(input){const t=tickets.get(input?.ticket),a=assertArmed();if(!t||t.generation!==a.generation||Date.now()>t.expires)throw new Error('Missing, expired or revoked Sutra action ticket.');return t;}
   const tool={
-    prepareInvocation(options){const t=ticket(options.input);const md=new vscode.MarkdownString();md.appendText(t.kind==='edit'?'Apply this exact proposed edit to '+t.preview.target+'?':'Run the permitted Python test '+t.preview.target+' in a read-only snapshot with network denied?');if(t.preview.diff)md.appendCodeblock(t.preview.diff,'diff');md.isTrusted=false;
+    prepareInvocation(options){const t=ticket(options.input);const md=new vscode.MarkdownString();md.appendText(t.kind==='edit'?'Apply this exact proposed edit to '+t.preview.target+'?':'Run the permitted Python test '+t.preview.target+' in a read-only snapshot with network denied?');if(t.preview.snapshot_files)md.appendText(' Snapshot files: '+t.preview.snapshot_files.join(', ')+'. '+t.preview.snapshot_note);if(t.preview.diff)md.appendCodeblock(t.preview.diff,'diff');md.isTrusted=false;
       return {invocationMessage:t.kind==='edit'?'Applying governed edit':'Running governed test',confirmationMessages:{title:'Sutra: '+(t.kind==='edit'?'apply edit':'run test'),message:md}};},
     async invoke(options,token){
       if(running||deps.isBusy())throw new Error('A Sutra operation is already running.');
@@ -180,7 +180,7 @@ function install(vscode,context,deps){
       // without a chat token. Require a host dialog for that path as well.
       if(!options.toolInvocationToken){
         const label=t.kind==='edit'?'Apply edit':'Run test';
-        const confirmed=await vscode.window.showWarningMessage('Sutra: '+label+' · '+t.preview.target,{modal:true,detail:t.preview.diff||'Run the permitted Python unittest in a read-only snapshot with network denied. Exit status is a process observation; assertions remain unverified.'},label);
+        const confirmed=await vscode.window.showWarningMessage('Sutra: '+label+' · '+t.preview.target,{modal:true,detail:t.preview.diff||'Run the permitted Python unittest in a read-only snapshot with network denied. Exit status is a process observation; assertions remain unverified.'+(t.preview.snapshot_files?' Snapshot files: '+t.preview.snapshot_files.join(', ')+'. '+t.preview.snapshot_note:'')},label);
         if(confirmed!==label)throw new Error('Sutra action not confirmed.');
         await check(token);if(ticket(options.input)!==t)throw new Error('Action revoked.');
       }

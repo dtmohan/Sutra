@@ -6,9 +6,7 @@ import json
 from pathlib import Path
 import zipfile
 
-def package(source, output):
-    output.mkdir(parents=True,exist_ok=True)
-    pkg=json.loads((source/'package.json').read_text());version=pkg['version']
+def runtime_files(source):
     tree=ast.parse((source/'harness/governance.py').read_text())
     policies=next(ast.literal_eval(n.value) for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='POLICY_FILES' for t in n.targets))
     files={source/'harness'/name for name in policies}|{source/'THIRD_PARTY_NOTICES.md'}
@@ -22,9 +20,30 @@ def package(source, output):
             for name in names:
                 dep=source/'harness'/(name.replace('.','/')+'.py')
                 if dep.is_file() and dep not in files:files.add(dep);pending.append(dep)
-    files.update(source/name for name in ('package.json','extension.js','model_selection.js','native_provider.js','native_memory.js','diagram_view.js','usage_view.js','host_tokens.js','README.txt','runtime-integrity.json','bin/telemetry','harness/canonical-kernel.json','harness/README.txt'))
+    files.update(source/name for name in ('package.json','extension.js','model_selection.js','native_provider.js','native_memory.js','diagram_view.js','usage_view.js','host_tokens.js','README.txt','runtime-integrity.json','bin/telemetry','bin/telemetry-build.json','harness/canonical-kernel.json','harness/README.txt'))
     files.update(p for directory in ('media','vendor') for p in (source/directory).rglob('*') if p.is_file())
     assert not any(p.name.startswith(('test_','experiment','validate_','audit_')) for p in files)
+    return files
+
+
+def integrity_hashes(source):
+    excluded = {"package.json", "runtime-integrity.json"}
+    return {p.relative_to(source).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(runtime_files(source))
+            if p.relative_to(source).as_posix() not in excluded}
+
+
+def verify_integrity(source):
+    manifest = json.loads((source / "runtime-integrity.json").read_text())
+    if manifest.get("format") != 2 or manifest["sha256"] != integrity_hashes(source):
+        raise ValueError("Runtime integrity coverage or hashes differ; regenerate explicitly after reviewing changes")
+
+
+def package(source, output):
+    output.mkdir(parents=True,exist_ok=True)
+    pkg=json.loads((source/'package.json').read_text());version=pkg['version']
+    files=runtime_files(source)
+    verify_integrity(source)
     kernel=hashlib.sha256((source/'harness/stp_canonical/kernel.py').read_bytes()).hexdigest()
     assert kernel=='9dfef2479b9af1b8f82282597f13b1205c31b19ba4ff52f60e305f1757ed4eac'
     manifest=f'''<?xml version="1.0" encoding="utf-8"?>

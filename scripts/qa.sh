@@ -28,7 +28,10 @@ done
 export KARMA_NODE="${KARMA_NODE:-$(command -v node || true)}"
 export KARMA_TYPESCRIPT="${KARMA_TYPESCRIPT:-$ROOT/vendor/typescript/typescript.js}"
 
-export KARMA_UI_OUTPUT="${KARMA_UI_OUTPUT:-$(mktemp -d -t sutra-qa)}"
+if [ -z "${KARMA_UI_OUTPUT:-}" ]; then
+  KARMA_UI_OUTPUT="$(python3 -c 'import tempfile; print(tempfile.mkdtemp(prefix="sutra-qa-"))')" || exit 1
+fi
+export KARMA_UI_OUTPUT
 PASS=0
 FAIL=0
 declare -a FAILED=()
@@ -71,7 +74,7 @@ fi
 gate "release metadata" python3 -B scripts/check-release.py
 gate "python harness" python_suite
 
-for suite in native-provider hardening panel-entry model-selection branding host-tokens; do
+for suite in native-provider hardening panel-entry model-selection branding host-tokens runtime-integrity; do
   gate "node $suite" node_suite "$suite"
 done
 

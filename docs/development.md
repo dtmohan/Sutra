@@ -16,6 +16,8 @@ node test/panel-entry.cjs
 node test/model-selection.cjs
 node test/branding.cjs
 node test/host-tokens.cjs
+node test/runtime-integrity.cjs
+python3 -B scripts/runtime-integrity.py
 python3 -B package.py --output dist
 ```
 
@@ -36,12 +38,25 @@ environment variables; they are not ordinary Node unit tests.
 On macOS the bundled telemetry helper can be rebuilt from source:
 
 ```sh
-clang -O2 -fobjc-arc -framework Foundation -framework IOKit harness/telemetry.m -o bin/telemetry
+python3 -B scripts/build-telemetry.py --output bin/telemetry --record bin/telemetry-build.json
+python3 -B scripts/runtime-integrity.py --write
 ```
 
-Update its SHA-256 entry in `runtime-integrity.json` after a deliberate rebuild.
-This helper is platform-specific. Other platforms use the portable monitoring
-path; missing temperature sensors remain unavailable.
+The build records compiler/SDK, source/header hashes and binary hash; an arm64
+Mac also checks a live sample. CI compiles the helper on macOS, independently of
+the packaged binary. Different SDKs need not produce byte-identical binaries.
+Other platforms use portable monitoring; missing sensors remain unavailable.
+
+After reviewing runtime source changes, explicitly regenerate the manifest with
+`python3 -B scripts/runtime-integrity.py --write`. Packaging and QA verify both
+coverage and hashes; they never regenerate it implicitly. All runtime files are
+covered except the manifest itself and `package.json`, which VS Code may modify.
+This detects mismatched files, not malicious replacement of the whole extension.
+The canonical kernel hash is separately pinned and must not change.
+
+CI runs the portable gates on Linux/macOS with Python 3.9, 3.11 and 3.13. Browser
+and VS Code gates still require the explicit environments described above. A
+configured matrix is not evidence that a remote run has passed.
 
 ## Repository layout
 

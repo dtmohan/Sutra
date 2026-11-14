@@ -120,6 +120,6 @@ def dispatch(s,meta,workspace,root,request,provider=None):
  if last['admission']['admitted']:
   t=last['accepted_output']['tool']
   if t['kind'] in ('read','search','list'):
-   tool=repo.execute(s,session,workspace,root,t['kind'],target=t['target'],query=t['query'],line=t['line'],
+   tool=repo.execute(s,session,workspace,root,t['kind'],target=t['target'],query=t['query'],line=t['line'],cursor=t.get('cursor'),
     invocation_id=last['invocation_id'],request_id=last['invocation_id'],resource_check=real)
  return {'result':last,'tool_receipt':tool,'routing':route(s,session,last['invocation_id'],model),'state':state(s,meta,workspace)}

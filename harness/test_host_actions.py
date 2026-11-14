@@ -116,6 +116,12 @@ class ActionTests(unittest.TestCase):
         receipt=self.apply(r);self.assertEqual(receipt['result']['status'],'applied')
         self.assertIn('range(MAX_ATTEMPTS):',(self.workspace/'src/retry.py').read_text())
         self.assertEqual(before,self.s.current_contract(self.session));self.assertTrue(self.s.audit_valid())
+    def test_test_confirmation_lists_the_exact_snapshot_grant(self):
+        result = self.propose('test')
+        shown = preview(self.s, self.session, result['result']['invocation_id'], self.workspace)
+        actual = files_at(self.s, self.session, self.workspace)
+        self.assertEqual(shown['snapshot_files'], sorted(actual))
+        self.assertIn('required project modules', shown['snapshot_note'])
     def test_replay_returns_original_receipt_without_second_write(self):
         r=self.propose();first=self.apply(r);second=self.apply(r)
         self.assertEqual(first['id'],second['id']);self.assertTrue(second['replayed_receipt'])
@@ -199,6 +205,20 @@ class HardwareTests(unittest.TestCase):
 
 @requires_sandbox
 class SandboxTests(unittest.TestCase):
+    def test_project_dependency_requires_explicit_snapshot_inclusion(self):
+        text = ('import unittest\nimport helper\n'
+                'class Check(unittest.TestCase):\n'
+                '    def test_value(self): self.assertEqual(helper.VALUE, 7)\n')
+        for include, expected in ((False, 'process_failed'), (True, 'process_exited_zero')):
+            with self.subTest(include=include), tempfile.TemporaryDirectory() as tmp:
+                files = {'test_scope.py': {'text': text, 'sha256': sha256(text)}}
+                if include:
+                    files['helper.py'] = {'text': 'VALUE = 7\n', 'sha256': sha256('VALUE = 7\n')}
+                result = run_tests_snapshot(Path(tmp).resolve(), files, 'test_scope.py', 3000)
+                self.assertEqual(result['status'], expected, result['output_tail'])
+                if not include:
+                    self.assertIn('ModuleNotFoundError', result['output_tail'])
+
     def test_interrupt_kills_the_running_test_process_before_returning(self):
         from lifecycle import deadline, Interrupted
         import subprocess

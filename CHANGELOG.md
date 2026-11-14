@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.20.3 — review findings and portability
+
+- Recognize compiled standard-library imports, including Python 3.9, and local modules within the existing read grant without widening edit or test scope.
+- Preserve long source lines with UTF-8-safe, file-version-bound read cursors. Reject changed-source continuations and altered request replays.
+- Reuse verified audit results only on unchanged database connections; invalidate on writes, external commits, schema changes, rollback or file replacement. Cold checks still verify the complete chain.
+- Normalize Karma and Smriti measurements using the selected boundary thresholds. Canonical STP kernel unchanged.
+- Verify bundled application files and the kernel before loading local modules. Rebuild native telemetry from source, record provenance and add macOS CI compilation.
+- Show exact test snapshot contents and document dependency limits. Use portable QA temporary directories; cover Python 3.9, 3.11 and 3.13 in Linux/macOS CI.
+- Existing policy-bound workspace tasks require a fresh task after upgrading; conversation memory is retained.
+
 ## 0.20.2 — larger Python maps and actionable pauses
 
 - Use the source-page allocation for Python static maps; retain the small API evidence packet limit and enforce aggregate graph bounds across languages.

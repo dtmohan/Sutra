@@ -1,4 +1,8 @@
-Sutra 0.20.2 — larger Python maps and actionable pauses
+Sutra 0.20.3 — verified runtime, lossless reads and dependency fixes
+
+Compiled Python stdlib imports and readable project imports are recognized without widening action permissions. Long source lines continue with version-bound cursors. Test confirmation lists the exact snapshot files; required project modules must be explicitly granted.
+
+Runtime checks now cover application code and the unchanged STP kernel before local modules load. Repeated audit checks reuse only an unchanged verified database connection.
 
 Whole-codebase Python mapping uses the same source-page work allocation as TypeScript, instead of the small API-review packet limit. Pauses show the underlying cause and mapped-file counts in chat; file failures also appear in Sutra Monitor.
 

@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Local model orchestration with portable context, governed tools, diagrams and token visibility.",
-  "version": "0.20.2",
+  "version": "0.20.3",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -264,6 +264,29 @@
             "line": {
               "type": "integer",
               "minimum": 1
+            },
+            "cursor": {
+              "type": "object",
+              "description": "Copy the returned next_cursor unchanged to continue a read without dropping long-line content. Source changes invalidate it.",
+              "properties": {
+                "line": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "column": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "sha256": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "line",
+                "column",
+                "sha256"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [

@@ -72,6 +72,20 @@ class PagedContext(ContextStore):
             for op in ('UPDATE','DELETE'):
                 self.db.execute(f"CREATE TRIGGER IF NOT EXISTS immutable_{table}_{op} BEFORE {op} ON {table} BEGIN SELECT RAISE(ABORT,'immutable record'); END")
         self.db.commit()
+        self._audit_verified = None
+        self._audit_file_identity = self._audit_identity()
+
+    def _audit_identity(self):
+        if self.path == ':memory:':
+            return None
+        st = pathlib.Path(self.path).stat()
+        return st.st_dev, st.st_ino
+
+    def _audit_stamp(self):
+        return (self.db.total_changes,
+                self.db.execute('PRAGMA data_version').fetchone()[0],
+                self.db.execute('PRAGMA schema_version').fetchone()[0],
+                self.db.execute('SELECT seq,event_hash FROM page_audit ORDER BY seq DESC LIMIT 1').fetchone())
 
     def snapshot(self, session):
         state=super().snapshot(session)
@@ -90,11 +104,35 @@ class PagedContext(ContextStore):
         self.db.execute('INSERT INTO page_audit VALUES(?,?,?,?,?)',(seq,event,data,prev,digest))
 
     def audit_valid(self):
-        prev='GENESIS'; expected=1
-        for seq,event,data,old,digest in self.db.execute('SELECT * FROM page_audit ORDER BY seq'):
-            if seq!=expected or old!=prev or sha(canonical([seq,event,data,old]))!=digest: return False
-            expected+=1; prev=digest
-        return True
+        # Reuse only an unchanged, already verified view on this connection.
+        # No persistent trusted-prefix marker: every reopened ledger is scanned.
+        # Writes, schema changes and commits on other connections invalidate it.
+        owns_transaction = not self.db.in_transaction
+        try:
+            if self._audit_identity() != self._audit_file_identity:
+                return False
+            if owns_transaction:
+                self.db.execute('BEGIN')
+            stamp = self._audit_stamp()
+            if stamp == self._audit_verified:
+                return True
+            self._audit_verified = None
+            prev = 'GENESIS'
+            expected = 1
+            for seq,event,data,old,digest in self.db.execute('SELECT * FROM page_audit ORDER BY seq'):
+                if seq != expected or old != prev or sha(canonical([seq,event,data,old])) != digest:
+                    return False
+                expected += 1
+                prev = digest
+            if self._audit_stamp() == stamp:
+                self._audit_verified = stamp
+            return True
+        except (OSError, sqlite3.DatabaseError):
+            self._audit_verified = None
+            return False
+        finally:
+            if owns_transaction and self.db.in_transaction:
+                self.db.rollback()
 
     def page(self, session, key, version=None):
         if version is None:

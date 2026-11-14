@@ -13,6 +13,8 @@ import subprocess
 import sys
 import time
 import uuid
+import sysconfig
+from importlib.machinery import EXTENSION_SUFFIXES
 from context_manager import InvalidUpdate, canonical, sha
 from karma_adapter import budget_decision
 from monitoring import require_resources, resource_state
@@ -63,7 +65,34 @@ def imports(tree):
     return roots
 
 
-def proposed_edit(workspace, constraints, action, payload):
+def stdlib_modules():
+    """Discover runtime stdlib names without importing project or site packages."""
+    if hasattr(sys, 'stdlib_module_names'):
+        return set(sys.stdlib_module_names)
+    names = set(sys.builtin_module_names)
+    paths = sysconfig.get_paths()
+    roots = {Path(paths[key]) for key in ('stdlib', 'platstdlib') if paths.get(key)}
+    roots.update(p / 'lib-dynload' for p in tuple(roots))
+    shared = sysconfig.get_config_var('DESTSHARED')
+    if shared:
+        roots.add(Path(shared))
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for item in root.iterdir():
+            if item.name in ('site-packages', 'dist-packages', '__pycache__'):
+                continue
+            if item.is_dir() and (item / '__init__.py').is_file():
+                names.add(item.name)
+            elif item.is_file():
+                for suffix in (*EXTENSION_SUFFIXES, '.py', '.pyc'):
+                    if item.name.endswith(suffix):
+                        names.add(item.name[:-len(suffix)])
+                        break
+    return names
+
+
+def proposed_edit(workspace, constraints, action, payload, *, read_scope=None):
     name=action['target'];old=action['old'];new=action['new']
     if constraints.get('edits_allowed') is not True:raise InvalidUpdate('Code edits are not allowed by the contract')
     if name not in constraints['allowed_paths'] or not name.endswith('.py'):raise InvalidUpdate('Edit target must be an in-scope Python file')
@@ -86,9 +115,13 @@ def proposed_edit(workspace, constraints, action, payload):
     try:a=ast.parse(before);b=ast.parse(after)
     except SyntaxError as exc:raise InvalidUpdate('Python syntax check failed: '+str(exc)) from None
     if constraints.get('dependencies_allowed') is False:
-        stdlib=Path(os.__file__).parent
-        allowed=set(sys.builtin_module_names)|{p.stem for p in stdlib.iterdir()}|{Path(p).parts[0].split('.')[0] for p in constraints['allowed_paths']}
-        if imports(b)-imports(a)-allowed:raise InvalidUpdate('New external import conflicts with dependency constraint')
+        allowed=stdlib_modules()|{Path(p).parts[0].split('.')[0] for p in constraints['allowed_paths']}
+        added=imports(b)-imports(a)-allowed
+        if added and read_scope is not None:
+            from repository_tools import inventory
+            names=inventory(Path(workspace),read_scope,automatic=True)
+            allowed.update(Path(p).parts[0].split('.')[0] for p in names if p.endswith('.py'))
+        if added-allowed:raise InvalidUpdate('New external or out-of-scope import conflicts with dependency constraint')
     return {'target':name,'before':before,'after':after,'before_hash':sha(before),'after_hash':sha(after),
             'diff':''.join(difflib.unified_diff(before.splitlines(True),after.splitlines(True),fromfile=name,tofile=name))}
 
@@ -153,8 +186,12 @@ def verified_proposal(s,session,iid,workspace):
 def preview(s,session,iid,workspace):
     env,payload,output=verified_proposal(s,session,iid,workspace)
     action=output['action'];constraints=s.snapshot(session)['constraints']
-    if action['kind']=='edit':return proposed_edit(workspace,constraints,action,payload)
+    if action['kind']=='edit':
+        from native_access import read_scope
+        return proposed_edit(workspace,constraints,action,payload,read_scope=read_scope(s,session))
     if action['kind']=='run_tests':return {'target':action['target'],'runner':'Python unittest','isolation':'scoped read-only snapshot; network denied',
+                                         'snapshot_files':sorted(constraints['allowed_paths']),
+                                         'snapshot_note':'Only these granted files are available. Include required project modules in the task grant before running tests.',
                                          'timeout_ms':constraints['test_timeout_ms']}
     raise InvalidUpdate('Proposal does not request an executable action')
 
@@ -266,7 +303,8 @@ def execute(s,session,iid,workspace,root,resource_check=True):
     hardware=require_resources(root) if resource_check else {'profile':'unit-test-fixture'}
     files=files_at(s,session,workspace);versions={k:v['sha256'] for k,v in files.items()}
     if versions!=payload.get('source_versions'):raise InvalidUpdate('Scoped file versions changed since proposal')
-    change=proposed_edit(workspace,constraints,action,payload) if kind=='edit' else None
+    from native_access import read_scope
+    change=proposed_edit(workspace,constraints,action,payload,read_scope=read_scope(s,session)) if kind=='edit' else None
     if kind=='run_tests' and (constraints.get('tests_allowed') is not True or action['target'] not in constraints.get('test_paths',[])):
         raise InvalidUpdate('Test execution is not permitted for this target')
     origin=s.current_contract(session);aid=uuid.uuid4().hex

@@ -5,14 +5,18 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
+        python: ['3.9', '3.11', '3.13']
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.python }}
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
       - run: bash scripts/qa.sh --with-package
         shell: bash
+      - name: Compile native telemetry from source
+        if: runner.os == 'macOS' && matrix.python == '3.11'
+        run: python3 scripts/build-telemetry.py --output "$RUNNER_TEMP/sutra-telemetry"

@@ -39,7 +39,9 @@ def validate(store,session,payload,proposal):
     workspace=Path(payload['workspace']);current=execution_context(store,session,workspace)
     if payload['execution']!=current:raise InvalidUpdate('Host execution evidence changed')
     c=payload['contract']['constraints'];a=proposal['action'];kind=a['kind']
-    if kind=='edit':proposed_edit(workspace,c,a,payload)
+    if kind=='edit':
+        from native_access import read_scope
+        proposed_edit(workspace,c,a,payload,read_scope=read_scope(store,session))
     else:
         if a['old'] or a['new']:raise InvalidUpdate('Non-edit action cannot contain a patch')
         if kind=='run_tests':

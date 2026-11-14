@@ -407,7 +407,7 @@ def _handle(root,workspace,request):
         elif op=='repository_tool':
             if not meta.get('active'):raise InvalidUpdate('Create an architecture review in Karma first')
             from repository_tools import execute
-            result={'tool_receipt':execute(s,meta['active'],workspace,root,request['kind'],target=request.get('target',''),query=request.get('query',''),line=request.get('line',1)),'state':state(s,meta,workspace)}
+            result={'tool_receipt':execute(s,meta['active'],workspace,root,request['kind'],target=request.get('target',''),query=request.get('query',''),line=request.get('line',1),cursor=request.get('cursor')),'state':state(s,meta,workspace)}
         elif op in ('new','save'):
             if op=='save' and meta.get('active') and s.snapshot(meta['active'])['constraints'].get('review_only'):
                 raise InvalidUpdate('Start a new architecture review to change its scope or budget')
