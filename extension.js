@@ -213,6 +213,7 @@ function activate(context) {
       let childUsage={calls:[]};
       let flow=await request({op:'orchestrate',event:'start_review',prompt,models,tier,binding,armed:true,conversation_id:conversationId},token,true);
       while(flow.state!=='DONE'){
+        if(flow.recovery)throw new Error(flow.recovery.message+' Open Sutra chat to choose recovery.');
         if(token?.isCancellationRequested)throw new Error('Sutra request cancelled. Task state and budgets were preserved.');
         if(flow.state==='PAUSED')throw new Error('The review stopped at its allocation or source boundary. Inspect Sutra Monitor.');
         flow=await request({op:'orchestrate',event:'step',flow_id:flow.flow_id,cursor:flow.cursor,binding:flow.binding||binding,armed:true,models,tier},token,true);

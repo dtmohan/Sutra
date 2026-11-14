@@ -33,7 +33,7 @@ function renderMonitor(){
  const workflow=d.orchestration,rows=(workflow?.nodes||[]).filter(n=>n.kind!=='task').slice(0,12);
  el('flow-status').textContent=!snapshotFresh?'Awaiting fresh snapshot':rows.length?(workflow.execution||'Recorded workflow'):'No workflow yet';
  const pending=native?.pending;el('recovery-controls').hidden=!pending;
- el('recovery-status').textContent=pending?'Saved request · '+pending.state+'. Context and consumed budget are retained. Resume selects it for your next Sutra message.':'';
+ el('recovery-status').textContent=pending?(pending.recovery?.message||'Saved request · '+pending.state+'. Context and consumed budget are retained. Resume selects it for your next Sutra message.'):'';
  for(const id of ['resume-workflow','discard-workflow'])el(id).disabled=!!native?.working;
  const signature=JSON.stringify([rows,snapshotFresh]);
  if(signature!==workflowSignature){workflowSignature=signature;

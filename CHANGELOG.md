@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.20.4 — child source paging and upgrade recovery
+
+- Keep child excerpt scope stable through canonical JSON storage; ranked excerpts no longer fail receipt replay because their object keys were sorted.
+- Read each child partition through fresh source pages bounded by the existing task page allocation. Charge each page through the kernel; validate page ownership and source versions before invocation and join.
+- Retain compiler configuration across child pages; split parser work-unit overflow without enlarging allocations. Report the specific file and remaining bytes when a read cannot fit.
+- Detect old-policy workflow bindings before resuming. Explicit Restart review preserves the original prompt, task contract and consumed budget, releases unused reservations and discards incompatible model results. Contract/calibration changes cannot use this restart path.
+- Keep recovery in the existing chat and display the incompatibility in Sutra Monitor. STP kernel unchanged.
+
 ## 0.20.3 — review findings and portability
 
 - Recognize compiled standard-library imports, including Python 3.9, and local modules within the existing read grant without widening edit or test scope.

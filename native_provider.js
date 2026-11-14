@@ -97,10 +97,12 @@ function install(vscode,context,deps){
       const current=await deps.request({op:'orchestrate',event:'inspect',flow_id:pending.flow_id});
       await rememberFlow(['DONE','CANCELLED'].includes(current.state)?current:await deps.request({op:'orchestrate',event:'cancel',flow_id:current.flow_id,cursor:current.cursor}));recoveryChoice=undefined;
     }else{
+      const current=await deps.request({op:'orchestrate',event:'inspect',flow_id:pending.flow_id});
+      await rememberFlow(current);
       recoveryChoice=pending.flow_id;
       // Focus the existing chat without replacing its draft, model, or history.
       await vscode.commands.executeCommand('workbench.action.chat.open');
-      void vscode.window.showInformationMessage('Resume selected. Send your next message with a Sutra model to continue the saved request with its original context and remaining budget.');
+      void vscode.window.showInformationMessage(current.recovery?current.recovery.message+' Send continue in Sutra chat to choose recovery.':'Resume selected. Send your next message with a Sutra model to continue the saved request with its original context and remaining budget.');
     }
   }
   async function flowEvent(flow,event,tier,token,extra={}){
@@ -235,14 +237,26 @@ function install(vscode,context,deps){
       const recordUsage=result=>{responseUsage=tokens.merge(responseUsage,result?.token_usage);audit.token_usage=responseUsage;};
       running=true;activeCancel=new vscode.CancellationTokenSource();const cancellation=token.onCancellationRequested(()=>activeCancel?.cancel());publish();
       try{
-        let data,flow;
+        let data,flow,restartReview=false;
         if(!request.results){
           let pending=context.workspaceState.get(pendingKey);
           if(!pending){const saved=await flowEvent(null,'pending',tier,activeCancel.token);if(saved.flow_id)pending={...saved,workspace:deps.workspace()};}
           if(pending?.workspace===deps.workspace()){
             const old=await deps.request({op:'orchestrate',event:'inspect',flow_id:pending.flow_id},activeCancel.token);
             if(['DONE','CANCELLED'].includes(old.state))await rememberFlow(old);
-            else {
+            else if(old.recovery){
+              await rememberFlow(old);
+              const recovery=old.recovery;
+              if(!recovery.restart_allowed){
+                progress.report(new vscode.LanguageModelTextPart(recovery.message+'\n\nUse **Discard** in Sutra Monitor, then submit your new request.'));return;
+              }
+              const choice=await vscode.window.showWarningMessage('This review was started by an older Sutra policy.',{modal:true,detail:recovery.message+'\nSaved request: '+old.prompt},'Restart review');
+              if(activeCancel.token.isCancellationRequested||choice!=='Restart review'){
+                progress.report(new vscode.LanguageModelTextPart('Saved request retained. '+recovery.message));return;
+              }
+              recoveryChoice=undefined;flow=old;prompt=old.prompt;restartReview=true;
+              conversationId=undefined;footerId=undefined;footerSignature=undefined;
+            }else {
               const choice=recoveryChoice===old.flow_id||/^(continue|resume|please continue|please resume)[.! ]*$/i.test(prompt)?'Resume saved request':await vscode.window.showWarningMessage('A Sutra request is saved.',{modal:true,detail:'Saved request: '+old.prompt+'\nResume preserves its context and remaining budget. Discard releases unused child reservations; consumed budgets and receipts remain.'},'Resume saved request','Discard and use new request');
               if(activeCancel.token.isCancellationRequested)return;
               recoveryChoice=undefined;
@@ -281,10 +295,12 @@ function install(vscode,context,deps){
 
         }
         assertArmed();
+        if(restartReview)flow=await flowEvent(flow,'restart_review',tier,activeCancel.token);
         if(!flow)flow=await flowEvent(null,'start_existing',tier,activeCancel.token,{prompt,conversation_id:conversationId});
         if(flow.state==='PAUSED')flow=await flowEvent(flow,'resume',tier,activeCancel.token);
         while(!['DONE','AWAITING_ACTION'].includes(flow.state)){
           if(armed!==a||activeCancel.token.isCancellationRequested)throw new Error('Native request disarmed or cancelled.');
+          if(flow.recovery){audit.stage='recovery_required';audit.message=flow.recovery.message;publish();progress.report(new vscode.LanguageModelTextPart(flow.recovery.message+'\n\nSend **continue** to review the recovery options.'));return;}
           if(flow.state==='PAUSED'){
             const stop=flow.stop||{},failures=stop.failures||[];
             const details=[stop.error,...failures.map(f=>f.path+': '+f.error)].filter(Boolean);

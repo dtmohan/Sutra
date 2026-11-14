@@ -1,4 +1,5 @@
 import uuid,json
+from pathlib import Path
 from context_manager import InvalidUpdate
 from invocation_gateway import InvocationGateway
 from monitoring import require_resources
@@ -13,6 +14,55 @@ def build(s,meta,workspace,root,files,real=True):
  row=repo.execute(s,meta['active'],workspace,root,'static_map',target='\n'.join(files),resource_check=real)
  if row['result']['status']!='ok':raise InvalidUpdate(row['result'].get('error','Static analysis failed'))
  return row
+
+def build_partition(s,meta,workspace,root,files,real=True):
+ """Fresh pages inside one child allocation; never enlarge the source-page cap."""
+ cap=s.snapshot(meta['active'])['constraints']['review_page_kib']*1024
+ configs=[p for p in files if Path(p).name=='tsconfig.json']
+ config_bytes=sum((Path(workspace)/p).stat().st_size for p in configs)
+ pages=[];page=list(configs);size=config_bytes
+ for name in files:
+  if name in configs:continue
+  length=(Path(workspace)/name).stat().st_size
+  if length+config_bytes>cap:
+   raise InvalidUpdate(f'Source page cannot fit {name}: {length+config_bytes} bytes including config, allocation {cap}')
+  if size+length>cap:
+   pages.append(page);page=list(configs);size=config_bytes
+  page.append(name);size+=length
+ if len(page)>len(configs):pages.append(page)
+ receipts=[]
+ while pages:
+  current=pages.pop(0)
+  try:row=build(s,meta,workspace,root,current,real=real)
+  except InvalidUpdate as exc:
+   # Only parser work-unit overflow is repairable by dividing this source page.
+   code=[p for p in current if p not in configs]
+   if len(code)<2 or not any(t in str(exc) for t in ('work-unit allocation exceeded','API index bound exceeded')):raise
+   middle=len(code)//2
+   pages[:0]=[configs+code[:middle],configs+code[middle:]]
+   continue
+  receipts.append(row['id'])
+ return receipts
+
+def load_partition(s,sid,workspace,receipts,owner):
+ """Validate every page again; merging does not infer cross-page relationships."""
+ if not isinstance(receipts,list) or not receipts or len(set(receipts))!=len(receipts):
+  raise InvalidUpdate('Invalid child snapshot receipts')
+ sources={};versions={};graph={'nodes':[],'calls':[],'profiles':[],'diagnostics':[],'diagnostic_count':0}
+ for rid in receipts:
+  row=repo.record_by_id(s,sid,rid)
+  if (row['operation'].get('orchestration') or {}).get('node_id')!=owner:
+   raise InvalidUpdate('Child source page belongs to another orchestration node')
+  data=analysis.load(s,sid,workspace,rid)
+  for name,text in data['sources'].items():
+   if name in sources and (Path(name).name!='tsconfig.json' or sources[name]!=text):
+    raise InvalidUpdate('Duplicate or conflicting child source page')
+   sources[name]=text;versions[name]=data['versions'][name]
+  for key in ('nodes','calls'):graph[key].extend(data['graph'][key])
+  graph['diagnostics'].extend(data['graph']['diagnostics'][:max(0,3-len(graph['diagnostics']))])
+  graph['diagnostic_count']+=data['graph'].get('diagnostic_count',len(data['graph']['diagnostics']))
+  graph['profiles']=sorted(set(graph['profiles']+data['graph']['profiles']))
+ return {'sources':sources,'versions':versions,'graph':graph}
 
 def explain(s,meta,workspace,root,receipt,model,sites=None,mode='compact',provider=None,handoff=None,progress=None):
  sid=meta['active'];result=analysis.load(s,sid,workspace,receipt)

@@ -167,7 +167,10 @@ class OrchestrationTests(unittest.TestCase):
         out=self.step(out);worker=[p for stage,p in self.models if stage=='subagent'][0]
         self.assertEqual(worker.payloads[0]['contract']['calibration_binding'],bound)
         calibration.revoke(self.s,ref,'test revocation')
-        with self.assertRaises((InvalidUpdate,PageFault)):self.step(out)
+        before=len(self.models)
+        blocked=self.step(out)
+        self.assertFalse(blocked['recovery']['restart_allowed'])
+        self.assertEqual(len(self.models),before)
 
     def test_oversized_fork_is_atomic_and_records_no_children(self):
         out=self.until('BRANCHING');_,data=flow.info(self.s,out['flow_id']);n=m.checked(self.s,data['root_node'])
@@ -251,3 +254,95 @@ class OrchestrationTests(unittest.TestCase):
         self.s.db.execute('DROP TRIGGER immutable_orchestration_events_UPDATE')
         self.s.db.execute("UPDATE orchestration_events SET digest='tampered' WHERE node_id=? AND seq=1",(fid,));self.s.db.commit()
         with self.assertRaisesRegex(InvalidUpdate,'corrupted'):self.step(out,event='inspect')
+
+    def test_child_larger_than_page_allocation_pages_fresh_sources_across_model_switch(self):
+        from vscode_bridge import handle
+        import repository_tools as repo
+        for i in range(6):
+            text=f'def part{i}():\n    return {i}\n'+('# padding\n'*2200)
+            (self.ws/f'part{i}.py').write_text(text)
+        handle(self.root,self.ws,{'op':'auto_new','goal':self.prompt,'roots':['.'],'review_page_kib':32})
+        self.meta=json.loads((self.root/'workspace.json').read_text())
+        out=self.children();sid=self.meta['active'];contract=self.s.pinned(sid)
+        parent=m.node(self.s,out['children'][0]['id'])['parent_id']
+        before=m.spent(self.s,parent)
+        out=self.step(out);after=m.spent(self.s,parent)
+        self.assertGreaterEqual(after['operations']-before['operations'],2)
+        self.s.close();self.s=InvocationLedger(self.root/'state.sqlite');self.tier='high'
+        result=self.until('DONE',out)
+        self.assertTrue(result['data']['result']['admission']['admitted'])
+        self.assertEqual(contract,self.s.pinned(sid))
+        for stage,model in self.models:
+            if stage!='subagent':continue
+            packet=model.payloads[0];self.assertGreaterEqual(len(packet['snapshot_receipts']),2)
+            files=set()
+            for rid in packet['snapshot_receipts']:
+                row=repo.record_by_id(self.s,sid,rid)
+                self.assertLessEqual(row['result']['read_limit'],32*1024)
+                self.assertLessEqual(sum(len(t.encode()) for t in row['result']['sources'].values()),32*1024)
+                self.assertEqual(row['operation']['orchestration']['node_id'],packet['branch']['id'])
+                files.update(row['result']['sources'])
+            self.assertEqual(files,set(m.node(self.s,packet['branch']['id'])['files']))
+        self.assertTrue(self.s.verify_invocations(sid))
+
+    def test_policy_upgrade_offers_explicit_restart_without_refunding_or_reusing_children(self):
+        out=self.children();out=self.step(out);sid=self.meta['active'];old_flow=out['flow_id']
+        contract=self.s.pinned(sid);used=review_budget.usage(self.s,sid)['used'];calls=len(self.models)
+        with patch('governance.policy_hash',return_value='f'*64):
+            self.s.close();self.s=InvocationLedger(self.root/'state.sqlite')
+            blocked=self.step(out)
+            self.assertEqual(blocked['recovery']['kind'],'policy_changed')
+            self.assertTrue(blocked['recovery']['restart_allowed'])
+            self.assertEqual(len(self.models),calls)
+            with self.assertRaisesRegex(InvalidUpdate,'user-armed'):self.step(blocked,event='restart_review',armed=False)
+            restarted=self.step(blocked,event='restart_review')
+            self.assertNotEqual(restarted['flow_id'],old_flow)
+            self.assertEqual(m.state(self.s,old_flow),'CANCELLED')
+            self.assertEqual(flow.info(self.s,restarted['flow_id'])[0]['prompt'],self.prompt)
+            self.assertEqual(review_budget.usage(self.s,sid)['used'],used)
+            self.assertEqual(self.s.pinned(sid),contract)
+            self.tier='high';done=self.until('DONE',restarted)
+            self.assertTrue(done['data']['result']['admission']['admitted'])
+            self.assertEqual(self.s.pinned(sid),contract)
+            self.assertGreater(review_budget.usage(self.s,sid)['used']['calls'],used['calls'])
+
+    def test_changed_contract_does_not_allow_policy_only_restart(self):
+        from vscode_bridge import save_contract
+        out=self.children();sid=self.meta['active'];constraints=self.s.snapshot(sid)['constraints']
+        save_contract(self.s,sid,{'goal':'Different user goal','constraints':constraints},self.ws)
+        blocked=self.step(out)
+        self.assertEqual(blocked['recovery']['kind'],'binding_changed')
+        self.assertFalse(blocked['recovery']['restart_allowed'])
+        with self.assertRaisesRegex(InvalidUpdate,'policy-only'):
+            self.step(blocked,event='restart_review',binding=flow.identity(self.s,sid))
+
+    def test_exact_full_page_allows_a_following_empty_source_file(self):
+        import static_analysis
+        text='def source(): return 1\n'
+        (self.ws/'full.py').write_text(text);(self.ws/'empty.py').write_text('')
+        page=static_analysis.snapshot(self.ws,['full.py','empty.py'],max_total=len(text.encode()))
+        self.assertEqual(set(page['sources']),{'full.py','empty.py'})
+
+    def test_compiler_config_is_not_a_separate_review_partition(self):
+        from test_support import ENV,HAS_TYPESCRIPT
+        if not HAS_TYPESCRIPT:self.skipTest('Node/TypeScript required')
+        for path in self.ws.glob('*.py'):path.unlink()
+        (self.ws/'entry.ts').write_text('export function main(){return 1;}\n')
+        (self.ws/'tsconfig.json').write_text('{"compilerOptions":{"strict":true}}')
+        with patch.dict('os.environ',ENV):out=self.until('SYNTHESIS')
+        self.assertFalse(out['children'])
+
+    def test_ranked_child_excerpts_keep_scope_after_canonical_storage(self):
+        for i,name in enumerate(('main.py','a.py','b.py','c.py')):
+            (self.ws/f'part{i}.py').rename(self.ws/name)
+        out=self.children();out=self.step(out)
+        worker=[p for stage,p in self.models if stage=='subagent'][0]
+        packet=worker.payloads[0]
+        self.assertNotEqual(list(packet['excerpts']),sorted(packet['excerpts']))
+        self.assertEqual(packet['source_paths'],sorted(packet['excerpts']))
+        from subagent_runtime import request_check
+        for paths in (packet['source_paths']+packet['source_paths'][:1],['outside.py']):
+            bad=copy.deepcopy(packet);bad['source_paths']=paths
+            with self.assertRaisesRegex(InvalidUpdate,'scope changed'):request_check(self.s,self.meta['active'],bad)
+        self.s.close();self.s=InvocationLedger(self.root/'state.sqlite');self.tier='high'
+        self.assertTrue(self.until('DONE',out)['data']['result']['admission']['admitted'])

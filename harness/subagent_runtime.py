@@ -35,11 +35,11 @@ def request_check(s,sid,p):
     if machine.state(s,n['id']) in ('CANCELLED','QUARANTINED'):raise InvalidUpdate('Child was revoked')
     if n['context_hash']!=sha(canonical(n['context'])) or p['request']!=n['context']['request']:raise InvalidUpdate('Parent context changed')
     if p['contract']!=s.validation_contract(sid) or p['constraint_echo']!=constraint_rows(p['contract']):raise InvalidUpdate('Child constraints changed')
-    if p['source_paths']!=list(p['excerpts']):raise InvalidUpdate('Child source scope changed')
+    if p['source_paths']!=sorted(p['excerpts']):raise InvalidUpdate('Child source scope changed')
     machine.scope_check(n,'model',p['source_paths'],'subagent')
     check_workspace_handoff(s,sid,p)
     if n['context'].get('conversation_id')!=(p.get('conversation_handoff') or {}).get('invocation_id'):raise InvalidUpdate('Child lost parent conversation lineage')
-    data=analysis.load(s,sid,p['workspace'],p['snapshot_receipt'])
+    data=runtime.load_partition(s,sid,p['workspace'],p['snapshot_receipts'],n['id'])
     if set(data['sources'])!=set(n['files']):raise InvalidUpdate('Child snapshot exceeds assigned files')
     for path,digest in data['versions'].items():
         if n['context']['versions'].get(path)!=digest:raise InvalidUpdate('Source changed since branch planning; replan required')
@@ -72,7 +72,8 @@ def run(s,meta,workspace,root,nid,models,tier='auto',provider=None):
         output=s.load_result(sid,env['id']);machine.complete(s,nid,env['id'])
         return {'result':{'invocation_id':env['id'],'admission':{'admitted':True,'errors':[]},'accepted_output':output},'route':{'model':env['model']},'branch_id':nid,'recovered':True}
     with machine.scope(nid):
-        row=runtime.build(s,meta,workspace,root,n['files'],real=real);data=row['result'];graph=data['graph']
+        receipts=runtime.build_partition(s,meta,workspace,root,n['files'],real=real)
+        data=runtime.load_partition(s,sid,workspace,receipts,nid);graph=data['graph']
         signals={'source_files':len(n['context']['versions']),'selected_files':len(n['files']),'unresolved_calls':sum(c['target'] is None for c in graph['calls'])}
         route=KarmaAdapter().route(n['context']['request'],models,tier,signals)
         if real:
@@ -80,14 +81,14 @@ def run(s,meta,workspace,root,nid,models,tier='auto',provider=None):
             provider=provider_for(root,route['model'],review=True);provider.budget=Budget(16384,2048,256);provider.keep_alive=0
         if provider.model!=route['model']:raise InvalidUpdate('Child provider differs from routed model')
         p={'contract':s.pinned(sid),'branch':machine.packet(n),'workspace':str(workspace),'request':n['context']['request'],'source_paths':n['files'],'pages':[],
-           'snapshot_receipt':row['id'],'sites':[c['id'] for c in graph['calls'][:4]],'excerpt_bytes':4096,'route':route,
+           'snapshot_receipts':receipts,'sites':[c['id'] for c in graph['calls'][:4]],'excerpt_bytes':4096,'route':route,
            'memory_budget':vars(provider.budget).copy()}
         p['constraint_echo']=constraint_rows(p['contract']);p['facts']=chat.facts(graph,p['sites'])
         if n['context'].get('conversation_id'):
             from conversation import workspace_handoff
             p['conversation_handoff']=workspace_handoff(s,sid,n['context']['conversation_id'],p['request'])
         while True:
-            p['excerpts']=chat.excerpts(data['sources'],p['request'],p['excerpt_bytes']);p['source_paths']=list(p['excerpts'])
+            p['excerpts']=chat.excerpts(data['sources'],p['request'],p['excerpt_bytes']);p['source_paths']=sorted(p['excerpts'])
             try:
                 p['memory']=memory(s,p,provider.budget,True);fmt=schema(p)
                 provider.budget.check(SYSTEM,dict(p,repair={'errors':['x'*140]*2}),fmt);break

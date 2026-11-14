@@ -23,7 +23,27 @@ def response(s,fid,**extra):
     return dict(flow_id=fid,state=m.state(s,fid),cursor=history[-1]['receipt'] if history else None,
                 conversation_id=data.get('conversation_id'),binding=data.get('binding'),
                 stop=data.get('mapping_stop') if m.state(s,fid)=='PAUSED' else None,
+                recovery=recovery(s,fid),
                 children=[{'id':i,'state':m.state(s,i),'files':m.node(s,i)['files']} for i in data.get('children',[])],**extra)
+
+def recovery(s,fid):
+    """Inspect incompatibility without accepting or rewriting old commitments."""
+    n,data=info(s,fid)
+    if m.state(s,fid) in m.TERMINAL or not data.get('root_node'):return None
+    parent=m.node(s,data['root_node']);old=parent['binding']
+    try:current=m.binding(s,parent['session'])
+    except InvalidUpdate:
+        return {'kind':'binding_changed','restart_allowed':False,
+                'message':'The saved task calibration is no longer usable. Discard this request and establish a valid task before continuing.'}
+    changed=[key for key in old if old[key]!=current.get(key)]
+    if not changed:return None
+    policy_only=changed==['logic_hash']
+    return {'kind':'policy_changed' if policy_only else 'binding_changed',
+            'restart_allowed':policy_only and bool(s.snapshot(parent['session'])['constraints'].get('auto_review')),
+            'message':('Sutra was updated after this review started. Its previous worker results cannot be resumed under the new policy. '
+                       'Restart review keeps the original request, task constraints and consumed budget, releases unused child reservations, and reads sources again.'
+                       if policy_only else 'The task contract or calibration changed. Discard this saved request and submit a new request under the current task.'),
+            'changed':changed}
 
 def identity(s,sid):
     return {k:v for k,v in m.binding(s,sid).items() if k!='logic_hash'}
@@ -51,11 +71,13 @@ def plan(s,meta,workspace,prompt,conversation_id):
     # One fresh map plus up to three calls per participant. Actual use is charged.
     minimum={'calls':3,'tokens':3*16384,'seconds':470,'operations':1}
     affordable=min(int(left[k]//v) for k,v in minimum.items())-1
-    names=auto.ranked(versions,prompt);count=min(len(names),max(0,affordable))
+    names=auto.ranked([p for p in versions if Path(p).suffix in auto.CODE],prompt)
+    configs=[p for p in versions if Path(p).name=='tsconfig.json']
+    count=min(len(names),max(0,affordable))
     signals={'source_files':len(names),'static_calls':calls,'unresolved_calls':unresolved,'affordable_children':max(0,affordable),
              'policy':'source-partition-v1','semantic_complexity_verified':False}
     if count<2:return parent,[],signals
-    groups=[names[i::count] for i in range(count)]
+    groups=[configs+names[i::count] for i in range(count)]
     proposals=[]
     for i,files in enumerate(groups):
         # Preserve a parent share for synthesis and fresh source reads.
@@ -113,7 +135,7 @@ def handle(s,meta,workspace,root,req,providers=None):
         if f['workspace']!=str(workspace):raise InvalidUpdate('Workflow belongs to another workspace')
         if event=='inspect':
             extra={'prompt':f['prompt']}
-            if m.state(s,fid)=='NEED_PERMISSION':extra.update(permission=permission(s,meta['active'],d['permission']),bound_task=identity(s,meta['active']))
+            if m.state(s,fid)=='NEED_PERMISSION' and not recovery(s,fid):extra.update(permission=permission(s,meta['active'],d['permission']),bound_task=identity(s,meta['active']))
             return response(s,fid,**extra)
         if req.get('cursor')!=response(s,fid)['cursor']:raise InvalidUpdate('Workflow event is stale or replayed')
     f,d=info(s,fid);phase=m.state(s,fid);prompt=f['prompt']
@@ -122,6 +144,23 @@ def handle(s,meta,workspace,root,req,providers=None):
             m.cancel(s,fid);return response(s,fid)
         if d.get('root_node'):m.abandon_children(s,d['root_node'],'Workflow cancelled')
         m.cancel(s,fid);return response(s,fid)
+    incompatibility=recovery(s,fid)
+    if event=='restart_review':
+        if not incompatibility or not incompatibility['restart_allowed']:raise InvalidUpdate('This saved request cannot restart as a policy-only review')
+        parent=m.node(s,d['root_node']);sid=parent['session']
+        if not req.get('armed') or meta.get('active')!=sid or req.get('binding')!=identity(s,sid):
+            raise InvalidUpdate('Restart requires the same user-armed task and current binding')
+        # This is an explicit host UI event. Keep the task and all consumed use;
+        # do not transfer old model results or authorize any new file/action scope.
+        with s.db:
+            m.abandon_children(s,parent['id'],'User restarted review after policy upgrade')
+            m.cancel(s,fid)
+            new=m.create(s,'flow',objective=prompt,workspace=str(workspace),prompt=prompt,
+                         conversation_parent=None,restarted_from=fid)
+            m.transition(s,new['id'],'CLASSIFYING','POLICY_RESTART',{'previous_flow':fid})
+            m.transition(s,new['id'],'NEED_ARM','USER_REVIEW',{'conversation_id':None,'permission':{'operation':'read','paths':[]}})
+        return response(s,new['id'],progress='Review restarted under the current policy; task constraints and consumed budget retained.')
+    if incompatibility:return response(s,fid)
     if phase=='CLASSIFYING':
         chat=converse(s,meta,root,{'prompt':prompt,'parent':f.get('conversation_parent'),'models':models,'tier':tier},provider=provider('conversation'))
         r=chat['result']

@@ -49,7 +49,9 @@ def read_bytes(workspace,name,limit=MAX_FILE):
   f=os.open(parts[-1],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=fd)
   with os.fdopen(f,'rb') as stream:
    before=os.fstat(stream.fileno())
-   if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or before.st_size>limit:raise InvalidUpdate('Source exceeds allocated bytes or is not a regular unlinked file')
+   if not stat.S_ISREG(before.st_mode):raise InvalidUpdate('Source is not a regular file: '+name)
+   if before.st_nlink!=1:raise InvalidUpdate('Source has multiple hard links: '+name)
+   if before.st_size>limit:raise InvalidUpdate(f'Source {name} needs {before.st_size} bytes; remaining page allocation is {limit} bytes')
    raw=stream.read(limit+1);after=os.fstat(stream.fileno())
    if len(raw)>limit or (before.st_mtime_ns,before.st_size)!=(after.st_mtime_ns,after.st_size):raise InvalidUpdate('File changed while reading')
   if b'\0' in raw:raise InvalidUpdate('Binary file rejected')

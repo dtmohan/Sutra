@@ -35,7 +35,9 @@ def analyze(texts,item_budget=1024):
 def snapshot(workspace,files,max_total=None):
  texts={};remaining=max_total
  for p in files:
-  raw=repo.read_bytes(workspace,p,limit=remaining if remaining is not None else repo.MAX_FILE);texts[p]=raw.decode()
+  raw=repo.read_bytes(workspace,p,limit=max(1,remaining) if remaining is not None else repo.MAX_FILE)
+  if remaining is not None and len(raw)>remaining:raise InvalidUpdate('Source grew beyond the remaining page allocation: '+p)
+  texts[p]=raw.decode()
   if remaining is not None:remaining-=len(raw)
  item_budget=max(1024,min(16384,max_total//8)) if max_total else 1024
  graph=analyze(texts,item_budget=item_budget);graph['item_budget']=item_budget

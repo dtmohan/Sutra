@@ -1,4 +1,6 @@
-Sutra 0.20.3 — verified runtime, lossless reads and dependency fixes
+Sutra 0.20.4 — bounded child source pages and upgrade recovery
+
+Child reviews read fresh, byte-bounded source pages within their existing allocations. An interrupted review from an older policy offers Restart review in the same chat; the original request, constraints and consumed budget stay intact. Old worker results are not reused.
 
 Compiled Python stdlib imports and readable project imports are recognized without widening action permissions. Long source lines continue with version-bound cursors. Test confirmation lists the exact snapshot files; required project modules must be explicitly granted.
 

@@ -230,5 +230,35 @@ function setup(saved={}){
  shouldPause=false;await paused.send('high',[{role:1,content:[new Text('continue')]}]);
  const afterPause=paused.calls.find(c=>c.op==='native_work');assert.equal(afterPause.prompt,'Fix retry');assert.equal(afterPause.tier,'high');assert.equal(afterPause.contract_hash,'contract-1');
  checks.push('mapping pauses return actionable details without a client error; original context and permission binding resume on another model');
+ for(const approve of [false,true]){
+  const upgraded=setup();upgraded.kind('report');
+  const originalPrompt='Review saved workspace architecture';
+  const original=await upgraded.deps.request({op:'orchestrate',event:'start',prompt:originalPrompt,tier:'low'});
+  const backend=upgraded.deps.request;let restart,arms=0;
+  const recovery={kind:'policy_changed',restart_allowed:true,message:'Sutra was updated. Restart retains task constraints and consumed budget.'};
+  upgraded.deps.request=async(m,t)=>{
+   if(m.op==='orchestrate'&&m.event==='inspect'&&m.flow_id===original.flow_id)return {...original,recovery};
+   if(m.op==='orchestrate'&&m.event==='restart_review'){
+    restart=structuredClone(m);await backend({...m,event:'cancel'},t);
+    return backend({...m,event:'start',prompt:originalPrompt},t);
+   }
+   return backend(m,t);
+  };
+  upgraded.v.window.showWarningMessage=async(message,options,label)=>{
+   if(label==='Restart review')return approve?label:undefined;
+   if(label==='Arm Sutra')arms++;
+   return label;
+  };
+  const result=await upgraded.send('high',[{role:1,content:[new Text('continue')]}]);
+  if(approve){
+   assert(restart?.armed);assert.equal(restart.binding.contract_hash,'contract-1');
+   const work=upgraded.calls.find(c=>c.op==='native_work');assert.equal(work.prompt,originalPrompt);assert.equal(work.tier,'high');assert.equal(arms,1);
+  }else{
+   assert(!restart);assert.equal(arms,0);assert(!upgraded.calls.some(c=>c.op==='native_work'));
+   assert(result.some(p=>p.value?.includes('Saved request retained')));
+  }
+  assert(!upgraded.uiCalls.some(c=>c[0]==='workbench.action.chat.newLocalChat'));
+ }
+ checks.push('policy upgrade recovery is explicit before arming; decline preserves saved work and approval retains the original request in the same chat on another model');
  console.log(JSON.stringify({passed:true,checks},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;});
