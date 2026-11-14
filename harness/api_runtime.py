@@ -20,7 +20,10 @@ def provider_for(root,model,review=False,model_class=LocalModel):
  if model not in {x['name'] for x in ollama('/api/tags')['models']} or 'cloud' in model.lower():raise InvalidUpdate('Choose an installed local model')
  info=ollama('/api/show',{'model':model})
  if info.get('remote_model') or info.get('remote_host'):raise InvalidUpdate('Remote API models are not allowed')
- provider=model_class(root/'calls',11434,model,budget=Budget(response_reserve=2048 if review else 1024),thinking=False)
+ import os
+ from model_activity import thinking_control
+ control=thinking_control(info,os.environ.get('SUTRA_THINKING','off'))
+ provider=model_class(root/'calls',11434,model,budget=Budget(response_reserve=2048 if review else 1024),thinking=control)
  provider.context_metadata=info
  return provider
 

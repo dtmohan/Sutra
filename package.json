@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Local model orchestration with portable context, governed tools, diagrams and token visibility.",
-  "version": "0.20.5",
+  "version": "0.21.0",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -208,6 +208,21 @@
           "default": true,
           "scope": "machine",
           "description": "Make Sutra Auto available for general conversation. Arm a task for workspace tools; arming is revoked on reload or contract changes."
+        },
+        "karma.thinking": {
+          "type": "string",
+          "enum": [
+            "off",
+            "on",
+            "model-default"
+          ],
+          "enumDescriptions": [
+            "Request thinking off. Models that require it may still emit reasoning.",
+            "Enable reasoning at the lowest advertised positive level.",
+            "Use each installed model\u2019s default reasoning setting."
+          ],
+          "default": "off",
+          "description": "Local-model reasoning. Emitted reasoning appears live in chat when supported and in Sutra Monitor. Uses the existing output allocation; enabling it may increase latency or exhaust the answer budget."
         }
       }
     },

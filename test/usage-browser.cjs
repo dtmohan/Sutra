@@ -26,6 +26,13 @@ const snapshot={monitor,calls,total_calls:300,limit:250,workspace:'Nadi · examp
  assert(await page.locator('#flow-nodes details').evaluate(e=>e.open));assert.equal(await page.evaluate(()=>document.activeElement.tagName),'SUMMARY');
  await send({snapshot,native:{pending:{state:'PAUSED'},working:false}});await page.click('#resume-workflow');await page.click('#discard-workflow');
  assert.deepEqual((await page.evaluate(()=>sent)).slice(-2),[{type:'resume'},{type:'discard'}]);
+ const activity=[{id:'parent-1',node_id:'task',role:'conversation',model:'local-large',status:'accepted',text:'Compare the options.',startedAt:Date.now()-3000,finishedAt:Date.now(),usage:{input_tokens:30,output_tokens:40}},
+ {id:'child-2',node_id:'child',role:'subagent',model:'local-small',status:'generating',text:'<img src=x onerror=alert(1)> Unverified child reasoning',startedAt:Date.now()}];
+ await send({snapshot,activity});assert.equal(await page.locator('#reasoning-calls details').count(),2);
+ const child=page.locator('#reasoning-calls details').first();await child.locator('summary').click();await child.locator('summary').focus();
+ await send({snapshot,activity:activity.map(c=>c.id==='child-2'?{...c,text:c.text+' updated',status:'withheld',usage:{input_tokens:12,output_tokens:80}}:c)});
+ assert(await child.evaluate(e=>e.open));assert.equal(await page.evaluate(()=>document.activeElement.tagName),'SUMMARY');assert.equal(await child.locator('img').count(),0);assert((await child.textContent()).includes('withheld'));assert((await child.textContent()).includes('80 output'));
+ await page.screenshot({path:path.join(out,'Live-child-reasoning.png'),fullPage:true});
  await page.screenshot({path:path.join(out,'Sutra-monitor.png'),fullPage:true});
  await page.selectOption('#stage','conversation');assert.equal(await page.locator('#input').textContent(),'2,284');await send({snapshot});assert.equal(await page.locator('#calls').textContent(),'3');assert.equal(await page.locator('#stage').inputValue(),'conversation');assert.equal(await page.locator('#cpu-temp').textContent(),'48.2 °C');
  await page.selectOption('#status','quarantined');assert.equal(await page.locator('#output').textContent(),'50');await page.selectOption('#model','local-assistant:latest');assert.equal(await page.locator('#input').textContent(),'—');assert(await page.locator('#empty').isVisible());assert.equal(await page.locator('#empty-title').textContent(),'No calls match these filters');

@@ -1,5 +1,9 @@
 # Sutra
 
+Sutra 0.21.0 streams local-model reasoning separately from accepted answers. Open **Sutra Monitor → Calls & reasoning** for expandable parent/child details, their model, status and final token usage. Compatible VS Code hosts also show native thinking parts inline; hosts without that capability use the Monitor. Choose **Sutra → Settings → Model reasoning**, then save runtime settings, to request reasoning on (lowest supported level) or model defaults. Off remains the default; some models always reason.
+
+Reasoning is unverified diagnostic text, never a task-memory page, permission, test proof or accepted answer. Reasoning and answers share the existing output allocation. Ollama supplies total output counts, not separate reasoning-token counts. The view retains the latest 12 calls with up to 16,000 characters each until the window reloads; existing diagnostic traces remain subject to the storage policy.
+
 Local model orchestration for VS Code. Switch models while keeping the task,
 constraints and accepted context in a local ledger.
 

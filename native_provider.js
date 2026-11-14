@@ -111,10 +111,11 @@ function install(vscode,context,deps){
       void vscode.window.showInformationMessage(current.recovery?current.recovery.message+' Send continue in Sutra chat to choose recovery.':'Resume selected. Send your next message with a Sutra model to continue the saved request with its original context and remaining budget.');
     }
   }
+  let activityProgress;
   async function flowEvent(flow,event,tier,token,extra={}){
     const models=['inspect','pending','cancel'].includes(event)?undefined:await deps.configureModels(false,token);
     let next;
-    try{next=await deps.request({op:'orchestrate',event,flow_id:flow?.flow_id,cursor:flow?.cursor,armed:!!armed,binding:armed?.binding,models,tier,...extra},token);}
+    try{next=await deps.request({op:'orchestrate',event,flow_id:flow?.flow_id,cursor:flow?.cursor,armed:!!armed,binding:armed?.binding,models,tier,...extra},token,activityProgress);}
     catch(error){if(/Task changed|Workflow task|permissions changed|calibration.*changed/i.test(error.message))disarm('Task changed. Re-arm to accept the current contract.');throw error;}
     await rememberFlow(next);return next;
   }
@@ -242,6 +243,18 @@ function install(vscode,context,deps){
       let responseUsage={calls:[]},footerId,footerSignature;
       const recordUsage=result=>{responseUsage=tokens.merge(responseUsage,result?.token_usage);audit.token_usage=responseUsage;};
       running=true;activeCancel=new vscode.CancellationTokenSource();const cancellation=token.onCancellationRequested(()=>activeCancel?.cancel());publish();
+      const activityToken=activeCancel.token;let activityOpen=true;
+      activityProgress=e=>{
+        if(!activityOpen||activityToken.isCancellationRequested)return;
+        // Optional host capability: no proposed-API flags required. Older hosts
+        // retain the same diagnostic stream in Sutra Monitor.
+        if(typeof vscode.LanguageModelThinkingPart!=='function')return;
+        let text='';
+        if(e.kind==='start')text=(e.role==='subagent'?'Child review':'Model call')+' · '+e.model+' · '+e.role+'\n'+(e.node_id?'Task '+e.node_id+'\n':'')+'Unverified local-model reasoning.\n';
+        else if(e.kind==='thinking')text=e.text;
+        else if(e.kind==='finish')text='\nProtocol: '+e.status+' · '+(e.usage?.input_tokens??'?')+' input / '+(e.usage?.output_tokens??'?')+' output tokens (reasoning included).'+(e.display_truncated?' Display shortened; full generation still charged.':'')+'\n';
+        if(text)progress.report(new vscode.LanguageModelThinkingPart(text,e.id));
+      };
       try{
         let data,flow,restartReview=false;
         if(!request.results){
@@ -358,7 +371,7 @@ function install(vscode,context,deps){
           if(!activeCancel.token.isCancellationRequested)progress.report(new vscode.LanguageModelTextPart('\n\n---\n'+footer+(footerId?(audit.memoryUsed?' · Memory restored':' · New conversation'):'')+' · Open tokens, system and kernel status with **Sutra Monitor** in the status bar.\n'));
         }
         const stopped=activeCancel.token.isCancellationRequested;
-        cancellation.dispose();activeCancel.dispose();activeCancel=undefined;running=false;publish();
+        activityOpen=false;activityProgress=undefined;cancellation.dispose();activeCancel.dispose();activeCancel=undefined;running=false;publish();
         if(stopped){try{await rememberFlow(await deps.request({op:'orchestrate',event:'pending'}));}catch{} }
         if(stopped&&context.workspaceState.get(pendingKey))void vscode.window.showInformationMessage('Sutra stopped. The saved request, context and consumed budget are retained. Resume or Discard from Sutra Monitor.');
       }

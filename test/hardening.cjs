@@ -32,7 +32,7 @@ const vscode={
  lm:{registerTool(n,t){tools.set(n,t);return disposable();}},LanguageModelToolResult:class{constructor(content){this.content=content;}},LanguageModelTextPart:class{constructor(value){this.value=value;}}
 };
 const moduleFixture={exports:{}};
-const context={module:moduleFixture,exports:moduleFixture.exports,require:n=>n==='vscode'?vscode:n==='node:child_process'?{spawn}:n==='./media/token_usage'?require('../media/token_usage'):n==='./usage_view'?require('../usage_view'):n==='./diagram_view'?require('../diagram_view'):n==='./model_selection'?require('../model_selection'):n==='./native_provider'?require('../native_provider'):require(n),process,Buffer,console,queueMicrotask,structuredClone,
+const context={module:moduleFixture,exports:moduleFixture.exports,require:n=>n==='vscode'?vscode:n==='node:child_process'?{spawn}:n==='./model_activity'?require('../model_activity'):n==='./media/token_usage'?require('../media/token_usage'):n==='./usage_view'?require('../usage_view'):n==='./diagram_view'?require('../diagram_view'):n==='./model_selection'?require('../model_selection'):n==='./native_provider'?require('../native_provider'):require(n),process,Buffer,console,queueMicrotask,structuredClone,
  setInterval:fn=>{intervals.push(fn);return fn;},clearInterval(){},setTimeout:(fn,ms)=>{timers.push({fn,ms});return fn;},clearTimeout(){}};
 vm.runInNewContext(fs.readFileSync(path.join(root,'extension.js'),'utf8'),context,{filename:'extension.js'});
 const subscriptions=[];
@@ -59,8 +59,8 @@ const subscriptions=[];
  const beforeRuntime=requests.length;
  for(const settings of [{storageLimitMiB:0,pythonPath:''},{storageLimitMiB:512.5,pythonPath:''},{storageLimitMiB:512,pythonPath:'python3\nanything'},{storageLimitMiB:512,pythonPath:'',extra:true}])await panel.webview.receive({op:'save_runtime_settings',settings});
  assert.equal(runtimeUpdates.length,0);
- await panel.webview.receive({op:'save_runtime_settings',settings:{storageLimitMiB:1024,pythonPath:' /test/python3 '}});
- assert.deepEqual(runtimeUpdates,[['storageLimitMiB',1024],['pythonPath','/test/python3']]);assert.equal(requests.length,beforeRuntime,'Runtime settings must not mutate the task or dispatch');
+ await panel.webview.receive({op:'save_runtime_settings',settings:{storageLimitMiB:1024,pythonPath:' /test/python3 ',thinking:'on'}});
+ assert.deepEqual(runtimeUpdates,[['storageLimitMiB',1024],['pythonPath','/test/python3'],['thinking','on']]);assert.equal(requests.length,beforeRuntime,'Runtime settings must not mutate the task or dispatch');
  const native=participants.get('karma.local'),rendered=[],buttons=[],token={isCancellationRequested:false,onCancellationRequested:()=>disposable()};
  const capture={markdown(m){rendered.push(typeof m==='string'?m:m.value);},progress(){},reference(){},button(b){buttons.push(b);}};
  assert(views.has('karma.usage'));assert(statusItems.some(i=>i.command==='karma.openMonitor'));

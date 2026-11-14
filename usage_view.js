@@ -1,14 +1,15 @@
 'use strict';
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
 const tokens=require('./media/token_usage');
+const {ActivityLog}=require('./model_activity');
 
 // A read-only view of existing receipts. This surface cannot dispatch models or tools.
 function install(vscode,context,deps){
-  let view,ready=false,snapshot,routing,native,error;
+  let view,ready=false,snapshot,routing,native,error;const activity=new ActivityLog();
   const item=vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right,19);
   item.name='Sutra Monitor';item.text='$(dashboard) Sutra Monitor';item.command='karma.openMonitor';
   item.tooltip='Open tokens, system telemetry and kernel decisions';item.show();
-  const publish=()=>{if(ready)view?.webview.postMessage({type:'usage',snapshot,routing,native,error});};
+  const publish=()=>{if(ready)view?.webview.postMessage({type:'usage',snapshot,routing,native,error,activity:activity.calls});};
   const refresh=()=>deps.refresh();
   const provider={resolveWebviewView(current){
     view=current;ready=false;
@@ -42,14 +43,15 @@ function install(vscode,context,deps){
       for(const key of ['orchestration','hardware','kernel','review_budget','repository','action_budget','storage','context','adapter_health','session','contract'])monitor[key]=data[key];
       snapshot={...(data.token_usage||{calls:[],total_calls:0,limit:250}),monitor,workspace,updatedAt:new Date().toISOString()};error=undefined;publish();
     },
+    activity(event){activity.accept(event);publish();},
     setError(message){error=message;publish();},
     setStatus(value){
       const r=value?.routing;
-      routing=r?{active:!!r.active,stage:r.stage,model:r.model,memoryUsed:r.memoryUsed,memorySource:r.memorySource,memoryAllocation:r.memoryAllocation,memoryStatus:r.memoryStatus,modelCapacity:r.modelCapacity,conversationBudget:r.conversationBudget,invocationId:r.invocationId}:undefined;
+      routing=r?{active:!!r.active,workspaceAccess:r.workspaceAccess,stage:r.stage,model:r.model,memoryUsed:r.memoryUsed,memorySource:r.memorySource,memoryAllocation:r.memoryAllocation,memoryStatus:r.memoryStatus,modelCapacity:r.modelCapacity,conversationBudget:r.conversationBudget,invocationId:r.invocationId}:undefined;
       native=value?{enabled:value.enabled,armed:value.armed,label:value.label,compaction:value.compaction,pending:value.pending,working:value.working}:undefined;publish();
     },
     recordResponse(group){if(group?.calls?.length)item.tooltip='Latest completed stage / response: '+tokens.compact(group)+'\nClick for workspace history and per-stage counts.';},
-    reset(){snapshot=undefined;routing=undefined;native=undefined;error=undefined;item.tooltip='Open tokens, system telemetry and kernel decisions';publish();}
+    reset(){activity.clear();snapshot=undefined;routing=undefined;native=undefined;error=undefined;item.tooltip='Open tokens, system telemetry and kernel decisions';publish();}
   };
 }
 module.exports={install};

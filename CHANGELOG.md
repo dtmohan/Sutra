@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.21.0
+
+- Stream local-model reasoning with parent/child invocation identity; show expandable Monitor details and native thinking where the host supports it.
+- Add an accessible reasoning setting with model-aware controls and unchanged total output allocations.
+- Keep partial answers withheld until validation; preserve context, permissions and budget accounting. No STP kernel changes.
+- Forward workspace permission feedback into the Monitor.
+
+
 ## 0.20.5 — workspace confirmation and stale failure recovery
 
 - Bind saved mapping failures to the policy, parser tools, Python version, contract and page allocation. Requeue legacy or outdated failures once, with an audit entry; retain consumed budgets and permissions.

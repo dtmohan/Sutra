@@ -21,12 +21,15 @@ def main(out):
                 sample=json.loads(line);tmp=root/'telemetry.tmp';tmp.write_text(json.dumps(sample));tmp.replace(root/'telemetry.json')
             except (ValueError,OSError):pass
     threading.Thread(target=collect,daemon=True).start()
-    report={'passed':False,'fresh_bridge_per_step':True,'steps':[],'models':[],'semantic_correctness_verified':False}
+    report={'activity_events':[], 'passed':False,'fresh_bridge_per_step':True,'steps':[],'models':[],'semantic_correctness_verified':False}
     models={'low':'qwen3:4b','mid':'qwen3.6:35b','high':'local-assistant:latest'}
     prompt='Inspect the current workspace source and explain its architecture. Remember project Cedar and reference CED724. Keep this review read only. No network access and no new dependencies. Cite the supplied source and report coverage limits.'
     def save(): (out/'result.json').write_text(json.dumps(report,indent=2)+'\n')
     def request(req):
         started=time.monotonic();r=subprocess.run([sys.executable,'-B',str(SOURCE/'harness/vscode_bridge.py'),'--storage',str(root),'--workspace',str(ws)],input=json.dumps(req),capture_output=True,text=True,timeout=480,env=dict(os.environ,KARMA_TYPESCRIPT=str(SOURCE/'vendor/typescript/typescript.js')))
+        for line in r.stderr.splitlines():
+            if line.startswith('SUTRA_EVENT '):report['activity_events'].append(json.loads(line[12:]))
+        save()
         if r.returncode:raise RuntimeError(r.stdout+r.stderr)
         data=json.loads(r.stdout)
         if not data['ok']:raise RuntimeError(data)
@@ -82,7 +85,18 @@ def main(out):
             report['ledger_valid']=s.verify_invocations(sid);assert report['ledger_valid']
             report['audit_valid']=s.audit_valid();assert report['audit_valid']
             report['kernel_sha256']=__import__('hashlib').sha256((SOURCE/'harness/stp_canonical/kernel.py').read_bytes()).hexdigest()
-            report['answer']=result['data']['result']['accepted_output'];report['passed']=True
+            report['answer']=result['data']['result']['accepted_output']
+            if os.environ.get('SUTRA_ACTIVITY')=='1':
+                ids={e['id'] for e in report['activity_events'] if e['kind']=='start' and e['role']=='subagent'}
+                assert len(ids)>=2
+                if os.environ.get('SUTRA_THINKING')=='on':
+                    assert ids.issubset({e['id'] for e in report['activity_events'] if e['kind']=='thinking'})
+                child_nodes={e['node_id'] for e in report['activity_events'] if e['kind']=='start' and e['id'] in ids}
+                accepted_nodes={e['node_id'] for e in report['activity_events'] if e['kind']=='finish' and e['id'] in ids and e['status']=='accepted'}
+                assert child_nodes==accepted_nodes  # Rejected attempts may be repaired within the same allocation.
+                report['live_child_streams_verified']=True
+                report['children_emitting_thinking']=len(ids & {e['id'] for e in report['activity_events'] if e['kind']=='thinking'})
+            report['passed']=True
         finally:s.close()
     except BaseException as e:report['error']=str(e);raise
     finally:

@@ -282,8 +282,10 @@ class InvocationGateway:
         finally: ledger.close()
         permit = {'hash': envelope['request_hash'], 'used': False}
         token = _permit.set(permit); error = None; proposal = None;started=time.monotonic()
+        from model_activity import scope
         try:
-            proposal, record = self.provider.call(call_id, system, copy.deepcopy(payload), copy.deepcopy(schema))
+            with scope(envelope) as activity:
+                proposal, record = self.provider.call(call_id, system, copy.deepcopy(payload), copy.deepcopy(schema))
         except Exception as exc:
             error = type(exc).__name__ + ': ' + str(exc)
             record = getattr(exc, 'call_record', {'call_id': call_id, 'ok': False, 'error': error})
@@ -293,6 +295,7 @@ class InvocationGateway:
             if not error: ledger.confirm_delivery(delivery_id)
             from token_usage import measured, history
             result = ledger.finalize(envelope, payload, proposal, error,time.monotonic()-started, measured(record))
+            activity.finish(result['admission']['admitted'], measured(record))
             result['token_usage'] = history(ledger.db, run_id=self.run_id)
             if error: result['blocked'] = error
             result['record'] = record

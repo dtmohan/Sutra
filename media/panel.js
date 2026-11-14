@@ -211,10 +211,10 @@ el('refresh-models').onclick=()=>send('refresh_models');
 el('save-model-tiers').onclick=()=>send('save_model_tiers',{models:Object.fromEntries(['low','mid','high'].map(t=>[t,el('tier-'+t).value]))});
 
 window.addEventListener('message',({data:m})=>{
- if(m.type==='runtime-settings'){el('storage-limit').value=m.settings.storageLimitMiB;el('python-path').value=m.settings.pythonPath;}
+ if(m.type==='runtime-settings'){el('storage-limit').value=m.settings.storageLimitMiB;el('python-path').value=m.settings.pythonPath;el('thinking-mode').value=m.settings.thinking||'off';}
  if(m.type==='runtime-saved')el('runtime-save-status').textContent='Runtime settings saved. They apply to subsequent requests.';
 });
-el('save-runtime').onclick=()=>{el('runtime-save-status').textContent='';send('save_runtime_settings',{settings:{storageLimitMiB:Number(el('storage-limit').value),pythonPath:el('python-path').value.trim()}});};
+el('save-runtime').onclick=()=>{el('runtime-save-status').textContent='';send('save_runtime_settings',{settings:{storageLimitMiB:Number(el('storage-limit').value),pythonPath:el('python-path').value.trim(),thinking:el('thinking-mode').value}});};
 el('overview-native-use').onclick=()=>send('native_use');el('overview-native-arm').onclick=()=>send(nativeState.armed?'native_disarm':'native_arm');el('native-use').onclick=()=>send('native_use');el('native-arm').onclick=()=>send(nativeState.armed?'native_disarm':'native_arm');el('native-disarm').onclick=()=>send('native_disarm');el('native-toggle').onclick=()=>send('native_toggle');
 
 // Usage filters operate on a bounded, disclosed window of immutable receipts.

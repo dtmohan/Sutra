@@ -107,7 +107,7 @@ function activate(context) {
     }catch(e){output.appendLine('Dashboard: '+e.message);panel?.webview.postMessage({type:'dashboard-error',message:e.message});usage?.setError(e.message);}
     finally{dashboardInFlight=false;}
   }
-  async function request(message, token, internal=false) {
+  async function request(message, token, internal=false, onActivity) {
     if(token?.isCancellationRequested)throw new Error("Sutra request cancelled before dispatch.");
     const diagnostic=message?.op==='dashboard';
     if(diagnostic)return requestDashboard();
@@ -123,17 +123,18 @@ function activate(context) {
       return await new Promise((resolve,reject) => {
         const python = vscode.workspace.getConfiguration('karma').get('pythonPath','')||(process.platform==='win32'?'python':'python3');
         const child = spawn(python,['-B',path.join(context.extensionPath,'harness','vscode_bridge.py'),
-          '--workspace',cwd,'--storage',stateDir],{cwd,stdio:['pipe','pipe','pipe'],env:{...process.env,KARMA_STORAGE_LIMIT_MIB:String(vscode.workspace.getConfiguration('karma').get('storageLimitMiB',512)),KARMA_NODE:process.execPath,KARMA_TYPESCRIPT:path.join(context.extensionPath,'vendor','typescript','typescript.js')}});
+          '--workspace',cwd,'--storage',stateDir],{cwd,stdio:['pipe','pipe','pipe'],env:{...process.env,KARMA_STORAGE_LIMIT_MIB:String(vscode.workspace.getConfiguration('karma').get('storageLimitMiB',512)),SUTRA_ACTIVITY:"1",SUTRA_THINKING:vscode.workspace.getConfiguration('karma').get('thinking','off'),KARMA_NODE:process.execPath,KARMA_TYPESCRIPT:path.join(context.extensionPath,'vendor','typescript','typescript.js')}});
         processes.add(child); let stdout='',stderr='';
+        const events=require('./model_activity').decoder(e=>{usage?.activity(e);onActivity?.(e);},s=>{stderr=(stderr+s).slice(-10000);});
         let stopReason,killTimer;const cancel=reason=>{if(stopReason)return;stopReason=reason;child.kill('SIGTERM');killTimer=setTimeout(()=>child.kill('SIGKILL'),10000);};
         const cancellation=token?.onCancellationRequested(()=>cancel('Sutra request cancelled. Interrupted work will be reconciled.'));
         // Three attempts each have a 150 second transport deadline.
         const timer=setTimeout(()=>cancel('Sutra bridge exceeded its deadline. Interrupted work will be reconciled.'),480000);
         child.stdout.on('data',d=>{stdout+=d;if(stdout.length>4_000_000)child.kill();});
-        child.stderr.on('data',d=>{stderr=(stderr+d).slice(-10000);});
-        child.on('error',e=>{clearTimeout(timer);clearTimeout(killTimer);cancellation?.dispose();processes.delete(child);reject(e);});
+        child.stderr.on('data',d=>events.write(d));
+        child.on('error',e=>{events.end();events.close();clearTimeout(timer);clearTimeout(killTimer);cancellation?.dispose();processes.delete(child);reject(e);});
         child.on('close',(code,signal)=>{
-          clearTimeout(timer);clearTimeout(killTimer);cancellation?.dispose();processes.delete(child);
+          events.end();events.close();clearTimeout(timer);clearTimeout(killTimer);cancellation?.dispose();processes.delete(child);
           try {
             if(stopReason)throw new Error(stopReason);
             if(!stdout.trim())throw new Error(`Bridge exited without a response (code ${code}, signal ${signal||'none'}). Pending calls remain withheld.`);
@@ -160,7 +161,7 @@ function activate(context) {
   function publishSettings(){
     nativeController?.publish();
     panel?.webview.postMessage({type:'tier-settings',models:modelSettings(),catalog:modelCatalog});
-    const config=vscode.workspace.getConfiguration('karma');panel?.webview.postMessage({type:'runtime-settings',settings:{storageLimitMiB:config.get('storageLimitMiB',512),pythonPath:config.get('pythonPath','')}});
+    const config=vscode.workspace.getConfiguration('karma');panel?.webview.postMessage({type:'runtime-settings',settings:{storageLimitMiB:config.get('storageLimitMiB',512),pythonPath:config.get('pythonPath',''),thinking:config.get('thinking','off')}});
   }
   async function discoverModels(token,internal=false){
     let catalog;try{catalog=await request({op:'models'},token,internal);}catch(error){modelCatalog={models:[],suggested_tiers:{},error:'Cannot discover local models. Start Ollama, then choose Retry model discovery. '+error.message};publishSettings();throw new Error(modelCatalog.error);}
@@ -340,10 +341,11 @@ function activate(context) {
         if(message.op==='save_runtime_settings'){
           if(busy||sequence)throw new Error('Wait for the current turn before changing runtime settings.');
           const s=message.settings;
-          if(!s||Object.keys(s).sort().join(',')!=='pythonPath,storageLimitMiB'||!Number.isInteger(s.storageLimitMiB)||s.storageLimitMiB<64||s.storageLimitMiB>8192||typeof s.pythonPath!=='string'||s.pythonPath.length>1024||/[\r\n\0]/.test(s.pythonPath))throw new Error('Use a history allocation of 64–8192 MiB and a single Python executable path.');
+          if(!s||Object.keys(s).sort().join(',')!=='pythonPath,storageLimitMiB,thinking'||!Number.isInteger(s.storageLimitMiB)||s.storageLimitMiB<64||s.storageLimitMiB>8192||!['off','on','model-default'].includes(s.thinking)||typeof s.pythonPath!=='string'||s.pythonPath.length>1024||/[\r\n\0]/.test(s.pythonPath))throw new Error('Use a history allocation of 64–8192 MiB and a single Python executable path.');
           const config=vscode.workspace.getConfiguration('karma');
           await config.update('storageLimitMiB',s.storageLimitMiB,vscode.ConfigurationTarget.Global);
           await config.update('pythonPath',s.pythonPath.trim(),vscode.ConfigurationTarget.Global);
+          await config.update('thinking',s.thinking,vscode.ConfigurationTarget.Global);
           dashboardWorker?.child.kill();dashboardWorker=undefined;
           publishSettings();panel?.webview.postMessage({type:'runtime-saved'});return;
         }
@@ -506,7 +508,7 @@ function activate(context) {
       if(data.tool_receipt)output.appendLine('KARMA_TOOL_RECEIPT '+data.tool_receipt.id);return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify(data))]);}
   }));
   if(vscode.lm.registerLanguageModelChatProvider){
-    nativeController=nativeProvider.install(vscode,context,{request:(m,t)=>request(m,t,true),workspace,isBusy:()=>busy||sequence,
+    nativeController=nativeProvider.install(vscode,context,{request:(m,t,a)=>request(m,t,true,a),workspace,isBusy:()=>busy||sequence,
       modelSettings,configureModels:(force,t)=>configureModels(force,t,true),simpleChat,publishReview,
       async presentConversation(data){if(data.result.accepted_output.diagram)await diagrams.open(data);},
       async showDiff(change,iid){const before=vscode.Uri.parse('karma-preview:/'+iid+'/before.py'),after=vscode.Uri.parse('karma-preview:/'+iid+'/after.py');previewDocuments.set(before.toString(),change.before);previewDocuments.set(after.toString(),change.after);await vscode.commands.executeCommand('vscode.diff',before,after,'Sutra proposed edit: '+change.target);},

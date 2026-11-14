@@ -1,4 +1,7 @@
-Sutra 0.20.5 — permission feedback and stale mapping recovery
+Sutra 0.21.0 — live parent and child reasoning
+
+Use Sutra → Settings → Model reasoning to enable reasoning at the lowest supported level or use model defaults. Reasoning remains off by default where supported. Calls & reasoning in Sutra Monitor shows live expandable details for parent and child calls, protocol outcome and final input/output tokens. Compatible VS Code hosts also show thinking inline; older hosts use the Monitor. Reasoning is unverified model commentary and is never saved as task memory or authority. It shares the existing output budget with the answer. Display history is bounded and cleared on reload.
+
 
 Workspace access waits for the Arm Sutra dialog, then explicitly reports granted or declined. Already armed requests say they reuse the current grant. Sutra Monitor and routing logs include the permission outcome. File operations cannot proceed while confirmation is pending or declined.
 
