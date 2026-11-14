@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.21.3
+
+- Deliver fresh structural context across all mapped source partitions instead of selecting only one snapshot and a tiny unrelated excerpt.
+- Distinguish host-supplied source from optional Smriti pages and harness-created artifact flags.
+- Preserve child answers and checked citations for synthesis, and display measured evidence coverage.
+- Allocate review context from installed model metadata and remaining task/ancestor budgets, reserving bounded repair capacity.
+- Keep the STP kernel unchanged and retain data-only conversation compatibility with 0.21.1/0.21.2.
+
 ## 0.21.2
 
 - Keep separate bounded reasoning records across reloads, with per-call links in native chat and read-only details panes in Sutra Monitor.

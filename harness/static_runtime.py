@@ -48,7 +48,7 @@ def load_partition(s,sid,workspace,receipts,owner):
  """Validate every page again; merging does not infer cross-page relationships."""
  if not isinstance(receipts,list) or not receipts or len(set(receipts))!=len(receipts):
   raise InvalidUpdate('Invalid child snapshot receipts')
- sources={};versions={};graph={'nodes':[],'calls':[],'profiles':[],'diagnostics':[],'diagnostic_count':0}
+ sources={};versions={};graph={'nodes':[],'calls':[],'profiles':[],'diagnostics':[],'diagnostic_count':0,'module_dependencies':[]}
  for rid in receipts:
   row=repo.record_by_id(s,sid,rid)
   if (row['operation'].get('orchestration') or {}).get('node_id')!=owner:
@@ -58,7 +58,7 @@ def load_partition(s,sid,workspace,receipts,owner):
    if name in sources and (Path(name).name!='tsconfig.json' or sources[name]!=text):
     raise InvalidUpdate('Duplicate or conflicting child source page')
    sources[name]=text;versions[name]=data['versions'][name]
-  for key in ('nodes','calls'):graph[key].extend(data['graph'][key])
+  for key in ('nodes','calls','module_dependencies'):graph[key].extend(data['graph'].get(key,[]))
   graph['diagnostics'].extend(data['graph']['diagnostics'][:max(0,3-len(graph['diagnostics']))])
   graph['diagnostic_count']+=data['graph'].get('diagnostic_count',len(data['graph']['diagnostics']))
   graph['profiles']=sorted(set(graph['profiles']+data['graph']['profiles']))

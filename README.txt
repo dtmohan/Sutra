@@ -1,4 +1,6 @@
-Sutra 0.21.2 — persistent per-call reasoning details
+Sutra 0.21.3 — fresh workspace evidence for architecture reviews
+
+Architecture reviewers receive a fresh cross-page file and module inventory, budgeted source excerpts, and available child reports. The evidence-delivery line distinguishes mapped files from sampled implementation coverage. Workspace context uses installed model metadata within remaining allocations; model changes do not reset budgets or permissions.
 
 The conversation stage can request a workspace review in the same chat. Its lack of direct file tools does not disable the harness. Known false file-access refusals are withheld and sent through bounded repair; arming, task scope and remaining budgets still govern execution. Existing conversations keep their saved memory and contracts.
 

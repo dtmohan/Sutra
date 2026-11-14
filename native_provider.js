@@ -362,6 +362,8 @@ function install(vscode,context,deps){
         const r=data.result;recordUsage(r);audit.invocationId=r.invocation_id;audit.model=lastRoute;audit.stage=r.admission.admitted?'admitted':'withheld';publish();if(!r.admission.admitted){progress.report(new vscode.LanguageModelTextPart('Sutra withheld the response: '+r.admission.errors.join('; ')));return;}
         const p=r.accepted_output;if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&!['edit','run_tests'].includes(p.action?.kind))throw new Error('No admitted action is available to satisfy required tool mode.');
         progress.report(new vscode.LanguageModelTextPart(`Sutra routing confirmed · ${lastRoute} · task ${a.session}\nRequest ${audit.id} · protocol invocation ${r.invocation_id}\n\n${p.answer||p.summary}\n\n`));
+        const evidence=data.coverage?.evidence;
+        if(evidence)progress.report(new vscode.LanguageModelTextPart(`Evidence delivered: ${evidence.fresh_snapshot_files} freshly mapped files; source excerpts from ${evidence.excerpt_files.length} files; ${evidence.child_reports} child reports. This is a bounded review, not an exhaustive semantic audit.\n\n`));
         if(['edit','run_tests'].includes(p.action?.kind)){
           if(!canAct){progress.report(new vscode.LanguageModelTextPart('The proposal is retained. Enable the Sutra action tool in native Agent chat to review and apply it. No action executed.'));return;}
           const preview=await deps.request({op:'native_preview',...a.binding,invocation_id:r.invocation_id},activeCancel.token);if(armed!==a||activeCancel.token.isCancellationRequested)throw new Error('Task disarmed or cancelled during preview.');

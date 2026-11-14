@@ -60,6 +60,55 @@ class ChatTests(unittest.TestCase):
             self.assertFalse(choice['semantic_complexity_verified'])
         for tier in MODELS:self.assertEqual(KarmaAdapter().route('Audit architecture.',MODELS,tier,signals)['model'],MODELS[tier])
 
+    def test_whole_workspace_inventory_includes_separate_source_pages(self):
+        # Force two parser work units without changing the task's byte allocation.
+        original=__import__('static_runtime').build
+        def split(s,meta,workspace,root,files,real=True):
+            if len(files)>1:raise InvalidUpdate('Static graph work-unit allocation exceeded')
+            return original(s,meta,workspace,root,files,real=real)
+        with patch('static_runtime.build',side_effect=split):
+            model=Fake();out=self.ask(provider=model)
+        p=model.payloads[0]
+        self.assertEqual(len(p['snapshot_receipts']),2)
+        self.assertEqual(p['workspace_map']['files'],['entry.py','leaf.py'])
+        self.assertEqual(out['coverage']['evidence']['fresh_snapshot_files'],2)
+        self.assertFalse(out['coverage']['evidence']['exhaustive_semantic_review'])
+        self.assertEqual(p['review_capabilities']['source_field'],'excerpts')
+        self.assertFalse(p['contract']['implementation_present'])
+        self.assertTrue(p['excerpts'])
+        for key in ['workspace_map','evidence_coverage','review_capabilities']:
+            bad=copy.deepcopy(p);bad[key]={}
+            with self.assertRaises(InvalidUpdate):chat.request_check(self.s,self.sid,bad)
+        bad=copy.deepcopy(p);bad['snapshot_receipts']=p['snapshot_receipts'][:1]
+        with self.assertRaises(InvalidUpdate):chat.request_check(self.s,self.sid,bad)
+
+    def test_architecture_selection_uses_entrypoint_and_original_goal(self):
+        texts={'aaa.py':'unrelated = 1\n','extension.js':'function activate(){ return 1; }\n'}
+        self.assertEqual(next(iter(chat.excerpts(texts,'Architecture overview. Retry the original request.',30))),'extension.js')
+
+    def test_review_context_expands_with_model_capability_without_resetting_budget(self):
+        import review_context
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        provider=SimpleNamespace(context_metadata={'model_info':{'general.architecture':'qwen','qwen.context_length':131072},'parameters':'num_ctx 65536'})
+        before=review_budget.usage(self.s,self.sid)
+        with patch('review_budget.usage',return_value={'limits':{'tokens':90000},'used':{'tokens':30000}}):
+            result=review_context.context_budget(provider,self.s,self.sid)
+        self.assertEqual(provider.budget.context_limit,20000)
+        self.assertEqual(provider.budget.response_reserve,4096)
+        self.assertEqual(result['repair_slots_reserved'],3)
+        self.assertEqual(review_budget.usage(self.s,self.sid),before)
+
+    def test_structural_inventory_discloses_omissions_and_keeps_imports_unresolved(self):
+        import review_context
+        data={'sources':{'entry.py':'import external\ndef entry(): return 1\n','leaf.py':'def leaf(): return 2\n'},
+              'graph':{'nodes':[],'calls':[],'diagnostics':[]}}
+        full=review_context.overview(data,4096)
+        self.assertEqual(full['modules'][0]['imports'],['external'])
+        self.assertNotIn('edges',full)
+        small=review_context.overview(data,512)
+        self.assertGreater(small['omitted_module_details'],0)
+
     def test_two_fresh_models_preserve_task_binding_handoff_and_spent_budget(self):
         ref=calibration.register(self.s,profile());binding=calibration.bind(self.s,self.sid,[ref],calibration.EMPTY_HASH)
         small=Fake();one=self.ask(provider=small);before=review_budget.usage(self.s,self.sid)
@@ -81,8 +130,10 @@ class ChatTests(unittest.TestCase):
 
     def test_citation_choices_are_exact_bounded_source_and_wrong_file_still_rejected(self):
         m=Fake();self.ask(provider=m);p=m.payloads[0]
-        choices=chat.schema(p)['properties']['citations']['items']['properties']['quote']['enum']
+        choices=[c['quote'] for c in chat.schema(p)['properties']['citations']['items']['enum']]
         self.assertTrue(choices)
+        for citation in chat.schema(p)['properties']['citations']['items']['enum']:
+            self.assertIn(citation['quote'],p['excerpts'][citation['path']])
         for quote in choices:
             self.assertTrue(any(quote in text for text in p['excerpts'].values()))
             self.assertLessEqual(len(quote),160)

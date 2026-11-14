@@ -1,5 +1,7 @@
 # Sutra
 
+Sutra 0.21.3 supplies architecture reviewers with a fresh inventory across mapped source partitions, budgeted implementation excerpts, and available child answers. Empty optional memory pages and the absence of harness-created artifacts no longer imply absent repository source. Review context follows installed model capacity within remaining task/ancestor allocations, with room for bounded repairs. The response labels exactly how many mapped files, excerpt files and child reports were delivered. This remains a bounded architecture review, not an exhaustive semantic audit of every file.
+
 Sutra 0.21.2 retains separate reasoning details for every routing, child and workspace-review call. Click a call’s **reasoning details** link in chat or **Open reasoning details** in Sutra Monitor. The read-only pane updates during generation and stays available after a reload within the retention window. Native thinking remains available, but VS Code controls how its inline blocks are grouped.
 
 Sutra 0.21.1 fixes same-chat workspace handoff: tool-free conversation-stage restrictions no longer describe the whole harness. Known false file-access refusals go through bounded repair. Verified conversation history from released 0.20.x and 0.21.0 policies remains available after reload; old action authority is not restored. Workspace arming, scope and remaining budgets still apply.

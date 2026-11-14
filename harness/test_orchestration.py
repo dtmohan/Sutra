@@ -78,6 +78,10 @@ class OrchestrationTests(unittest.TestCase):
             self.assertIn('CED724',canonical(packet['memory']));self.assertEqual(packet['memory']['recent_turns'][-1]['user'],self.prompt)
             self.assertFalse(packet['branch']['capabilities']['edit']);self.assertFalse(packet['branch']['capabilities']['network'])
         main=[p for stage,p in self.models if stage=='synthesis'][0];self.assertEqual(len(main.payloads[0]['child_results']),len(children))
+        for result in main.payloads[0]['child_results']:
+            self.assertIn('Static calls',result['answer_unverified'])
+            self.assertTrue(result['evidence_coverage']['excerpt_files'])
+        self.assertEqual(main.payloads[0]['workspace_map']['source_files'],4)
         self.assertTrue(self.s.verify_invocations(sid));self.assertTrue(self.s.audit_valid())
     def test_replayed_ui_event_and_unarmed_step_are_rejected(self):
         out=self.step()

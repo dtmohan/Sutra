@@ -229,7 +229,7 @@ def handle(s,meta,workspace,root,req,providers=None):
     if phase=='BRANCHING':
         parent,children,signals=plan(s,meta,workspace,prompt,d['conversation_id'])
         move(s,fid,'CHILDREN' if children else 'SYNTHESIS','BRANCH_PLAN',children=[c['id'] for c in children],signals=signals)
-        return response(s,fid,progress=('Reviewing '+str(len(children))+' source partitions' if children else 'Source review fits one worker'))
+        return response(s,fid,progress=('Reviewing '+str(len(children))+' source partitions' if children else 'Preparing a bounded overview directly; no child review was allocated'))
     if phase=='CHILDREN':
         from subagent_runtime import run
         pending=[i for i in d['children'] if m.state(s,i)!='DONE']
