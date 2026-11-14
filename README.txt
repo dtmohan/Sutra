@@ -1,4 +1,8 @@
-Sutra 0.20.4 — bounded child source pages and upgrade recovery
+Sutra 0.20.5 — permission feedback and stale mapping recovery
+
+Workspace access waits for the Arm Sutra dialog, then explicitly reports granted or declined. Already armed requests say they reuse the current grant. Sutra Monitor and routing logs include the permission outcome. File operations cannot proceed while confirmation is pending or declined.
+
+Saved mapping failures are bound to their parser environment, contract and allocation. After a parser/policy upgrade, legacy failures rejoin the fresh-read queue; unchanged failures are not retried indefinitely. Existing receipts, permissions and consumed budget remain intact.
 
 Child reviews read fresh, byte-bounded source pages within their existing allocations. An interrupted review from an older policy offers Restart review in the same chat; the original request, constraints and consumed budget stay intact. Old worker results are not reused.
 

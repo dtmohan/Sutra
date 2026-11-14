@@ -1,5 +1,5 @@
 """A persisted, source-verified review queue. Model changes never own the queue."""
-import json,re,time
+import hashlib,json,os,platform,re,time
 from pathlib import Path
 from context_manager import InvalidUpdate,ContextBudgetExceeded,sha,canonical
 from paging import PageFault
@@ -9,6 +9,31 @@ import static_runtime as runtime
 import review_budget as budget
 
 CODE={'.py','.js','.jsx','.ts','.tsx'}
+
+def failure_environment(s,sid):
+ # A failed parse belongs to its parser, allocation and task, not just its source.
+ # Recompute once per mapping step; this never caches source or authorizes access.
+ tools={}
+ for key in ('KARMA_NODE','KARMA_TYPESCRIPT'):
+  name=os.environ.get(key);entry={'path':name}
+  if name:
+   try:
+    p=Path(name);st=p.stat();entry.update(size=st.st_size,mtime_ns=st.st_mtime_ns)
+    if key=='KARMA_TYPESCRIPT':entry['sha256']=hashlib.sha256(p.read_bytes()).hexdigest()
+   except OSError:entry['unavailable']=True
+  tools[key]=entry
+ return {'policy_hash':s.logic_hash,'contract_hash':s.current_contract(sid)['contract_hash'],
+         'page_bytes':s.snapshot(sid)['constraints']['review_page_kib']*1024,
+         'python':platform.python_version(),'tools':tools}
+
+def requeue_stale_failures(s,meta):
+ a=meta['auto'];current=failure_environment(s,meta['active']);previous=a.get('failure_environment')
+ if previous!=current and a.get('failures'):
+  with s.db:s._audit('AUTO_FAILURES_REQUEUED',{'session':meta['active'],
+     'paths':sorted(a['failures']),'reason':'Mapping environment changed or legacy failure lacks a binding',
+     'previous_environment':previous,'current_environment':current})
+  a['failures']={};a['failure_versions']={}
+ a['failure_environment']=current
 
 def failure_version(workspace,name,cap):
  try:
@@ -97,6 +122,7 @@ def step(s,meta,workspace,root,request,provider=None):
   # Refresh the directory TOC on every page; source bodies are never cached.
   catalog=repo.execute(s,meta['active'],workspace,root,'catalog',resource_check=provider is None)
   if catalog['result']['status']!='ok':raise InvalidUpdate(catalog['result']['error'])
+  requeue_stale_failures(s,meta)
   for p in list(a['failures']):
    if p not in catalog['result']['files'] or a.get('failure_versions',{}).get(p)!=failure_version(workspace,p,c['review_page_kib']*1024):a['failures'].pop(p);a.get('failure_versions',{}).pop(p,None)
   st=status(s,meta,workspace);valid,_=current_pages(s,meta,workspace)
@@ -110,6 +136,7 @@ def step(s,meta,workspace,root,request,provider=None):
    try:row=runtime.build(s,meta,workspace,root,files,real=provider is None);break
    except budget.BudgetStop:raise
    except InvalidUpdate as exc:
+    if 'RESOURCE_WAIT' in str(exc):raise
     with s.db:s._audit('AUTO_PAGE_SPLIT',{'session':meta['active'],'files':files,'reason':str(exc)})
     if len(primary)==1:
      fail_page(a,workspace,primary[0],str(exc),c['review_page_kib']*1024);a['status']='page_rejected';return {'result':None,'auto':status(s,meta,workspace)}

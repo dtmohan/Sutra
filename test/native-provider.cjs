@@ -175,6 +175,26 @@ function setup(saved={}){
  await inline.send('high',[{role:2,content:inlineReply},{role:1,content:[new Text('Continue review')]}]);
  assert.equal(confirmations,1);const switched=inline.calls.filter(c=>c.op==='native_work').at(-1);assert.equal(switched.contract_hash,inlineWork.contract_hash);assert.equal(switched.session,inlineWork.session);assert(!inline.calls.some(c=>['auto_new','native_permissions'].includes(c.op)));
  checks.push('inline arming resumes the exact pending request with its conversation receipt and existing permissions, without opening any chat; model switches keep that binding');
+ assert(inlineReply.some(p=>p.value?.includes('Workspace access granted for this window')));
+ assert(inline.routeEvents.some(r=>r.workspaceAccess?.state==='requested'));
+ assert(inline.routeEvents.some(r=>r.workspaceAccess?.state==='granted'));
+ assert.equal(inline.controller.status().routing.workspaceAccess.state,'already_armed');
+ for(const approve of [false,true]){
+  const waiting=setup();waiting.kind('report');let decide;
+  waiting.v.window.showWarningMessage=(message,options,label)=>{
+   assert.equal(message,'Arm Sutra for this workspace?');assert.equal(options.modal,true);assert.equal(label,'Arm Sutra');
+   return new Promise(resolve=>{decide=resolve;});
+  };
+  const response=waiting.send();while(!decide)await new Promise(r=>setImmediate(r));
+  assert.equal(waiting.controller.status().routing.workspaceAccess.state,'requested');
+  assert(!waiting.controller.status().armed);assert(!waiting.flowRequests.some(r=>r.armed));
+  assert.deepEqual(waiting.calls.map(c=>c.op),['conversation']);
+  decide(approve?'Arm Sutra':undefined);const parts=await response;
+  assert.equal(waiting.controller.status().routing.workspaceAccess.state,approve?'granted':'declined');
+  assert.equal(waiting.calls.some(c=>c.op==='native_work'),approve);
+  assert(parts.some(p=>p.value?.includes(approve?'Workspace access granted':'Workspace access was not granted')));
+ }
+ checks.push('confirmation feedback records requested/granted/declined or already armed; pending and declined dialogs cannot dispatch workspace work');
  const standalone=setup();await standalone.arm();assert(!standalone.uiCalls.some(c=>c[0].startsWith('workbench.')));assert.equal(standalone.cfg.defaultModel,undefined);
  checks.push('standalone arming changes no chat selection, saved model, or conversation');
  for(const stop of ['cancel','disarm','disable','workspace']){

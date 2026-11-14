@@ -56,19 +56,25 @@ function install(vscode,context,deps){
     const epoch=accessEpoch,workspace=deps.workspace();
     const stillValid=()=>{if(epoch!==accessEpoch||!enabled()||deps.workspace()!==workspace||owner&&(!ownsRequest()||owner.token.isCancellationRequested))throw new Error('Arming cancelled: Sutra was disarmed, disabled, or the request/workspace changed.');if(deps.isBusy())throw new Error('Workspace became busy while arming.');};
     let success=false;arming=true;setArmingStep('Confirm Arm Sutra in the dialog. This request will continue here; edits and tests ask when needed.');
+    const access={id:crypto.randomUUID(),workspace,state:'requested',requestedAt:new Date().toISOString(),source:'vscode_modal'};
+    const recordAccess=state=>{access.state=state;access.updatedAt=new Date().toISOString();if(owner){owner.audit.workspaceAccess={...access};publish();deps.onRoute?.({...owner.audit});}};
     try{
+      recordAccess('requested');
       const yes=await vscode.window.showWarningMessage('Arm Sutra for this workspace?',{modal:true,detail:workspace+'\nSutra may read project files for your requests. Existing task scope and permissions are retained. File grants persist with the task across model switches; disarm or reload stops execution until you arm again. Each edit or test still requires action confirmation. Native workspace tasks forbid network access and new dependencies.\n'+(owner?'Your pending request will continue in this chat.':'Your current chat stays open.')},'Arm Sutra');
       stillValid();
-      if(yes!=='Arm Sutra')return false;
+      if(yes!=='Arm Sutra'){recordAccess('declined');return false;}
+      recordAccess('confirmed');
       const st=await deps.request({op:'state'},owner?.token);
       stillValid();
       const current=st.auto||st.contract?.contract.constraints.native_task;
       armed={workspace,generation:crypto.randomUUID(),session:current?st.session:undefined,binding:current?identity(st):undefined,coding:!!(current&&st.contract.contract.constraints.native_task)};
       reason='Armed for workspace reading. Describe the work in chat; Sutra asks for additional permissions when needed.';
+      recordAccess('granted');
       success=true;
       if(!owner)void vscode.window.showInformationMessage('Sutra is armed. Your current chat is unchanged. Use Sutra Auto for governed requests.');
       return true;
-    }finally{arming=false;armingStep='';if(!success&&epoch===accessEpoch)reason='Arming cancelled. Conversation remains available.';publish();}
+    }catch(error){recordAccess('cancelled');throw error;}
+    finally{arming=false;armingStep='';if(!success&&epoch===accessEpoch)reason='Arming cancelled. Conversation remains available.';publish();}
   }
   // UI effects only: the host state machine selects work, forks and joins.
   async function approvePermission(descriptor,token){
@@ -286,11 +292,15 @@ function install(vscode,context,deps){
           }
           if(!a){
             audit.stage='awaiting_workspace_permission';publish();
-            progress.report(new vscode.LanguageModelTextPart('Workspace access needs your confirmation. Choose **Arm Sutra** to continue this request here.\n\n'));
+            progress.report(new vscode.LanguageModelTextPart('Waiting for the **Arm Sutra** confirmation dialog in this VS Code window. No workspace files will be read until you confirm.\n\n'));
             if(!await beginArm({audit,token:activeCancel.token})){
               audit.stage='permission_declined';progress.report(new vscode.LanguageModelTextPart('Workspace access was not granted. No source was read, edited, or tested. You can keep chatting.'));return;
             }
             a=armed;audit.stage='workspace';publish();
+            progress.report(new vscode.LanguageModelTextPart('**Workspace access granted for this window.** Continuing your request; edits and tests require separate confirmation.\n\n'));
+          }else{
+            audit.workspaceAccess={state:'already_armed',workspace:a.workspace};publish();
+            progress.report(new vscode.LanguageModelTextPart('Using workspace access already armed for this window.\n\n'));
           }
 
         }

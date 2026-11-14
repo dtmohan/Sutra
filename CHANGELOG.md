@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.20.5 — workspace confirmation and stale failure recovery
+
+- Bind saved mapping failures to the policy, parser tools, Python version, contract and page allocation. Requeue legacy or outdated failures once, with an audit entry; retain consumed budgets and permissions.
+- Keep temporary resource waits out of the persistent file-failure queue.
+- Show waiting, granted, declined and reused workspace-access feedback; record dialog transitions in routing diagnostics and show the last outcome in Sutra Monitor.
+- Test pending/declined confirmations, actual VS Code dialog cancellation/approval, and recovery of the reported 29 failures on a copy of the saved 113-file review. STP kernel unchanged.
+
 ## 0.20.4 — child source paging and upgrade recovery
 
 - Keep child excerpt scope stable through canonical JSON storage; ranked excerpts no longer fail receipt replay because their object keys were sorted.

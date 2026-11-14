@@ -51,6 +51,31 @@ class AutomaticTests(unittest.TestCase):
  def test_bytes_replace_eight_file_limit(self):
   for p in self.ws.glob('*.py'):p.write_text('x=1\n')
   r=self.step(explain=False);self.assertEqual(r['auto']['mapped_files'],140);self.assertEqual(r['auto']['status'],'structural_pass_complete');self.assertFalse(r['auto']['semantic_review_complete'])
+ def test_legacy_failures_requeue_after_upgrade_without_refunding_or_changing_contract(self):
+  self.step(explain=False);contract=self.s.current_contract(self.sid);used=budget.usage(self.s,self.sid)['used']
+  a=self.meta['auto'];a.pop('failure_environment',None)
+  auto.fail_page(a,self.ws,'file001.py','API index bound exceeded: old parser',1024)
+  out=self.step(explain=False)
+  self.assertNotIn('file001.py',out['auto']['failures']);self.assertEqual(out['auto']['mapped_files'],2)
+  self.assertEqual(self.s.current_contract(self.sid),contract)
+  now=budget.usage(self.s,self.sid)['used'];self.assertTrue(all(now[k]>=v for k,v in used.items()))
+  events=self.s.db.execute("SELECT payload_json FROM page_audit WHERE event='AUTO_FAILURES_REQUEUED'").fetchall()
+  self.assertEqual(len(events),1);self.assertEqual(json.loads(events[0][0])['paths'],['file001.py'])
+  self.assertEqual(a['failure_environment']['policy_hash'],self.s.logic_hash)
+ def test_same_failure_environment_retains_errors_and_tool_change_requeues_once(self):
+  a=self.meta['auto'];a['failure_environment']=auto.failure_environment(self.s,self.sid)
+  auto.fail_page(a,self.ws,'file000.py','fixture failure',1024)
+  auto.requeue_stale_failures(self.s,self.meta);self.assertIn('file000.py',a['failures'])
+  with patch.dict(os.environ,{'KARMA_NODE':'/different/trusted/node'}):
+   auto.requeue_stale_failures(self.s,self.meta);self.assertFalse(a['failures'])
+   auto.fail_page(a,self.ws,'file000.py','still failed',1024)
+   auto.requeue_stale_failures(self.s,self.meta);self.assertIn('file000.py',a['failures'])
+  self.assertEqual(self.s.db.execute("SELECT COUNT(*) FROM page_audit WHERE event='AUTO_FAILURES_REQUEUED'").fetchone()[0],1)
+ def test_resource_wait_does_not_mark_a_source_file_as_permanently_failed(self):
+  with patch('auto_review.runtime.build',side_effect=InvalidUpdate('RESOURCE_WAIT: pressure')):
+   out=self.step(explain=False)
+  self.assertEqual(out['auto']['status'],'resource_wait');self.assertFalse(out['auto']['failures'])
+  self.assertEqual(self.step(explain=False)['auto']['mapped_files'],1)
  def test_allocations_use_kernel_and_preserve_compound_priority(self):
   for cost in ({'tokens':1},{'tokens':300000},{'tokens':600000}):
    frame=budget.decision(self.s,self.sid,cost);self.assertEqual(frame['decision'],HarnessKernelAdapter().evaluate(frame['omega'],frame['sigma']).decision.value)
