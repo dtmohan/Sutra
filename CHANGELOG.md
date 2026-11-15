@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.24.0
+
+- Start new Auto requests with the configured low-tier model, answering simple conversation in one call. Apply workspace breadth routing only after fresh source is supplied.
+- Add schema-checked context and reasoning escalation proposals. Page missing Smriti context first, then permit only the next configured untried higher tier in Auto. Keep explicit model choices fixed and assessments labelled unverified.
+- Persist the conversation session and accepted routing checkpoints before subsequent dispatch. Retain original prompts, mandatory pages, pins, permissions and consumed allocations across pressure pauses, reloads and model switches. All calls use the invocation gateway and unchanged STP kernel.
+- Withhold routing drafts; include all stage tokens in the footer and propagate checkpoint quarantine through final answers. Pause normally on budget/context shortages or exhausted model choices.
+- Preserve data-only conversations from 0.23.0 and 0.23.1; retain the saved-review greeting and monitor fixes from 0.23.1.
+
+## 0.23.1
+
+- Route new conversation independently of a saved workspace review, including reviews made stale by an upgrade. Greetings no longer trigger review recovery, arming or mapping.
+- Require explicit continue/resume to resume saved work; classify a new workspace request before asking to discard the old one. Preserve edit/test permission intent in the admitted handoff.
+- Keep saved review context, permissions and spent budgets unchanged during conversation and model switches. Bind classification resource stops to their newly created flow.
+- Distinguish live system pressure from the last model-memory allocation in Sutra Monitor and recovery guidance. Keep memory thresholds and the canonical STP kernel unchanged.
+- Preserve data-only conversation memory from released 0.23.0.
+
 ## 0.23.0
 
 - Calibrate cold MLX process memory across repeated synthetic workload sizes, through a tool-free invocation role and the unified gateway. Keep workload token counts separate from requested context and exclude pressure-affected or interrupted observations.

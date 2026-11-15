@@ -20,7 +20,7 @@ function latestRequest(vscode,messages){
   return {prompt,parent};
 }
 function install(vscode,context,deps){
-  let recoveryChoice;
+
   let armPromise,accessEpoch=0,armingStep='',armed,activeCancel,arming=false,running=false,selecting=false,lastRoute='',routing,reason='Open Sutra chat to talk. Arm Sutra when you need workspace access.';
   const memory=new NativeMemory(context);let lastCompaction;
   const tickets=new Map(),completed=new Map(),changed=new vscode.EventEmitter();
@@ -92,7 +92,14 @@ function install(vscode,context,deps){
     return {operation:descriptor.operation,paths,test_paths};
   }
   const pendingKey='sutra.pendingOrchestration';
-  async function rememberFlow(flow){await context.workspaceState.update(pendingKey,flow.state==='DONE'||flow.state==='CANCELLED'?undefined:{...flow,workspace:deps.workspace(),conversation:undefined,child:undefined,data:undefined,mapping:undefined});publish();}
+  async function rememberFlow(flow){
+    const terminal=flow.state==='DONE'||flow.state==='CANCELLED';
+    const saved=context.workspaceState.get(pendingKey);
+    // Finishing a conversational turn must not erase another saved review.
+    if(!terminal||saved?.flow_id===flow.flow_id)
+      await context.workspaceState.update(pendingKey,terminal?undefined:{...flow,workspace:deps.workspace(),conversation:undefined,routing_step:undefined,child:undefined,data:undefined,mapping:undefined});
+    publish();
+  }
   async function recoverSaved(discard=false){
     if(running||routing?.active||deps.isBusy())throw new Error('Stop the active request and wait for cleanup before changing the saved workflow.');
     const pending=context.workspaceState.get(pendingKey);
@@ -101,14 +108,14 @@ function install(vscode,context,deps){
       const yes=await vscode.window.showWarningMessage('Discard the saved Sutra request?',{modal:true,detail:'Consumed budgets, receipts and task permissions are retained. Unused child reservations are released. Executed actions are not undone.'},'Discard request');
       if(yes!=='Discard request')return;
       const current=await deps.request({op:'orchestrate',event:'inspect',flow_id:pending.flow_id});
-      await rememberFlow(['DONE','CANCELLED'].includes(current.state)?current:await deps.request({op:'orchestrate',event:'cancel',flow_id:current.flow_id,cursor:current.cursor}));recoveryChoice=undefined;
+      await rememberFlow(['DONE','CANCELLED'].includes(current.state)?current:await deps.request({op:'orchestrate',event:'cancel',flow_id:current.flow_id,cursor:current.cursor}));
     }else{
       const current=await deps.request({op:'orchestrate',event:'inspect',flow_id:pending.flow_id});
       await rememberFlow(current);
-      recoveryChoice=pending.flow_id;
+
       // Focus the existing chat without replacing its draft, model, or history.
       await vscode.commands.executeCommand('workbench.action.chat.open');
-      void vscode.window.showInformationMessage(current.recovery?current.recovery.message+' Send continue in Sutra chat to choose recovery.':'Resume selected. Send your next message with a Sutra model to continue the saved request with its original context and remaining budget.');
+      void vscode.window.showInformationMessage(current.recovery?current.recovery.message+' Send continue in Sutra chat to choose recovery.':'Resume selected. Send continue with a Sutra model to resume the saved request with its original context and remaining budget. Other messages remain separate.');
     }
   }
   let activityProgress;
@@ -127,7 +134,7 @@ function install(vscode,context,deps){
     const reason=details.length?details.join('\n'):(stop.status||'Inspect Sutra Monitor for details.');
     audit.stage='paused';audit.message=reason;publish();
     const guidance=stop.status==='resource_wait'
-      ? 'Wait until Sutra Monitor shows **Resources: ALLOW**, then use **Resume** and send **continue** here. Resume checks a fresh measurement before dispatch. Sutra will not automatically retry this stop.'
+      ? 'Check both **System pressure** and the **Last model allocation** in Sutra Monitor. Healthy system pressure alone does not mean the selected model fits. After resources recover, or after selecting a smaller configured model, use **Resume** and send **continue** here. Resume checks a fresh measurement and model allocation before dispatch. Sutra will not automatically retry this stop.'
       : 'Resolve the reported cause, then use **Resume** in Sutra Monitor and send **continue** here.';
     const title=stop.resume_phase==='CLASSIFYING'?'Sutra paused the request.':'Sutra paused the review.';
     progress.report(new vscode.LanguageModelTextPart('**'+title+'**'+coverage+'\n\n'+reason+'\n\n'+(stop.failure_count>failures.length?`${stop.failure_count-failures.length} more file failures are recorded in the review details.\n\n`:'')+'The request, context, permissions and consumed budget are saved. '+guidance+' Resume keeps the remaining allocation; it does not reset a limit. Use **Discard** to abandon this request.'));
@@ -279,7 +286,8 @@ function install(vscode,context,deps){
         if(!request.results){
           let pending=context.workspaceState.get(pendingKey);
           if(!pending){const saved=await flowEvent(null,'pending',tier,activeCancel.token);if(saved.flow_id)pending={...saved,workspace:deps.workspace()};}
-          if(pending?.workspace===deps.workspace()){
+          const resumeRequested=/^(continue|resume|please continue|please resume)[.! ]*$/i.test(prompt.trim());
+          if(resumeRequested&&pending?.workspace===deps.workspace()){
             const old=await deps.request({op:'orchestrate',event:'inspect',flow_id:pending.flow_id},activeCancel.token);
             if(['DONE','CANCELLED'].includes(old.state))await rememberFlow(old);
             else if(old.recovery){
@@ -292,19 +300,14 @@ function install(vscode,context,deps){
               if(activeCancel.token.isCancellationRequested||choice!=='Restart review'){
                 progress.report(new vscode.LanguageModelTextPart('Saved request retained. '+recovery.message));return;
               }
-              recoveryChoice=undefined;flow=old;prompt=old.prompt;restartReview=true;
+              flow=old;prompt=old.prompt;restartReview=true;
               conversationId=undefined;footerId=undefined;footerSignature=undefined;
             }else {
-              const choice=recoveryChoice===old.flow_id||/^(continue|resume|please continue|please resume)[.! ]*$/i.test(prompt)?'Resume saved request':await vscode.window.showWarningMessage('A Sutra request is saved.',{modal:true,detail:'Saved request: '+old.prompt+'\nResume preserves its context and remaining budget. Discard releases unused child reservations; consumed budgets and receipts remain.'},'Resume saved request','Discard and use new request');
-              if(activeCancel.token.isCancellationRequested)return;
-              recoveryChoice=undefined;
-              if(choice==='Resume saved request'){
-                resuming=true;
-                flow=old;prompt=old.prompt;conversationId=old.conversation_id;audit.memoryUsed=true;audit.conversationInvocationId=conversationId;
-                if(conversationId){footerSignature=await memory.remember(conversationId,options);footerId=conversationId;}
-                progress.report(new vscode.LanguageModelTextPart('Resuming the saved Sutra workflow with its context and remaining budget.\n\n'));
-              }else if(choice==='Discard and use new request')await flowEvent(old,'cancel',tier,activeCancel.token);
-              else {progress.report(new vscode.LanguageModelTextPart('Saved request retained. Use Resume or Discard in Sutra Monitor when ready.'));return;}
+
+              resuming=true;
+              flow=old;prompt=old.prompt;conversationId=old.conversation_id;audit.memoryUsed=true;audit.conversationInvocationId=conversationId;
+              if(conversationId){footerSignature=await memory.remember(conversationId,options);footerId=conversationId;}
+              progress.report(new vscode.LanguageModelTextPart('Resuming the saved Sutra workflow with its context and remaining budget.\n\n'));
             }
           }
           if(!flow)flow=await flowEvent(null,'start',tier,activeCancel.token,{prompt,parent:request.parent});
@@ -312,6 +315,17 @@ function install(vscode,context,deps){
             flow=await flowEvent(flow,'resume',tier,activeCancel.token);
           }
           if(resuming&&flow.state==='CLASSIFYING')flow=await flowEvent(flow,'step',tier,activeCancel.token);
+          while(flow.routing_step||flow.state==='CLASSIFYING'){
+            if(armed!==a||!enabled()||activeCancel.token.isCancellationRequested)throw new Error('Native request disarmed or cancelled. Response withheld.');
+            if(flow.routing_step){
+              const step=flow.routing_step;recordUsage(step.result);lastRoute=step.route.model;audit.model=lastRoute;
+              audit.routingDecision=step.routing_followup;audit.stage='routing';publish();
+              progress.report(new vscode.LanguageModelTextPart((step.routing_followup?.kind==='page_in'?'Loading the requested conversation context before choosing a model.':step.routing_followup?.kind==='escalate'?'Checking the next model tier against the remaining budget and available memory.':flow.progress)+'\n\n'));
+            }
+            if(flow.state==='PAUSED'){showPause(flow,audit,progress);return;}
+            if(flow.state!=='CLASSIFYING')break;
+            flow=await flowEvent(flow,'step',tier,activeCancel.token);
+          }
           if(flow.state==='PAUSED'&&flow.stop?.resume_phase==='CLASSIFYING'){showPause(flow,audit,progress);return;}
           const chat=flow.conversation;
           if(chat){
@@ -319,8 +333,19 @@ function install(vscode,context,deps){
           const r=chat.result;recordUsage(r);lastRoute=chat.route.model;audit.model=lastRoute;audit.memoryUsed=chat.memory_used;audit.memoryAllocation=chat.memory_allocation;audit.memoryStatus=chat.memory_status;audit.modelCapacity=chat.model_capacity;audit.conversationBudget=chat.budget;audit.invocationId=r.invocation_id;audit.stage=r.admission.admitted?'conversation':'withheld';publish();
           if(!r.admission.admitted){progress.report(new vscode.LanguageModelTextPart('Sutra withheld the conversation response: '+r.admission.errors.join('; ')));return;}
           const p=r.accepted_output;
-          if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&flow.state==='DONE')throw new Error('No admitted action is available to satisfy required tool mode.');
+          if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&flow.state==='DONE'&&!flow.deferred_flow_id)throw new Error('No admitted action is available to satisfy required tool mode.');
           footerSignature=await memory.remember(r.invocation_id,options);footerId=r.invocation_id;
+          if(flow.deferred_flow_id){
+            const old=await deps.request({op:'orchestrate',event:'inspect',flow_id:flow.deferred_flow_id},activeCancel.token);
+            await rememberFlow(old);
+            const choice=await vscode.window.showWarningMessage('Another Sutra workspace request is saved.',{modal:true,detail:'New request: '+prompt+'\nSaved request: '+old.prompt+'\nDiscard releases unused child reservations. Consumed budgets, receipts and task permissions remain. To resume the saved request instead, cancel and send continue.'},'Discard and use new request');
+            if(activeCancel.token.isCancellationRequested||choice!=='Discard and use new request'){
+              progress.report(new vscode.LanguageModelTextPart('Saved request retained. Your new workspace request has not run. Send **continue** to resume the saved request, or use **Discard** in Sutra Monitor before submitting a new workspace request. General conversation can continue.'));return;
+            }
+            if(armed!==a||!enabled())throw new Error('Native request disarmed or cancelled. Response withheld.');
+            await flowEvent(old,'cancel',tier,activeCancel.token);
+            flow=await flowEvent(null,'start_existing',tier,activeCancel.token,{prompt,conversation_id:r.invocation_id});
+          }
           // Routing prose is not an authority on host capabilities or permissions.
           // Present a host-owned transition; publish model prose for conversation.
           progress.report(new vscode.LanguageModelTextPart((flow.state!=='DONE'?'Continuing this request through Sutra’s workspace workflow.':p.answer)+'\n\n'));

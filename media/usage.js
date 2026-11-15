@@ -12,7 +12,7 @@ function renderMonitor(){
  const why=error?'Readings unavailable':!snapshotFresh&&snapshot?'Readings expired':h.reason||'Waiting for system readings';
  const thermal={nominal:'Normal',fair:'Elevated',serious:'High',critical:'Critical'}[h.thermal_label]||'Unavailable';
  const hd=hwFresh&&decisions.has(h.decision)?h.decision:undefined;
- el('resource').textContent=hd?'Resources: '+hd:'Resources unavailable';el('resource').dataset.decision=hd||'';
+ el('resource').textContent=hd?'System pressure: '+hd:'System pressure unavailable';el('resource').dataset.decision=hd||'';
  el('thermal').textContent=hwFresh?'OS thermal pressure: '+thermal+' · sample '+(h.age_seconds+elapsed).toFixed(1)+'s old':why;
  el('cpu-load').textContent=hwFresh&&finite(s.cpu_busy_pct)&&s.cpu_busy_pct>=0&&s.cpu_busy_pct<=100?s.cpu_busy_pct.toFixed(0)+'%':'—';
  el('ram').textContent=hwFresh&&finite(h.reclaimable_estimate_gib)&&h.reclaimable_estimate_gib>=0?h.reclaimable_estimate_gib.toFixed(1)+' GiB':'—';
@@ -34,7 +34,7 @@ function renderMonitor(){
  const workflow=d.orchestration,rows=(workflow?.nodes||[]).filter(n=>n.kind!=='task').slice(0,12);
  el('flow-status').textContent=!snapshotFresh?'Awaiting fresh snapshot':rows.length?(workflow.execution||'Recorded workflow'):'No workflow yet';
  const pending=native?.pending;el('recovery-controls').hidden=!pending;
- el('recovery-status').textContent=pending?(pending.recovery?.message||pending.stop?.error||'Saved request · '+pending.state+'. Context and consumed budget are retained. Resume selects it for your next Sutra message.'):'';
+ el('recovery-status').textContent=pending?(pending.recovery?.message||pending.stop?.error||'Saved request · '+pending.state+'. Context and consumed budget are retained. Use Resume, then send continue. Other messages remain separate.'):'';
  for(const id of ['resume-workflow','discard-workflow'])el(id).disabled=!!native?.working;
  const signature=JSON.stringify([rows,snapshotFresh]);
  if(signature!==workflowSignature){workflowSignature=signature;
@@ -77,7 +77,10 @@ function renderRuntimeMemory(m,s,hwFresh,snapshotFresh){
   const card=node('div',undefined,'gate');card.append(node('strong',r.name),node('div',gib(r.size)+' reported · '+T.number(r.context_length)+' context tokens'+(r.runner?' · '+r.runner:'')));el('resident-models').append(card);
  }
  const p=m?.plan;
- el('memory-plan').textContent=p?'Last runtime plan: '+p.model+' · '+T.number(p.context_tokens)+' context tokens · '+gib(p.estimated_increment_bytes)+' estimated additional memory · '+gib(p.system_reserve_bytes)+' system reserve · '+p.decision+'. '+p.estimate_scope+'. Peak memory is not verified.':'No runtime allocation recorded yet.';
+ const allocation=el('model-allocation');
+ allocation.textContent=p?'Last model allocation: '+p.decision:'No model allocation yet';
+ allocation.dataset.decision=decisions.has(p?.decision)?p.decision:'';
+ el('memory-plan').textContent=p?'Last runtime plan: '+p.model+' · '+T.number(p.context_tokens)+' context tokens · '+gib(p.estimated_increment_bytes)+' memory reservation · '+gib(p.system_reserve_bytes)+' system reserve. '+p.estimate_scope+'. Peak memory is not verified. This is the last dispatch check, not a live fit guarantee; Resume checks again.':'No runtime allocation recorded yet.';
  if(p?.calibration)el('memory-plan').append(node('div','MLX calibration '+p.calibration.profile_sha256.slice(0,12)+' · measured workload ceiling '+T.number(p.calibration.covered_tokens)+' tokens · '+gib(p.calibration.margin_bytes)+' uncertainty margin.'));
  else if(p?.calibration_status)el('memory-plan').append(node('div',p.calibration_status));
  const e=(m?.events||[]).at(-1);

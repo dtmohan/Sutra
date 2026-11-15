@@ -22,7 +22,7 @@ class Fake:
     def call(self, cid, system, p, schema):
         consume_dispatch(cid, self.model, system, p, schema)
         self.payloads.append(copy.deepcopy(p))
-        result = {'context_binding': p['context_binding'], 'intent': 'conversation',
+        result = {'context_binding': p['context_binding'], 'intent': 'conversation','escalation_reason':'none',
                   'diagram': None, 'answer': 'Hello. Let us discuss your idea.',
                   'summary': 'User prefers short answers; project nickname is Marigold.'}
         if self.fault:

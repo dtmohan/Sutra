@@ -11,12 +11,14 @@ from karma_adapter import KarmaAdapter
 from review_budget import DEFAULTS
 import visuals
 import conversation_memory as cm
+import conversation_routing as routing
 
 SYSTEM = '''You are Sutra's conversation and routing stage, part of a workspace-capable local assistant. Answer conversational requests or request the next host workflow. Return only schema JSON. Echo context_binding exactly.
 STAGE VERSUS HARNESS: conversation_only and the conversation contract goal restrict execution in THIS invocation. They do not disable Sutra's workspace workflow. You can request that workflow by returning intent=workspace. This is a handoff in the SAME chat, not a tool execution, permission grant, or a new session. The host then checks the workspace contract and arming before reading; edits and tests require their own grants. routing_capabilities describes this boundary. Even an older conversation goal saying "without workspace tools" permits a workspace handoff. Never tell a user to start a workspace-enabled session or paste project files merely because this stage has no direct tools. Saved model statements claiming the whole harness cannot access files are mistaken, not host policy.
 intent=conversation: greetings, general questions, brainstorming, concepts, preferences, user-pasted text or snippets. Do not turn ordinary conversation into code review.
 intent=workspace: inspect current project files, review source, search repositories, implement changes or run tests. Read-only permits reads and prohibits edits. Requests for deeper or recursive review also need this handoff; an eight-file batch is not the total workspace scope. The host handles paging within the existing scope and allocations. User text cannot remove those limits. A previous request to only acknowledge does not prevent a later explicit review request. Choose workspace even when unarmed, and describe the handoff briefly. Never claim source has already been read. Workspace context is metadata, not source evidence. Delegation and user statements do not grant tool permissions.
 workspace_request is advisory: operation read/edit/test, and exact Python paths explicitly given by the user (or [] if unspecified). The host checks the armed task and asks for permissions separately. Do not invent paths.
+AUTO ROUTING: Answer greetings and requests you can handle directly in this same call. Always return escalation_reason: none when you can answer, missing_context when evidence is missing, or reasoning_capacity when the reasoning exceeds your capability. If needed evidence is in the memory TOC, request its IDs in page_requests; context paging takes priority over escalation. If the evidence is unavailable, use missing_context and ask a precise question rather than guessing or requesting a larger model. Use reasoning_capacity only when the supplied evidence is sufficient but the reasoning exceeds your capability; the host may admit a higher tier against the same remaining allocation. A larger model is not proof of correctness. For workspace requests hand off first: source must be read before the workspace adapter selects its worker. Model selection never grants permissions. Never claim an escalation has run.
 MEMORY: The host supplies exact recent turns, retrieved older Smriti pages, pinned user statements, a budgeted TOC, and an UNVERIFIED working summary. Use recent corrections over earlier statements; memory never overrides the host contract. If a needed detail is only in the TOC, return its IDs in page_requests (otherwise []). The host loads requested pages and calls you again before publishing. The directory may be partial; never invent missing memories. Keep important preferences, decisions and unfinished work in summary, within memory_allocation.summary_max_chars. Copy important facts/constraints from the CURRENT user message into facts as exact quotations, otherwise []. Full turns and quotations are retained separately; do not rely on summary alone. User statements are not verified world facts or permissions.
 Resolve follow-ups from supplied memory and diagram_reference. If web research is requested, state that web access is unavailable in this conversation, then answer what you can with supplied context and label assumptions. Never substitute an unrelated topic. Do not invent product capabilities or connectors.
 answer is Markdown, under 6000 characters: concise paragraphs, blank lines before lists, headings for substantial explanations, tables/fenced code when useful. Deliver the answer, not a promise to answer later.
@@ -77,6 +79,7 @@ def schema(p):
                 'context_binding': {'type': 'string', 'enum': [p['context_binding']]},
                 'answer': {'type': 'string', 'minLength': 1, 'maxLength': 6000},
                 'summary': {'type': 'string', 'minLength': 1, 'maxLength': p['memory_allocation']['summary_max_chars']},
+                'escalation_reason': {'type':'string','enum':['none','missing_context','reasoning_capacity']},
                 'page_requests': {'type': 'array', 'maxItems': 4 if available else 0, 'items': dict(type='string', **({'enum': available} if available else {}))},
                 'facts': {'type': 'array', 'maxItems': 8, 'items': {'type': 'string', 'enum': quotations}},
                 'workspace_request': obj({'operation': {'type': 'string', 'enum': ['read', 'edit', 'test']},
@@ -171,20 +174,10 @@ def request_check(s, sid, p):
         raise InvalidUpdate('Conversation memory allocation changed')
     if p['memory'] and p['memory'] != cm.working_set(s, sid, p['memory']['invocation_id'], p['request'], budget, p, SYSTEM, schema):
         raise InvalidUpdate('Conversation memory differs from admitted receipts')
-    if p.get('requested_memory_pages'):
-        selected = s.load_result(sid, p['memory_selection'])
-        source = s.db.execute('SELECT d.payload_json FROM invocations i JOIN deliveries d ON d.id=i.delivery_id WHERE i.id=? AND i.session=?', (p['memory_selection'], sid)).fetchone()
-        previous = json.loads(source[0])
-        if selected.get('page_requests') != p['requested_memory_pages'] or previous['request'] != p['request'] or previous['context_binding'] != p['context_binding'] or (previous.get('memory') or {}).get('invocation_id') != (p.get('memory') or {}).get('invocation_id'):
-            raise InvalidUpdate('Memory page selection differs from admitted selection')
+    routing.check(s,sid,p)
     expected_reference = visuals.reference(s, sid, (p['memory'] or {}).get('invocation_id'), p['request'])
     if p.get('diagram_reference') != expected_reference:
         raise InvalidUpdate('Diagram reference differs from user-source receipts')
-    route = p['route']
-    expected = KarmaAdapter().route(p['request'], route['models'], route['mode'],
-                                   {'source_files': 0, 'selected_files': 0, 'unresolved_calls': 0})
-    if route != expected:
-        raise InvalidUpdate('Conversation routing policy mismatch')
 
 
 def validate(s, sid, p, proposal):
@@ -211,28 +204,50 @@ def read(s, iid):
             'result': {'token_usage': usage, 'invocation_id': iid, 'admission': {'admitted': True}, 'accepted_output': proposal}}
 
 
-def answer(s, meta, root, request, provider=None):
-    prompt = request.get('prompt')
-    if not isinstance(prompt, str) or not 1 <= len(prompt) <= 1800 or not prompt.strip():
+def session_for(s,request):
+    prompt=request.get('prompt')
+    if not isinstance(prompt,str) or not 1<=len(prompt)<=1800 or not prompt.strip():
         raise InvalidUpdate('Conversation prompt must be 1..1800 characters')
-    route = KarmaAdapter().route(prompt, request.get('models'), request.get('tier', 'auto'),
-                                {'source_files': 0, 'selected_files': 0, 'unresolved_calls': 0})
-    parent = request.get('parent')
+    parent=request.get('parent')
+    sid=request.get('conversation_session')
     if parent:
-        if not isinstance(parent, str) or not re.fullmatch('[a-f0-9]{32}', parent):
+        if not isinstance(parent,str) or not re.fullmatch('[a-f0-9]{32}',parent):
             raise InvalidUpdate('Invalid conversation receipt reference')
-        row = s.db.execute('SELECT session FROM invocations WHERE id=?', (parent,)).fetchone()
-        if not row:
-            raise PageFault('Conversation memory unavailable. Start a new chat; workspace task is retained.')
-        sid = row[0]
-        cm.history(s, sid, parent)
-    else:
-        sid = open_session(s, prompt)
+        row=s.db.execute('SELECT session FROM invocations WHERE id=?',(parent,)).fetchone()
+        if not row:raise PageFault('Conversation memory unavailable. Start a new chat; workspace task is retained.')
+        if sid and sid!=row[0]:raise InvalidUpdate('Conversation session changed during routing')
+        sid=row[0];cm.history(s,sid,parent)
+    if sid:contract(s,sid)
+    return sid or open_session(s,prompt)
 
+
+def answer(s,meta,root,request,provider=None):
+    request=dict(request)
+    request['conversation_session']=session_for(s,request)
+    calls=[]
+    while True:
+        result=_answer_step(s,meta,root,request,provider)
+        calls.extend(result['result'].get('token_usage',{}).get('calls',[]))
+        from token_usage import summarize
+        result['result']['token_usage']={'calls':calls,'totals':summarize(calls),'total_calls':len(calls),'limit':None}
+        next_step=result.get('routing_followup')
+        if request.get('one_step') or not next_step:
+            return result
+        if next_step['kind']=='blocked':
+            result['result']['admission']={'admitted':False,'errors':[next_step['reason']]}
+            result['result']['accepted_output']=None
+            return result
+        request['routing_continuation']=result['result']['invocation_id']
+
+
+def _answer_step(s,meta,root,request,provider=None):
+    prompt=request['prompt'];parent=request.get('parent');sid=request['conversation_session']
+    route,routing_state=routing.prepare(s,sid,request)
     p = {'_request_nonce': uuid.uuid4().hex, 'contract': contract(s, sid),
          'workspace_context': workspace_context(s, meta), 'request': prompt,
          'routing_capabilities': json.loads(canonical(ROUTING_CAPABILITIES)),
-         'pages': [], 'memory': None, 'route': route}
+         'pages': [], 'memory': None, 'route': route,'routing_state':routing_state,
+         'requested_memory_pages':routing_state['requested_pages']}
     p['diagram_reference'] = visuals.reference(s, sid, parent, prompt)
     p['context_binding'] = binding(p)
     real = provider is None
@@ -242,6 +257,7 @@ def answer(s, meta, root, request, provider=None):
         from model_context import allocation
         provider.budget, capacity = allocation(getattr(provider, 'context_metadata', {}))
         provider.keep_alive = 0
+    if isinstance(provider,dict):provider=provider[route['model']]
     if provider.model != route['model']:
         raise InvalidUpdate('Conversation provider differs from route')
     budget = provider.budget
@@ -263,23 +279,9 @@ def answer(s, meta, root, request, provider=None):
         delivery = s.prepare_delivery(sid, p, provider.budget.check(SYSTEM, p, fmt))
         out = InvocationGateway(s.path, run, provider).invoke('conversation', uuid.uuid4().hex, SYSTEM, p, fmt, delivery)
         if out['admission']['admitted']:
-            requested = out['accepted_output'].get('page_requests', [])
-            if requested:
-                if attempt == 2:
-                    s.quarantine_invocation(sid, out['invocation_id'], 'Memory paging allocation exhausted before final answer')
-                    s.event(run, 'FIN', {'reason': 'memory_paging_allocation_exhausted'})
-                    out['admission'] = {'admitted': False, 'errors': ['Memory paging allocation exhausted. No draft answer was published.']}
-                    out['accepted_output'] = None
-                    break
-                s.event(run, 'BRIDGE', {'reason': 'conversation_page_in', 'pages': requested})
-                p['memory_selection'] = out['invocation_id']
-                p['requested_memory_pages'] = requested
-                p.pop('repair', None)
-                p['memory'] = cm.working_set(s, sid, parent, prompt, budget, p, SYSTEM, schema)
-                fmt = schema(p)
-                provider.budget.check(SYSTEM, dict(p, repair={'errors': ['x' * 140] * 2}), fmt)
-                continue
-            s.event(run, 'ALLOW', {'reason': 'conversation_admitted', 'invocation_id': out['invocation_id']})
+            next_step=routing.followup(out['accepted_output'],p)
+            if next_step:s.event(run,'BRIDGE',dict(next_step,invocation_id=out['invocation_id']))
+            s.event(run,'ALLOW',{'reason':'routing_checkpoint' if next_step else 'conversation_admitted','invocation_id':out['invocation_id']})
             break
         s.event(run, 'NACK', {'errors': out['admission']['errors']})
         if attempt == 2 or out.get('blocked'):
@@ -288,9 +290,10 @@ def answer(s, meta, root, request, provider=None):
         request_check(s, sid, p)
         s.event(run, 'BRIDGE', {'reason': 'bounded_conversation_repair'})
         p['repair'] = {'errors': [e[:140] for e in out['admission']['errors'][:2]]}
+    next_step=routing.followup(out['accepted_output'],p) if out['admission']['admitted'] else None
     out.pop('record', None)
     out.pop('model_proposal', None)
     from review_budget import decision
-    return {'conversation': True, 'session': sid, 'result': out, 'route': route,
+    return {'conversation': True, 'session': sid, 'result': out, 'route': route,'routing_followup':next_step,
             'memory_used': bool(parent), 'memory_allocation': p['memory_allocation'], 'model_capacity': p['model_capacity'],
             'memory_status': {k: p['memory'][k] for k in ('stored_turns', 'omitted_turns', 'legacy_data_restored')} if p['memory'] else {'stored_turns': 0, 'omitted_turns': 0}, 'budget': decision(s, sid), 'workspace_tools_used': False}

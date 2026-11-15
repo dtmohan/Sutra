@@ -88,3 +88,11 @@
   from this diagnostic log; existing call traces have their own retention policy.
 
 - A long-lived workspace task shares its conservative allocation across requests, model switches and retries. Model context capacity and remaining task budget are different limits. A saved context pause does not replenish either limit; optional repair shares yield first, but a report can still require a larger explicitly authorized task allocation.
+
+## Small-model routing
+
+- Escalation is a model proposal, not a verified measurement of reasoning quality. A small model may fail to request help or request it unnecessarily. Contract, budget, context and resource checks remain deterministic; they do not prove semantic correctness.
+- Auto starts the conversation/routing stage small. Workspace workers still use a source-informed breadth heuristic after fresh scoped retrieval; this release does not add a small-first retry cascade to every worker or reviewer role.
+- Repeated configured model names are skipped during escalation. Different aliases with the same weights are not deduplicated here; reviewer identity checks remain separate.
+- Requested pages and pinned context must fit the chosen model. Otherwise the request pauses for a larger context/model choice; no mandatory context is discarded. Missing facts require user clarification.
+- Routing drafts consume allocation and remain receipt dependencies, but are not published or saved as ordinary conversation turns. Resume never refunds completed calls.

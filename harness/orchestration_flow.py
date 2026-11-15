@@ -18,6 +18,12 @@ def info(s,fid):
 def move(s,fid,target,kind,**data):
     with s.db:return m.transition(s,fid,target,kind,data)
 
+def pending_flows(s,workspace,exclude=None):
+    return [nid for nid, in s.db.execute(
+        "SELECT id FROM orchestration_nodes WHERE json_extract(record_json,'$.kind')='flow' ORDER BY rowid DESC")
+        if nid!=exclude and m.node(s,nid).get('workspace')==str(workspace)
+        and m.state(s,nid) not in m.TERMINAL]
+
 def response(s,fid,**extra):
     n,data=info(s,fid);history=m.events(s,fid)
     return dict(flow_id=fid,state=m.state(s,fid),cursor=history[-1]['receipt'] if history else None,
@@ -104,10 +110,12 @@ def permission(s,sid,requested):
 def handle(s,meta,workspace,root,req,providers=None):
     """Translate measured resource stops at the shared orchestration boundary."""
     from monitoring import ResourceWait
+    req=dict(req)
+    req.pop('_created_flow_id',None)
     try:
         return _handle(s,meta,workspace,root,req,providers)
     except ResourceWait as exc:
-        fid=req.get('flow_id')
+        fid=req.get('_created_flow_id') or req.get('flow_id')
         if not fid:
             # A start can stop during classification after its durable creation.
             # The private bridge serializes requests; match this workspace/request.
@@ -145,27 +153,32 @@ def _handle(s,meta,workspace,root,req,providers=None):
     event=req.get('event','step');models=req.get('models');tier=req.get('tier','auto')
     def provider(stage):return providers(stage) if providers else None
     if event in ('pending','start','start_existing','start_review'):
-        pending=[]
-        for nid, in s.db.execute("SELECT id FROM orchestration_nodes WHERE json_extract(record_json,'$.kind')='flow' ORDER BY rowid DESC"):
-            if m.node(s,nid).get('workspace')==str(workspace) and m.state(s,nid) not in m.TERMINAL:pending.append(nid)
+        pending=pending_flows(s,workspace)
         if event=='pending':return response(s,pending[0]) if pending else {'state':'DONE','flow_id':None}
-        if pending:raise InvalidUpdate('A saved workflow exists; explicitly resume or discard it before starting another request')
+        # A saved workspace task must not intercept unrelated conversation.
+        # Classify a new request through the gateway before asking to replace work.
+        if pending and event!='start':raise InvalidUpdate('A saved workflow exists; explicitly resume or discard it before starting another request')
     if event in ('start','start_existing','start_review'):
         prompt=req.get('prompt','')
         if not isinstance(prompt,str) or not prompt.strip():raise InvalidUpdate('Empty workflow request')
+        if event=='start_existing':
+            from conversation import workspace_handoff,read
+            workspace_handoff(s,meta.get('active'),req.get('conversation_id'),prompt)
+            proposal=read(s,req['conversation_id'])['result']['accepted_output']
+            if proposal['intent']!='workspace':raise InvalidUpdate('Continuation requires an admitted workspace intent')
         with s.db:
             f=m.create(s,'flow',objective=prompt,workspace=str(workspace),prompt=prompt,conversation_parent=req.get('parent'))
             m.transition(s,f['id'],'CLASSIFYING','REQUEST')
         fid=f['id']
+        req['_created_flow_id']=fid
         if event=='start_review':
             sid=meta.get('active')
             if not req.get('armed') or not sid or req.get('binding')!=identity(s,sid) or not s.snapshot(sid)['constraints'].get('auto_review'):raise InvalidUpdate('Explicit review requires a user-created read-only task')
             move(s,fid,'NEED_ARM','USER_REVIEW',conversation_id=req.get('conversation_id'),permission={'operation':'read','paths':[]})
             return response(s,fid)
         if event=='start_existing':
-            from conversation import workspace_handoff
-            workspace_handoff(s,meta.get('active'),req.get('conversation_id'),prompt)
-            move(s,fid,'NEED_ARM','ACTION_CONTINUATION',conversation_id=req['conversation_id'],permission={'operation':'read','paths':[]})
+            move(s,fid,'NEED_ARM','ACTION_CONTINUATION',conversation_id=req['conversation_id'],
+                 permission=proposal.get('workspace_request') or {'operation':'read','paths':[]})
             return response(s,fid)
     else:
         fid=req.get('flow_id');f,d=info(s,fid)
@@ -204,10 +217,10 @@ def _handle(s,meta,workspace,root,req,providers=None):
     if incompatibility:return response(s,fid)
     if phase=='PAUSED':
         if event!='resume':raise InvalidUpdate('Workflow paused. Choose Resume or Discard; allocations remain unchanged.')
-        stopped=[e for e in m.events(s,fid) if e['kind'] in ('MAPPING_STOPPED','CONTEXT_STOPPED','RESOURCE_STOPPED')]
+        stopped=[e for e in m.events(s,fid) if e['kind'] in ('MAPPING_STOPPED','CONTEXT_STOPPED','RESOURCE_STOPPED','ROUTING_STOPPED')]
         if not stopped:raise InvalidUpdate('Paused workflow requires inspection before recovery')
         last=stopped[-1]
-        target=(last['data']['workflow_stop']['resume_phase'] if last['kind']=='RESOURCE_STOPPED'
+        target=(last['data']['workflow_stop']['resume_phase'] if last['kind'] in ('RESOURCE_STOPPED','ROUTING_STOPPED')
                 else last['from'] if last['kind']=='CONTEXT_STOPPED' else 'MAPPING')
         if target!='CLASSIFYING':
             if not req.get('armed'):raise InvalidUpdate('Workspace workflow requires a user-armed harness')
@@ -226,11 +239,38 @@ def _handle(s,meta,workspace,root,req,providers=None):
         move(s,fid,target,'RESUME_REQUESTED',workflow_stop=None,reason='User resumed with existing contract and allocation')
         return response(s,fid)
     if phase=='CLASSIFYING':
-        chat=converse(s,meta,root,{'prompt':prompt,'parent':f.get('conversation_parent'),'models':models,'tier':tier},provider=provider('conversation'))
+        from conversation import session_for
+        from conversation_routing import RoutingBlocked
+        from review_budget import BudgetStop
+        request={'prompt':prompt,'parent':f.get('conversation_parent'),'models':models,'tier':tier,
+                 'conversation_session':d.get('conversation_session'),'routing_continuation':d.get('routing_continuation'),'one_step':True}
+        request['conversation_session']=session_for(s,request)
+        if not d.get('conversation_session'):
+            move(s,fid,'CLASSIFYING','CONVERSATION_BOUND',conversation_session=request['conversation_session'])
+        try:
+            chat=converse(s,meta,root,request,provider=provider('conversation'))
+        except (ContextBudgetExceeded,BudgetStop,m.OrchestrationStop,RoutingBlocked) as exc:
+            stop={'status':'routing_budget','resume_phase':'CLASSIFYING','error':str(exc),
+                  'budget':getattr(exc,'frame',None),'automatic_retry':False}
+            move(s,fid,'PAUSED','ROUTING_STOPPED',workflow_stop=stop)
+            return response(s,fid)
         r=chat['result']
         if not r['admission']['admitted']:
             move(s,fid,'DONE','REJECTED',conversation_id=r['invocation_id']);return response(s,fid,conversation=chat)
+        next_step=chat.get('routing_followup')
+        if next_step:
+            move(s,fid,'CLASSIFYING','ROUTING_CHECKPOINT',routing_continuation=r['invocation_id'],next_routing=next_step)
+            if next_step['kind']=='blocked':
+                stop={'status':'routing_choice','resume_phase':'CLASSIFYING','error':next_step['reason'],'automatic_retry':False}
+                move(s,fid,'PAUSED','ROUTING_STOPPED',workflow_stop=stop)
+            return response(s,fid,routing_step=chat,progress=next_step['reason'])
         p=r['accepted_output'];target='NEED_ARM' if p['intent']=='workspace' else 'DONE'
+        other=pending_flows(s,workspace,exclude=fid)
+        if target=='NEED_ARM' and other:
+            # Only the host can resolve this conflict. No source reads or grants
+            # are made, and the existing task/allocations remain untouched.
+            move(s,fid,'DONE','WORKSPACE_DEFERRED',conversation_id=r['invocation_id'],saved_flow_id=other[0])
+            return response(s,fid,conversation=chat,deferred_flow_id=other[0])
         move(s,fid,target,'CLASSIFIED',conversation_id=r['invocation_id'],permission=p.get('workspace_request') or {'operation':'read','paths':[]})
         return response(s,fid,conversation=chat)
     if phase in m.TERMINAL:return response(s,fid)

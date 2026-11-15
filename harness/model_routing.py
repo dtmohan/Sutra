@@ -13,8 +13,11 @@ def choose(prompt,models,mode,signals):
         if type(signals.get(key)) is not int or signals[key]<0:raise InvalidUpdate('Invalid routing measurement '+key)
     difficult=bool(re.search(r'\b(architecture|security|audit|concurrency|race|refactor|whole|entire)\b',prompt,re.I))
     broad=bool(re.search(r'\b(codebase|repository|dependencies|integration|compare|across)\b',prompt,re.I))
-    tier='high' if difficult else 'mid' if broad or len(prompt)>500 or signals['selected_files']>3 else 'low'
-    reason='explicit user override' if mode!='auto' else 'broad or higher-risk request' if difficult else 'cross-file or detailed request' if tier=='mid' else 'focused request'
+    # With no source evidence Auto always starts small. Workspace work may use
+    # the existing breadth heuristic only after the host has paged fresh source.
+    evidence=signals['source_files']>0 and signals['selected_files']>0
+    tier=('high' if difficult else 'mid' if broad or len(prompt)>500 or signals['selected_files']>3 else 'low') if evidence else 'low'
+    reason='explicit user override' if mode!='auto' else 'small-model first' if not evidence else 'fresh-source breadth assessment' if tier!='low' else 'focused request'
     if mode!='auto':tier=mode
-    return {'policy':'local-tier-routing-v1','tier':tier,'model':models[tier],'mode':mode,'models':dict(models),
-            'signals':dict(signals),'reason':reason,'semantic_complexity_verified':False,'automatic_escalation':False}
+    return {'policy':'local-tier-routing-v2','tier':tier,'model':models[tier],'mode':mode,'models':dict(models),
+            'signals':dict(signals),'reason':reason,'semantic_complexity_verified':False,'automatic_escalation':mode=='auto'}

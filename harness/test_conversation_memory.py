@@ -67,8 +67,10 @@ class MemoryTests(unittest.TestCase):
 
     def test_model_can_page_in_from_toc_before_publication(self):
         first, parent = self.fill()
-        target = first['result']['invocation_id']
+        target = None
         def page(r, p):
+            nonlocal target
+            if not p.get('requested_memory_pages'):target=p['memory']['toc'][-1]['id']
             r['page_requests'] = [] if p.get('requested_memory_pages') else [target]
         m = Fake(fault=page)
         out = self.ask('Tell me about that earlier topic.', parent, m)
@@ -77,7 +79,7 @@ class MemoryTests(unittest.TestCase):
         self.assertIn(target, [p['id'] for p in m.payloads[0]['memory']['toc']])
         self.assertIn(target, [p['id'] for p in m.payloads[1]['memory']['retrieved_turns']])
         self.assertTrue(self.s.verify_invocations(first['session']))
-        selection = m.payloads[1]['memory_selection']
+        selection = m.payloads[1]['routing_state']['previous']
         self.s.quarantine_invocation(first['session'], selection, 'Invalid selection')
         with self.assertRaises(PageFault): self.s.load_result(first['session'], out['result']['invocation_id'])
 

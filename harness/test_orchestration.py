@@ -64,6 +64,36 @@ class OrchestrationTests(unittest.TestCase):
         self.assertTrue(out['data']['result']['admission']['admitted'])
         self.assertEqual(contract,self.s.pinned(sid))
 
+    def test_auto_small_first_then_fresh_source_worker_switch_keeps_contract(self):
+        self.tier='auto';self.prompt='Review the architecture. Remember Cedar, CED724. Keep this read only; no network or new dependencies.'
+        def provider(stage):
+            if stage=='conversation':
+                p=Conversation('small',lambda r,p:r.update(intent='workspace',escalation_reason='reasoning_capacity'))
+            else:
+                p=Child('large') if stage=='subagent' else Review('large')
+                p.budget=__import__('paging').Budget(32768,4096,256)
+            self.models.append((stage,p));return p
+        self.provider=provider
+        first=self.step(armed=False)
+        self.assertEqual(first['conversation']['route']['tier'],'low')
+        self.assertEqual(len(self.models),1);self.assertNotIn('active',self.meta)
+        with self.assertRaisesRegex(InvalidUpdate,'user-armed'):self.step(first,armed=False)
+        children=self.until('CHILDREN',first);sid=self.meta['active'];contract=self.s.pinned(sid)
+        used=review_budget.usage(self.s,sid)['used']
+        done=self.until('DONE',children)
+        self.assertTrue(done['data']['result']['admission']['admitted'])
+        self.assertEqual(done['data']['route']['tier'],'high')
+        self.assertEqual(self.s.pinned(sid),contract)
+        self.assertGreater(review_budget.usage(self.s,sid)['used']['calls'],used['calls'])
+        for stage,p in self.models:
+            if stage not in ('subagent','synthesis'):continue
+            packet=p.payloads[0]
+            self.assertTrue(packet['excerpts']);self.assertTrue(packet.get('snapshot_receipts'))
+            self.assertEqual(packet['contract'],contract)
+            self.assertFalse(packet['contract']['constraints']['network_allowed'])
+            self.assertFalse(packet['contract']['constraints']['edits_allowed'])
+            self.assertIn('CED724',canonical(packet['memory']))
+
     def test_fresh_models_keep_context_permissions_budget_and_join(self):
         out=self.children();self.assertGreaterEqual(len(out['children']),2)
         contract=self.s.pinned(self.meta['active']);sid=self.meta['active']
@@ -398,10 +428,62 @@ class OrchestrationTests(unittest.TestCase):
         out=self.children();sid=self.meta['active'];used=review_budget.usage(self.s,sid)['used']
         found=flow.handle(self.s,self.meta,self.ws,self.root,{'event':'pending'})
         self.assertEqual(found['flow_id'],out['flow_id'])
-        with self.assertRaisesRegex(InvalidUpdate,'saved workflow'):self.step()
+        deferred=self.step()
+        self.assertEqual(deferred['state'],'DONE')
+        self.assertEqual(deferred['deferred_flow_id'],out['flow_id'])
+        self.assertEqual(used,review_budget.usage(self.s,sid)['used'])
+        with self.assertRaisesRegex(InvalidUpdate,'saved workflow'):
+            self.step(event='start_existing',conversation_id=deferred['conversation_id'])
         inspected=self.step(out,event='inspect');self.assertEqual(inspected['prompt'],self.prompt)
         self.step(out,event='cancel');self.assertEqual(used,review_budget.usage(self.s,sid)['used'])
         self.assertIsNone(flow.handle(self.s,self.meta,self.ws,self.root,{'event':'pending'})['flow_id'])
+
+    def test_greeting_beside_saved_review_preserves_context_budget_and_permissions(self):
+        out=self.children();out=self.step(out);sid=self.meta['active']
+        before=flow.response(self.s,out['flow_id']);contract=self.s.pinned(sid)
+        used=review_budget.usage(self.s,sid)['used'];original=self.provider
+        greeting=Conversation(MODELS['low'])
+        self.provider=lambda stage:greeting if stage=='conversation' else original(stage)
+        with patch('static_analysis.snapshot',side_effect=AssertionError('Greeting read source')):
+            chat=self.step(prompt='hello there',armed=False)
+        self.assertEqual(chat['state'],'DONE');self.assertNotIn('deferred_flow_id',chat)
+        self.assertTrue(chat['conversation']['result']['admission']['admitted'])
+        self.assertEqual(len(greeting.payloads),1)
+        self.assertEqual(flow.response(self.s,out['flow_id']),before)
+        self.assertEqual(self.s.pinned(sid),contract)
+        self.assertEqual(review_budget.usage(self.s,sid)['used'],used)
+        self.assertEqual(flow.handle(self.s,self.meta,self.ws,self.root,{'event':'pending'})['flow_id'],out['flow_id'])
+        self.provider=original;self.s.close();self.s=InvocationLedger(self.root/'state.sqlite');self.tier='high'
+        done=self.until('DONE',out)
+        self.assertTrue(done['data']['result']['admission']['admitted'])
+        self.assertEqual(self.s.pinned(sid),contract)
+        self.assertGreater(review_budget.usage(self.s,sid)['used']['calls'],used['calls'])
+        self.assertIn('CED724',canonical(self.models[-1][1].payloads[0]['memory']))
+
+    def test_new_classification_resource_stop_does_not_pause_saved_same_prompt(self):
+        from monitoring import ResourceWait
+        out=self.children();before=flow.response(self.s,out['flow_id'])
+        with patch('conversation.answer',side_effect=ResourceWait({'admitted':False,'reason':'memory pressure'})):
+            paused=self.step(armed=False)
+        self.assertNotEqual(paused['flow_id'],out['flow_id'])
+        self.assertEqual(paused['state'],'PAUSED')
+        self.assertEqual(paused['stop']['resume_phase'],'CLASSIFYING')
+        self.assertEqual(flow.response(self.s,out['flow_id']),before)
+
+    def test_replacing_review_keeps_edit_intent_and_requires_permission(self):
+        out=self.children();sid=self.meta['active'];self.operation='edit'
+        edit_prompt='Remember project Cedar, ticket CED724. Edit part0.py'
+        deferred=self.step(prompt=edit_prompt,armed=False)
+        self.assertEqual(deferred['deferred_flow_id'],out['flow_id'])
+        self.assertFalse(self.s.snapshot(sid)['constraints']['edits_allowed'])
+        self.step(out,event='cancel')
+        start=self.step(event='start_existing',prompt=edit_prompt,conversation_id=deferred['conversation_id'])
+        self.assertEqual(start['state'],'NEED_ARM')
+        with self.assertRaisesRegex(InvalidUpdate,'user-armed'):self.step(start,armed=False)
+        needed=self.step(start)
+        self.assertEqual(needed['state'],'NEED_PERMISSION')
+        self.assertEqual(needed['permission']['operation'],'edit')
+        self.assertFalse(self.s.snapshot(sid)['constraints']['edits_allowed'])
 
     def test_settlement_is_idempotent_and_illegal_transition_is_rejected(self):
         out=self.children();cid=out['children'][0]['id'];self.step(out);used=m.spent(self.s,cid)
@@ -466,6 +548,15 @@ class OrchestrationTests(unittest.TestCase):
             self.assertEqual(blocked['recovery']['kind'],'policy_changed')
             self.assertTrue(blocked['recovery']['restart_allowed'])
             self.assertEqual(len(self.models),calls)
+            before=flow.response(self.s,old_flow)
+            greeting=flow.handle(self.s,self.meta,self.ws,self.root,
+                {'event':'start','prompt':'hello there','models':MODELS,'tier':'low','armed':False},
+                lambda stage:Conversation())
+            self.assertEqual(greeting['state'],'DONE')
+            self.assertTrue(greeting['conversation']['result']['admission']['admitted'])
+            self.assertEqual(flow.response(self.s,old_flow),before)
+            self.assertEqual(review_budget.usage(self.s,sid)['used'],used)
+            self.assertEqual(self.s.pinned(sid),contract)
             with self.assertRaisesRegex(InvalidUpdate,'user-armed'):self.step(blocked,event='restart_review',armed=False)
             restarted=self.step(blocked,event='restart_review')
             self.assertNotEqual(restarted['flow_id'],old_flow)

@@ -241,6 +241,8 @@ class InvocationLedger(GovernedContext):
             history(self,session,payload['memory']['invocation_id'])
         if env['role']=='conversation' and payload.get('memory_selection'):
             self.load_result(session,payload['memory_selection'])
+        if env['role']=='conversation' and payload.get('routing_state',{}).get('previous'):
+            self.load_result(session,payload['routing_state']['previous'])
         if env['role']=='chat_reviewer':
             from chat_runtime import request_check
             request_check(self,session,payload)

@@ -16,6 +16,8 @@ LEGACY_POLICIES = {'2319f693bfd23c67bda96909572c6a5646d1a299497aa3ab9c23fc990721
                    'd71f0acf70b42a1d0cb1332c1413bfb85b90156d5820d590cdb19b41ea79ce04'}
 # Recomputed from the released VSIX policy manifests; never from an untrusted receipt.
 RELEASE_POLICIES = {
+    '0.23.1': '8c2e917101313d03f24e9ae6cd31c08ce607262e22e1f39e7ee1b88cf4f0474e',
+    '0.23.0': '1d138f3f860284569ef3b84a9c6bb807343c06bad79c763b0cb3c47a8d3fbb22',
     '0.22.0': 'f01812ee6cb7d05d58a69acfb644e549f000db4608c9f85c7ac7bb5650eea9aa',
     '0.21.7': 'b6fe292c7ecbab77ed8a77b75006a64edf787c634cf36bde38f0e7839ca64d12',
     '0.21.6': '1579fce7cacc7b2f42c24502209950b326660425a1c996c56be207ae24f75519',
@@ -36,6 +38,23 @@ LEGACY_POLICIES.update(RELEASE_POLICIES.values())
 PIN = re.compile(r'\b(remember|must|never|always|constraint|prefer|do not|don.t|keep|only|important)\b', re.I)
 WORDS = re.compile(r'[^\W_]{3,}', re.UNICODE)
 STOP = {'the', 'and', 'this', 'that', 'what', 'with', 'please', 'about', 'could', 'would', 'tell', 'have', 'were'}
+
+def check_routing_ancestry(s,sid,payload):
+    """Intermediate routing drafts never become memory, but remain dependencies."""
+    previous=payload.get('routing_state',{}).get('previous');seen=set()
+    while previous:
+        if previous in seen:raise PageFault('Routing receipt ancestry cycle')
+        seen.add(previous)
+        row=s.db.execute('SELECT i.record_json,r.record_json,d.payload_json,d.payload_hash FROM invocations i JOIN invocation_receipts r ON r.invocation_id=i.id JOIN deliveries d ON d.id=i.delivery_id WHERE i.id=? AND i.session=?',(previous,sid)).fetchone()
+        if not row or s.db.execute('SELECT 1 FROM invocation_quarantine WHERE invocation_id=?',(previous,)).fetchone():
+            raise PageFault('Routing ancestor is unavailable or quarantined')
+        env,receipt,prior=json.loads(row[0]),json.loads(row[1]),json.loads(row[2])
+        if (env['role']!='conversation' or receipt['status']!='accepted' or receipt['logic_hash'] not in LEGACY_POLICIES|{s.logic_hash}
+                or sha(row[2])!=row[3] or row[3]!=receipt['payload_hash'] or prior.get('pages')
+                or any(prior[k]!=payload[k] for k in ('contract','workspace_context','request','context_binding'))
+                or prior['routing_state']['parent']!=payload['routing_state']['parent']):
+            raise PageFault('Routing ancestor differs from retained context or policy')
+        previous=prior['routing_state'].get('previous')
 
 
 def history(s, sid, parent):
@@ -68,6 +87,7 @@ def history(s, sid, parent):
         if not delivery or sha(delivery[0]) != delivery[1] or delivery[1] != r['payload_hash']:
             raise PageFault('Conversation delivery is corrupt')
         p = json.loads(delivery[0])
+        check_routing_ancestry(s,sid,p)
         if p.get('pages') or p['contract']['contract_hash'] != origin:
             raise PageFault('Historical conversation is not tool-free')
         proposal = r['proposal']

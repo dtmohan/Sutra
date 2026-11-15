@@ -1,4 +1,24 @@
-Sutra 0.23.0 — calibrated MLX memory admission
+Sutra 0.24.0 — small-model-first Auto routing
+
+New Auto requests start with the configured low tier, including broad or complex questions. The same call can answer a greeting directly. Configure Low as qwen3:4b (or another installed small chat model); existing tier selections are preserved.
+
+When the model requests older conversation context, Sutra loads receipt-backed Smriti pages and calls the same tier again before considering escalation. Requested pages, recent turns and pinned user statements stay mandatory through later model switches. Missing information that cannot be paged should produce a question for the user, not a larger-model guess. Paging must make progress and every call consumes the original session's remaining allocation.
+
+The model may request stronger reasoning. In Auto, the host selects the next higher configured model name not already attempted and checks context capacity, memory, permissions and remaining budget through the invocation gateway and unchanged STP kernel. The model's capability assessment is unverified. Explicit Low/Mid/High choices never silently escalate. With no eligible next model, insufficient context or exhausted allocation, the request pauses without publishing an intermediate draft. Resume retains accepted routing steps and spent budget; it does not replay the accepted small-model call. Names that are identical are skipped; different aliases can still use the same weights.
+
+Workspace requests first use the small model to request a governed handoff. Fresh scoped source mapping and paging then precede the existing worker-tier breadth heuristic. This is not a small-worker-then-large-worker loop for every tool role. Architecture review retains its separately selected reviewer. Source freshness and workspace/edit/test permissions remain enforced independently of model selection.
+
+Chat shows context-loading and escalation progress. Token totals include every routing call and repair; only the final admitted answer becomes conversation memory. Routing receipts remain dependencies, so quarantining an intermediate step also invalidates its descendants. Resource or context pauses preserve the original request for recovery; mandatory context is never silently dropped to fit a smaller model.
+
+Conversation beside saved workspace work
+
+New messages are classified through the invocation gateway before any saved-review recovery. A greeting stays conversational, with no workspace arming, source mapping or review restart. A saved review keeps its context, constraints and consumed allocation. Send continue/resume explicitly to resume it; new workspace work asks before replacing it. Policy-upgrade restarts remain an explicit choice.
+
+Sutra Monitor separates System pressure from Last model allocation. Healthy system pressure does not prove that the selected model fits. The last allocation is labelled historical and is checked again on dispatch. All existing memory thresholds and the STP kernel remain unchanged.
+
+For light conversation, choose a small installed chat model for the low tier. Existing user model choices are preserved; configuring all tiers to the same large model still uses that model for greetings.
+
+Prior memory calibration features:
 
 MLX memory profiles now feed measured process-footprint estimates into Karma's resource adapter. Each profile is bound to the exact model manifest and metadata, Ollama executable/version, MLX libraries, macOS build, hardware and server epoch. Profiles are checked before optional Smriti paging and again before dispatch. A smaller context can lower the estimated memory requirement while the kernel and 4 GiB system reserve stay unchanged.
 

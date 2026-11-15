@@ -30,8 +30,11 @@ function setup(saved={}){
   const reply=extra=>structuredClone({...f,...extra});
   if(m.event==='pending')return structuredClone([...flows.values()].reverse().find(f=>!['DONE','CANCELLED'].includes(f.state))||{state:'DONE',flow_id:null});
   if(m.event==='start'||m.event==='start_existing'){
+   const pending=[...flows.values()].reverse().find(f=>!['DONE','CANCELLED'].includes(f.state));
+   if(pending&&m.event==='start_existing')throw Error('Saved workspace workflow exists');
    const c=m.event==='start'?await deps.backendRequest({...m,op:'conversation'},t):null;
-   f={flow_id:'flow-'+(++flowCount),cursor:'1',state:c?.result.accepted_output.intent==='conversation'?'DONE':'NEED_ARM',conversation_id:c?.result.invocation_id||m.conversation_id,children:[],prompt:m.prompt,permission:c?.result.accepted_output.workspace_request||{operation:'read',paths:[]}};flows.set(f.flow_id,f);
+   f={flow_id:'flow-'+(++flowCount),cursor:'1',state:c?.result.accepted_output.intent==='conversation'?'DONE':'NEED_ARM',conversation_id:c?.result.invocation_id||m.conversation_id,children:[],prompt:m.prompt,permission:c?.result.accepted_output.workspace_request||[...flows.values()].find(old=>old.conversation_id===m.conversation_id)?.permission||{operation:'read',paths:[]}};flows.set(f.flow_id,f);
+   if(pending&&f.state==='NEED_ARM'){f.state='DONE';return reply({conversation:c,deferred_flow_id:pending.flow_id});}
    return reply(c?{conversation:c}:{});
   }
   f=flows.get(m.flow_id);if(!f)throw Error('Unknown flow');
@@ -243,7 +246,7 @@ function setup(saved={}){
  assert(retained.some(p=>p.value?.includes('Saved request retained')));assert(!savedCase.flowRequests.some(r=>r.event==='cancel'));
  const oldConversationCount=savedCase.calls.filter(c=>c.op==='conversation').length;
  await savedCase.commands['karma.resumeWorkflow']();assert.deepEqual(savedCase.uiCalls.find(c=>c[0]==='workbench.action.chat.open'),['workbench.action.chat.open']);
- await savedCase.send('high',[{role:1,content:[new Text('Proceed with selected recovery')]}]);
+ await savedCase.send('high',[{role:1,content:[new Text('continue')]}]);
  assert.equal(savedCase.calls.filter(c=>c.op==='conversation').length,oldConversationCount);
  assert.equal(savedCase.calls.filter(c=>c.op==='native_work').at(-1).prompt,'Fix retry');
  checks.push('unrelated requests require an explicit recovery choice; Resume retains the original prompt and binding without replacing the chat draft');
@@ -251,7 +254,46 @@ function setup(saved={}){
  discarded.v.window.showWarningMessage=async()=> 'Discard and use new request';
  await discarded.send('high',[{role:1,content:[new Text('New request')]}]);assert(discarded.flowRequests.some(r=>r.event==='cancel'));
  assert.equal(discarded.calls.filter(c=>c.op==='conversation').at(-1).prompt,'New request');
- checks.push('explicit discard releases the saved workflow before classifying the new prompt');
+ checks.push('new workspace intent is classified first; explicit discard releases saved work before any new workspace operation');
+ for(const incompatible of [false,true]){
+  const greeting=setup();greeting.kind('report');await greeting.arm();
+  greeting.hold(()=>{throw Error('saved review fixture');});await assert.rejects(greeting.send(),/saved review/);greeting.hold(null);
+  const retained=structuredClone(greeting.controller.status().pending);
+  greeting.commands['karma.disarmNative']();
+  const original=greeting.deps.request;
+  greeting.deps.request=async(m,t)=>{const out=await original(m,t);return incompatible&&m.event==='inspect'?{...out,recovery:{kind:'policy_changed',restart_allowed:true,message:'Old policy'}}:out;};
+  greeting.v.window.showWarningMessage=async()=>{throw Error('Greeting must not show recovery or arming dialogs');};
+  await greeting.commands['karma.resumeWorkflow']();
+  const retainedCursor=greeting.controller.status().pending.cursor;
+  const before=greeting.calls.length,events=greeting.flowRequests.length;
+  const hello=await greeting.send('low',[{role:1,content:[new Text('hello there')]}],{modelOptions:{_conversationId:'new-chat'}});
+  assert(hello.some(p=>p.value?.includes('Conversational answer')));
+  assert.deepEqual(greeting.calls.slice(before).map(c=>c.op),['conversation']);
+  assert(!greeting.flowRequests.slice(events).some(c=>['step','cancel','restart_review','resume'].includes(c.event)));
+  assert.equal(greeting.controller.status().pending.flow_id,retained.flow_id);
+  assert.equal(greeting.controller.status().pending.cursor,retainedCursor);
+  assert(!greeting.controller.status().armed);
+ }
+ checks.push('greetings bypass saved review recovery, including older policies and Resume selection, with one conversation call and no arming or workspace effects');
+ const routingFlow=setup();let routingStep=0;const routingEvents=[];
+ const routingChat=(id,model,followup)=>({route:{model},routing_followup:followup,result:{invocation_id:id,admission:{admitted:true},accepted_output:{intent:'conversation',answer:followup?'UNPUBLISHED DRAFT':'Final routed answer'},token_usage:{calls:[{invocation_id:id,model,stage:'conversation',input_tokens:100,output_tokens:20}]}}});
+ routingFlow.deps.request=async m=>{
+  routingEvents.push(m);
+  if(m.event==='pending')return {state:'DONE',flow_id:null};
+  const base={flow_id:'routed-flow',cursor:String(++routingStep),children:[]};
+  if(routingStep===1)return {...base,state:'CLASSIFYING',routing_step:routingChat('a'.repeat(32),'small',{kind:'page_in'})};
+  if(routingStep===2)return {...base,state:'CLASSIFYING',routing_step:routingChat('b'.repeat(32),'small',{kind:'escalate',tier:'mid'})};
+  return {...base,state:'DONE',conversation:routingChat('c'.repeat(32),'medium',null)};
+ };
+ routingFlow.v.window.showWarningMessage=async()=>{throw Error('Conversation escalation must not arm workspace access');};
+ const routedParts=await routingFlow.send('auto',[{role:1,content:[new Text('Explain this')]}]);
+ const routedText=routedParts.map(p=>p.value||'').join('');
+ assert(routedText.includes('Final routed answer'));assert(!routedText.includes('UNPUBLISHED DRAFT'));
+ assert(routedText.includes('Loading the requested conversation context'));assert(routedText.includes('remaining budget'));
+ assert(routedText.includes('300 in')&&routedText.includes('60 out')&&routedText.includes('3 calls'));
+ assert.deepEqual(routingEvents.map(e=>e.event),['pending','start','step','step']);
+ assert(!routingFlow.controller.status().armed);assert(!routingFlow.controller.status().pending);
+ checks.push('Auto pages context before escalating, withholds intermediate drafts, charges all stages in the footer, and never arms conversation-only work');
  if(process.platform==='darwin'){
  const named=setup();named.kind('report');named.st.contract.contract.constraints.tests_allowed=false;let selected;
  const previous=named.deps.backendRequest;named.deps.backendRequest=async(m,t)=>{if(m.op==='native_permissions'){selected=m.test_paths;named.st.contract.contract.constraints.tests_allowed=true;return named.st;}const x=await previous(m,t);if(m.op==='conversation')x.result.accepted_output.workspace_request={operation:'test',paths:['checks/foo_test.py','tests/support.py']};return x;};
@@ -286,7 +328,7 @@ function setup(saved={}){
  const pressured=setup();pressured.kind('report');await pressured.arm();const pressuredRequest=pressured.deps.request;
  pressured.deps.request=async(m,t)=>{const r=await pressuredRequest(m,t);return m.op==='orchestrate'&&r.state==='CODING'?{...r,state:'PAUSED',stop:{status:'resource_wait',resume_phase:'CODING',error:'RESOURCE_WAIT: OS thermal pressure: serious; kernel: BRIDGE'}}:r;};
  const pressureReply=await pressured.send();
- assert(pressureReply.some(p=>p.value?.includes('Resources: ALLOW')));assert(pressureReply.some(p=>p.value?.includes('will not automatically retry')));
+ assert(pressureReply.some(p=>p.value?.includes('Last model allocation')));assert(pressureReply.some(p=>p.value?.includes('will not automatically retry')));
  assert.equal(pressured.controller.status().routing.stage,'paused');assert(!pressured.calls.some(c=>c.op==='native_work'));
  checks.push('thermal/resource waits produce normal chat pauses with recovery guidance and no workspace dispatch');
  const cooling=setup();let blockedResource=true,resourceFlow;
