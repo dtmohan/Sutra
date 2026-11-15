@@ -70,6 +70,27 @@ function setup(saved={}){
  const history=[{role:1,content:[new Text('OLD SECRET HISTORY')]},{role:2,content:[new Text('old answer')]},{role:1,content:[new Text('<userRequest>Fix retry</userRequest>')]}];
  const parts=await h.send('low',history),call=parts.find(p=>p instanceof Call);assert.equal(call.name,'karma_native_action');assert(!h.calls.some(c=>c.op==='native_execute'));
  assert(parts.some(p=>p instanceof Text&&p.value.includes('Sutra routing confirmed')&&p.value.includes('protocol invocation inv-')));assert(h.routeEvents.some(r=>r.stage==='received'&&r.active));assert.equal(h.routeEvents.at(-1).stage,'admitted');assert(!h.routeEvents.at(-1).active);assert(h.controller.status().label.includes('routing unverified'));checks.push('routing proof comes from actual provider entry and protocol invocation; idle and armed status never claims focused-chat coverage');
+ const formatted=setup();await formatted.arm();formatted.kind('report');let diagramsOpened=0;
+ const originalFormatted=formatted.deps.backendRequest;
+ formatted.deps.backendRequest=async(m,t)=>{const d=await originalFormatted(m,t);if(m.op==='native_work'){d.result.accepted_output.report={overview:'Overview'};d.report_markdown='Overview\n\n## Main components\n\n- **Entry** — Dispatches the request.';d.review_diagram={title:'Source relationships'};d.coverage={evidence:{fresh_snapshot_files:10,excerpt_files:['main.py'],child_reports:2}};}return d;};
+ formatted.deps.publishReview=()=>({reportUri:'karma-preview:/review/'+ 'a'.repeat(32)+'/Review.md'});
+ formatted.deps.presentReview=async()=>{diagramsOpened++;};
+ const formattedParts=await formatted.send(),body=formattedParts.map(p=>p.value||'').join('');
+ assert(body.includes('\n\n## Main components\n\n- **Entry**'));assert.equal(diagramsOpened,1);
+ assert(body.includes('Review details and source citations'));assert(body.includes('10 freshly mapped files'));
+ assert(!body.includes('protocol invocation'));assert(!body.includes('Remaining:'));
+ checks.push('structured workspace report retains Markdown spacing, opens verified diagram, and moves raw IDs into review details');
+ const diagramState={},diagramCommands={},diagramMessages=[];
+ const diagramVscode={Uri:{file:p=>({toString:()=>p})},ViewColumn:{Beside:2},window:{showErrorMessage:m=>{throw Error(m);},createWebviewPanel:()=>({webview:{cspSource:'fixture',asWebviewUri:u=>u,onDidReceiveMessage:f=>diagramMessages.push(f)}})},commands:{registerCommand:(n,f)=>{diagramCommands[n]=f;return disposable();}}};
+ const diagramContext={extensionPath:require('node:path').join(__dirname,'..'),subscriptions:[],workspaceState:{get:k=>diagramState[k],update:async(k,v)=>{diagramState[k]=structuredClone(v);}}};
+ const diagramInstall=require('../diagram_view').install;
+ const viewer=diagramInstall(diagramVscode,diagramContext,async()=>{throw Error('A source snapshot must not read a conversation receipt');});
+ await viewer.openReview({result:{invocation_id:'a'.repeat(32)},review_diagram:{title:'Source relationships',note:'Static references.',direction:'LR',nodes:[{id:'n1',label:'main.py',kind:'process'}],edges:[]}});
+ assert.equal(diagramState['karma.lastDiagram'].kind,'source');
+ diagramInstall(diagramVscode,diagramContext,async()=>{throw Error('Wrong receipt reader');});await diagramCommands['karma.openLastDiagram']();
+ assert.equal(diagramMessages.length,2);assert(diagramState['karma.lastDiagram'].diagram.note.startsWith('Saved review snapshot.'));
+ checks.push('source relationship diagram reopens after reload from a bounded labelled snapshot without misreading a conversation receipt');
+
  const work=h.calls.find(c=>c.op==='native_work');assert.equal(work.prompt,'Fix retry');assert(!JSON.stringify(work).includes('OLD SECRET'));assert(!('history' in work));assert(work.conversation_id);checks.push('fresh request contains no conversation replay; only Sutra tool emitted despite available shell tool');
  const prepared=h.tool.prepareInvocation({input:call.input});assert.equal(prepared.confirmationMessages.message.isTrusted,false);assert(prepared.confirmationMessages.message.value.includes('+ new'));
  assert.throws(()=>h.tool.prepareInvocation({input:{ticket:'fake'}}),/ticket/);

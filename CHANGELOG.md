@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.21.4
+
+- Render architecture reviews as structured components, request flow, grounded strengths/risks and next checks, with host-owned Markdown and safe webview elements.
+- Select relevant declaration bodies beyond import preambles, retaining fresh source snapshots, line ranges and unchanged budget/permission checks.
+- Preserve mandatory Smriti context while bounding optional older dialogue by model capacity; reserve one full repair within the existing task allocation.
+- Open a bounded diagram from literal local import candidates; keep full static maps and protocol IDs in review details.
+- Preserve data-only conversation compatibility with 0.21.3; keep the STP kernel unchanged.
+
 ## 0.21.3
 
 - Deliver fresh structural context across all mapped source partitions instead of selecting only one snapshot and a tiny unrelated excerpt.

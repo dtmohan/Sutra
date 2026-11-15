@@ -55,7 +55,7 @@ exports.run=async()=>{
   assert.equal(before.calibration.binding.profiles.length,2);assert(before.calibration.receipts_valid);
   assert.equal(before.calibration.last_evaluation.decision,'BRIDGE');assert.equal(before.calibration.last_evaluation.grants_tool_permission,false);
   const token=new vscode.CancellationTokenSource();const result=await vscode.lm.invokeTool('karma_auto_review',{input:{explain:false}},token.token);
-  const data=JSON.parse(result.content.map(c=>c.value||'').join(''));assert(data.auto.mapped_files>0);assert.deepEqual(data.state.contract,before.contract);
+  const data=JSON.parse(result.content.map(c=>c.value||'').join(''));report.mapping_outcome=data.auto;assert(data.auto.mapped_files>0);assert.deepEqual(data.state.contract,before.contract);
   assert(data.auto.budget.used.operations>before.auto.budget.used.operations);assert.equal(data.auto.budget.used.calls,0);
   await vscode.commands.executeCommand('karma.openAutomaticReport');report.checks.push('governed agent tool maps fresh source through packaged bridge and bundled TypeScript','task contract and allocation preserved','report opens in VS Code without a model call');
   const after=await api.getState();assert.equal(after.auto.pending_files,0);assert.deepEqual(after.calibration.binding,before.calibration.binding);

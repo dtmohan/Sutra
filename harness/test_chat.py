@@ -22,6 +22,11 @@ class Fake:
             'answer':'The entry function calls the leaf implementation. Static calls do not prove runtime execution.',
             'summary':'Inspected the entry and leaf source.','citations':[{'path':name,'quote':p['excerpts'][name].splitlines()[0]}],
             'remaining':['Review runtime behavior.'],'complete':False}
+        if 'report' in schema['properties']:
+            result['report']={'overview':result['answer'],
+                'components':[{'name':'Entry','responsibility':'Starts the request.','paths':[name]}],
+                'flow':[{'description':'Calls the leaf implementation to finish the request.','paths':[name]}],
+                'strengths':[], 'risks':[], 'next_steps':['Exercise error recovery with an injected failure.']}
         if self.fault:self.fault(result,p)
         return result,{'call_id':cid,'ok':True,'answer':result}
 
@@ -94,9 +99,10 @@ class ChatTests(unittest.TestCase):
         before=review_budget.usage(self.s,self.sid)
         with patch('review_budget.usage',return_value={'limits':{'tokens':90000},'used':{'tokens':30000}}):
             result=review_context.context_budget(provider,self.s,self.sid)
-        self.assertEqual(provider.budget.context_limit,20000)
-        self.assertEqual(provider.budget.response_reserve,4096)
-        self.assertEqual(result['repair_slots_reserved'],3)
+        self.assertEqual(provider.budget.context_limit,30000)
+        self.assertEqual(provider.budget.response_reserve,8192)
+        self.assertLessEqual(provider.budget.response_reserve,8192)
+        self.assertEqual(result['repair_slots_reserved'],1)
         self.assertEqual(review_budget.usage(self.s,self.sid),before)
 
     def test_structural_inventory_discloses_omissions_and_keeps_imports_unresolved(self):
@@ -113,6 +119,8 @@ class ChatTests(unittest.TestCase):
         ref=calibration.register(self.s,profile());binding=calibration.bind(self.s,self.sid,[ref],calibration.EMPTY_HASH)
         small=Fake();one=self.ask(provider=small);before=review_budget.usage(self.s,self.sid)
         large=Fake('fixture-large');two=self.ask('Review architecture.',provider=large)
+        self.assertIn('\n\n## Main components\n\n',two['report_markdown'])
+        self.assertIn('report',two['result']['accepted_output'])
         self.assertTrue(one['result']['admission']['admitted']);self.assertTrue(two['result']['admission']['admitted'])
         self.assertEqual(small.payloads[0]['contract'],large.payloads[0]['contract'])
         self.assertEqual(large.payloads[0]['contract']['calibration_binding'],binding)

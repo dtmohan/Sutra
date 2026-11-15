@@ -39,13 +39,14 @@ def context_budget(provider, s, sid):
     """Use installed capability within remaining task and ancestor allocations.
 
     This only proposes a packet size. The gateway still charges every attempt
-    and the unchanged kernel must admit it. Keep capacity for bounded repairs.
+    and the unchanged kernel must admit it. Reserve one full repair; any later
+    attempt still needs fresh admission within the remaining shared budget.
     """
     from model_context import allocation
     import review_budget
     import orchestration as machine
     budget, metadata = allocation(provider.context_metadata)
-    available = budget.context_limit * 3
+    available = budget.context_limit * 2
     task = review_budget.usage(s, sid)
     if task:
         available = min(available, max(0, task['limits']['tokens'] - task['used']['tokens']))
@@ -53,13 +54,15 @@ def context_budget(provider, s, sid):
     if owner:
         for frame in machine.gates(s, owner, {}):
             available = min(available, max(0, frame['limits']['tokens'] - frame['used']['tokens']))
-    limit = min(budget.context_limit, int(available // 3))
-    reserve = budget.response_reserve
+    limit = min(budget.context_limit, int(available // 2))
+    # A structured architecture report also carries the full constraint echo and
+    # source citations. Reserve output within the same per-call/task allocation.
+    reserve = max(budget.response_reserve, min(8192, limit // 3))
     if limit <= reserve + 1024:
         # Do not invent extra allocation. The normal budget checks stop dispatch.
         limit = max(1, limit)
     provider.budget = Budget(limit, reserve, budget.template_reserve)
-    return dict(metadata, review_context_allocation=limit, repair_slots_reserved=3)
+    return dict(metadata, review_context_allocation=limit, attempt_slots_reserved=2, repair_slots_reserved=1)
 
 
 def overview(data, limit, request='Architecture overview'):
@@ -113,6 +116,11 @@ def evidence(p, data):
     p['review_capabilities'] = dict(CAPABILITIES)
     p['workspace_map'] = overview(data, p['map_bytes'], query(p))
     p['sites'] = select_sites(data['graph'], p['excerpts'])
+    p['excerpt_locations'] = {}
+    for name, excerpt in p['excerpts'].items():
+        start = data['sources'][name].find(excerpt)
+        line = data['sources'][name][:start].count('\n') + 1
+        p['excerpt_locations'][name] = {'start_line': line, 'end_line': line + excerpt.count('\n'), 'partial_file': excerpt != data['sources'][name]}
     p['evidence_coverage'] = {
         'fresh_snapshot_files': p['workspace_map']['source_files'], 'excerpt_files': sorted(p['excerpts']),
         'excerpt_bytes': sum(len(t.encode()) for t in p['excerpts'].values()),
@@ -122,5 +130,5 @@ def evidence(p, data):
 
 def check(p, data):
     expected = dict(p); evidence(expected, data)
-    for key in ('review_capabilities', 'workspace_map', 'sites', 'evidence_coverage'):
+    for key in ('review_capabilities', 'workspace_map', 'sites', 'evidence_coverage', 'excerpt_locations'):
         if p.get(key) != expected[key]: raise InvalidUpdate('Review evidence context changed: ' + key)

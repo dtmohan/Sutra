@@ -358,10 +358,14 @@ function install(vscode,context,deps){
         if(armed!==a||!enabled()||activeCancel.token.isCancellationRequested)throw new Error('Native request disarmed or cancelled. Proposal withheld.');
         if(data?.notice){audit.stage='guidance';progress.report(new vscode.LanguageModelTextPart(data.notice.message+'\n\nSutra setup guidance — no model invocation.'));return;}
         if(!data?.result)throw new Error(data?.notice?.message||'No governed response available.');
-        deps.publishReview(data);lastRoute=data.route?.model||data.result.model||'';publish();
+        const reviewLinks=deps.publishReview(data);lastRoute=data.route?.model||data.result.model||'';publish();
         const r=data.result;recordUsage(r);audit.invocationId=r.invocation_id;audit.model=lastRoute;audit.stage=r.admission.admitted?'admitted':'withheld';publish();if(!r.admission.admitted){progress.report(new vscode.LanguageModelTextPart('Sutra withheld the response: '+r.admission.errors.join('; ')));return;}
         const p=r.accepted_output;if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&!['edit','run_tests'].includes(p.action?.kind))throw new Error('No admitted action is available to satisfy required tool mode.');
-        progress.report(new vscode.LanguageModelTextPart(`Sutra routing confirmed · ${lastRoute} · task ${a.session}\nRequest ${audit.id} · protocol invocation ${r.invocation_id}\n\n${p.answer||p.summary}\n\n`));
+        if(data.report_markdown){
+          progress.report(new vscode.LanguageModelTextPart(data.report_markdown+'\n\n'));
+          if(data.review_diagram){try{await deps.presentReview?.(data);progress.report(new vscode.LanguageModelTextPart('The **source dependency diagram** is open beside this chat. Its arrows show local import candidates, not execution order.\n\n'));}catch(error){progress.report(new vscode.LanguageModelTextPart('Diagram preview unavailable: '+error.message+'\n\n'));}}
+          if(reviewLinks?.reportUri)progress.report(new vscode.LanguageModelTextPart(`[Review details and source citations](${reviewLinks.reportUri}) · Reviewed through Sutra with **${lastRoute}**.\n\n`));
+        }else progress.report(new vscode.LanguageModelTextPart(`Sutra routing confirmed · ${lastRoute} · task ${a.session}\nRequest ${audit.id} · protocol invocation ${r.invocation_id}\n\n${p.answer||p.summary}\n\n`));
         const evidence=data.coverage?.evidence;
         if(evidence)progress.report(new vscode.LanguageModelTextPart(`Evidence delivered: ${evidence.fresh_snapshot_files} freshly mapped files; source excerpts from ${evidence.excerpt_files.length} files; ${evidence.child_reports} child reports. This is a bounded review, not an exhaustive semantic audit.\n\n`));
         if(['edit','run_tests'].includes(p.action?.kind)){
@@ -371,7 +375,7 @@ function install(vscode,context,deps){
           if(preview.diff)await deps.showDiff(preview,r.invocation_id);
           if(armed!==a||activeCancel.token.isCancellationRequested){tickets.delete(id);throw new Error('Task disarmed or cancelled during diff review.');}
           progress.report(new vscode.LanguageModelToolCallPart(callId,ACTION,{ticket:id}));
-        }else{progress.report(new vscode.LanguageModelTextPart('Remaining: '+(p.remaining?.join('; ')||'No further step proposed.')+'\n\nModel notes are not proof of correctness. Test receipts report process observations.'));}
+        }else if(!p.report){progress.report(new vscode.LanguageModelTextPart('Remaining: '+(p.remaining?.join('; ')||'No further step proposed.')+'\n\nModel notes are not proof of correctness. Test receipts report process observations.'));}
       }finally{
         if(responseUsage.calls.length||footerId){
           const detail=tokens.compact(responseUsage),label='Sutra · '+detail+' · conversation details';

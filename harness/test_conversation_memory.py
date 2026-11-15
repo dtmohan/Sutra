@@ -50,6 +50,21 @@ class MemoryTests(unittest.TestCase):
         self.assertLess(len(memory['recent_turns']) + len(memory['retrieved_turns']), memory['stored_turns'])
         self.assertTrue(self.s.verify_invocations(first['session']))
 
+    def test_workspace_memory_allocation_keeps_pins_latest_and_requested_pages(self):
+        first, parent = self.fill(); sid = first['session']
+        cm.materialize(self.s, sid, cm.history(self.s, sid, parent))
+        schema = lambda p: {'type':'object'}
+        budget = Budget(65536,8192,256)
+        full = cm.working_set(self.s,sid,parent,'Topic',budget,{},'',schema)
+        limited = cm.working_set(self.s,sid,parent,'Topic',budget,{},'',schema,extra_bytes=1500)
+        self.assertEqual(limited['pinned_user_statements'],full['pinned_user_statements'])
+        self.assertEqual(limited['recent_turns'][-1],full['recent_turns'][-1])
+        self.assertLess(len(canonical(limited)),len(canonical(full)))
+        self.assertEqual(limited['stored_turns'],full['stored_turns'])
+        target = first['result']['invocation_id']
+        requested = cm.working_set(self.s,sid,parent,'Topic',budget,{'requested_memory_pages':[target]},'',schema,extra_bytes=0)
+        self.assertIn(target,[row['id'] for row in requested['retrieved_turns']])
+
     def test_model_can_page_in_from_toc_before_publication(self):
         first, parent = self.fill()
         target = first['result']['invocation_id']

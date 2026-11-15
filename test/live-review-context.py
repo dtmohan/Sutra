@@ -51,7 +51,17 @@ def run(state,scratch,out,iid,model):
         report['input_charge']=row['charge'];report['after']=usage(s,sid)
         assert p['workspace_map']['source_files']==mapped['auto']['source_files']
         assert p['workspace_map']['omitted_files']==0
-        assert len(p['excerpts'])>len(old['excerpts'])
+        assert len(p['excerpts'])>=min(6,len(old['excerpts']))
+        review=result['result']['accepted_output'].get('report')
+        assert review and len(review['components'])>=3 and len(review['flow'])>=2
+        assert review['strengths'] and review['risks'] and review['next_steps']
+        assert all(len(row['description'].split())>=4 for row in review['flow'])
+        assert '\n\n## Main components\n\n' in result['report_markdown']
+        assert result['review_diagram'] is not None
+        report['words']=len(result['report_markdown'].split())
+        report['excerpt_locations']=p['excerpt_locations']
+        (out/'Live-review.md').write_text(result['report_markdown']+'\n')
+        (out/'Live-source-diagram.json').write_text(json.dumps(result['review_diagram'],indent=2)+'\n')
         assert s.pinned(sid)==contract and report['after']['limits']==before['limits']
         assert report['after']['used']['calls']>before['used']['calls']
         assert s.verify_invocations(sid,complete=False)

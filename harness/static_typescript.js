@@ -67,6 +67,10 @@ for(const s of program.getSourceFiles())if(files.has(s.fileName)){
    const resolved=ts.resolveModuleName(n.moduleSpecifier.text,s.fileName,options,host).resolvedModule;
    moduleDependencies.push({source:s.fileName.slice(prefix.length),specifier:n.moduleSpecifier.text,target:resolved&&files.has(resolved.resolvedFileName)?resolved.resolvedFileName.slice(prefix.length):null,...loc(n)});
   }
+  if(ts.isCallExpression(n)&&ts.isIdentifier(n.expression)&&n.expression.text==='require'&&n.arguments.length===1&&ts.isStringLiteral(n.arguments[0])){
+   const specifier=n.arguments[0].text,resolved=ts.resolveModuleName(specifier,s.fileName,options,host).resolvedModule;
+   moduleDependencies.push({source:s.fileName.slice(prefix.length),specifier,target:resolved&&files.has(resolved.resolvedFileName)?resolved.resolvedFileName.slice(prefix.length):null,...loc(n)});
+  }
   ts.forEachChild(n,visit);
  };visit(s);
 }

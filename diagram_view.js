@@ -22,15 +22,15 @@ function safeSVG(svg){
 }
 function install(vscode,context,read){
   let last=context.workspaceState?.get('karma.lastDiagram');
-  async function open(data){
-    const d=validate(data.result.accepted_output.diagram),id=data.result.invocation_id;
-    last=id;await context.workspaceState?.update('karma.lastDiagram',id);
+  async function open(data,source=false){
+    const d=validate(source?data.review_diagram:data.result.accepted_output.diagram),id=data.result.invocation_id;
+    last=source?{kind:'source',id,diagram:d}:id;await context.workspaceState?.update('karma.lastDiagram',last);
     const panel=vscode.window.createWebviewPanel('karma.diagram',d.title,vscode.ViewColumn.Beside,{enableScripts:true,localResourceRoots:[vscode.Uri.file(path.join(context.extensionPath,'media')),vscode.Uri.file(path.join(context.extensionPath,'vendor/mermaid'))]});
     const nonce=crypto.randomBytes(18).toString('base64'),web=panel.webview;
     const resource=name=>web.asWebviewUri(vscode.Uri.file(path.join(context.extensionPath,name))).toString();
     web.html=fs.readFileSync(path.join(context.extensionPath,'media/diagram.html'),'utf8').replaceAll('{{csp}}',web.cspSource).replaceAll('{{nonce}}',nonce).replace('{{css}}',resource('media/diagram.css')).replace('{{mermaid}}',resource('vendor/mermaid/mermaid.min.js')).replace('{{script}}',resource('media/diagram.js'));
     web.onDidReceiveMessage(async message=>{try{
-      if(message.type==='ready'){await web.postMessage({type:'diagram',diagram:d,source:mermaidSource(d),receipt:id});return;}
+      if(message.type==='ready'){await web.postMessage({type:'diagram',diagram:d,source:mermaidSource(d),receipt:id,provenance:source?'source':'conversation'});return;}
       if(message.type==='layout'){await web.postMessage({type:'source',source:mermaidSource(d,message.direction)});return;}
       if(message.type==='copy'){await vscode.env.clipboard.writeText(mermaidSource(d,message.direction));return;}
       if(message.type==='export'){
@@ -41,7 +41,7 @@ function install(vscode,context,read){
     }catch(error){void vscode.window.showErrorMessage('Sutra diagram: '+error.message);}});
     context.subscriptions.push(panel);return panel;
   }
-  context.subscriptions.push(vscode.commands.registerCommand('karma.openLastDiagram',async()=>{if(!last){void vscode.window.showInformationMessage('Ask Sutra Auto to draw a diagram first.');return;}try{await open(await read(last));}catch(e){void vscode.window.showErrorMessage(e.message);}}));
-  return {open};
+  context.subscriptions.push(vscode.commands.registerCommand('karma.openLastDiagram',async()=>{if(!last){void vscode.window.showInformationMessage('Ask Sutra Auto to draw a diagram first.');return;}try{if(last.kind==='source')await open({review_diagram:{...last.diagram,note:'Saved review snapshot. '+last.diagram.note.slice(0,210)},result:{invocation_id:last.id}},true);else await open(await read(last));}catch(e){void vscode.window.showErrorMessage(e.message);}}));
+  return {open,openReview:data=>open(data,true)};
 }
 module.exports={install,validate,mermaidSource,safeSVG};

@@ -153,7 +153,7 @@ function chatSend(fresh=false){el('error').textContent='';el('chat-progress').te
 el('configure-models').onclick=()=>send('configure_models');el('chat-send').onclick=()=>chatSend();el('chat-new').onclick=()=>chatSend(true);el('chat-stop').onclick=()=>send('chat_stop');el('chat-diagram').onclick=()=>send('open_chat_diagram');
 el('chat-prompt').onkeydown=e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){e.preventDefault();chatSend();}};
 window.addEventListener('message',({data:m})=>{
- if(m.type==='state'){el('chat-task').textContent=m.data.contract?'Task: '+m.data.contract.contract.goal:'No active task.';el('workflow-notice').hidden=!(m.data.session&&!m.data.auto);if(m.data.chat){el('chat-answer').textContent=m.data.chat.answer?.answer||m.data.chat.warning;}}
+ if(m.type==='state'){el('chat-task').textContent=m.data.contract?'Task: '+m.data.contract.contract.goal:'No active task.';el('workflow-notice').hidden=!(m.data.session&&!m.data.auto);if(m.data.chat){renderReview(m.data.chat.answer,m.data.chat.warning);}}
  if(m.type==='tier-settings'){el('tier-summary').textContent=['low','mid','high'].map(t=>t+': '+(m.models[t]||'no local chat model available')).join(' · ');showModelChoices(m);}
  if(m.type==='show-section')showSection(m.section);
  if(m.type==='models-saved')el('model-save-status').textContent='Model choices saved.';
@@ -163,7 +163,7 @@ window.addEventListener('message',({data:m})=>{
  if(m.type==='chat-progress')el('chat-progress').textContent=m.message;
  if(m.type==='chat-result'){const d=m.data,p=d.result.accepted_output;el('chat-usage').textContent='Sutra · '+KarmaTokens.compact(d.result.token_usage)+' · Per-stage counts in Usage.';el('chat-progress').textContent='Mapped '+d.coverage.mapped_files+'/'+d.coverage.source_files+' files. Answer excerpts: '+d.source_files.join(', ');
   el('chat-route').textContent=d.route.tier+' · '+d.route.model+' · '+d.route.reason;
-  el('chat-answer').textContent=p?p.answer+'\n\nSources:\n'+p.citations.map(c=>c.path+': '+c.quote).join('\n')+'\n\nRemaining:\n'+p.remaining.join('\n'):'Response withheld: '+d.result.admission.errors.join('; ');el('chat-diagram').disabled=!d.diagram;}
+  renderReview(p,'Response withheld: '+d.result.admission.errors.join('; '));el('chat-diagram').disabled=!d.diagram;}
 });
 
 function showTemperatures(t,reason='No current sensor sample'){
@@ -270,3 +270,19 @@ const tabNames=['dashboard','chat','usage','settings','tools'];
 function syncTabs(){for(const view of tabNames){const tab=el('nav-'+view);tab.setAttribute('aria-selected',String(activeView===view));tab.tabIndex=activeView===view?0:-1;}}
 for(const view of tabNames){const tab=el('nav-'+view),click=tab.onclick;tab.onclick=()=>{click();syncTabs();};tab.onkeydown=e=>{let index=tabNames.indexOf(view);if(e.key==='ArrowRight')index=(index+1)%tabNames.length;else if(e.key==='ArrowLeft')index=(index+tabNames.length-1)%tabNames.length;else if(e.key==='Home')index=0;else if(e.key==='End')index=tabNames.length-1;else return;e.preventDefault();showView(tabNames[index]);syncTabs();el('nav-'+tabNames[index]).focus();};}
 syncTabs();
+
+function renderReview(p,fallback=''){
+ const root=el('chat-answer');root.replaceChildren();
+ if(!p?.report){root.append(textNode('p',p?.answer||fallback));return;}
+ const r=p.report;root.append(textNode('p',r.overview));
+ for(const [key,title,ordered] of [['components','Main components',false],['flow','How a request moves through the code',true],['strengths','Strengths',false],['risks','Risks and tradeoffs',false],['next_steps','Recommended next checks',true]]){
+  root.append(textNode('h2',title));const list=document.createElement(ordered?'ol':'ul');
+  for(const row of r[key]){const item=document.createElement('li');
+   if(typeof row==='string')item.append(textNode('span',row));
+   else{if(row.name)item.append(textNode('strong',row.name+' — '));item.append(textNode('span',row.responsibility||row.description||row.observation));if(row.implication)item.append(textNode('p','Why it matters: '+row.implication));item.append(textNode('p','Source: '+row.paths.join(' · '),'muted'));}
+   list.append(item);
+  }
+  if(!r[key].length)list.append(textNode('li','No specific finding supported by the delivered excerpts.'));
+  root.append(list);
+ }
+}

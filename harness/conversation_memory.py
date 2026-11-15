@@ -16,6 +16,7 @@ LEGACY_POLICIES = {'2319f693bfd23c67bda96909572c6a5646d1a299497aa3ab9c23fc990721
                    'd71f0acf70b42a1d0cb1332c1413bfb85b90156d5820d590cdb19b41ea79ce04'}
 # Recomputed from the released VSIX policy manifests; never from an untrusted receipt.
 RELEASE_POLICIES = {
+    '0.21.3': 'd8a9f716c42c494a60f63d7214400f20614444389fd3feef6e37d2f49408ba4d',
     '0.21.1': '481fc309735f32a2b5533a19f2cebc44a008ea87d8c6d66f88948bbc26987bdf',
     '0.21.2': '481fc309735f32a2b5533a19f2cebc44a008ea87d8c6d66f88948bbc26987bdf',
     '0.20.0': '2319f693bfd23c67bda96909572c6a5646d1a299497aa3ab9c23fc9907215812',
@@ -99,7 +100,7 @@ def summary_limit(budget):
     return max(128, budget.response_reserve // 2)
 
 
-def working_set(s, sid, parent, request, budget, base, system, schema_for):
+def working_set(s, sid, parent, request, budget, base, system, schema_for, extra_bytes=None):
     base = {k: v for k, v in base.items() if k != 'repair'}
     rows = history(s, sid, parent)
     if not rows:
@@ -116,11 +117,13 @@ def working_set(s, sid, parent, request, budget, base, system, schema_for):
               'recent_turns': [], 'retrieved_turns': [], 'toc': [], 'stored_turns': len(rows),
               'omitted_turns': len(rows), 'legacy_data_restored': any(r['legacy'] for r in rows)}
 
+    memory_ceiling = None
+
     def fits():
         probe = dict(base, memory=memory, repair={'errors': ['x' * 140] * 2})
         try:
-            budget.check(system, probe, schema_for(probe))
-            return True
+            charge = budget.check(system, probe, schema_for(probe))
+            return memory_ceiling is None or charge <= memory_ceiling
         except ContextBudgetExceeded:
             return False
 
@@ -153,6 +156,11 @@ def working_set(s, sid, parent, request, budget, base, system, schema_for):
             raise PageFault('Requested conversation page is outside this ancestry')
         if not add(row, 'retrieved_turns'):
             raise ContextBudgetExceeded('The requested older page cannot fit with the latest turn and pinned statements. Choose a larger context.')
+    if extra_bytes is not None:
+        # Workspace roles prioritize fresh source over optional older dialogue.
+        # Latest turn, all pins and explicitly requested pages above stay intact.
+        mandatory = dict(base, memory=memory, repair={'errors': ['x' * 140] * 2})
+        memory_ceiling = budget.charge(system, mandatory, schema_for(mandatory)) + max(0, extra_bytes)
     # Allocate half of remaining memory room to a contiguous recent window, then
     # use the rest for relevant older pages and a compact directory.
     reserve_probe = dict(base, memory=memory)

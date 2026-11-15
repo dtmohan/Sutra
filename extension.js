@@ -21,6 +21,7 @@ function activate(context) {
   const usageView=require('./usage_view');
   const output = vscode.window.createOutputChannel('Sutra');
   let nativeController, usage, panel, panelReady=false, panelSection, busy = false, sequence = false, telemetry, telemetryDir, dashboardTimer, dashboardInFlight=false, stopAuto=false, chatCancellation;
+  let lastReview;
   const previewDocuments=new Map(), previewChanges=new vscode.EventEmitter();
   function updateReports(data){
     const st=data?.state||data;if(!st?.session)return;
@@ -155,6 +156,16 @@ function activate(context) {
     if(data.result)panel?.webview.postMessage({type:'result',data:data.result});
     panel?.webview.postMessage({type:'state',data:data.state});
     if(data.routing)output.appendLine('KARMA_ROUTED '+JSON.stringify(data.routing));
+    if(!data.result?.admission?.admitted||!data.report_markdown)return;
+    const p=data.result.accepted_output,id=data.result.invocation_id;
+    if(!/^[a-f0-9]{32}$/.test(id))return;
+    const reportUri=vscode.Uri.parse('karma-preview:/review/'+id+'/Review.md');
+    const sourceUri=vscode.Uri.parse('karma-preview:/review/'+id+'/Chat-source-map.md');
+    const sources=(p.citations||[]).map(c=>'### '+c.path+'\n\n```\n'+c.quote+'\n```').join('\n\n');
+    previewDocuments.set(reportUri.toString(),data.report_markdown+'\n\n## Review evidence\n\nModel conclusions are unverified. Source anchors were checked against fresh reads.\n\n'+sources+'\n\n## Outstanding checks\n\n'+(p.remaining||[]).map(x=>'- '+x).join('\n')+'\n\nProtocol invocation: '+id+'\n\n[Full static source map]('+sourceUri.toString()+')');
+    if(data.diagram)previewDocuments.set(sourceUri.toString(),data.diagram);
+    lastReview=data;
+    return {reportUri:reportUri.toString(),sourceUri:sourceUri.toString()};
   }
   function modelSettings(){return vscode.workspace.getConfiguration('karma').get('models',{low:'',mid:'',high:''});}
   let modelCatalog;
@@ -227,7 +238,7 @@ function activate(context) {
       panel?.webview.postMessage({type:'state',data:data.state});panel?.webview.postMessage({type:'chat-result',data});
       output.appendLine('KARMA_CHAT_ROUTE '+JSON.stringify(data.route));
       if(data.diagram){const uri=vscode.Uri.parse('karma-preview:/'+data.state.session+'/'+data.result.invocation_id+'/Chat-source-map.md');previewDocuments.set(uri.toString(),data.diagram);data.diagramUri=uri;}
-      return data;
+      publishReview(data);return data;
     }finally{sequence=false;panel?.webview.postMessage({type:'busy',value:false});}
   }
   if(vscode.chat?.createChatParticipant){
@@ -248,11 +259,12 @@ function activate(context) {
         if(!data)return;
         if(data.notice){stream.markdown(data.notice.message);entryButtons(stream,data.notice.kind==='workflow');return;}
         stream.markdown(`**${data.route.tier} · ${data.route.model}** — ${data.route.reason}\n\n`);
-        if(data.result.admission.admitted){const p=data.result.accepted_output;const md=new vscode.MarkdownString(p.answer);md.isTrusted=false;stream.markdown(md);
+        if(data.result.admission.admitted){const p=data.result.accepted_output;const md=new vscode.MarkdownString(data.report_markdown||p.answer);md.isTrusted=false;stream.markdown(md);
           stream.markdown(`\n\nMapped ${data.coverage.mapped_files}/${data.coverage.source_files} files. This answer inspected excerpts from ${data.source_files.join(', ')}.\n\nRemaining: ${p.remaining.join('; ')||'No further step proposed.'}`);
         }else stream.markdown('The response was withheld by Sutra checks. '+data.result.admission.errors.join('; '));
         stream.markdown('\n\n---\nSutra · '+tokens.compact(data.result.token_usage));
         stream.button({command:'karma.openUsage',title:'Open Sutra Monitor'});
+        if(data.review_diagram)await diagrams.openReview(data);
         if(data.diagramUri)stream.reference(data.diagramUri);
         stream.button({command:'karma.open',title:'Open Sutra dashboard'});
         return {metadata:{model:data.route.model,tier:data.route.tier,invocationId:data.result.invocation_id}};
@@ -270,7 +282,7 @@ function activate(context) {
         publishReview(data);
         if(!data.result.admission.admitted||['report','clarify'].includes(data.result.accepted_output.tool.kind)||data.tool_receipt?.result.status!=='ok')break;
       }
-      return data;
+      publishReview(data);return data;
     }finally{sequence=false;panel?.webview.postMessage({type:'busy',value:false});}
   }
   async function runAuto(options={}){
@@ -361,6 +373,7 @@ function activate(context) {
           finally{chatCancellation.dispose();chatCancellation=undefined;}return;
         }
         if(message.op==='open_chat_diagram'){
+          if(lastReview?.review_diagram){await diagrams.openReview(lastReview);return;}
           const match=[...previewDocuments.keys()].reverse().find(k=>k.endsWith('/Chat-source-map.md'));
           if(match)await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.parse(match)));return;
         }
@@ -510,6 +523,7 @@ function activate(context) {
   if(vscode.lm.registerLanguageModelChatProvider){
     nativeController=nativeProvider.install(vscode,context,{request:(m,t,a)=>request(m,t,true,a),workspace,isBusy:()=>busy||sequence,
       activityLink:event=>usage?.activityLink(event),modelSettings,configureModels:(force,t)=>configureModels(force,t,true),simpleChat,publishReview,
+      async presentReview(data){await diagrams.openReview(data);},
       async presentConversation(data){if(data.result.accepted_output.diagram)await diagrams.open(data);},
       async showDiff(change,iid){const before=vscode.Uri.parse('karma-preview:/'+iid+'/before.py'),after=vscode.Uri.parse('karma-preview:/'+iid+'/after.py');previewDocuments.set(before.toString(),change.before);previewDocuments.set(after.toString(),change.after);await vscode.commands.executeCommand('vscode.diff',before,after,'Sutra proposed edit: '+change.target);},
       onRoute(value){output.appendLine('KARMA_NATIVE_ROUTE '+JSON.stringify(value));},
