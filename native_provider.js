@@ -119,6 +119,18 @@ function install(vscode,context,deps){
     catch(error){if(/Task changed|Workflow task|permissions changed|calibration.*changed/i.test(error.message))disarm('Task changed. Re-arm to accept the current contract.');throw error;}
     await rememberFlow(next);return next;
   }
+  function showPause(flow,audit,progress){
+    const stop=flow.stop||{},failures=stop.failures||[];
+    const details=[stop.error,...failures.map(f=>f.path+': '+f.error)].filter(Boolean);
+    const coverage=Number.isInteger(stop.mapped_files)&&Number.isInteger(stop.source_files)?` Mapped ${stop.mapped_files} of ${stop.source_files} source files.`:'';
+    const reason=details.length?details.join('\n'):(stop.status||'Inspect Sutra Monitor for details.');
+    audit.stage='paused';audit.message=reason;publish();
+    const guidance=stop.status==='resource_wait'
+      ? 'Wait until Sutra Monitor shows **Resources: ALLOW**, then use **Resume** and send **continue** here. Resume checks a fresh measurement before dispatch. Sutra will not automatically retry this stop.'
+      : 'Resolve the reported cause, then use **Resume** in Sutra Monitor and send **continue** here.';
+    const title=stop.resume_phase==='CLASSIFYING'?'Sutra paused the request.':'Sutra paused the review.';
+    progress.report(new vscode.LanguageModelTextPart('**'+title+'**'+coverage+'\n\n'+reason+'\n\n'+(stop.failure_count>failures.length?`${stop.failure_count-failures.length} more file failures are recorded in the review details.\n\n`:'')+'The request, context, permissions and consumed budget are saved. '+guidance+' Resume keeps the remaining allocation; it does not reset a limit. Use **Discard** to abandon this request.'));
+  }
   async function selectNativeChat(){
     if(selecting)throw new Error('Sutra chat selection is already in progress.');
     selecting=true;publish();
@@ -262,7 +274,7 @@ function install(vscode,context,deps){
         if(e.kind==='finish')progress.report(new vscode.LanguageModelThinkingPart('',e.id,{vscode_reasoning_done:true}));
       };
       try{
-        let data,flow,restartReview=false;
+        let data,flow,restartReview=false,resuming=false;
         if(!request.results){
           let pending=context.workspaceState.get(pendingKey);
           if(!pending){const saved=await flowEvent(null,'pending',tier,activeCancel.token);if(saved.flow_id)pending={...saved,workspace:deps.workspace()};}
@@ -286,6 +298,7 @@ function install(vscode,context,deps){
               if(activeCancel.token.isCancellationRequested)return;
               recoveryChoice=undefined;
               if(choice==='Resume saved request'){
+                resuming=true;
                 flow=old;prompt=old.prompt;conversationId=old.conversation_id;audit.memoryUsed=true;audit.conversationInvocationId=conversationId;
                 if(conversationId){footerSignature=await memory.remember(conversationId,options);footerId=conversationId;}
                 progress.report(new vscode.LanguageModelTextPart('Resuming the saved Sutra workflow with its context and remaining budget.\n\n'));
@@ -294,6 +307,11 @@ function install(vscode,context,deps){
             }
           }
           if(!flow)flow=await flowEvent(null,'start',tier,activeCancel.token,{prompt,parent:request.parent});
+          if(resuming&&flow.state==='PAUSED'&&flow.stop?.resume_phase==='CLASSIFYING'){
+            flow=await flowEvent(flow,'resume',tier,activeCancel.token);
+          }
+          if(resuming&&flow.state==='CLASSIFYING')flow=await flowEvent(flow,'step',tier,activeCancel.token);
+          if(flow.state==='PAUSED'&&flow.stop?.resume_phase==='CLASSIFYING'){showPause(flow,audit,progress);return;}
           const chat=flow.conversation;
           if(chat){
           if(armed!==a||!enabled()||activeCancel.token.isCancellationRequested)throw new Error('Native request disarmed or cancelled. Response withheld.');
@@ -331,12 +349,7 @@ function install(vscode,context,deps){
           if(armed!==a||activeCancel.token.isCancellationRequested)throw new Error('Native request disarmed or cancelled.');
           if(flow.recovery){audit.stage='recovery_required';audit.message=flow.recovery.message;publish();progress.report(new vscode.LanguageModelTextPart(flow.recovery.message+'\n\nSend **continue** to review the recovery options.'));return;}
           if(flow.state==='PAUSED'){
-            const stop=flow.stop||{},failures=stop.failures||[];
-            const details=[stop.error,...failures.map(f=>f.path+': '+f.error)].filter(Boolean);
-            const coverage=Number.isInteger(stop.mapped_files)&&Number.isInteger(stop.source_files)?` Mapped ${stop.mapped_files} of ${stop.source_files} source files.`:'';
-            const reason=details.length?details.join('\n'):(stop.status||'Mapping needs attention. Inspect Sutra Monitor for details.');
-            audit.stage='paused';audit.message=reason;publish();
-            progress.report(new vscode.LanguageModelTextPart('**Sutra paused the review.**'+coverage+'\n\n'+reason+'\n\n'+(stop.failure_count>failures.length?`${stop.failure_count-failures.length} more file failures are recorded in the review details.\n\n`:'')+'The request, context, permissions and consumed budget are saved. Resolve the reported cause, then use **Resume** in Sutra Monitor and send **continue** here. Resume keeps the remaining allocation; it does not reset a limit. Use **Discard** to abandon this request.'));
+            showPause(flow,audit,progress);
             return;
           }
           if(['QUARANTINED','CANCELLING','EXECUTING_ACTION'].includes(flow.state))throw new Error('Sutra workflow '+flow.state+'. Saved request retained. Inspect Sutra Monitor, then choose Resume or Discard.');

@@ -19,7 +19,7 @@ EDGES = {
  'READY': {'RUNNING','WAITING_CHILDREN','DONE','PAUSED','CANCELLED','QUARANTINED'},
  'RUNNING': {'READY','DONE','PAUSED','CANCELLED','QUARANTINED'},
  'WAITING_CHILDREN': {'READY','PAUSED','CANCELLED','QUARANTINED'},
- 'PAUSED': {'READY','MAPPING','CANCELLED','QUARANTINED'},
+ 'PAUSED': {'READY','CLASSIFYING','MAPPING','CHILDREN','SYNTHESIS','CODING','CANCELLED','QUARANTINED'},
  'CREATED': {'CLASSIFYING','CANCELLED','PAUSED'},
  'CLASSIFYING': {'NEED_ARM','BINDING','DONE','PAUSED','CANCELLED'},
  'NEED_ARM': {'BINDING','CANCELLED','PAUSED'},
@@ -289,7 +289,7 @@ def overview(db,sid=None):
         result.append({'id':nid,'parent':n['parent_id'],'kind':n['kind'],'state':e.get('to',n['initial_state']),
                        'objective':n.get('objective',n.get('goal','')),'kernel':last_dispatch.get('kernel'),'limits':n.get('limits'),
                        'permissions':n.get('permissions'),'context_hash':n.get('context_hash'),'last_event':e.get('kind'),
-                       'stop':e.get('data',{}).get('mapping_stop') if e.get('to')=='PAUSED' else None,
+                       'stop':(e.get('data',{}).get('workflow_stop') or e.get('data',{}).get('mapping_stop')) if e.get('to')=='PAUSED' else None,
                        'model':last_dispatch.get('data',{}).get('model'),'used':used,'files':n.get('files',[])})
     return {'nodes':result,'execution':'serial local dispatch','kernel':'unchanged STP','scope':'latest 40 orchestration nodes'}
 

@@ -1,7 +1,7 @@
 import copy,json,tempfile,time,unittest
 from pathlib import Path
 from unittest.mock import patch
-from context_manager import InvalidUpdate
+from context_manager import InvalidUpdate,canonical
 from paging import Budget,PageFault
 from invocation_gateway import InvocationLedger,consume_dispatch
 from vscode_bridge import handle
@@ -121,6 +121,42 @@ class ChatTests(unittest.TestCase):
         self.assertNotIn('edges',full)
         small=review_context.overview(data,512)
         self.assertGreater(small['omitted_module_details'],0)
+
+    def test_optional_repairs_yield_to_preserved_conversation_and_reviewer(self):
+        import conversation
+        import review_context
+        from test_conversation import Fake as Conversational
+        prompt='Explain the architecture. Remember exact review requirements: '+('preserve public API and keep the review read only; '*20)
+        router=Conversational('fixture-small',lambda r,p:r.update(intent='workspace',
+            workspace_request={'operation':'read','paths':[]},facts=[]))
+        route=conversation.answer(self.s,self.meta,self.storage,
+            {'prompt':prompt,'models':MODELS,'tier':'low'},provider=router)
+        self.assertTrue(route['result']['admission']['admitted'],route['result']['admission'])
+        iid=route['result']['invocation_id']
+        model=Fake();model.budget=Budget(65536,4096,256)
+        result=chat.answer(self.s,self.meta,self.ws,self.storage,
+            {'prompt':prompt,'models':MODELS,'tier':'low','conversation_id':iid},provider=model)
+        self.assertTrue(result['result']['admission']['admitted'])
+        p=copy.deepcopy(model.payloads[0]);before=review_budget.usage(self.s,self.sid)
+        data=chat.runtime.load_partition(self.s,self.sid,self.ws,p['snapshot_receipts'],p['snapshot_owner'])
+        model.context_metadata={'model_info':{'qwen.context_length':65536}}
+        # Like a long-lived task, only 41,403 conservative units remain.
+        with patch('review_budget.usage',return_value={'limits':{'tokens':250000},'used':{'tokens':208597}}):
+            fmt,attempts=chat.fit_packet(self.s,self.sid,p,data,model,True)
+        self.assertLess(attempts,3)
+        self.assertGreater(model.budget.context_limit,10350)
+        self.assertLessEqual(model.budget.context_limit* (attempts+1),41403)
+        self.assertIn(prompt,canonical(p['memory']))
+        self.assertEqual(p['memory']['recent_turns'][-1]['user'],prompt)
+        self.assertEqual(p['contract'],self.s.pinned(self.sid))
+        self.assertLessEqual(model.budget.check(chat.SYSTEM,p,fmt)+model.budget.response_reserve,model.budget.context_limit)
+        self.assertEqual(review_budget.usage(self.s,self.sid),before)
+        with patch('review_budget.usage',return_value={'limits':{'tokens':250000},'used':{'tokens':244000}}):
+            with self.assertRaises(review_context.ReviewContextExceeded) as stopped:
+                chat.fit_packet(self.s,self.sid,p,data,model,True)
+        self.assertEqual(stopped.exception.details['available_tokens'],6000)
+        self.assertIn('65,536',str(stopped.exception))
+        self.assertEqual(review_budget.usage(self.s,self.sid),before)
 
     def test_two_fresh_models_preserve_task_binding_handoff_and_spent_budget(self):
         ref=calibration.register(self.s,profile());binding=calibration.bind(self.s,self.sid,[ref],calibration.EMPTY_HASH)

@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Local model orchestration with portable context, governed tools, diagrams and token visibility.",
-  "version": "0.21.5",
+  "version": "0.21.7",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"

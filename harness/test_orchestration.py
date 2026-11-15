@@ -1,7 +1,7 @@
 import copy,json,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
-from context_manager import InvalidUpdate,canonical
+from context_manager import InvalidUpdate,ContextBudgetExceeded,canonical
 from invocation_gateway import InvocationLedger
 from test_chat import Fake as Review
 from test_conversation import Fake as Conversation,MODELS
@@ -228,6 +228,92 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(used,review_budget.usage(self.s,sid)['used']);self.assertEqual(contract,self.s.pinned(sid))
         self.assertTrue(self.until('DONE',out)['data']['result']['admission']['admitted'])
 
+    def test_context_shortage_pauses_and_resumes_synthesis_without_reclassification(self):
+        out=self.until('SYNTHESIS');sid=self.meta['active'];contract=self.s.pinned(sid)
+        used=review_budget.usage(self.s,sid)['used'];conversation_id=out['conversation_id']
+        with patch('chat_runtime.answer',side_effect=ContextBudgetExceeded('Review allocation is too small.')):
+            out=self.step(out)
+        self.assertEqual(out['state'],'PAUSED')
+        self.assertEqual(out['stop']['status'],'context_budget')
+        self.assertEqual(out['stop']['stage'],'SYNTHESIS')
+        self.assertEqual(review_budget.usage(self.s,sid)['used'],used)
+        with self.assertRaisesRegex(InvalidUpdate,'Choose Resume'):self.step(out)
+        self.s.close();self.s=InvocationLedger(self.root/'state.sqlite');self.tier='high'
+        pending=flow.handle(self.s,self.meta,self.ws,self.root,{'event':'pending'})
+        self.assertEqual(pending['stop'],out['stop'])
+        resumed=self.step(pending,event='resume')
+        self.assertEqual(resumed['state'],'SYNTHESIS');self.assertIsNone(resumed['stop'])
+        self.assertEqual(resumed['conversation_id'],conversation_id)
+        self.assertEqual(review_budget.usage(self.s,sid)['used'],used)
+        with patch('auto_review.step',side_effect=AssertionError('unnecessary remapping')):
+            done=self.step(resumed)
+        self.assertEqual(done['state'],'DONE');self.assertTrue(done['data']['result']['admission']['admitted'])
+        self.assertEqual(self.s.pinned(sid),contract)
+
+    def test_resource_wait_during_classification_needs_no_workspace_arm_and_rechecks_on_resume(self):
+        from monitoring import ResourceWait
+        blocked={'admitted':False,'available':True,'reason':'thermal pressure','thermal_label':'serious',
+                 'decision':'BRIDGE','sample':{'memory_pressure_raw':1},'reclaimable_estimate_gib':20}
+        with patch('conversation.answer',side_effect=ResourceWait(blocked)):
+            out=self.step(armed=False)
+        self.assertEqual(out['state'],'PAUSED');self.assertNotIn('active',self.meta)
+        self.assertEqual(out['stop']['measurement'],blocked)
+        self.assertEqual(out['stop']['resume_phase'],'CLASSIFYING')
+        self.assertFalse(out['stop']['automatic_retry']);self.assertFalse(any(p.payloads for _,p in self.models))
+        self.s.close();self.s=InvocationLedger(self.root/'state.sqlite')
+        with patch('monitoring.resource_state',return_value=blocked):
+            still=self.step(out,event='resume',armed=False)
+        self.assertEqual(still['state'],'PAUSED');self.assertFalse(any(p.payloads for _,p in self.models))
+        with patch('monitoring.resource_state',return_value={'admitted':True}):
+            ready=self.step(still,event='resume',armed=False)
+        self.assertEqual(ready['state'],'CLASSIFYING')
+        classified=self.step(ready,armed=False)
+        self.assertEqual(classified['state'],'NEED_ARM');self.assertNotIn('active',self.meta)
+
+    def test_child_resource_pause_keeps_completed_sibling_and_model_switch_context(self):
+        from monitoring import ResourceWait
+        out=self.children();out=self.step(out);sid=self.meta['active']
+        first=out['children'][0]['id'];parent=m.node(self.s,first)['parent_id']
+        self.assertEqual(m.state(self.s,first),'DONE')
+        used=m.spent(self.s,parent);contract=self.s.pinned(sid)
+        blocked={'admitted':False,'available':True,'reason':'memory pressure','thermal_label':'nominal',
+                 'decision':'FIN','sample':{'memory_pressure_raw':4},'reclaimable_estimate_gib':3}
+        with patch('subagent_runtime.runtime.build_partition',side_effect=ResourceWait(blocked)):
+            stopped=self.step(out)
+        self.assertEqual(stopped['state'],'PAUSED');self.assertEqual(stopped['stop']['stage'],'CHILDREN')
+        self.assertEqual(m.spent(self.s,parent),used)
+        self.s.close();self.s=InvocationLedger(self.root/'state.sqlite');self.tier='high'
+        with self.assertRaisesRegex(InvalidUpdate,'user-armed'):self.step(stopped,event='resume',armed=False)
+        with patch('monitoring.resource_state',return_value=blocked):
+            still=self.step(stopped,event='resume')
+        self.assertEqual(still['state'],'PAUSED');self.assertEqual(m.spent(self.s,parent),used)
+        with patch('monitoring.resource_state',return_value={'admitted':True}):ready=self.step(still,event='resume')
+        self.assertEqual(ready['state'],'CHILDREN')
+        done=self.until('DONE',ready)
+        self.assertTrue(done['data']['result']['admission']['admitted'])
+        self.assertEqual(contract,self.s.pinned(sid))
+        self.assertEqual(len([e for e in m.events(self.s,first) if e['kind']=='RESULT']),1)
+
+    def test_resource_wait_in_mapping_and_synthesis_keeps_correct_resume_stage(self):
+        from monitoring import ResourceWait
+        blocked={'admitted':False,'available':False,'reason':'Hardware sample is stale or future-dated','decision':None}
+        out=self.until('MAPPING');sid=self.meta['active'];used=review_budget.usage(self.s,sid)['used']
+        # Exercise the real auto-review handler's typed exception path.
+        with patch('static_runtime.build',side_effect=ResourceWait(blocked)):
+            out=self.step(out)
+        self.assertEqual(out['state'],'PAUSED');self.assertEqual(out['stop']['stage'],'MAPPING')
+        after=review_budget.usage(self.s,sid)['used']
+        self.assertEqual(after['calls'],used['calls']);self.assertEqual(after['tokens'],used['tokens'])
+        self.assertGreaterEqual(after['operations'],used['operations'])
+        with patch('monitoring.resource_state',return_value={'admitted':True}):out=self.step(out,event='resume')
+        out=self.until('SYNTHESIS',out);used=review_budget.usage(self.s,sid)['used']
+        with patch('chat_runtime.answer',side_effect=ResourceWait(blocked)):out=self.step(out)
+        self.assertEqual(out['state'],'PAUSED');self.assertEqual(out['stop']['stage'],'SYNTHESIS')
+        self.assertEqual(review_budget.usage(self.s,sid)['used'],used)
+        with patch('monitoring.resource_state',return_value={'admitted':True}):out=self.step(out,event='resume')
+        self.assertEqual(out['state'],'SYNTHESIS')
+        self.assertTrue(self.step(out)['data']['result']['admission']['admitted'])
+
     def test_mapping_failure_details_survive_reload_and_do_not_dispatch_children(self):
         out=self.until('MAPPING');sid=self.meta['active'];used=review_budget.usage(self.s,sid)['used']
         failure={'auto':{'status':'needs_attention','mapped_files':2,'source_files':9,
@@ -316,7 +402,8 @@ class OrchestrationTests(unittest.TestCase):
     def test_policy_upgrade_offers_explicit_restart_without_refunding_or_reusing_children(self):
         out=self.children();out=self.step(out);sid=self.meta['active'];old_flow=out['flow_id']
         contract=self.s.pinned(sid);used=review_budget.usage(self.s,sid)['used'];calls=len(self.models)
-        with patch('governance.policy_hash',return_value='f'*64):
+        import conversation_memory as cm
+        with patch('governance.policy_hash',return_value='f'*64), patch.object(cm,'LEGACY_POLICIES',cm.LEGACY_POLICIES|{self.s.logic_hash}):
             self.s.close();self.s=InvocationLedger(self.root/'state.sqlite')
             blocked=self.step(out)
             self.assertEqual(blocked['recovery']['kind'],'policy_changed')
@@ -327,12 +414,15 @@ class OrchestrationTests(unittest.TestCase):
             self.assertNotEqual(restarted['flow_id'],old_flow)
             self.assertEqual(m.state(self.s,old_flow),'CANCELLED')
             self.assertEqual(flow.info(self.s,restarted['flow_id'])[0]['prompt'],self.prompt)
+            self.assertEqual(restarted['conversation_id'],out['conversation_id'])
             self.assertEqual(review_budget.usage(self.s,sid)['used'],used)
             self.assertEqual(self.s.pinned(sid),contract)
             self.tier='high';done=self.until('DONE',restarted)
             self.assertTrue(done['data']['result']['admission']['admitted'])
             self.assertEqual(self.s.pinned(sid),contract)
             self.assertGreater(review_budget.usage(self.s,sid)['used']['calls'],used['calls'])
+            packet=[p for stage,p in self.models if stage=='synthesis'][-1].payloads[0]
+            self.assertIn('CED724',canonical(packet['memory']))
 
     def test_changed_contract_does_not_allow_policy_only_restart(self):
         from vscode_bridge import save_contract

@@ -1,7 +1,7 @@
 """Host-owned native workflow. The UI renders states and supplies user grants."""
 import copy,json,math
 from pathlib import Path
-from context_manager import InvalidUpdate,canonical,sha
+from context_manager import InvalidUpdate,ContextBudgetExceeded,canonical,sha
 import orchestration as m
 
 
@@ -22,7 +22,7 @@ def response(s,fid,**extra):
     n,data=info(s,fid);history=m.events(s,fid)
     return dict(flow_id=fid,state=m.state(s,fid),cursor=history[-1]['receipt'] if history else None,
                 conversation_id=data.get('conversation_id'),binding=data.get('binding'),
-                stop=data.get('mapping_stop') if m.state(s,fid)=='PAUSED' else None,
+                stop=(data.get('workflow_stop') or data.get('mapping_stop')) if m.state(s,fid)=='PAUSED' else None,
                 recovery=recovery(s,fid),
                 children=[{'id':i,'state':m.state(s,i),'files':m.node(s,i)['files']} for i in data.get('children',[])],**extra)
 
@@ -102,6 +102,30 @@ def permission(s,sid,requested):
             'read_scope':roots,'goal':s.snapshot(sid)['goal']} if needed else None
 
 def handle(s,meta,workspace,root,req,providers=None):
+    """Translate measured resource stops at the shared orchestration boundary."""
+    from monitoring import ResourceWait
+    try:
+        return _handle(s,meta,workspace,root,req,providers)
+    except ResourceWait as exc:
+        fid=req.get('flow_id')
+        if not fid:
+            # A start can stop during classification after its durable creation.
+            # The private bridge serializes requests; match this workspace/request.
+            pending=[nid for nid, in s.db.execute("SELECT id FROM orchestration_nodes WHERE json_extract(record_json,'$.kind')='flow' ORDER BY rowid DESC")
+                     if m.node(s,nid).get('workspace')==str(workspace) and m.node(s,nid).get('prompt')==req.get('prompt') and m.state(s,nid) not in m.TERMINAL]
+            if len(pending)!=1:raise
+            fid=pending[0]
+        _,data=info(s,fid);phase=m.state(s,fid)
+        target=(data.get('workflow_stop') or {}).get('resume_phase') if phase=='PAUSED' else phase
+        if target not in ('CLASSIFYING','MAPPING','CHILDREN','SYNTHESIS','CODING'):raise
+        stop={'status':'resource_wait','stage':target,'resume_phase':target,'error':str(exc),
+              'measurement':exc.state,'automatic_retry':False}
+        move(s,fid,'PAUSED','RESOURCE_STOPPED',workflow_stop=stop)
+        save(root,meta)
+        return response(s,fid)
+
+
+def _handle(s,meta,workspace,root,req,providers=None):
     # Only the extension's private bridge can supply arming/permission events.
     # Model proposals cannot invoke this endpoint or set permissions.
     from conversation import answer as converse
@@ -150,17 +174,37 @@ def handle(s,meta,workspace,root,req,providers=None):
         parent=m.node(s,d['root_node']);sid=parent['session']
         if not req.get('armed') or meta.get('active')!=sid or req.get('binding')!=identity(s,sid):
             raise InvalidUpdate('Restart requires the same user-armed task and current binding')
+        conversation_id = d.get('conversation_id')
+        if conversation_id:
+            from conversation import workspace_handoff
+            workspace_handoff(s,sid,conversation_id,prompt)
         # This is an explicit host UI event. Keep the task and all consumed use;
         # do not transfer old model results or authorize any new file/action scope.
         with s.db:
             m.abandon_children(s,parent['id'],'User restarted review after policy upgrade')
             m.cancel(s,fid)
             new=m.create(s,'flow',objective=prompt,workspace=str(workspace),prompt=prompt,
-                         conversation_parent=None,restarted_from=fid)
+                         conversation_parent=conversation_id,restarted_from=fid)
             m.transition(s,new['id'],'CLASSIFYING','POLICY_RESTART',{'previous_flow':fid})
-            m.transition(s,new['id'],'NEED_ARM','USER_REVIEW',{'conversation_id':None,'permission':{'operation':'read','paths':[]}})
+            m.transition(s,new['id'],'NEED_ARM','USER_REVIEW',{'conversation_id':conversation_id,'permission':{'operation':'read','paths':[]}})
         return response(s,new['id'],progress='Review restarted under the current policy; task constraints and consumed budget retained.')
     if incompatibility:return response(s,fid)
+    if phase=='PAUSED':
+        if event!='resume':raise InvalidUpdate('Workflow paused. Choose Resume or Discard; allocations remain unchanged.')
+        stopped=[e for e in m.events(s,fid) if e['kind'] in ('MAPPING_STOPPED','CONTEXT_STOPPED','RESOURCE_STOPPED')]
+        if not stopped:raise InvalidUpdate('Paused workflow requires inspection before recovery')
+        last=stopped[-1]
+        target=(last['data']['workflow_stop']['resume_phase'] if last['kind']=='RESOURCE_STOPPED'
+                else last['from'] if last['kind']=='CONTEXT_STOPPED' else 'MAPPING')
+        if target!='CLASSIFYING':
+            if not req.get('armed'):raise InvalidUpdate('Workspace workflow requires a user-armed harness')
+            if d.get('binding')!=identity(s,meta.get('active')) or req.get('binding')!=d['binding']:
+                raise InvalidUpdate('Workflow task, calibration or permissions changed')
+        if last['kind']=='RESOURCE_STOPPED':
+            from monitoring import require_resources
+            require_resources(root)
+        move(s,fid,target,'RESUME_REQUESTED',workflow_stop=None,reason='User resumed with existing contract and allocation')
+        return response(s,fid)
     if phase=='CLASSIFYING':
         chat=converse(s,meta,root,{'prompt':prompt,'parent':f.get('conversation_parent'),'models':models,'tier':tier},provider=provider('conversation'))
         r=chat['result']
@@ -199,13 +243,6 @@ def handle(s,meta,workspace,root,req,providers=None):
         return response(s,fid)
     if d.get('binding')!=identity(s,meta.get('active')) or req.get('binding')!=d['binding']:raise InvalidUpdate('Workflow task, calibration or permissions changed')
     parent=m.checked(s,d['root_node']);sid=parent['session']
-    if phase=='PAUSED':
-        if event!='resume':raise InvalidUpdate('Workflow paused. Choose Resume or Discard; allocations remain unchanged.')
-        # Resume retries admission, never replenishes the task or child allocation.
-        stopped=[e for e in m.events(s,fid) if e['kind']=='MAPPING_STOPPED']
-        if not stopped:raise InvalidUpdate('Paused workflow requires inspection before recovery')
-        move(s,fid,'MAPPING','RESUME_REQUESTED',reason='User resumed with existing contract and allocation')
-        return response(s,fid)
     if phase=='WORKSPACE':
         c=s.snapshot(sid)['constraints']
         move(s,fid,'CODING' if c.get('native_task') else 'MAPPING','WORK_SELECTED')
@@ -215,6 +252,9 @@ def handle(s,meta,workspace,root,req,providers=None):
         with m.scope(parent['id']):out=auto.step(s,meta,workspace,root,{'explain':False},provider=provider('mapping'))
         save(root,meta)
         status=out['auto']['status'] if 'auto' in out else out.get('status')
+        if status=='resource_wait' and out.get('auto',out).get('resource_stop'):
+            from monitoring import ResourceWait
+            raise ResourceWait(out.get('auto',out)['resource_stop'])
         if status=='structural_pass_complete':
             move(s,fid,'WORKSPACE','SOURCE_MAPPED')
             move(s,fid,'BRANCHING','PLAN_CHILDREN')
@@ -224,7 +264,7 @@ def handle(s,meta,workspace,root,req,providers=None):
                   'failures':[{'path':p,'error':str(e)[:500]} for p,e in sorted(failures.items())[:5]],
                   'mapped_files':detail.get('mapped_files'),'source_files':detail.get('source_files'),
                   'budget':detail.get('stop_frame') or detail.get('budget')}
-            move(s,fid,'PAUSED','MAPPING_STOPPED',reason=status,mapping_stop=stop)
+            move(s,fid,'PAUSED','MAPPING_STOPPED',reason=status,mapping_stop=stop,workflow_stop=stop)
         return response(s,fid,progress='Fresh source mapping: '+str(status),mapping=out)
     if phase=='BRANCHING':
         parent,children,signals=plan(s,meta,workspace,prompt,d['conversation_id'])
@@ -247,13 +287,21 @@ def handle(s,meta,workspace,root,req,providers=None):
         return response(s,fid)
     if phase in ('SYNTHESIS','CODING'):
         request={'prompt':prompt,'models':models,'tier':tier,'conversation_id':d['conversation_id'],**d['binding'],'child_results':d.get('child_results',[]),'orchestration_parent':parent['id']}
-        with m.scope(parent['id']):
-            if phase=='CODING':
-                from native_runtime import turn
-                out=turn(s,meta,workspace,root,request,provider=provider('coder'))
-            else:
-                from chat_runtime import answer
-                out=answer(s,meta,workspace,root,request,provider=provider('synthesis'))
+        try:
+            with m.scope(parent['id']):
+                if phase=='CODING':
+                    from native_runtime import turn
+                    out=turn(s,meta,workspace,root,request,provider=provider('coder'))
+                else:
+                    from chat_runtime import answer
+                    out=answer(s,meta,workspace,root,request,provider=provider('synthesis'))
+        except ContextBudgetExceeded as exc:
+            import review_budget
+            stop={'status':'context_budget','stage':phase,'error':str(exc),
+                  'allocation':getattr(exc,'details',None),'budget':review_budget.usage(s,sid)}
+            move(s,fid,'PAUSED','CONTEXT_STOPPED',workflow_stop=stop)
+            save(root,meta)
+            return response(s,fid)
         save(root,meta)
         action=(out['result'].get('accepted_output') or {}).get('action',{}).get('kind')
         awaiting=phase=='CODING' and action in ('edit','run_tests')

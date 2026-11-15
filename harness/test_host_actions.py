@@ -13,7 +13,7 @@ from invocation_gateway import InvocationLedger, consume_dispatch
 from paging import Budget, PageFault
 from review_role import constraint_rows
 from host_actions import execute, preview, files_at, run_tests_snapshot, execution_context, source_path, run_provenance
-from monitoring import resource_state, dashboard
+from monitoring import resource_state, dashboard, require_resources, ResourceWait
 from vscode_bridge import handle, dispatch
 
 SOURCE='''MAX_ATTEMPTS = 3
@@ -293,6 +293,34 @@ class TestProvenanceTests(unittest.TestCase):
 
 
 class HardwareTests(unittest.TestCase):
+    def test_resource_stop_retains_measurement_and_fresh_recheck(self):
+        with tempfile.TemporaryDirectory() as tmp, patch('monitoring.time.time', return_value=1001):
+            root = Path(tmp)
+            sample = {'wall_time':1000, 'thermal_state':2, 'memory_pressure_raw':1,
+                      'free_bytes':8*1024**3, 'inactive_bytes':0}
+            (root/'telemetry.json').write_text(json.dumps(sample))
+            with self.assertRaises(ResourceWait) as caught:
+                require_resources(root)
+            self.assertEqual(caught.exception.state['sample'], sample)
+            self.assertEqual(caught.exception.state['decision'], 'BRIDGE')
+            self.assertIn('OS thermal pressure:', str(caught.exception))
+            self.assertIn('memory pressure: normal', str(caught.exception))
+            self.assertIn('8.0 GiB available estimate', str(caught.exception))
+            sample.update(thermal_state=0, memory_pressure_raw=4)
+            (root/'telemetry.json').write_text(json.dumps(sample))
+            with self.assertRaises(ResourceWait) as caught:
+                require_resources(root)
+            self.assertIn('memory pressure: critical', str(caught.exception))
+            sample.update(memory_pressure_raw=1, wall_time=900)
+            (root/'telemetry.json').write_text(json.dumps(sample))
+            with self.assertRaises(ResourceWait) as caught:
+                require_resources(root)
+            self.assertFalse(caught.exception.state['available'])
+            self.assertIn('stale', str(caught.exception))
+            sample.update(wall_time=1000)
+            (root/'telemetry.json').write_text(json.dumps(sample))
+            self.assertTrue(require_resources(root)['admitted'])
+
     def test_missing_nan_and_stale_signals_do_not_mean_healthy(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);self.assertFalse(resource_state(root)['admitted'])

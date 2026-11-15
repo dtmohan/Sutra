@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.21.7
+
+- Persist resource admission failures as normal workflow pauses during routing, mapping, child reviews and synthesis/coding. Native chat shows recovery guidance instead of a retriable provider exception.
+- Record the rejected measurement or unavailable/stale telemetry reason. Explicit Resume checks fresh resources before returning to the stopped stage; pressure cannot trigger automatic retries or replenish allocation.
+- Preserve the original prompt, contract, completed child results and consumed budget across reloads and model switches. Routing recovery needs no workspace arming; workspace recovery retains the existing permission checks.
+- Add data-only conversation compatibility for 0.21.6. Keep the STP kernel and resource admission thresholds unchanged.
+
+## 0.21.6
+
+- Let the initial architecture draft and review use shares previously reserved for optional repair attempts; reduce attempts accordingly and retain the model's normal output reserve when expanded output cannot fit. Task/parent allocations, permissions and STP admission remain unchanged.
+- Save context shortages as recoverable workflow pauses with separate model-capacity and remaining-task-budget diagnostics. Resume returns to synthesis/coding, preserving context and consumed budgets; native chat receives a normal paused response instead of an exception that triggers Autopilot retries.
+- Preserve validated conversation handoffs through a policy-only review restart, including data-only conversation compatibility for 0.21.5. Old executable proposals and child results remain invalid.
+- Display the saved stop reason in Sutra Monitor. Regression checks cover exhausted allocations, optional repair fallback, reload/model-switch recovery and chat feedback.
+
 ## 0.21.5
 
 - Bind test outcome comparisons to declared test inventories, contract epochs, runtime/runner identity and limits; keep assertion verification false.

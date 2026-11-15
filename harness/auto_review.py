@@ -3,6 +3,7 @@ import hashlib,json,os,platform,re,time
 from pathlib import Path
 from context_manager import InvalidUpdate,ContextBudgetExceeded,sha,canonical
 from paging import PageFault
+from monitoring import ResourceWait
 import repository_tools as repo
 import static_analysis as analysis
 import static_runtime as runtime
@@ -169,9 +170,12 @@ def step(s,meta,workspace,root,request,provider=None):
  except budget.BudgetStop as exc:
   a['status']='budget_stopped';a['stop_frame']=exc.frame
   with s.db:s._audit('AUTO_BUDGET_STOP',{'session':meta['active'],'kernel':exc.frame})
+ except ResourceWait as exc:
+  a['status']='resource_wait';a['error']=str(exc);a['resource_stop']=exc.state
  except (InvalidUpdate,PageFault) as exc:
+  a.pop('resource_stop',None)
   a['status']='resource_wait' if 'RESOURCE_WAIT' in str(exc) else 'needs_attention';a['error']=str(exc)
- return {'result':result,'auto':dict(status(s,meta,workspace),stop_frame=a.get('stop_frame'),error=a.get('error'))}
+ return {'result':result,'auto':dict(status(s,meta,workspace),stop_frame=a.get('stop_frame'),error=a.get('error'),resource_stop=a.get('resource_stop') if a['status']=='resource_wait' else None)}
 
 def report(s,meta,workspace):
  st=status(s,meta,workspace);valid,_=current_pages(s,meta,workspace);edges=set();notes=st['notes'];diagnostics=0;calls=0

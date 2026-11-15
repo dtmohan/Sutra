@@ -86,6 +86,30 @@ class ReportReviewTests(unittest.TestCase):
         out=self.review(reviewer=reviewer)
         self.assertFalse(out['result']['admission']['admitted']);self.assertIsNone(out['report_markdown'])
 
+    def test_initial_review_uses_remaining_budget_instead_of_reserving_an_unaffordable_retry(self):
+        from model_identity import compare,unknown
+        from paging import Budget
+        out=self.review();candidate_id=out['result']['invocation_id']
+        previous=json.loads(self.s.db.execute('SELECT payload_json FROM deliveries WHERE id=(SELECT delivery_id FROM invocations WHERE id=?)',
+                                             (out['report_review']['reviewer_id'],)).fetchone()[0])
+        needed=Budget().charge(report_review.SYSTEM,dict(previous,repair={'errors':['x'*160]*2}),report_review.schema(previous))+4096+300
+        current=review_budget.usage(self.s,self.sid);limited=copy.deepcopy(current)
+        limited['limits']['tokens']=limited['used']['tokens']+needed
+        reviewer=Fake('reviewer');reviewer.context_metadata={'model_info':{'qwen.context_length':65536}}
+        separation=compare(unknown('fixture-small'),unknown('reviewer'))
+        separation.update(selection='test',requested_model='auto')
+        with patch('report_review.choose',return_value=('reviewer',separation)), \
+             patch('api_runtime.provider_for',return_value=reviewer), \
+             patch('review_budget.usage',return_value=limited):
+            result=report_review.run(self.s,self.sid,self.storage,candidate_id)
+        self.assertTrue(result['admission']['admitted'],result['admission'])
+        self.assertEqual(len(reviewer.payloads),1)
+        config=json.loads(self.s.db.execute('SELECT config_json FROM protocol_runs WHERE id=(SELECT run_id FROM invocations WHERE id=?)',
+                                           (result['invocation_id'],)).fetchone()[0])
+        self.assertEqual(config['max_calls'],1);self.assertEqual(config['max_repairs'],0)
+        self.assertEqual(reviewer.payloads[0]['constraint_echo'],previous['constraint_echo'])
+        self.assertEqual(reviewer.payloads[0]['excerpts'],previous['excerpts'])
+
     def test_strict_unknown_identity_spends_no_reviewer_call(self):
         reviewer=Fake('reviewer');before=review_budget.usage(self.s,self.sid)['used']['calls']
         out=self.review(reviewer=reviewer,require_distinct_reviewer=True)

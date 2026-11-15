@@ -17,9 +17,24 @@ def resource_state(root, now=None):
         return {'profile':'hardware-v1','available':False,'decision':None,'admitted':False,'reason':str(exc)}
 
 
+class ResourceWait(InvalidUpdate):
+    """A measured, recoverable admission stop, not a provider failure."""
+    def __init__(self, state):
+        self.state = state
+        details = [state.get('reason', 'Resource measurement unavailable')]
+        if state.get('available'):
+            details.append('OS thermal pressure: '+str(state.get('thermal_label', 'unknown')))
+            pressure = (state.get('sample') or {}).get('memory_pressure_raw')
+            details.append('memory pressure: '+{1:'normal',2:'warning',4:'critical'}.get(pressure, 'unavailable'))
+            if state.get('reclaimable_estimate_gib') is not None:
+                details.append(str(state['reclaimable_estimate_gib'])+' GiB available estimate')
+            details.append('kernel: '+str(state.get('decision')))
+        super().__init__('RESOURCE_WAIT: '+'; '.join(details))
+
+
 def require_resources(root):
     state=resource_state(root)
-    if not state['admitted']:raise InvalidUpdate('RESOURCE_WAIT: '+state['reason'])
+    if not state['admitted']:raise ResourceWait(state)
     return state
 
 

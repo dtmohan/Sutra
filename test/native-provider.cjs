@@ -271,6 +271,43 @@ function setup(saved={}){
  shouldPause=false;await paused.send('high',[{role:1,content:[new Text('continue')]}]);
  const afterPause=paused.calls.find(c=>c.op==='native_work');assert.equal(afterPause.prompt,'Fix retry');assert.equal(afterPause.tier,'high');assert.equal(afterPause.contract_hash,'contract-1');
  checks.push('mapping pauses return actionable details without a client error; original context and permission binding resume on another model');
+ const tight=setup();tight.kind('report');await tight.arm();const tightRequest=tight.deps.request;
+ tight.deps.request=async(m,t)=>{
+  const r=await tightRequest(m,t);
+  if(m.op==='orchestrate'&&r.state==='CODING')return {...r,state:'PAUSED',stop:{status:'context_budget',stage:'SYNTHESIS',error:'Review packet cannot fit: 10,350 per call; 41,403 task budget units remain.'}};
+  return r;
+ };
+ const tightReply=await tight.send();
+ assert(tightReply.some(p=>p.value?.includes('41,403 task budget units remain')));
+ assert.equal(tight.controller.status().routing.stage,'paused');
+ assert.equal(tight.controller.status().pending.stop.status,'context_budget');
+ assert(!tight.calls.some(c=>c.op==='native_work'));
+ checks.push('context allocation shortages return a saved, explained pause instead of a retriable provider exception');
+ const pressured=setup();pressured.kind('report');await pressured.arm();const pressuredRequest=pressured.deps.request;
+ pressured.deps.request=async(m,t)=>{const r=await pressuredRequest(m,t);return m.op==='orchestrate'&&r.state==='CODING'?{...r,state:'PAUSED',stop:{status:'resource_wait',resume_phase:'CODING',error:'RESOURCE_WAIT: OS thermal pressure: serious; kernel: BRIDGE'}}:r;};
+ const pressureReply=await pressured.send();
+ assert(pressureReply.some(p=>p.value?.includes('Resources: ALLOW')));assert(pressureReply.some(p=>p.value?.includes('will not automatically retry')));
+ assert.equal(pressured.controller.status().routing.stage,'paused');assert(!pressured.calls.some(c=>c.op==='native_work'));
+ checks.push('thermal/resource waits produce normal chat pauses with recovery guidance and no workspace dispatch');
+ const cooling=setup();let blockedResource=true,resourceFlow;
+ const normalCooling=cooling.deps.request;
+ cooling.deps.request=async(m,t)=>{
+  if(m.op!=='orchestrate')return normalCooling(m,t);
+  if(m.event==='pending')return resourceFlow||{state:'DONE',flow_id:null};
+  if(m.event==='start')resourceFlow={flow_id:'resource-flow',cursor:'1',state:'PAUSED',prompt:m.prompt,children:[],stop:{status:'resource_wait',resume_phase:'CLASSIFYING',error:'RESOURCE_WAIT: memory pressure: warning'}};
+  if(m.event==='resume'&&!blockedResource)resourceFlow={...resourceFlow,state:'CLASSIFYING',stop:null};
+  if(m.event==='step'&&resourceFlow.state==='CLASSIFYING'){
+   const conversation=await cooling.deps.backendRequest({...m,op:'conversation',prompt:resourceFlow.prompt},t);
+   resourceFlow={...resourceFlow,state:'DONE',conversation};
+  }
+  return structuredClone(resourceFlow);
+ };
+ let coolReply=await cooling.send('low',[{role:1,content:[new Text('Hello')]}]);
+ assert(coolReply.some(p=>p.value?.includes('Sutra paused the request')));assert(!cooling.controller.status().armed);assert.equal(cooling.calls.length,0);
+ await cooling.send('high',[{role:1,content:[new Text('continue')]}]);assert.equal(cooling.calls.length,0);
+ blockedResource=false;coolReply=await cooling.send('high',[{role:1,content:[new Text('continue')]}]);
+ assert(coolReply.some(p=>p.value?.includes('Conversational answer')));assert.equal(cooling.calls[0].prompt,'Hello');assert.equal(cooling.calls[0].tier,'high');assert(!cooling.controller.status().armed);
+ checks.push('classification resource pause resumes the original conversational prompt on another model without arming files or replaying while blocked');
  for(const approve of [false,true]){
   const upgraded=setup();upgraded.kind('report');
   const originalPrompt='Review saved workspace architecture';

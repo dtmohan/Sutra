@@ -130,6 +130,42 @@ def validate(s,sid,p,proposal):
     report.validate(p, proposal)
     return {'admission':{'admitted':True,'errors':[],'semantic_correctness_verified':False},'checks':['schema','contract','calibration_binding','fresh_source','route_commitment','citations','handoff'],'provisional':True}
 
+def fit_packet(s, sid, p, data, provider, real):
+    """Keep required context; release optional repair shares before refusing.
+
+    A report always retains a separate reviewer share. Fewer shares mean fewer
+    draft attempts, never extra task allocation or dropped user constraints.
+    """
+    structured = report.requested(p)
+    minimum = 2 if structured else 1
+    preferred = 4 if structured else 2
+    choices = [(n, True) for n in range(preferred, minimum-1, -1)] + [(minimum, False)] if real else [(None, False)]
+    for slots, expand in choices:
+        allocation = context.context_budget(provider, s, sid, slots=slots, expand_output=expand) if real else None
+        if allocation and structured:
+            allocation.update(reviewer_slots_reserved=1, repair_slots_reserved=slots-2)
+        p['memory_budget'] = vars(provider.budget).copy()
+        p['excerpt_bytes'] = max(64, min(65536, provider.budget.context_limit//3))
+        p['map_bytes'] = max(512, min(65536, provider.budget.context_limit//3))
+        while True:
+            p['excerpts'] = excerpts(data['sources'], context.query(p), p['excerpt_bytes'], data['graph'])
+            context.evidence(p, data)
+            p['facts'] = facts(data['graph'], p['sites'])
+            fmt = schema(p)
+            try:
+                p['memory'] = conversation_pages(s, p, provider.budget, True)
+                provider.budget.check(SYSTEM, dict(p, repair={'errors':['x'*140]*2}), fmt)
+                return fmt, min(3, slots-int(structured)) if real else 3
+            except ContextBudgetExceeded as exc:
+                if p['excerpt_bytes'] == 64 and p['map_bytes'] == 512:
+                    if not real: raise
+                    failure = context.ReviewContextExceeded(allocation, provider.budget, exc)
+                    break
+                p['excerpt_bytes'] = max(64, p['excerpt_bytes']*4//5)
+                p['map_bytes'] = max(512, p['map_bytes']*4//5)
+    raise failure
+
+
 def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
     sid=meta['active'];prompt=request.get('prompt','');models=request.get('models');mode=request.get('tier','auto')
     # Validate user configuration before any source operation or inference.
@@ -173,21 +209,10 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
     real=provider is None
     if real:
         from api_runtime import provider_for
-        provider=provider_for(root,choice['model'],review=True);context.context_budget(provider,s,sid,slots=4 if report.requested(p) else 2);provider.keep_alive=0
-    p['memory_budget']=vars(provider.budget).copy()
-    p['excerpt_bytes']=max(64,min(65536,provider.budget.context_limit//3))
-    p['map_bytes']=max(512,min(65536,provider.budget.context_limit//3))
-    while True:
-        p['excerpts']=excerpts(data['sources'],context.query(p),p['excerpt_bytes'],data['graph'])
-        context.evidence(p,data);p['facts']=facts(graph,p['sites']);fmt=schema(p)
-        try:
-            p['memory']=conversation_pages(s,p,provider.budget,True)
-            provider.budget.check(SYSTEM,dict(p,repair={'errors':['x'*140]*2}),fmt);break
-        except ContextBudgetExceeded:
-            if p['excerpt_bytes']==64 and p['map_bytes']==512:raise
-            p['excerpt_bytes']=max(64,p['excerpt_bytes']*4//5);p['map_bytes']=max(512,p['map_bytes']*4//5)
-    run=s.begin_run(sid,prompt,[],None,max_calls=3,max_repairs=2)
-    for attempt in range(3):
+        provider=provider_for(root,choice['model'],review=True);provider.keep_alive=0
+    fmt, attempts = fit_packet(s, sid, p, data, provider, real)
+    run=s.begin_run(sid,prompt,[],None,max_calls=attempts,max_repairs=attempts-1)
+    for attempt in range(attempts):
         s.reserve(run,'ATTEMPT',{'attempt':attempt})
         if real:
             from monitoring import require_resources
@@ -199,7 +224,7 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
             s.event(run,'ALLOW',{'reason':'chat_review_admitted','invocation_id':out['invocation_id']})
             break
         s.event(run,'NACK',{'errors':out['admission']['errors']})
-        if attempt==2 or out.get('blocked'):s.event(run,'FIN',{'reason':'chat_repair_exhausted'});break
+        if attempt==attempts-1 or out.get('blocked'):s.event(run,'FIN',{'reason':'chat_repair_exhausted'});break
         try:request_check(s,sid,p)
         except (InvalidUpdate,PageFault) as exc:
             s.event(run,'FIN',{'reason':'chat_context_changed','error':str(exc)});break

@@ -37,6 +37,10 @@
 - Temperature sensor mapping is verified for the original Apple Silicon test
   machine. Celsius values are advisory; resource admission uses OS pressure and
   memory measurements.
+- A resource pause needs explicit Resume after resources recover; Sutra does not
+  automatically retry it or refund consumed task allocation. If pressure blocks
+  the independent reviewer after a draft was generated, that report is withheld;
+  the unreviewed draft is not a resumable or publishable checkpoint.
 - Private repository access and extension installation do not require or imply
   publication to the VS Code Marketplace.
 
@@ -62,3 +66,5 @@
   thresholds are uncalibrated, never kernel inputs. Backend request errors still
   obey normal transport and repair rules. Only numeric mode omits token text
   from this diagnostic log; existing call traces have their own retention policy.
+
+- A long-lived workspace task shares its conservative allocation across requests, model switches and retries. Model context capacity and remaining task budget are different limits. A saved context pause does not replenish either limit; optional repair shares yield first, but a report can still require a larger explicitly authorized task allocation.

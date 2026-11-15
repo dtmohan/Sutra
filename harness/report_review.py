@@ -7,7 +7,7 @@ agreement nor a quote proves semantic correctness. The STP kernel is unchanged.
 import copy
 import json
 import uuid
-from context_manager import InvalidUpdate, canonical, sha
+from context_manager import InvalidUpdate, ContextBudgetExceeded, canonical, sha
 from paging import PageFault
 from protocol import obj, arr
 from review_role import constraint_rows
@@ -121,7 +121,6 @@ def run(s, sid, root, candidate_id, provider=None, requested='auto', strict=Fals
         enforce(separation, strict)
         provider = provider_for(root, name, review=True)
         provider.expected_identity = separation['reviewer_identity']
-        context_budget(provider, s, sid)
         provider.keep_alive = 0
     else:
         from local_model import LocalModel
@@ -138,9 +137,22 @@ def run(s, sid, root, candidate_id, provider=None, requested='auto', strict=Fals
              candidate_id=candidate_id, candidate_hash=sha(canonical(draft)), claims=claims(draft['report'], source['excerpts']),
              reviewer_selection=separation, require_distinct_reviewer=strict)
     fmt = schema(p)
-    provider.budget.check(SYSTEM, dict(p, repair={'errors': ['x' * 160] * 2}), fmt)
-    run_id = s.begin_run(sid, p['request'], [], None, max_calls=2, max_repairs=1)
-    for attempt in range(2):
+    attempts = 2
+    if real:
+        allocation = context_budget(provider, s, sid, slots=attempts)
+    try:
+        provider.budget.check(SYSTEM, dict(p, repair={'errors': ['x' * 160] * 2}), fmt)
+    except ContextBudgetExceeded:
+        if not real: raise
+        attempts = 1
+        allocation = context_budget(provider, s, sid, slots=attempts, expand_output=False)
+        try:
+            provider.budget.check(SYSTEM, dict(p, repair={'errors': ['x' * 160] * 2}), fmt)
+        except ContextBudgetExceeded as exc:
+            from review_context import ReviewContextExceeded
+            raise ReviewContextExceeded(allocation, provider.budget, exc) from exc
+    run_id = s.begin_run(sid, p['request'], [], None, max_calls=attempts, max_repairs=attempts-1)
+    for attempt in range(attempts):
         s.reserve(run_id, 'ATTEMPT', {'attempt': attempt})
         delivery = s.prepare_delivery(sid, p, provider.budget.check(SYSTEM, p, fmt))
         result = InvocationGateway(s.path, run_id, provider).invoke('report_reviewer', uuid.uuid4().hex, SYSTEM, p, fmt, delivery)
@@ -148,7 +160,7 @@ def run(s, sid, root, candidate_id, provider=None, requested='auto', strict=Fals
             s.event(run_id, 'ALLOW', {'reason': 'architecture_review_recorded', 'invocation_id': result['invocation_id']})
             return result
         s.event(run_id, 'NACK', {'errors': result['admission']['errors']})
-        if attempt or result.get('blocked'):
+        if attempt==attempts-1 or result.get('blocked'):
             s.event(run_id, 'FIN', {'reason': 'report_review_repair_exhausted'})
             return result
         request_check(s, sid, p)
