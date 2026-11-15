@@ -1,0 +1,79 @@
+{
+  "format": "mlx-footprint-envelope-v1",
+  "created_at": 1794774710.496542,
+  "identity": {
+    "model": "local-assistant:latest",
+    "manifest_digest": "e5403b67f03bf9a90e33c6ec929ae1fa4d709199bcf6a4925d44bcf433a0d88f",
+    "backend": "mlx",
+    "metadata_sha256": "bf0d060aeedbcdbc4266b8a0e2fab9807f7bcd0f48e391d07fabcf1d8dac35a7",
+    "environment": {
+      "os_build": "26B8132",
+      "hardware_model": "Mac17,13",
+      "physical_bytes": 68719476736,
+      "cpu": "Apple M5 Pro",
+      "machine": "arm64",
+      "ollama_version": "0.40.16",
+      "executable_sha256": "5c3cf935be8d896433a5caefefc8857bc2bb9e32c77c35e7c3d38b7c5919822f",
+      "mlx_libraries": {
+        "mlx_metal_v3/libmlx.dylib": "aaba47a7e672fd25c82719aa408f4dcff87f91fcc189d5d5643cb585b02079b8",
+        "mlx_metal_v3/libmlxc.dylib": "29e9b7e6651cab2db01714a218da39dced774b9902bb17bc99b2259f4cf0b6b8",
+        "mlx_metal_v3/libollama_xgrammar.dylib": "f341a6d2c322c401a774a3a133a7e7c6118eb3b4a93ec04d3775578ef096be02",
+        "mlx_metal_v3/mlx.metallib": "0b8b2751e711343fce2abd16606a8e5caea8c413505159103cdd18595070ec93",
+        "mlx_metal_v4/libjaccl.dylib": "0c8172d83ebe9f1033b57d99d5b9f5f4331ff76371f8f48e0940485d1af3bb5c",
+        "mlx_metal_v4/libmlx.dylib": "9af11f7e223d17c5dbe7553ed5d632c9b210367105fd756de89b68053a9c06fa",
+        "mlx_metal_v4/libmlxc.dylib": "edf644dc9a9d4686075a721e7f0d90e9a5302970275e0ec667e6138ca2198ff7",
+        "mlx_metal_v4/libollama_xgrammar.dylib": "c56ac550df09c3f502ad750144db42ffc793679561d529a864b3071b7ad06c90",
+        "mlx_metal_v4/mlx.metallib": "9a95574a08d6383e621fcef301105984bf9c42b22b537b2ebef6a43b7053873d"
+      },
+      "server_epoch": {
+        "boot": "{ sec = 1794424920, usec = 172027 } Wed Nov 11 11:22:00 2026",
+        "pid": 4868,
+        "start": 75204726072
+      }
+    }
+  },
+  "method": "cold_text_prefill_process_tree_v1",
+  "backend_peak_verified": false,
+  "margin_fraction": 0.25,
+  "margin_min_bytes": 1073741824,
+  "evidence_sha256": "f183db542040e6017411c7fe3613ce66bd3c1b9528b8195e920b1f31523a456b",
+  "points": [
+    {
+      "covered_tokens": 4389,
+      "observed_increment_bytes": 22383081656,
+      "repeats": 2,
+      "requested_contexts": [
+        6144,
+        6144
+      ]
+    },
+    {
+      "covered_tokens": 8385,
+      "observed_increment_bytes": 22988798040,
+      "repeats": 2,
+      "requested_contexts": [
+        10240,
+        10240
+      ]
+    },
+    {
+      "covered_tokens": 16379,
+      "observed_increment_bytes": 24852281456,
+      "repeats": 2,
+      "requested_contexts": [
+        18432,
+        18432
+      ]
+    },
+    {
+      "covered_tokens": 32384,
+      "observed_increment_bytes": 26827553000,
+      "repeats": 2,
+      "requested_contexts": [
+        33792,
+        33792
+      ]
+    }
+  ],
+  "sha256": "559945328c4c1b0152067136ad153a01a5d1768ed130bea9c397c1f3795ce294"
+}

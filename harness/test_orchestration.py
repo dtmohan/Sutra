@@ -314,6 +314,37 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(out['state'],'SYNTHESIS')
         self.assertTrue(self.step(out)['data']['result']['admission']['admitted'])
 
+    def test_memory_release_then_model_switch_preserves_child_context_grants_and_spend(self):
+        import os
+        import runtime_memory as rm
+        from monitoring import ResourceWait
+        out=self.children();out=self.step(out);sid=self.meta['active']
+        first=out['children'][0]['id'];parent=m.node(self.s,first)['parent_id']
+        contract=self.s.pinned(sid);used=m.spent(self.s,parent)
+        row={'name':'large','digest':'identity','size':10*rm.GIB,'context_length':65536}
+        blocked={'available':False,'admitted':False,'reason':'memory pressure','decision':'BRIDGE'}
+        healthy={'available':True,'admitted':True,'decision':'ALLOW','sample':{'wall_time':100}}
+        with patch.dict(os.environ,{'SUTRA_RUNTIME_DIR':str(self.root/'runtime'),'SUTRA_MEMORY_OWNERSHIP':'exclusive'}),patch('monitoring.resource_state',return_value=blocked),patch.object(rm,'stable_resources',return_value=healthy),patch.object(rm,'running',side_effect=[[row],[],[]]),patch.object(rm,'api') as api:
+            rm.write_state({'active':None,'owned':{'name':'large','digest':'identity','completed_at':1}})
+            with patch('subagent_runtime.runtime.build_partition',side_effect=ResourceWait(blocked)):paused=self.step(out)
+            self.assertEqual(paused['state'],'PAUSED');self.assertTrue(paused['stop']['recovery']['admitted'])
+            self.assertEqual(paused['stop']['recovery']['action'],'released_owned_model')
+            self.assertEqual(m.spent(self.s,parent),used)
+            self.s.close();self.s=InvocationLedger(self.root/'state.sqlite');self.tier='high'
+            with self.assertRaisesRegex(InvalidUpdate,'user-armed'):self.step(paused,event='resume',armed=False)
+            with patch('monitoring.require_resources',return_value=healthy):resumed=self.step(paused,event='resume')
+            self.assertEqual(m.spent(self.s,parent),used)
+            api.assert_called_once()
+        done=self.until('DONE',resumed)
+        self.assertTrue(done['data']['result']['admission']['admitted'])
+        self.assertEqual(contract,self.s.pinned(sid))
+        self.assertEqual(len([e for e in m.events(self.s,first) if e['kind']=='RESULT']),1)
+        self.assertGreater(m.spent(self.s,parent)['calls'],used['calls'])
+        children=[p for stage,p in self.models if stage=='subagent']
+        self.assertGreaterEqual(len({p.model for p in children}),2)
+        self.assertIn('CED724',canonical(children[-1].payloads))
+        self.assertEqual(self.s.db.execute("SELECT COUNT(*) FROM page_audit WHERE event='MEMORY_RELEASE_PLANNED'").fetchone()[0],1)
+
     def test_mapping_failure_details_survive_reload_and_do_not_dispatch_children(self):
         out=self.until('MAPPING');sid=self.meta['active'];used=review_budget.usage(self.s,sid)['used']
         failure={'auto':{'status':'needs_attention','mapped_files':2,'source_files':9,
@@ -326,6 +357,32 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(saved['stop'],out['stop']);self.assertFalse(saved['children'])
         self.assertEqual(review_budget.usage(self.s,sid)['used'],used)
         self.tier='high';resumed=self.step(saved,event='resume');self.assertIsNone(resumed['stop'])
+
+    def test_calibrated_allocation_pause_then_model_switch_preserves_parent(self):
+        import runtime_memory as rm
+        from test_memory_profiles import profile
+        from monitoring import ResourceWait
+        out=self.children();out=self.step(out);sid=self.meta['active']
+        first=out['children'][0]['id'];parent=m.node(self.s,first)['parent_id']
+        spent=m.spent(self.s,parent);contract=self.s.pinned(sid)
+        hardware={'sample':{'free_bytes':20*rm.GIB,'inactive_bytes':0}}
+        plan=rm.estimate('large',{},8*rm.GIB,[],32768,hardware,profile())
+        self.assertEqual(plan['decision'],'BRIDGE')
+        def stopped(*args,**kwargs):rm.denied('Calibrated memory allocation does not fit',plan=plan)
+        with patch('subagent_runtime.runtime.build_partition',side_effect=stopped):paused=self.step(out)
+        self.assertEqual(paused['state'],'PAUSED');self.assertEqual(m.spent(self.s,parent),spent)
+        self.assertEqual(paused['stop']['measurement']['calibration']['profile_sha256'],plan['calibration']['profile_sha256'])
+        self.s.close();self.s=InvocationLedger(self.root/'state.sqlite');self.tier='high'
+        with self.assertRaisesRegex(InvalidUpdate,'user-armed'):self.step(paused,event='resume',armed=False)
+        with patch('monitoring.resource_state',return_value={'admitted':True}):ready=self.step(paused,event='resume')
+        self.assertEqual(m.spent(self.s,parent),spent)
+        done=self.until('DONE',ready)
+        self.assertTrue(done['data']['result']['admission']['admitted']);self.assertEqual(self.s.pinned(sid),contract)
+        self.assertEqual(len([e for e in m.events(self.s,first) if e['kind']=='RESULT']),1)
+        self.assertGreater(m.spent(self.s,parent)['calls'],spent['calls'])
+        children=[p for stage,p in self.models if stage=='subagent']
+        self.assertGreaterEqual(len({p.model for p in children}),2)
+        self.assertIn('CED724',canonical(children[-1].payloads))
 
     def test_committed_child_receipt_recovers_without_duplicate_inference(self):
         out=self.children();cid=out['children'][0]['id']

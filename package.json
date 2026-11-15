@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Local model orchestration with portable context, governed tools, diagrams and token visibility.",
-  "version": "0.21.7",
+  "version": "0.23.0",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -234,6 +234,16 @@
           "default": "off",
           "scope": "machine",
           "description": "Optional observe-only token-choice diagnostics. Numbers stores numeric summaries; tokens additionally saves a few flagged token strings. Never grants permissions or changes kernel decisions. Backend support varies; not a correctness score."
+        },
+        "karma.memoryOwnership": {
+          "type": "string",
+          "enum": [
+            "shared",
+            "exclusive"
+          ],
+          "default": "shared",
+          "scope": "application",
+          "description": "Ollama ownership for runtime memory recovery. Shared never explicitly unloads a model. Exclusive authorizes bounded release of a matching idle model after a completed Sutra call; choose only when no other app or extension uses this Ollama server."
         }
       }
     },

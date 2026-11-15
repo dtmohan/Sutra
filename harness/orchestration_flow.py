@@ -120,8 +120,21 @@ def handle(s,meta,workspace,root,req,providers=None):
         if target not in ('CLASSIFYING','MAPPING','CHILDREN','SYNTHESIS','CODING'):raise
         stop={'status':'resource_wait','stage':target,'resume_phase':target,'error':str(exc),
               'measurement':exc.state,'automatic_retry':False}
+        # Bounded host recovery never retries inference or changes task grants.
+        # Persist the original stop before any optional idle-model release.
         move(s,fid,'PAUSED','RESOURCE_STOPPED',workflow_stop=stop)
         save(root,meta)
+        try:
+            from runtime_memory import recover
+            def audit(kind,value):
+                with s.db:s._audit(kind,dict(flow_id=fid,**value))
+            recovery_result=exc.state.get('runtime_recovery') or recover(root,audit)
+            if recovery_result:
+                stop['recovery']=recovery_result
+                move(s,fid,'PAUSED','RESOURCE_RECOVERY_OBSERVED',workflow_stop=stop)
+        except ResourceWait as recovery_error:
+            stop['recovery']={'admitted':False,'error':str(recovery_error),'automatic_inference':False}
+            move(s,fid,'PAUSED','RESOURCE_RECOVERY_OBSERVED',workflow_stop=stop)
         return response(s,fid)
 
 
@@ -202,6 +215,13 @@ def _handle(s,meta,workspace,root,req,providers=None):
                 raise InvalidUpdate('Workflow task, calibration or permissions changed')
         if last['kind']=='RESOURCE_STOPPED':
             from monitoring import require_resources
+            from runtime_memory import recover
+            def audit(kind,value):
+                with s.db:s._audit(kind,dict(flow_id=fid,**value))
+            recovered=recover(root,audit)
+            if recovered and not recovered['admitted']:
+                from monitoring import ResourceWait
+                raise ResourceWait(dict(recovered['after'],runtime_recovery=recovered))
             require_resources(root)
         move(s,fid,target,'RESUME_REQUESTED',workflow_stop=None,reason='User resumed with existing contract and allocation')
         return response(s,fid)

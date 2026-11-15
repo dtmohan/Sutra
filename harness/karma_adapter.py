@@ -65,6 +65,14 @@ class KarmaAdapter:
         result['temperature_status']='available' if result['temperatures']['available'] else 'unavailable'
         if result['temperatures']['available']:result['temperature_reason']='CPU/GPU values are measured AppleSMC sensor maxima. OS thermal pressure is shown separately.'
         return result
+    def memory_allocation(self,incremental_bytes,available_bytes,headroom_bytes):
+        for name,value in (('incremental',incremental_bytes),('available',available_bytes),('headroom',headroom_bytes)):
+            measurement(value,name,nonnegative=True)
+        usable=max(0,available_bytes-headroom_bytes)
+        omega=self.boundary.k*incremental_bytes/max(1,usable)
+        if not usable:omega=max(omega,2*self.boundary.k)
+        return dict(self.frame('runtime-memory-v1',omega,0.),available_bytes=available_bytes,
+                    system_reserve_bytes=headroom_bytes,usable_bytes=usable)
     def uncertain(self,store,session,profile_ref,sample):
         from calibration import evaluate
         return evaluate(store,session,self.name,profile_ref,sample)

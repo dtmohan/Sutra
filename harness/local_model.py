@@ -19,7 +19,7 @@ class LocalModel:
             self.health.phase=call_id
         body={'model':self.model,'messages':self.messages(system,payload),
               'stream':True,'think':self.thinking,'format':schema,'keep_alive':getattr(self,'keep_alive','5m'),
-              'options':{'num_ctx':self.budget.context_limit,'num_predict':self.budget.response_reserve,'temperature':0,'seed':42}}
+              'options':{'num_ctx':getattr(self,'runtime_context_tokens',self.budget.context_limit),'num_predict':self.budget.response_reserve,'temperature':0,'seed':42}}
         sensor=None
         try:
             from logit_sensor import Sensor
@@ -62,13 +62,14 @@ class LocalModel:
                     except Exception:pass
                 if activity and thought: activity.thinking(thought)
                 if chunk.get('done'):
+                    self.runtime_completed=True
                     response=dict(chunk); response.pop('logprobs',None)
                     response['message']={'role':'assistant','content':''.join(content),'thinking':''.join(reasoning)}
                     record['response']=response
                     break
             if response is None: raise RuntimeError('Incomplete generation: stream ended without final usage')
             if not response.get('done') or response.get('done_reason')=='length': raise RuntimeError('Incomplete generation')
-            if response.get('prompt_eval_count',0)+self.budget.response_reserve>self.budget.context_limit:
+            if response.get('prompt_eval_count',0)+self.budget.response_reserve>body['options']['num_ctx']:
                 raise RuntimeError('Actual prompt exceeds admitted context budget')
             answer=json.loads(response['message']['content']); record['answer']=answer; record['ok']=True
         except Exception as exc:

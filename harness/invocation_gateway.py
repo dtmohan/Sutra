@@ -79,8 +79,12 @@ class InvocationLedger(GovernedContext):
             else:
                 if payload['contract']['contract_hash'] != config['contract_hash']:
                     raise Conflict('Invocation contract changed')
-                if role in ('reviewer','coder','architect','api_mapper','api_reviewer','static_explainer','chat_reviewer','conversation','subagent','report_reviewer'):
-                    if role=='report_reviewer':
+                if role in ('memory_probe','reviewer','coder','architect','api_mapper','api_reviewer','static_explainer','chat_reviewer','conversation','subagent','report_reviewer'):
+                    if role=='memory_probe':
+                        from memory_probe import check
+                        check(self,session,payload)
+                        if payload['model']!=model:raise InvalidUpdate('Memory probe model changed')
+                    elif role=='report_reviewer':
                         from report_review import request_check
                         request_check(self,session,payload)
                         expected=payload['reviewer_selection']['reviewer_identity']
@@ -273,6 +277,16 @@ class InvocationGateway:
         self.db, self.run_id, self.provider = db, run_id, provider
 
     def invoke(self, role, call_id, system, payload, schema, delivery_id):
+        from local_model import LocalModel
+        from pathlib import Path
+        if isinstance(self.provider, LocalModel):
+            from runtime_memory import dispatch
+            with dispatch(self.provider,Path(self.db).parent,call_id,system,payload,schema) as plan:
+                self.provider.memory_plan=plan
+                return self._invoke(role,call_id,system,payload,schema,delivery_id)
+        return self._invoke(role,call_id,system,payload,schema,delivery_id)
+
+    def _invoke(self, role, call_id, system, payload, schema, delivery_id):
         from lifecycle import timeout
         timeout(150)
         from storage_policy import require_space
@@ -287,6 +301,7 @@ class InvocationGateway:
             from local_model import LocalModel
             from monitoring import require_resources
             resource=require_resources(Path(self.db).parent) if isinstance(self.provider,LocalModel) else {'profile':'injected-test-provider'}
+            if getattr(self.provider,'memory_plan',None):resource=dict(resource,runtime_memory=self.provider.memory_plan)
             from model_identity import observe, unknown
             identity=observe(name) if isinstance(self.provider,LocalModel) else getattr(self.provider,'model_identity',unknown(name))
             expected=getattr(self.provider,'expected_identity',None)

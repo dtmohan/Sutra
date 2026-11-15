@@ -32,6 +32,7 @@ function activate(context) {
   }
   const processes = new Set();
   let dashboardWorker;
+  function runtimeEnvironment(){return {SUTRA_RUNTIME_DIR:path.join(context.globalStorageUri.fsPath,"runtime-memory"),SUTRA_MEMORY_OWNERSHIP:vscode.workspace.getConfiguration("karma").get("memoryOwnership","shared")};}
   const workspace = () => {
     if (!vscode.workspace.isTrusted) throw new Error('Sutra requires a trusted workspace.');
     const folder = vscode.workspace.workspaceFolders?.[0];
@@ -79,7 +80,7 @@ function activate(context) {
     if(!dashboardWorker){
       const config=vscode.workspace.getConfiguration('karma'),python=config.get('pythonPath','')||(process.platform==='win32'?'python':'python3');
       const child=spawn(python,['-B',path.join(context.extensionPath,'harness','vscode_bridge.py'),'--workspace',cwd,'--storage',directory,'--dashboard-stream'],
-        {cwd,stdio:['pipe','pipe','pipe'],env:{...process.env,KARMA_STORAGE_LIMIT_MIB:String(config.get('storageLimitMiB',512))}});
+        {cwd,stdio:['pipe','pipe','pipe'],env:{...process.env,...runtimeEnvironment(),KARMA_STORAGE_LIMIT_MIB:String(config.get('storageLimitMiB',512))}});
       const worker={child,directory,buffer:'',pending:null};dashboardWorker=worker;processes.add(child);
       const fail=error=>{if(worker.pending){clearTimeout(worker.pending.timer);worker.pending.reject(error);worker.pending=null;}if(dashboardWorker===worker)dashboardWorker=undefined;};
       child.on('error',fail);child.on('close',()=>{processes.delete(child);fail(new Error('Dashboard worker stopped; the next refresh will restart it.'));});
@@ -124,7 +125,7 @@ function activate(context) {
       return await new Promise((resolve,reject) => {
         const python = vscode.workspace.getConfiguration('karma').get('pythonPath','')||(process.platform==='win32'?'python':'python3');
         const child = spawn(python,['-B',path.join(context.extensionPath,'harness','vscode_bridge.py'),
-          '--workspace',cwd,'--storage',stateDir],{cwd,stdio:['pipe','pipe','pipe'],env:{...process.env,KARMA_STORAGE_LIMIT_MIB:String(vscode.workspace.getConfiguration('karma').get('storageLimitMiB',512)),SUTRA_LOGIT_SENSOR:({'off':'','numbers':'1','tokens':'tokens'})[vscode.workspace.getConfiguration('karma').get('logitSensor','off')]||'',SUTRA_ACTIVITY:"1",SUTRA_THINKING:vscode.workspace.getConfiguration('karma').get('thinking','off'),KARMA_NODE:process.execPath,KARMA_TYPESCRIPT:path.join(context.extensionPath,'vendor','typescript','typescript.js')}});
+          '--workspace',cwd,'--storage',stateDir],{cwd,stdio:['pipe','pipe','pipe'],env:{...process.env,...runtimeEnvironment(),KARMA_STORAGE_LIMIT_MIB:String(vscode.workspace.getConfiguration('karma').get('storageLimitMiB',512)),SUTRA_LOGIT_SENSOR:({'off':'','numbers':'1','tokens':'tokens'})[vscode.workspace.getConfiguration('karma').get('logitSensor','off')]||'',SUTRA_ACTIVITY:"1",SUTRA_THINKING:vscode.workspace.getConfiguration('karma').get('thinking','off'),KARMA_NODE:process.execPath,KARMA_TYPESCRIPT:path.join(context.extensionPath,'vendor','typescript','typescript.js')}});
         processes.add(child); let stdout='',stderr='';
         const events=require('./model_activity').decoder(e=>{usage?.activity(e);onActivity?.(e);},s=>{stderr=(stderr+s).slice(-10000);});
         let stopReason,killTimer;const cancel=reason=>{if(stopReason)return;stopReason=reason;child.kill('SIGTERM');killTimer=setTimeout(()=>child.kill('SIGKILL'),10000);};
@@ -172,7 +173,7 @@ function activate(context) {
   function publishSettings(){
     nativeController?.publish();
     panel?.webview.postMessage({type:'tier-settings',models:modelSettings(),catalog:modelCatalog});
-    const config=vscode.workspace.getConfiguration('karma');panel?.webview.postMessage({type:'runtime-settings',settings:{storageLimitMiB:config.get('storageLimitMiB',512),pythonPath:config.get('pythonPath',''),thinking:config.get('thinking','off'),logitSensor:config.get('logitSensor','off')}});
+    const config=vscode.workspace.getConfiguration('karma');panel?.webview.postMessage({type:'runtime-settings',settings:{storageLimitMiB:config.get('storageLimitMiB',512),pythonPath:config.get('pythonPath',''),thinking:config.get('thinking','off'),logitSensor:config.get('logitSensor','off'),memoryOwnership:config.get('memoryOwnership','shared')}});
   }
   async function discoverModels(token,internal=false){
     let catalog;try{catalog=await request({op:'models'},token,internal);}catch(error){modelCatalog={models:[],suggested_tiers:{},error:'Cannot discover local models. Start Ollama, then choose Retry model discovery. '+error.message};publishSettings();throw new Error(modelCatalog.error);}
@@ -353,8 +354,13 @@ function activate(context) {
         if(message.op==='save_runtime_settings'){
           if(busy||sequence)throw new Error('Wait for the current turn before changing runtime settings.');
           const s=message.settings;
-          if(!s||!['pythonPath,storageLimitMiB,thinking','logitSensor,pythonPath,storageLimitMiB,thinking'].includes(Object.keys(s).sort().join(','))||('logitSensor' in s&&!['off','numbers','tokens'].includes(s.logitSensor))||!Number.isInteger(s.storageLimitMiB)||s.storageLimitMiB<64||s.storageLimitMiB>8192||!['off','on','model-default'].includes(s.thinking)||typeof s.pythonPath!=='string'||s.pythonPath.length>1024||/[\r\n\0]/.test(s.pythonPath))throw new Error('Use a history allocation of 64–8192 MiB and a single Python executable path.');
+          if(!s||Object.keys(s).some(k=>!['pythonPath','storageLimitMiB','thinking','logitSensor','memoryOwnership'].includes(k))||('memoryOwnership' in s&&!['shared','exclusive'].includes(s.memoryOwnership))||('logitSensor' in s&&!['off','numbers','tokens'].includes(s.logitSensor))||!Number.isInteger(s.storageLimitMiB)||s.storageLimitMiB<64||s.storageLimitMiB>8192||!['off','on','model-default'].includes(s.thinking)||typeof s.pythonPath!=='string'||s.pythonPath.length>1024||/[\r\n\0]/.test(s.pythonPath))throw new Error('Use a history allocation of 64–8192 MiB and a single Python executable path.');
           const config=vscode.workspace.getConfiguration('karma');
+          if(s.memoryOwnership==='exclusive'&&config.get('memoryOwnership','shared')!=='exclusive'){
+            const approved=await vscode.window.showWarningMessage('Is local Ollama dedicated to Sutra?',{modal:true,detail:'This permits one explicit unload of a matching idle model after a completed Sutra call during resource recovery. Other clients using the same Ollama server could be interrupted. Keep Shared when using Ollama from other extensions or apps.'},'Use exclusively for Sutra');
+            if(approved!=='Use exclusively for Sutra')return;
+          }
+          if('memoryOwnership' in s)await config.update('memoryOwnership',s.memoryOwnership,vscode.ConfigurationTarget.Global);
           await config.update('storageLimitMiB',s.storageLimitMiB,vscode.ConfigurationTarget.Global);
           await config.update('pythonPath',s.pythonPath.trim(),vscode.ConfigurationTarget.Global);
           await config.update('thinking',s.thinking,vscode.ConfigurationTarget.Global);

@@ -1,0 +1,360 @@
+"""Host-owned runtime allocation and bounded recovery; no task-memory mutation.
+
+The shared-server default never sends an explicit unload. Exclusive ownership
+is a user setting, not something /api/ps can establish. Estimates are planning
+signals, not a proof of backend peak RAM or semantic sufficiency.
+"""
+import contextlib
+import http.client
+import json
+import math
+import os
+from pathlib import Path
+import time
+
+from context_manager import InvalidUpdate, canonical
+from karma_adapter import KarmaAdapter
+from platform_support import lock_file
+
+PROFILE = 'runtime-memory-v1'
+GIB = 1024 ** 3
+HEADROOM = 4 * GIB
+MAX_RECOVERY_SECONDS = 3
+
+
+def enabled():
+    return bool(os.environ.get('SUTRA_RUNTIME_DIR'))
+
+
+def ownership():
+    # Unknown settings never authorize unloading on a shared server.
+    return 'exclusive' if os.environ.get('SUTRA_MEMORY_OWNERSHIP') == 'exclusive' else 'shared'
+
+
+def directory():
+    path = Path(os.environ['SUTRA_RUNTIME_DIR']).resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def api(path, body=None):
+    from lifecycle import timeout
+    conn = http.client.HTTPConnection('127.0.0.1', 11434, timeout=timeout(2))
+    try:
+        conn.request('POST' if body is not None else 'GET', path,
+                     None if body is None else canonical(body), {'Content-Type':'application/json'})
+        response = conn.getresponse()
+        raw = response.read(1024 * 1024 + 1)
+        if response.status != 200 or len(raw) > 1024 * 1024:
+            raise InvalidUpdate('Ollama memory inventory is unavailable')
+        return json.loads(raw)
+    except (OSError, ValueError, http.client.HTTPException, InvalidUpdate) as exc:
+        denied('Ollama memory inventory or release is unavailable: '+str(exc)[:160])
+    finally:
+        conn.close()
+
+
+def running():
+    response=api('/api/ps')
+    result = response.get('models') if isinstance(response,dict) else None
+    if not isinstance(result, list) or len(result) > 100:
+        denied('Invalid Ollama memory inventory')
+    rows = []
+    for r in result:
+        if not isinstance(r, dict) or not isinstance(r.get('name'), str) or not isinstance(r.get('digest'), str):
+            denied('Model memory identity unavailable')
+        rows.append({k:r.get(k) for k in ('name','digest','size','size_vram','context_length','runner','expires_at')})
+    return rows
+
+
+def read_state():
+    try:
+        p = directory() / 'state.json'
+        if p.stat().st_size > 1024 * 1024:
+            return {}
+        value=json.loads(p.read_text())
+        return value if isinstance(value,dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_state(data):
+    data = dict(data, profile=PROFILE, ownership=ownership(), updated_at=time.time())
+    p = directory() / 'state.json'
+    temp = p.with_suffix('.tmp')
+    temp.write_text(canonical(data)); temp.replace(p)
+
+
+def note(data, event, **fields):
+    data.setdefault('events', []).append(dict(event=event, at=time.time(), **fields))
+    data['events'] = data['events'][-24:]
+    write_state(data)
+
+
+def denied(reason, **extra):
+    from monitoring import ResourceWait
+    state = extra.get('plan') or KarmaAdapter().frame(PROFILE, 2 * KarmaAdapter().boundary.k, 0.)
+    raise ResourceWait(dict(state, available=False, admitted=False, reason=reason, runtime=extra))
+
+
+@contextlib.contextmanager
+def lease():
+    manager = lock_file(directory() / 'ollama-11434.lock')
+    try:
+        manager.__enter__()
+    except InvalidUpdate:
+        denied('Another Sutra call or recovery owns the local model slot; resume after it finishes.', kind='busy')
+    try:
+        yield
+    finally:
+        manager.__exit__(None, None, None)
+
+
+def positive(value):
+    return type(value) is int and value > 0
+
+
+def kv_bytes_per_token(metadata):
+    """Conventional attention estimate only; hybrid/MLX layouts remain unknown."""
+    info = metadata.get('model_info') or {}
+    arch = info.get('general.architecture', '')
+    # Hybrid/recurrent architectures and non-GGUF backends need measured profiles.
+    if (metadata.get('details') or {}).get('format') != 'gguf' or arch not in ('llama','qwen2','qwen3','gemma','gemma2'):
+        return None
+    values = [info.get(arch + suffix) for suffix in
+              ('.block_count','.attention.head_count_kv','.embedding_length','.attention.head_count')]
+    if not all(positive(v) for v in values):
+        return None
+    layers, kv_heads, embedding, heads = values
+    if embedding % heads:
+        return None
+    key = info.get(arch+'.attention.key_length', embedding // heads)
+    value = info.get(arch+'.attention.value_length', embedding // heads)
+    if not positive(key) or not positive(value):
+        return None
+    # Two bytes per K/V element; backend workspace and concurrency are separate.
+    return layers * kv_heads * (key + value) * 2
+
+
+def estimate(model, metadata, weights, models, context_tokens, hardware, calibration=None):
+    current = next((r for r in models if r['name'] == model), None)
+    kv = kv_bytes_per_token(metadata)
+    resident_context = current.get('context_length') if current else 0
+    resident_context = resident_context if positive(resident_context) else 0
+    incremental = (0 if current else weights) + (kv * max(0, context_tokens-resident_context) if kv else 0)
+    calibrated=None
+    if calibration:
+        from memory_profiles import estimate as calibrated_estimate
+        calibrated=calibrated_estimate(calibration,context_tokens,weights)
+        if calibrated is None:
+            denied('Requested context exceeds measured MLX calibration coverage; re-page or recalibrate.')
+        # A cold footprint includes loading, caches and working buffers. Resident
+        # /api/ps size is not a measurement of reclaimable bytes: take no credit.
+        incremental=calibrated['bytes']
+    sample = hardware.get('sample') or {}
+    available = sample.get('available_bytes') if sample.get('profile') == 'portable-memory-v1' else sample.get('free_bytes', 0) + sample.get('inactive_bytes', 0)
+    frame = KarmaAdapter().memory_allocation(incremental, available, HEADROOM)
+    return dict(frame, model=model, context_tokens=context_tokens, estimated_increment_bytes=incremental,
+                model_file_bytes=weights, kv_bytes_per_token=kv, resident=bool(current),
+                calibration=calibrated,
+                estimate_scope=('measured cold MLX footprint envelope plus margin; no resident credit' if calibrated else
+                                'weights and conventional KV' if kv else 'weights only; KV/backend workspace unknown'),
+                peak_memory_verified=False, source='local metadata and fresh Ollama inventory')
+
+
+def profile_for(provider, metadata, tag=None):
+    if getattr(provider,'memory_probe',False):return None,'Calibration probe; existing estimates not used'
+    if (metadata.get('details')or{}).get('runner')!='mlx':return None,'Not an MLX backend'
+    import subprocess
+    from memory_profiles import identity,select
+    from memory_observation import environment
+    try:
+        if tag is None:tag=next(t for t in api('/api/tags')['models'] if t['name']==provider.model)
+        key=identity(provider.model,tag,metadata,environment(api('/api/version')['version']))
+        return select(key)
+    except (OSError,ValueError,KeyError,StopIteration,subprocess.SubprocessError) as exc:
+        return None,'Calibration identity unavailable: '+str(exc)[:140]
+
+
+def fresh_resources(root):
+    """After our unload, wait briefly for telemetry to observe released memory.
+
+    This is measurement refresh, not inference retry or permission to ignore
+    pressure. An unchanged old sample must never grant the next dispatch.
+    """
+    from monitoring import require_resources,ResourceWait
+    if not enabled():return require_resources(root)
+    releases=[e['at'] for e in read_state().get('events',[])
+              if e.get('event')=='release_observed' and e.get('status')=='unloaded']
+    released=max(releases,default=0)
+    if time.time()-released>8:return require_resources(root)
+    deadline=time.monotonic()+MAX_RECOVERY_SECONDS
+    while True:
+        try:state=require_resources(root)
+        except ResourceWait as exc:state=exc.state
+        stamp=(state.get('sample')or{}).get('wall_time',0)
+        if stamp>=released:
+            if not state['admitted']:raise ResourceWait(state)
+            return state
+        if time.monotonic()>=deadline:
+            denied('Waiting for a fresh memory measurement after the previous model unloaded.',kind='post_unload_sample')
+        time.sleep(.1)
+
+
+def configure(provider, root, metadata, weights):
+    """Propose a context cap before Smriti selects its optional pages."""
+    if not enabled() or provider.port != 11434:
+        return
+    from model_context import allocation
+    from monitoring import require_resources
+    if not positive(weights):
+        denied('Installed model size is unavailable; cannot plan its memory allocation.')
+    hardware = fresh_resources(root)
+    models = running()
+    budget, _ = allocation(metadata)
+    low, high = 4096, budget.context_limit
+    calibration,status=profile_for(provider,metadata)
+    provider.memory_profile=calibration;provider.memory_profile_status=status
+    if calibration:high=min(high,calibration['points'][-1]['covered_tokens'])
+    minimum = estimate(provider.model, metadata, weights, models, low, hardware,calibration)
+    if minimum['decision'] != 'ALLOW':
+        minimum['calibration_status']=status
+        with lease():
+            data=read_state();data.update(plan=minimum,resident_models=models)
+            note(data,'allocation_paused',model=provider.model,decision=minimum['decision'])
+        denied('The selected model requires an estimated %.1f GiB plus %.1f GiB system reserve; %.1f GiB is available.' %
+               (minimum['estimated_increment_bytes']/GIB,HEADROOM/GIB,minimum['available_bytes']/GIB),plan=minimum)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if estimate(provider.model, metadata, weights, models, mid, hardware,calibration)['decision'] == 'ALLOW': low = mid
+        else: high = mid - 1
+    provider.memory_weights = weights
+    provider.context_metadata = dict(metadata, _sutra_runtime_cap=low)
+
+
+def dispatch_context(provider, system, payload, schema):
+    charge = provider.budget.check(system, payload, schema)
+    # Existing byte-based charge includes template reserve. Add a small runtime
+    # margin, never enlarge the admitted allocation or remove payload content.
+    required = charge + provider.budget.response_reserve
+    return min(provider.budget.context_limit, int(math.ceil((required + 256) / 1024)) * 1024)
+
+
+@contextlib.contextmanager
+def dispatch(provider, root, call_id, system, payload, schema):
+    provider.runtime_context_tokens = dispatch_context(provider, system, payload, schema)
+    if not enabled() or provider.port != 11434:
+        yield None
+        return
+    from monitoring import require_resources
+    with lease():
+        data = read_state()
+        hardware = fresh_resources(root)
+        models = running()
+        interrupted=data.get('active')
+        if interrupted and any(m['name']==interrupted.get('model') for m in models):
+            denied('An interrupted Sutra call may still be running in Ollama. Wait for its model to unload before resuming.', kind='interrupted')
+        weights = getattr(provider, 'memory_weights', None)
+        if not positive(weights):
+            tags = api('/api/tags').get('models', [])
+            weights = next((m.get('size') for m in tags if m.get('name') == provider.model), None)
+        if not positive(weights): denied('Installed model size is unavailable at dispatch.')
+        metadata = getattr(provider, 'context_metadata', {})
+        if not metadata:
+            metadata=api('/api/show',{'model':provider.model})
+            provider.context_metadata=metadata
+        calibration,status=profile_for(provider,metadata)
+        previous=getattr(provider,'memory_profile',None)
+        if previous and (not calibration or previous['sha256']!=calibration['sha256']):
+            denied('MLX calibration changed after context selection; retry with a fresh allocation.')
+        plan = estimate(provider.model, metadata, weights, models, provider.runtime_context_tokens, hardware,calibration)
+        plan['calibration_status']=status
+        data.update(plan=plan, resident_models=models)
+        if plan['decision'] != 'ALLOW':
+            note(data, 'allocation_paused', model=provider.model, decision=plan['decision'])
+            denied('Runtime memory allocation requires recovery before loading this model.', plan=plan)
+        # An active marker surviving process death never grants permission to
+        # unload: the server might still be finishing the interrupted request.
+        data.update(active={'call_id':call_id,'model':provider.model,'pid':os.getpid()}, owned=None)
+        note(data, 'dispatch', call_id=call_id, model=provider.model, context_tokens=provider.runtime_context_tokens,
+             calibration_sha256=calibration['sha256'] if calibration else None)
+        provider.keep_alive = 0
+        provider.runtime_completed = False
+        try:
+            yield plan
+        finally:
+            data['active'] = None
+            try:
+                rows = running(); data['resident_models'] = rows
+                resident = next((m for m in rows if m['name'] == provider.model), None)
+                complete = getattr(provider, 'runtime_completed', False)
+                data['owned'] = ({'name':resident['name'],'digest':resident['digest'],'completed_at':time.time()}
+                                 if resident and complete and ownership() == 'exclusive' else None)
+                release = 'still_resident' if resident else 'unloaded'
+                if resident and not complete:
+                    release = 'interrupted_ownership_unknown'
+                    data['active']={'call_id':call_id,'model':provider.model,'uncertain':True}
+            except Exception:
+                data['owned'] = None; release = 'verification_unavailable'
+                if not getattr(provider,'runtime_completed',False):
+                    data['active']={'call_id':call_id,'model':provider.model,'uncertain':True}
+            # Failure to collect diagnostics must not turn a settled model result
+            # into a new request error. The OS lease still releases in all cases.
+            try: note(data, 'release_observed', call_id=call_id, status=release)
+            except OSError: pass
+
+
+def stable_resources(root):
+    from monitoring import resource_state
+    deadline = time.monotonic() + MAX_RECOVERY_SECONDS
+    previous = None
+    while True:
+        state = resource_state(root)
+        stamp = (state.get('sample') or {}).get('wall_time')
+        if not state['admitted']: return state
+        if previous is not None and stamp is not None and stamp > previous: return state
+        if time.monotonic() >= deadline:
+            frame=KarmaAdapter().frame('runtime-recovery-stability-v1',2*KarmaAdapter().boundary.k,0.)
+            return dict(state, **frame, admitted=False, reason='Waiting for two distinct healthy memory samples before resuming.')
+        previous = stamp
+        time.sleep(.25)
+
+
+def recover(root, audit=None):
+    """One idle release at most, then a bounded stability check. Never infer."""
+    from monitoring import resource_state, ResourceWait
+    if not enabled(): return None
+    with lease():
+        data = read_state(); before = resource_state(root)
+        rows = running(); data['resident_models'] = rows
+        owned = data.get('owned')
+        candidate = next((m for m in rows if owned and m['name']==owned.get('name') and m['digest']==owned.get('digest')), None)
+        action = 'observe_only_shared_server' if ownership() == 'shared' else 'no_confirmed_idle_owned_model'
+        kernel=None
+        if ownership() == 'exclusive' and not data.get('active') and candidate:
+            # The explicit exclusive-server grant is required in addition to
+            # completed-call ownership and a fresh matching manifest identity.
+            kernel = KarmaAdapter().counted_slots(0, 1)
+            if kernel['decision']!='ALLOW':denied('Idle-model recovery allocation is exhausted.')
+            if audit:audit('MEMORY_RELEASE_PLANNED',{'model':candidate['name'],'digest':candidate['digest'],'kernel':kernel})
+            data['owned'] = None
+            note(data, 'release_requested', model=candidate['name'], kernel=kernel)
+            api('/api/generate', {'model':candidate['name'],'keep_alive':0,'stream':False})
+            rows = running(); data['resident_models'] = rows
+            action = 'release_unconfirmed' if any(m['name']==candidate['name'] for m in rows) else 'released_owned_model'
+        after = stable_resources(root)
+        result = {'profile':PROFILE, 'action':action, 'before':before, 'after':after,
+                  'admitted':after['admitted'], 'max_release_actions':1, 'automatic_inference':False,'release_kernel':kernel}
+        if audit:audit('MEMORY_RECOVERY_OBSERVED',result)
+        note(data, 'recovery', action=action, admitted=after['admitted'])
+        return result
+
+
+def snapshot():
+    if not enabled(): return {'enabled':False}
+    data = read_state()
+    result = {k:data.get(k) for k in ('profile','updated_at','active','plan','events')}
+    result.update(enabled=True, ownership=ownership())
+    try: result.update(resident_models=running(), inventory_available=True, inventory_at=time.time())
+    except Exception: result.update(resident_models=[], inventory_available=False)
+    return result

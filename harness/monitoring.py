@@ -46,6 +46,8 @@ def dashboard(root):
                         'kernel':{'name':'Smriti four-decision','order':['COMPOUND_FIN','ALLOW','BRIDGE','FIN'],
                                   'sha256':hashlib.sha256((Path(__file__).parent/'stp_canonical/kernel.py').read_bytes()).hexdigest()},
                         'context':None,'token_usage':{'calls':[],'total_calls':0,'limit':250},'scope':'This workspace and Karma calls only'}
+    from runtime_memory import snapshot
+    data['runtime_memory']=snapshot()
     from storage_policy import usage
     data['storage']=usage(root)
     path=root/'state.sqlite'

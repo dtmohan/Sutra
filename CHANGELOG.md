@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.23.0
+
+- Calibrate cold MLX process memory across repeated synthetic workload sizes, through a tool-free invocation role and the unified gateway. Keep workload token counts separate from requested context and exclude pressure-affected or interrupted observations.
+- Bind versioned, integrity-checked empirical profiles to exact model identity, backend executable/libraries, OS/hardware and server epoch. Apply the next larger measured workload plus an explicit uncertainty margin; cap paging to observed coverage and never extrapolate.
+- Feed calibrated additional-memory cost through the existing Karma adapter and unchanged STP kernel. Preserve hardware pressure checks, system reserve, context pins, permissions and spent task budgets.
+- Wait for a fresh post-unload memory sample before the next model allocation; retain a bounded wait and the OS pressure gate.
+- Display profile identity, coverage and margin in Sutra Monitor. Missing/mismatched profiles fall back explicitly; backend restarts require fresh calibration because hidden server options may change.
+- Preserve data-only 0.22.0 conversations; add recovery/model-switch and invalid-profile regressions.
+
+## 0.22.0
+
+- Size local runtime context to the admitted packet plus output reserve and margin; retain the original payload, task allocation and mandatory Smriti context. Known conventional KV layouts also constrain optional context selection before paging.
+- Coordinate Sutra inference across windows with an OS-released local slot. Recheck resources and estimated incremental model memory before registering an invocation; publish model residency, compression, swap, context plans and recovery events in Sutra Monitor.
+- Keep shared Ollama as the default. An explicit application-level exclusive-server setting permits at most one identity-matched idle release from a completed Sutra call per recovery. Record release intent and outcome; never unload interrupted or unowned models automatically.
+- Require distinct healthy telemetry samples on resource resume. Recovery does not run inference, grant permissions or reset consumed budgets. Unknown MLX/hybrid KV costs remain labelled unknown; estimates do not prove peak RAM requirements.
+- Preserve data-only 0.21.7 conversation compatibility; keep the canonical STP kernel unchanged.
+
 ## 0.21.7
 
 - Persist resource admission failures as normal workflow pauses during routing, mapping, child reviews and synthesis/coding. Native chat shows recovery guidance instead of a retriable provider exception.

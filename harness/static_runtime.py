@@ -79,7 +79,9 @@ def explain(s,meta,workspace,root,receipt,model,sites=None,mode='compact',provid
   if payload['contract']['constraints'].get('auto_review'):provider.keep_alive=0
   # Full-source comparison is isolated to this experimental role; normal paths
   # remain 8192. Both branches reserve identical output and check actual usage.
-  provider.budget=Budget(context_limit=32768 if mode=='full_source' else 8192,response_reserve=1024 if payload['contract']['constraints'].get('auto_review') else 768)
+  from model_context import allocation
+  capacity=allocation(provider.context_metadata)[0].context_limit
+  provider.budget=Budget(context_limit=min(capacity,32768 if mode=='full_source' else 8192),response_reserve=1024 if payload['contract']['constraints'].get('auto_review') else 768)
  schema=role.schema(payload);provider.budget.check(role.SYSTEM,dict(payload,repair={'errors':['x'*120]*2}),schema)
  run=s.begin_run(sid,payload['request'],[],None,max_calls=3,max_repairs=2)
  for attempt in range(3):

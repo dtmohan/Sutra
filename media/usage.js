@@ -17,6 +17,7 @@ function renderMonitor(){
  el('cpu-load').textContent=hwFresh&&finite(s.cpu_busy_pct)&&s.cpu_busy_pct>=0&&s.cpu_busy_pct<=100?s.cpu_busy_pct.toFixed(0)+'%':'—';
  el('ram').textContent=hwFresh&&finite(h.reclaimable_estimate_gib)&&h.reclaimable_estimate_gib>=0?h.reclaimable_estimate_gib.toFixed(1)+' GiB':'—';
  el('ram-note').textContent=hwFresh?'Reclaimable estimate · pressure '+({1:'normal',2:'elevated',4:'critical'}[s.memory_pressure_raw]||'unavailable'):'Waiting for fresh memory data';
+ renderRuntimeMemory(d.runtime_memory,s,hwFresh,snapshotFresh);
  for(const group of ['cpu','gpu']){
   const t=h.temperatures,v=t?.[group],ok=hwFresh&&T.freshAge(t?.age_seconds,elapsed)&&v?.available===true&&finite(v.maximum_celsius)&&v.maximum_celsius>0&&v.maximum_celsius<=150;
   el(group+'-temp').textContent=ok?v.maximum_celsius.toFixed(1)+' °C':'—';
@@ -62,6 +63,25 @@ function renderMonitor(){
  const compact=native?.compaction;el('compaction').dataset.missing=String(compact?.status==='missing_checkpoint');
  el('compaction').textContent=compact?'Last VS Code compaction: '+(compact.status==='checkpoint_preserved'?'signed checkpoint retained; no model summary call':compact.status==='missing_checkpoint'?'no authenticated checkpoint; context may need restating':'unknown status')+' · '+new Date(compact.time).toLocaleTimeString()+'.':'No VS Code compaction observed in this window.';
  el('activity').textContent=error?'Refresh unavailable':routing?.active?'Request in progress':snapshotFresh?'Snapshot current':snapshot?'Snapshot delayed':'Waiting for data';el('activity').dataset.active=String(!!routing?.active);
+}
+function renderRuntimeMemory(m,s,hwFresh,snapshotFresh){
+ const gib=n=>finite(n)&&n>=0?(n/(1024**3)).toFixed(1)+' GiB':'Unavailable';
+ el('compressed-memory').textContent=hwFresh?gib(s.compressed_bytes):'—';
+ el('swap-memory').textContent=hwFresh?gib(s.swap_used_bytes):'—';
+ el('memory-policy').textContent=m?.enabled?(m.ownership==='exclusive'?'Dedicated Ollama · bounded idle-model release authorized':'Shared Ollama · explicit model unloading disabled'):'Runtime manager is not active in this snapshot';
+ const rows=m?.resident_models||[],inventoryFresh=snapshotFresh&&m?.inventory_available&&finite(m.inventory_at)&&Date.now()/1000-m.inventory_at<=8;
+ el('resident-models').replaceChildren();
+ if(!inventoryFresh)el('resident-models').append(node('p','Resident model inventory unavailable or stale.','muted'));
+ else if(!rows.length)el('resident-models').append(node('p','No models currently loaded.','muted'));
+ else for(const r of rows){
+  const card=node('div',undefined,'gate');card.append(node('strong',r.name),node('div',gib(r.size)+' reported · '+T.number(r.context_length)+' context tokens'+(r.runner?' · '+r.runner:'')));el('resident-models').append(card);
+ }
+ const p=m?.plan;
+ el('memory-plan').textContent=p?'Last runtime plan: '+p.model+' · '+T.number(p.context_tokens)+' context tokens · '+gib(p.estimated_increment_bytes)+' estimated additional memory · '+gib(p.system_reserve_bytes)+' system reserve · '+p.decision+'. '+p.estimate_scope+'. Peak memory is not verified.':'No runtime allocation recorded yet.';
+ if(p?.calibration)el('memory-plan').append(node('div','MLX calibration '+p.calibration.profile_sha256.slice(0,12)+' · measured workload ceiling '+T.number(p.calibration.covered_tokens)+' tokens · '+gib(p.calibration.margin_bytes)+' uncertainty margin.'));
+ else if(p?.calibration_status)el('memory-plan').append(node('div',p.calibration_status));
+ const e=(m?.events||[]).at(-1);
+ el('memory-recovery').textContent=e?'Last resource event: '+e.event.replaceAll('_',' ')+(e.action?' · '+e.action.replaceAll('_',' '):'')+(e.status?' · '+e.status.replaceAll('_',' '):'')+' · '+new Date(e.at*1000).toLocaleTimeString():'';
 }
 for(const key of ['model','stage','status','time']){el(key).value=filters[key]||'';el(key).onchange=()=>{filters[key]=el(key).value;vscode.setState({filters});render();};}
 el('reset').onclick=()=>{filters={};for(const key of ['model','stage','status','time'])el(key).value='';vscode.setState({filters});render();};

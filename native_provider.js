@@ -123,6 +123,7 @@ function install(vscode,context,deps){
     const stop=flow.stop||{},failures=stop.failures||[];
     const details=[stop.error,...failures.map(f=>f.path+': '+f.error)].filter(Boolean);
     const coverage=Number.isInteger(stop.mapped_files)&&Number.isInteger(stop.source_files)?` Mapped ${stop.mapped_files} of ${stop.source_files} source files.`:'';
+    if(stop.recovery)details.push('Runtime memory recovery: '+(stop.recovery.error||stop.recovery.action?.replaceAll('_',' ')||'observed')+'. Task allocation is unchanged.');
     const reason=details.length?details.join('\n'):(stop.status||'Inspect Sutra Monitor for details.');
     audit.stage='paused';audit.message=reason;publish();
     const guidance=stop.status==='resource_wait'

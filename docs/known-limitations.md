@@ -1,5 +1,25 @@
 # Known limitations
 
+- MLX calibration measures sampled process-tree physical footprint during cold
+  synthetic text prefill, not a proven worst-case GPU allocation. Larger output,
+  multimodal work, unseen shapes and external clients can change memory use.
+  Estimates use the next larger measured workload plus a 25%/1 GiB margin and
+  no residency credit. Context beyond measured coverage requires paging or a
+  new calibration; the runtime never extrapolates from smaller observations.
+- Profiles are bound to exact model/metadata, backend binary/libraries, hardware,
+  OS build and server epoch. Restarting Ollama invalidates them because server
+  settings may change. Missing or invalid profiles revert visibly to file-size
+  and known conventional GGUF KV estimates; MLX backend overhead is then unknown.
+  Other same-model clients cannot be distinguished by the running-model API:
+  calibration requires other clients to be idle. This is not a RAM guarantee.
+- The inference slot coordinates Sutra windows in the same extension profile.
+  Other Ollama clients and separate profiles are not coordinated. Shared mode
+  never sends a separate unload request. Exclusive ownership is a user assertion
+  about the server, not something the running-model API can verify.
+- Resource recovery releases at most one confirmed idle owned model and observes
+  stability for up to three seconds. It does not automatically retry inference.
+  Interrupted model activity stays uncertain until observed absent; no caller is
+  assumed idle just because a local lease was released after process death.
 - Model explanations can contain unsupported factual claims. Structural diagram
   validation does not establish the truth of device specifications or connections.
 - A generated diagram can merge distinct devices unless identity constraints are
