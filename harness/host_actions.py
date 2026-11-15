@@ -148,12 +148,78 @@ def execution_context(s, session, workspace):
             item={'id':action['id'],'kind':action['kind'],'target':action['target'],'status':result.get('status'),
                   'model':action['model'],'before_hash':action.get('before_hash'),'after_hash':result.get('after_hash')}
             if action['kind']=='run_tests':item.update(returncode=result.get('returncode'),tests=result.get('tests'),
-                    current=valid,assertions_verified=False,output_tail=result.get('output_tail','')[-700:] if not any(r['kind']=='run_tests' for r in recent) else '')
+                    current=valid,assertions_verified=False,transition=(result.get('provenance') or {}).get('transition'),output_tail=result.get('output_tail','')[-700:] if not any(r['kind']=='run_tests' for r in recent) else '')
             recent.append(item)
     return {'authority':'host_process_observations','assertions_verified':False,'actions_used':used,'pending_actions':pending,'recent':list(reversed(recent)),'tests':tests}
 
 
+def outcome_grade(status):
+    return {'process_failed':'red','process_exited_zero':'green'}.get(status,'inconclusive')
+
+
+def action_history(s, session):
+    rows=s.db.execute('SELECT a.record_json,r.record_json FROM host_actions a JOIN host_action_receipts r ON a.id=r.action_id WHERE a.session=? ORDER BY a.rowid DESC',(session,)).fetchall()
+    return [(json.loads(a),json.loads(r)['result']) for a,r in rows]
+
+
+def run_provenance(history, target, test_paths, versions, status, execution=None):
+    """Host-derived context for one test observation, read from receipts only.
+
+    history holds (action, result) pairs for this session's receipted actions,
+    newest first. A failing run followed by an exit-zero run over byte-identical
+    test files is a stronger observation than an exit code alone, because the
+    change in outcome cannot come from an edited test. It still does not prove
+    that assertions ran, so assertions_verified stays False everywhere.
+    """
+    edited=sorted({a['target'] for a,r in history if a['kind']=='edit' and r.get('status')=='applied' and a['target'] in test_paths})
+    prior=next(((a,r) for a,r in history if a['kind']=='run_tests' and a['target']==target),None)
+    now=outcome_grade(status)
+    out={'version':2,'target_sha256':versions.get(target),'test_paths':sorted(test_paths),
+         'execution':execution,'test_paths_edited_in_task':edited,'prior_run':None,
+         'transition':'inconclusive' if now=='inconclusive' else 'first_run'}
+    if prior:
+        action,result=prior;before=result.get('artifact_versions') or {};was=outcome_grade(result.get('status'))
+        provenance=result.get('provenance') or {}
+        comparable=bool(execution and provenance.get('execution')==execution and
+                        provenance.get('version')==2 and provenance.get('test_paths')==sorted(test_paths))
+        tests_unchanged=comparable and all(p in before and p in versions and before[p]==versions[p] for p in test_paths)
+        sources_changed=any(before.get(k)!=versions.get(k) for k in set(before)|set(versions) if k not in test_paths)
+        out['prior_run']={'action_id':action['id'],'status':result.get('status'),'comparable':comparable,
+                          'tests_unchanged':tests_unchanged,'sources_changed':sources_changed}
+        if not comparable or 'inconclusive' in (was,now):out['transition']='inconclusive'
+        elif not tests_unchanged:out['transition']='tests_changed'
+        elif (was,now)==('red','green') and not sources_changed:out['transition']='red_to_green_without_source_change'
+        else:out['transition']=was+'_to_'+now
+    return out
+
+
+def execution_identity(s, session, constraints):
+    """Stable host identity for comparing process observations, not test proof.
+
+    Snapshot-specific paths are deliberately excluded. Runtime bytes, standard
+    library build, runner, sandbox policy implementation, limits and task epoch
+    are included. Any changed or missing identity makes a comparison inconclusive.
+    """
+    runtime=test_runtime().resolve()
+    def digest(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    command=[str(runtime),'-I','-B','-c',
+             'import sys,sysconfig,json; print(json.dumps([sys.version,sys.implementation.name,sysconfig.get_config_vars("SOABI","CONFIG_ARGS")]))']
+    build=subprocess.check_output(command,timeout=5,text=True).strip()
+    origin=s.current_contract(session)
+    return {'contract_hash':origin['contract_hash'],'epoch':origin['epoch'],'logic_hash':s.logic_hash,
+            'runtime_sha256':digest(runtime),'runtime_build':build,
+            'runner_sha256':digest(Path(__file__).with_name('unittest_entry.py')),
+            'sandbox_implementation_sha256':digest(__file__),
+            'platform':sys.platform,'os_release':__import__('platform').release(),'test_timeout_ms':constraints['test_timeout_ms'],
+            'environment':{'isolated':True,'bytecode':False,'LANG':'en_US.UTF-8',
+                           'network_allowed':False,'project_writes_allowed':False}}
+
+
 def receipt(s, action, result):
+    if action['kind']=='run_tests' and 'provenance' not in result:
+        # Recovery cannot reconstruct a runtime identity for an interrupted run.
+        result['provenance']=run_provenance(action_history(s,action['session']),action['target'],
+            action.get('test_paths',[]),action.get('artifact_versions',{}),result.get('status'),None)
     with s.db:
         s.db.execute('BEGIN IMMEDIATE')
         row=s.db.execute('SELECT seq,id FROM host_action_receipts WHERE session=? ORDER BY seq DESC LIMIT 1',(action['session'],)).fetchone()
@@ -318,6 +384,7 @@ def execute(s,session,iid,workspace,root,resource_check=True):
         commit={'id':aid,'session':session,'invocation_id':iid,'model':env['model'],'kind':kind,'target':action['target'],
                 'contract_hash':origin['contract_hash'],'epoch':origin['epoch'],'logic_hash':s.logic_hash,
                 'budget_kernel':measured,'resource_kernel':hardware,'artifact_versions':versions,
+                'test_paths':sorted(constraints.get('test_paths',[])) if kind=='run_tests' else [],
                 'before_hash':change['before_hash'] if change else None,'proposed_after_hash':change['after_hash'] if change else None,
                 'proposal_hash':sha(canonical(output)),'started_at':time.time()}
         from orchestration import admit,action_flow,transition
@@ -329,6 +396,7 @@ def execute(s,session,iid,workspace,root,resource_check=True):
         raw=canonical(commit);s.db.execute('INSERT INTO host_actions VALUES(?,?,?,?,?)',(aid,session,iid,raw,sha('action-v1:'+raw)))
         s._audit('HOST_ACTION_DISPATCH',commit)
     directory=Path(root)/'actions'/aid;directory.mkdir(parents=True)
+    execution=None
     try:
         if kind=='edit':
             (directory/'before.py').write_bytes(change['before'].encode());(directory/'after.py').write_bytes(change['after'].encode());(directory/'change.diff').write_text(change['diff'])
@@ -337,7 +405,10 @@ def execute(s,session,iid,workspace,root,resource_check=True):
             s.observe_file(session,'action-'+aid,action['target'],str(Path(workspace)/action['target']),s.snapshot(session)['revision'])
             result={'status':'applied','after_hash':after,'backup':str(directory/'before.py')}
         else:
+            execution=execution_identity(s,session,constraints)
             result=run_tests_snapshot(directory,files,action['target'],constraints['test_timeout_ms'],root if resource_check else None)
+            if execution_identity(s,session,constraints)!=execution:
+                result['status']='execution_changed'
             current={k:v['sha256'] for k,v in files_at(s,session,workspace).items()}
             result['artifact_versions']=versions
             if current!=versions:result['status']='stale_sources'
@@ -345,4 +416,7 @@ def execute(s,session,iid,workspace,root,resource_check=True):
             # record_test / tool-authority assertion pages or completion proof.
     except Exception as exc:
         result={'status':'failed_or_uncertain','error':type(exc).__name__+': '+str(exc)}
+    if kind=='run_tests':
+        result['artifact_versions']=versions
+        result['provenance']=run_provenance(action_history(s,session),action['target'],constraints.get('test_paths',[]),versions,result['status'],execution)
     return receipt(s,commit,result)

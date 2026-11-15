@@ -110,7 +110,7 @@ function renderActivity(calls){
    const open=node('button','Open reasoning details');open.onclick=()=>vscode.postMessage({type:'activity_details',id:c.id});
    card.append(node('summary'),node('p',undefined,'plot-note'),node('pre'),node('p',undefined,'plot-note'),open);box.prepend(card);
   }
-  card.children[0].textContent=(c.role==='subagent'?'Child review':c.role==='chat_reviewer'?'Workspace review':c.role==='conversation'?'Conversation / routing':'Model call')+' · '+c.model+' · '+c.role+' · '+c.status;
+  card.children[0].textContent=(c.role==='report_reviewer'?'Architecture claim review':c.role==='subagent'?'Child review':c.role==='chat_reviewer'?'Workspace review':c.role==='conversation'?'Conversation / routing':'Model call')+' · '+c.model+' · '+c.role+' · '+c.status;
   card.children[1].textContent='Invocation '+c.id+(c.node_id?' · task '+c.node_id:'')+' · reasoning requested: '+(c.requested===null?'model default':c.requested??'pending');
   card.children[2].textContent=c.text||'No reasoning emitted yet. The model may have reasoning disabled or may not support a separate thinking stream.';
   const usage=c.usage,elapsed=((c.finishedAt||Date.now())-c.startedAt)/1000;

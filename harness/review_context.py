@@ -35,7 +35,7 @@ def ordered_sources(sources, graph, request):
     return sorted(names, key=score)
 
 
-def context_budget(provider, s, sid):
+def context_budget(provider, s, sid, slots=2):
     """Use installed capability within remaining task and ancestor allocations.
 
     This only proposes a packet size. The gateway still charges every attempt
@@ -46,7 +46,7 @@ def context_budget(provider, s, sid):
     import review_budget
     import orchestration as machine
     budget, metadata = allocation(provider.context_metadata)
-    available = budget.context_limit * 2
+    available = budget.context_limit * slots
     task = review_budget.usage(s, sid)
     if task:
         available = min(available, max(0, task['limits']['tokens'] - task['used']['tokens']))
@@ -54,7 +54,7 @@ def context_budget(provider, s, sid):
     if owner:
         for frame in machine.gates(s, owner, {}):
             available = min(available, max(0, frame['limits']['tokens'] - frame['used']['tokens']))
-    limit = min(budget.context_limit, int(available // 2))
+    limit = min(budget.context_limit, int(available // slots))
     # A structured architecture report also carries the full constraint echo and
     # source citations. Reserve output within the same per-call/task allocation.
     reserve = max(budget.response_reserve, min(8192, limit // 3))
@@ -62,7 +62,7 @@ def context_budget(provider, s, sid):
         # Do not invent extra allocation. The normal budget checks stop dispatch.
         limit = max(1, limit)
     provider.budget = Budget(limit, reserve, budget.template_reserve)
-    return dict(metadata, review_context_allocation=limit, attempt_slots_reserved=2, repair_slots_reserved=1)
+    return dict(metadata, review_context_allocation=limit, attempt_slots_reserved=slots, repair_slots_reserved=1)
 
 
 def overview(data, limit, request='Architecture overview'):

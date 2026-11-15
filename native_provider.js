@@ -246,7 +246,7 @@ function install(vscode,context,deps){
       const activityToken=activeCancel.token;let activityOpen=true;
       activityProgress=e=>{
         if(!activityOpen||activityToken.isCancellationRequested)return;
-        const label=e.role==='subagent'?'Child review':e.role==='chat_reviewer'?'Workspace review':e.role==='conversation'?'Conversation / routing':'Model call';
+        const label=e.role==='report_reviewer'?'Architecture claim review':e.role==='subagent'?'Child review':e.role==='chat_reviewer'?'Workspace review':e.role==='conversation'?'Conversation / routing':'Model call';
         if(e.kind==='start'){
           const uri=deps.activityLink?.(e);
           if(uri)progress.report(new vscode.LanguageModelTextPart(`\n\n[${label} · reasoning details](${uri})\n\n`));

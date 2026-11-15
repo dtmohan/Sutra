@@ -109,6 +109,22 @@ class GatewayTests(unittest.TestCase):
         with self.assertRaises(PageFault):s.load_result('active',r['invocation_id'])
         self.assertTrue(s.verify_invocations('active'));s.close()
 
+    def test_model_retag_during_call_withholds_output_and_keeps_usage(self):
+        from model_identity import unknown
+        class LiveFixture(LocalModel):
+            def call(self,cid,system,p,fmt):
+                consume_dispatch(cid,self.model,system,p,fmt)
+                return {'read_pages':['src/policy.py'],'browse':[]},{'response':{'prompt_eval_count':90,'eval_count':30}}
+        model=LiveFixture(self.root/'calls',model='fixture')
+        gate,payload,rid,system,schema=self.prepared(model=model)
+        a=dict(unknown('fixture'),manifest_digest='before');b=dict(a,manifest_digest='after')
+        with patch('model_identity.observe',side_effect=[a,b]),patch('monitoring.require_resources',return_value={'profile':'injected-test-provider'}):
+            result=gate.invoke('selector','retag',system,payload,schema,rid)
+        self.assertFalse(result['admission']['admitted'])
+        self.assertIn('changed during inference',result['blocked'])
+        self.assertEqual(result['record']['response']['prompt_eval_count'],90)
+        self.assertEqual(result['token_usage']['totals']['input_tokens'],90)
+
     def test_selector_rejects_unknown_pages_and_bad_cursors(self):
         for answer in ({'read_pages':['../../secret'],'browse':[]},
                        {'read_pages':[],'browse':[{'group':'implementation','offset':999}]},

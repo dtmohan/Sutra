@@ -15,7 +15,7 @@ from evidence import EvidenceContext, CURRENT
 from paging import PageFault
 
 
-POLICY_FILES = ('review_report.py','review_context.py','orchestration.py','orchestration_flow.py','subagent_runtime.py','native_access.py','conversation_memory.py','model_context.py','token_usage.py','visuals.py','conversation.py','native_runtime.py','model_catalog.py','temperature_signals.py','temperature-provenance.json','smc_temperature.h','chat_runtime.py','model_routing.py','context_manager.py', 'paging.py', 'evidence.py', 'checked_protocol.py',
+POLICY_FILES = ('report_review.py','model_identity.py','review_report.py','review_context.py','orchestration.py','orchestration_flow.py','subagent_runtime.py','native_access.py','conversation_memory.py','model_context.py','token_usage.py','visuals.py','conversation.py','native_runtime.py','model_catalog.py','temperature_signals.py','temperature-provenance.json','smc_temperature.h','chat_runtime.py','model_routing.py','context_manager.py', 'paging.py', 'evidence.py', 'checked_protocol.py',
                 'policy_check.py', 'governance.py', 'governed_runtime.py', 'dag_runtime.py',
                 'protocol.py', 'dag_protocol.py', 'kernel.py', 'invocation_gateway.py',
                 'invocation_roles.py', 'runtime.py', 'local_model.py', 'legacy_model.py',

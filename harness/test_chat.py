@@ -18,6 +18,13 @@ class Fake:
     def __init__(self,model='fixture-small',fault=None):self.model=model;self.fault=fault;self.payloads=[]
     def call(self,cid,system,p,schema):
         consume_dispatch(cid,self.model,system,p,schema);self.payloads.append(copy.deepcopy(p));name=next(iter(p['excerpts']))
+        if 'claims' in schema['properties']:
+            judged={key:{'verdict':'supported','reason':'Supported by the delivered fixture source.',
+                         'evidence':[{'path':claim['paths'][0],'quote':p['excerpts'][claim['paths'][0]].splitlines()[0]}]}
+                    for key,claim in p['claims'].items()}
+            result={'task_id':p['contract']['task_id'],'constraints':copy.deepcopy(p['constraint_echo']),'claims':judged,'complete':False}
+            if getattr(self,'review_fault',None):self.review_fault(result,p)
+            return result,{'call_id':cid,'ok':True,'answer':result}
         result={'task_id':p['contract']['task_id'],'constraints':copy.deepcopy(p['constraint_echo']),
             'answer':'The entry function calls the leaf implementation. Static calls do not prove runtime execution.',
             'summary':'Inspected the entry and leaf source.','citations':[{'path':name,'quote':p['excerpts'][name].splitlines()[0]}],
@@ -128,7 +135,7 @@ class ChatTests(unittest.TestCase):
         self.assertFalse({'messages','history','conversation'}&set(large.payloads[0]))
         self.assertNotEqual(small.payloads[0]['snapshot_receipt'],large.payloads[0]['snapshot_receipt'])
         self.assertEqual(self.s.current_contract(self.sid),self.contract)
-        self.assertEqual(review_budget.usage(self.s,self.sid)['used']['calls'],before['used']['calls']+1)
+        self.assertEqual(review_budget.usage(self.s,self.sid)['used']['calls'],before['used']['calls']+2)
         self.assertTrue(self.s.verify_invocations(self.sid))
 
     def test_forged_citation_is_quarantined_with_bounded_repairs(self):

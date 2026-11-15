@@ -124,7 +124,7 @@ function activate(context) {
       return await new Promise((resolve,reject) => {
         const python = vscode.workspace.getConfiguration('karma').get('pythonPath','')||(process.platform==='win32'?'python':'python3');
         const child = spawn(python,['-B',path.join(context.extensionPath,'harness','vscode_bridge.py'),
-          '--workspace',cwd,'--storage',stateDir],{cwd,stdio:['pipe','pipe','pipe'],env:{...process.env,KARMA_STORAGE_LIMIT_MIB:String(vscode.workspace.getConfiguration('karma').get('storageLimitMiB',512)),SUTRA_ACTIVITY:"1",SUTRA_THINKING:vscode.workspace.getConfiguration('karma').get('thinking','off'),KARMA_NODE:process.execPath,KARMA_TYPESCRIPT:path.join(context.extensionPath,'vendor','typescript','typescript.js')}});
+          '--workspace',cwd,'--storage',stateDir],{cwd,stdio:['pipe','pipe','pipe'],env:{...process.env,KARMA_STORAGE_LIMIT_MIB:String(vscode.workspace.getConfiguration('karma').get('storageLimitMiB',512)),SUTRA_LOGIT_SENSOR:({'off':'','numbers':'1','tokens':'tokens'})[vscode.workspace.getConfiguration('karma').get('logitSensor','off')]||'',SUTRA_ACTIVITY:"1",SUTRA_THINKING:vscode.workspace.getConfiguration('karma').get('thinking','off'),KARMA_NODE:process.execPath,KARMA_TYPESCRIPT:path.join(context.extensionPath,'vendor','typescript','typescript.js')}});
         processes.add(child); let stdout='',stderr='';
         const events=require('./model_activity').decoder(e=>{usage?.activity(e);onActivity?.(e);},s=>{stderr=(stderr+s).slice(-10000);});
         let stopReason,killTimer;const cancel=reason=>{if(stopReason)return;stopReason=reason;child.kill('SIGTERM');killTimer=setTimeout(()=>child.kill('SIGKILL'),10000);};
@@ -162,7 +162,7 @@ function activate(context) {
     const reportUri=vscode.Uri.parse('karma-preview:/review/'+id+'/Review.md');
     const sourceUri=vscode.Uri.parse('karma-preview:/review/'+id+'/Chat-source-map.md');
     const sources=(p.citations||[]).map(c=>'### '+c.path+'\n\n```\n'+c.quote+'\n```').join('\n\n');
-    previewDocuments.set(reportUri.toString(),data.report_markdown+'\n\n## Review evidence\n\nModel conclusions are unverified. Source anchors were checked against fresh reads.\n\n'+sources+'\n\n## Outstanding checks\n\n'+(p.remaining||[]).map(x=>'- '+x).join('\n')+'\n\nProtocol invocation: '+id+'\n\n[Full static source map]('+sourceUri.toString()+')');
+    previewDocuments.set(reportUri.toString(),data.report_markdown+'\n\n## Review evidence\n\nModel conclusions are unverified. Source anchors were checked against fresh reads.\n\n'+sources+'\n\n## Outstanding checks\n\n'+(p.remaining||[]).map(x=>'- '+x).join('\n')+(data.report_review?'\n\n## Claim review details\n\n```json\n'+JSON.stringify(data.report_review,null,2)+'\n```':'')+'\n\nProtocol invocation: '+id+'\n\n[Full static source map]('+sourceUri.toString()+')');
     if(data.diagram)previewDocuments.set(sourceUri.toString(),data.diagram);
     lastReview=data;
     return {reportUri:reportUri.toString(),sourceUri:sourceUri.toString()};
@@ -172,7 +172,7 @@ function activate(context) {
   function publishSettings(){
     nativeController?.publish();
     panel?.webview.postMessage({type:'tier-settings',models:modelSettings(),catalog:modelCatalog});
-    const config=vscode.workspace.getConfiguration('karma');panel?.webview.postMessage({type:'runtime-settings',settings:{storageLimitMiB:config.get('storageLimitMiB',512),pythonPath:config.get('pythonPath',''),thinking:config.get('thinking','off')}});
+    const config=vscode.workspace.getConfiguration('karma');panel?.webview.postMessage({type:'runtime-settings',settings:{storageLimitMiB:config.get('storageLimitMiB',512),pythonPath:config.get('pythonPath',''),thinking:config.get('thinking','off'),logitSensor:config.get('logitSensor','off')}});
   }
   async function discoverModels(token,internal=false){
     let catalog;try{catalog=await request({op:'models'},token,internal);}catch(error){modelCatalog={models:[],suggested_tiers:{},error:'Cannot discover local models. Start Ollama, then choose Retry model discovery. '+error.message};publishSettings();throw new Error(modelCatalog.error);}
@@ -353,11 +353,12 @@ function activate(context) {
         if(message.op==='save_runtime_settings'){
           if(busy||sequence)throw new Error('Wait for the current turn before changing runtime settings.');
           const s=message.settings;
-          if(!s||Object.keys(s).sort().join(',')!=='pythonPath,storageLimitMiB,thinking'||!Number.isInteger(s.storageLimitMiB)||s.storageLimitMiB<64||s.storageLimitMiB>8192||!['off','on','model-default'].includes(s.thinking)||typeof s.pythonPath!=='string'||s.pythonPath.length>1024||/[\r\n\0]/.test(s.pythonPath))throw new Error('Use a history allocation of 64–8192 MiB and a single Python executable path.');
+          if(!s||!['pythonPath,storageLimitMiB,thinking','logitSensor,pythonPath,storageLimitMiB,thinking'].includes(Object.keys(s).sort().join(','))||('logitSensor' in s&&!['off','numbers','tokens'].includes(s.logitSensor))||!Number.isInteger(s.storageLimitMiB)||s.storageLimitMiB<64||s.storageLimitMiB>8192||!['off','on','model-default'].includes(s.thinking)||typeof s.pythonPath!=='string'||s.pythonPath.length>1024||/[\r\n\0]/.test(s.pythonPath))throw new Error('Use a history allocation of 64–8192 MiB and a single Python executable path.');
           const config=vscode.workspace.getConfiguration('karma');
           await config.update('storageLimitMiB',s.storageLimitMiB,vscode.ConfigurationTarget.Global);
           await config.update('pythonPath',s.pythonPath.trim(),vscode.ConfigurationTarget.Global);
           await config.update('thinking',s.thinking,vscode.ConfigurationTarget.Global);
+          if('logitSensor' in s)await config.update('logitSensor',s.logitSensor,vscode.ConfigurationTarget.Global);
           dashboardWorker?.child.kill();dashboardWorker=undefined;
           publishSettings();panel?.webview.postMessage({type:'runtime-saved'});return;
         }
@@ -444,7 +445,7 @@ function activate(context) {
     if(!files?.length)return;await open();
     const draft=await request({op:'api_build',files,offset:options?.offset??0});publishReview(draft);
     if(!draft.result.admission.admitted||options?.review===false)return draft;
-    const checked=await request({op:'api_verify',reviewer_model:options?.reviewer_model??'qwen3:4b'});publishReview(checked);return checked;
+    const checked=await request({op:'api_verify',reviewer_model:options?.reviewer_model??'auto'});publishReview(checked);return checked;
   }
   async function readCalibrationJSON(title){
     workspace();const files=await vscode.window.showOpenDialog({title,canSelectMany:false,filters:{JSON:['json']}});if(!files?.length)return;
@@ -513,7 +514,7 @@ function activate(context) {
     karma_explain_map:async(input,token)=>request({...input,op:'static_explain'},token),
     karma_read_file:async(input,token)=>request({op:'repository_tool',kind:'read',target:input.path,line:input.cursor?.line??input.line??1,cursor:input.cursor},token),
     karma_api_map:async(input,token)=>request({op:'api_build',files:input.files,offset:input.offset??0},token),
-    karma_api_verify:async(input,token)=>request({op:'api_verify',reviewer_model:input.model??'qwen3:4b'},token),
+    karma_api_verify:async(input,token)=>request({op:'api_verify',reviewer_model:input.model??'auto'},token),
     karma_search:async(input,token)=>request({op:'repository_tool',kind:'search',query:input.query},token)
   };
   for(const [name,invoke] of Object.entries(externalTools))context.subscriptions.push(vscode.lm.registerTool(name,{

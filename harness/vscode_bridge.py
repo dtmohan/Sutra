@@ -295,6 +295,9 @@ def handle(root,workspace,request):
                 if meta.get('chat'):
                     try:
                         last=s.load_result(meta['active'],meta['chat']['checkpoint'])
+                        if meta['chat'].get('reviewer_id'):
+                            from report_review import published
+                            last,_=published(s,meta['active'],meta['chat']['checkpoint'],meta['chat']['reviewer_id'])
                         chat={'answer':last,'route':meta['chat']['route'],'checkpoint':meta['chat']['checkpoint']}
                     except (InvalidUpdate,PageFault):chat={'answer':None,'warning':'Previous chat answer is withheld; source, contract or calibration changed.'}
                     if 'state' in result:result['state']['chat']=chat

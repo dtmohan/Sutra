@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Local model orchestration with portable context, governed tools, diagrams and token visibility.",
-  "version": "0.21.4",
+  "version": "0.21.5",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -223,6 +223,17 @@
           ],
           "default": "off",
           "description": "Local-model reasoning. Emitted reasoning appears live in chat when supported and in Sutra Monitor. Uses the existing output allocation; enabling it may increase latency or exhaust the answer budget."
+        },
+        "karma.logitSensor": {
+          "type": "string",
+          "enum": [
+            "off",
+            "numbers",
+            "tokens"
+          ],
+          "default": "off",
+          "scope": "machine",
+          "description": "Optional observe-only token-choice diagnostics. Numbers stores numeric summaries; tokens additionally saves a few flagged token strings. Never grants permissions or changes kernel decisions. Backend support varies; not a correctness score."
         }
       }
     },
@@ -375,7 +386,7 @@
           "properties": {
             "model": {
               "type": "string",
-              "description": "Installed local reviewer model; default qwen3:4b."
+              "description": "Installed local reviewer model. Default auto: the smallest eligible model outside the mapper family."
             }
           },
           "required": [],

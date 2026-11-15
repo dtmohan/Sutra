@@ -55,6 +55,17 @@ class APIMapTests(unittest.TestCase):
    candidate=self.s.load_result(self.sid,self.meta['api_candidate'])
    for key,item in p['observations'].items():item.update(source=candidate['claims'][key]['source'],target=candidate['claims'][key]['target'])
   result=self.review(rubber_stamp);self.assertEqual(result['api']['status'],'quarantined');self.assertIsNone(result['api']['report']);self.assertTrue(result['api']['decision']['errors'])
+ def test_review_records_unknown_separation_for_unidentified_fixture(self):
+  self.build();result=self.review();sep=result['api']['independence']
+  self.assertEqual(sep['weight_relation'],'unknown');self.assertIsNone(sep['same_model'])
+  self.assertIn('Weight separation unknown',result['api']['report'])
+ def test_strict_reviewer_rejects_unknown_before_dispatch(self):
+  self.build();m=Model(self.data);m.model='other-name'
+  before=self.s.db.execute('select count(*) from invocations').fetchone()[0]
+  with self.assertRaisesRegex(InvalidUpdate,'not established'):
+   runtime.verify(self.s,self.meta,self.ws,self.storage,{'require_distinct_reviewer':True},m)
+  self.assertEqual(m.payloads,[])
+  self.assertEqual(self.s.db.execute('select count(*) from invocations').fetchone()[0],before)
  def test_independent_reviewer_catches_corruption(self):
   self.build(self.corrupt_self);result=self.review();self.assertEqual(result['api']['status'],'quarantined');self.assertIn('contradicted',str(result['api']['reviewer_comparison']))
  def test_wrong_target_and_reversed_caller_rejected(self):

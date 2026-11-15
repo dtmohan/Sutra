@@ -20,6 +20,12 @@ class LocalModel:
         body={'model':self.model,'messages':self.messages(system,payload),
               'stream':True,'think':self.thinking,'format':schema,'keep_alive':getattr(self,'keep_alive','5m'),
               'options':{'num_ctx':self.budget.context_limit,'num_predict':self.budget.response_reserve,'temperature':0,'seed':42}}
+        sensor=None
+        try:
+            from logit_sensor import Sensor
+            sensor=Sensor(self.log_dir); body.update(sensor.request())
+        except Exception:
+            sensor=None  # Diagnostics must not prevent an otherwise governed call.
         record={'call_id':call_id,'request':body,'conservative_input_charge':charge}
         from lifecycle import timeout
         c=http.client.HTTPConnection('127.0.0.1',self.port,timeout=timeout(150)); started=time.monotonic()
@@ -51,9 +57,12 @@ class LocalModel:
                 total+=len(text.encode())+len(thought.encode())
                 if total>byte_limit: raise RuntimeError('Model stream exceeds transport allocation')
                 content.append(text); reasoning.append(thought)
+                if sensor:
+                    try:sensor.observe(chunk)
+                    except Exception:pass
                 if activity and thought: activity.thinking(thought)
                 if chunk.get('done'):
-                    response=dict(chunk)
+                    response=dict(chunk); response.pop('logprobs',None)
                     response['message']={'role':'assistant','content':''.join(content),'thinking':''.join(reasoning)}
                     record['response']=response
                     break
@@ -67,6 +76,10 @@ class LocalModel:
         finally:
             if self.health: self.health.active=None
             c.close(); record['elapsed_s']=time.monotonic()-started
+            if sensor:
+                try:
+                    sensor.finish(self.log_dir,call_id,self.model,record,identity=getattr(self,'dispatch_identity',None))
+                except Exception:pass
             from storage_policy import write_trace
             write_trace(self.log_dir,call_id,record)
         return answer,record

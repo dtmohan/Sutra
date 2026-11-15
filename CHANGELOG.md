@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.21.5
+
+- Bind test outcome comparisons to declared test inventories, contract epochs, runtime/runner identity and limits; keep assertion verification false.
+- Record fresh mapper/reviewer identities at dispatch, distinguish manifest from weight identity, handle same-weight aliases and unknown metadata conservatively, and reject identity changes during a call.
+- Review architecture claim groups in a separate governed invocation; omit disputed claims from publication and restored model-switch context. Account for reviewer and repair costs in the existing task budget.
+- Add an optional observe-only token-choice sensor with numeric/text privacy modes, bounded storage, UTF-8 byte alignment, cohort metadata and isolated diagnostic failures.
+- Preserve data-only conversations from 0.21.4; keep the canonical STP kernel unchanged.
+
 ## 0.21.4
 
 - Render architecture reviews as structured components, request flow, grounded strengths/risks and next checks, with host-owned Markdown and safe webview elements.

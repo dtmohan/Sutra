@@ -82,6 +82,7 @@ def markdown(proposal):
     if r['next_steps']:
         lines += ['## Recommended next checks', '']
         lines += [str(i) + '. ' + prose(step) + '\n' for i, step in enumerate(r['next_steps'], 1)]
+    if proposal.get('publication_note'):lines += ['', prose(proposal['publication_note'])]
     return '\n'.join(lines).strip()
 
 

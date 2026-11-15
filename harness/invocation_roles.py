@@ -7,6 +7,9 @@ from protocol import SELECT_SYSTEM, SELECT_SCHEMA, schema_for
 
 
 def expected_request(role, payload):
+    if role=='report_reviewer':
+        from report_review import SYSTEM as REPORT_SYSTEM, schema
+        return REPORT_SYSTEM, schema(payload)
     if role=='subagent':
         from subagent_runtime import SYSTEM as CHILD_SYSTEM,schema
         return CHILD_SYSTEM,schema(payload)
@@ -93,6 +96,9 @@ def validate_permission_ops(operations):
 
 def validate_result(store, session, role, payload, schema, proposal, delivery_id):
     validate_shape(proposal, schema)
+    if role=='report_reviewer':
+        from report_review import validate
+        return validate(store,session,payload,proposal)
     if role=='subagent':
         from subagent_runtime import validate
         return validate(store,session,payload,proposal)

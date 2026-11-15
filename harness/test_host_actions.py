@@ -12,7 +12,7 @@ from context_manager import InvalidUpdate
 from invocation_gateway import InvocationLedger, consume_dispatch
 from paging import Budget, PageFault
 from review_role import constraint_rows
-from host_actions import execute, preview, files_at, run_tests_snapshot, execution_context, source_path
+from host_actions import execute, preview, files_at, run_tests_snapshot, execution_context, source_path, run_provenance
 from monitoring import resource_state, dashboard
 from vscode_bridge import handle, dispatch
 
@@ -116,6 +116,27 @@ class ActionTests(unittest.TestCase):
         receipt=self.apply(r);self.assertEqual(receipt['result']['status'],'applied')
         self.assertIn('range(MAX_ATTEMPTS):',(self.workspace/'src/retry.py').read_text())
         self.assertEqual(before,self.s.current_contract(self.session));self.assertTrue(self.s.audit_valid())
+    def test_interrupted_tests_recover_with_inconclusive_provenance(self):
+        r=self.propose('test')
+        with patch('host_actions.execution_identity',side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):self.apply(r)
+        from lifecycle import reconcile
+        reconcile(self.s,self.workspace)
+        raw=self.s.db.execute('SELECT record_json FROM host_action_receipts ORDER BY rowid DESC LIMIT 1').fetchone()[0]
+        result=json.loads(raw)['result']
+        self.assertEqual(result['status'],'interrupted')
+        self.assertEqual(result['provenance']['transition'],'inconclusive')
+        self.assertEqual(result['provenance']['test_paths'],['tests/test_retry.py'])
+        self.assertFalse(result['assertions_verified'])
+
+    def test_failed_runtime_observation_gets_inconclusive_provenance(self):
+        r=self.propose('test')
+        with patch('host_actions.execution_identity',side_effect=RuntimeError('unavailable')):
+            result=self.apply(r)['result']
+        self.assertEqual(result['status'],'failed_or_uncertain')
+        self.assertEqual(result['provenance']['transition'],'inconclusive')
+        self.assertIsNone(result['provenance']['execution'])
+
     def test_test_confirmation_lists_the_exact_snapshot_grant(self):
         result = self.propose('test')
         shown = preview(self.s, self.session, result['result']['invocation_id'], self.workspace)
@@ -175,6 +196,34 @@ class ActionTests(unittest.TestCase):
         self.apply(self.propose())
         import sqlite3
         with self.assertRaises(sqlite3.IntegrityError):self.s.db.execute("UPDATE host_action_receipts SET record_json='{}'")
+    def observed(self,r):
+        # Stand-in for the macOS sandbox so the receipt logic runs on every platform.
+        def run(directory,files,target,timeout_ms,root=None):
+            ok='range(MAX_ATTEMPTS)' in files['src/retry.py']['text'] or 'len(calls) < 1' in files['tests/test_retry.py']['text']
+            return {'status':'process_exited_zero' if ok else 'process_failed','returncode':0 if ok else 1,
+                    'assertions_verified':False,'elapsed_seconds':.01,'output_tail':''}
+        with patch('host_actions.run_tests_snapshot',run),patch('sys.platform','darwin'):return self.apply(r)
+    def test_red_to_green_is_recorded_only_when_test_files_are_unchanged(self):
+        failed=self.observed(self.propose('test'))['result']
+        self.assertEqual(failed['provenance']['transition'],'first_run');self.assertIsNone(failed['provenance']['prior_run'])
+        self.apply(self.propose('edit'));passed=self.observed(self.propose('test'))['result']
+        self.assertEqual(passed['provenance']['transition'],'red_to_green')
+        self.assertEqual(passed['provenance']['test_paths_edited_in_task'],[])
+        self.assertEqual({k:passed['provenance']['prior_run'][k] for k in ('status','tests_unchanged','sources_changed')},
+                         {'status':'process_failed','tests_unchanged':True,'sources_changed':True})
+        self.assertFalse(passed['assertions_verified'])
+        runs=[r for r in execution_context(self.s,self.session,self.workspace)['recent'] if r['kind']=='run_tests']
+        self.assertEqual([r['transition'] for r in runs],['first_run','red_to_green'])
+        self.assertTrue(all(r['assertions_verified'] is False for r in runs))
+    def test_passing_after_the_model_weakens_a_test_is_not_red_to_green(self):
+        self.observed(self.propose('test'))
+        weaken=lambda answer:answer['action'].update(target='tests/test_retry.py',old='if len(calls) < 3:',new='if len(calls) < 1:')
+        self.assertEqual(self.apply(self.propose('edit',Coder(weaken)))['result']['status'],'applied')
+        passed=self.observed(self.propose('test'))['result']
+        self.assertEqual(passed['status'],'process_exited_zero')
+        self.assertEqual(passed['provenance']['transition'],'tests_changed')
+        self.assertEqual(passed['provenance']['test_paths_edited_in_task'],['tests/test_retry.py'])
+        self.assertFalse(passed['provenance']['prior_run']['tests_unchanged'])
     @requires_sandbox
     def test_failed_then_passing_tests_bound_to_versions(self):
         failed=self.apply(self.propose('test'));self.assertEqual(failed['result']['status'],'process_failed')
@@ -184,6 +233,63 @@ class ActionTests(unittest.TestCase):
         report=self.propose('review');self.assertFalse(report['result']['accepted_output']['complete'])
         (self.workspace/'src/retry.py').write_text(SOURCE)
         self.assertNotEqual(execution_context(self.s,self.session,self.workspace)['tests'],'process_exited_zero_current')
+
+
+class TestProvenanceTests(unittest.TestCase):
+    EXECUTION={'contract_hash':'contract','epoch':1,'runtime_sha256':'runtime','runner_sha256':'runner','test_timeout_ms':1000}
+    PATHS=['tests/test_a.py','tests/helper.py']
+    def run_at(self,status,**versions):
+        base={'src/a.py':'s1','tests/test_a.py':'t1','tests/helper.py':'h1'};base.update(versions)
+        return ({'id':'run-'+status,'kind':'run_tests','target':'tests/test_a.py'},{'status':status,'artifact_versions':base,'provenance':{'version':2,'execution':self.EXECUTION,'test_paths':sorted(self.PATHS)}})
+    def now(self,history,status,**versions):
+        base={'src/a.py':'s2','tests/test_a.py':'t1','tests/helper.py':'h1'};base.update(versions)
+        return run_provenance(history,'tests/test_a.py',self.PATHS,base,status,self.EXECUTION)
+    def test_transitions(self):
+        red=self.run_at('process_failed');green=self.run_at('process_exited_zero')
+        self.assertEqual(self.now([red],'process_exited_zero')['transition'],'red_to_green')
+        self.assertEqual(self.now([green],'process_exited_zero')['transition'],'green_to_green')
+        self.assertEqual(self.now([green],'process_failed')['transition'],'green_to_red')
+        self.assertEqual(self.now([red],'process_failed')['transition'],'red_to_red')
+        self.assertEqual(self.now([],'process_exited_zero')['transition'],'first_run')
+        # Same sources and tests, different outcome: a flaky or environment-dependent test.
+        self.assertEqual(self.now([red],'process_exited_zero',**{'src/a.py':'s1'})['transition'],'red_to_green_without_source_change')
+    def test_any_changed_or_newly_listed_test_path_withholds_red_to_green(self):
+        red=self.run_at('process_failed')
+        self.assertEqual(self.now([red],'process_exited_zero',**{'tests/helper.py':'h2'})['transition'],'tests_changed')
+        self.assertEqual(self.now([red],'process_exited_zero',**{'tests/test_a.py':'t2'})['transition'],'tests_changed')
+        absent=({'id':'x','kind':'run_tests','target':'tests/test_a.py'},{'status':'process_failed','artifact_versions':{'src/a.py':'s1','tests/test_a.py':'t1'}})
+        self.assertEqual(self.now([absent],'process_exited_zero')['transition'],'inconclusive')
+    def test_timeouts_stale_and_legacy_results_are_inconclusive(self):
+        for status in ('timeout','resource_wait','output_limit','stale_sources','failed_or_uncertain','passed',None):
+            self.assertEqual(self.now([self.run_at('process_failed')],status)['transition'],'inconclusive')
+            self.assertEqual(self.now([],status)['transition'],'inconclusive')
+            prior=({'id':'p','kind':'run_tests','target':'tests/test_a.py'},{'status':status})
+            self.assertEqual(self.now([prior],'process_exited_zero')['transition'],'inconclusive')
+    def test_changed_test_inventory_cannot_reclassify_a_helper_as_source(self):
+        prior=self.run_at('process_failed')
+        now={'src/a.py':'s1','tests/test_a.py':'t1','tests/helper.py':'altered'}
+        result=run_provenance([prior],'tests/test_a.py',['tests/test_a.py'],now,'process_exited_zero',self.EXECUTION)
+        self.assertEqual(result['transition'],'inconclusive')
+        self.assertFalse(result['prior_run']['comparable'])
+    def test_changed_or_missing_execution_identity_is_inconclusive(self):
+        prior=self.run_at('process_failed')
+        for key in self.EXECUTION:
+            changed=dict(self.EXECUTION);changed[key]='changed'
+            with self.subTest(key=key):
+                result=run_provenance([prior],'tests/test_a.py',self.PATHS,prior[1]['artifact_versions'],'process_exited_zero',changed)
+                self.assertEqual(result['transition'],'inconclusive')
+        prior[1].pop('provenance')
+        self.assertEqual(self.now([prior],'process_exited_zero')['transition'],'inconclusive')
+
+    def test_history_selects_the_latest_run_of_the_same_target_and_applied_test_edits(self):
+        other=({'id':'o','kind':'run_tests','target':'tests/other.py'},{'status':'process_failed','artifact_versions':{}})
+        applied=({'id':'e1','kind':'edit','target':'tests/helper.py'},{'status':'applied'})
+        failed_edit=({'id':'e2','kind':'edit','target':'tests/test_a.py'},{'status':'failed_or_uncertain'})
+        source_edit=({'id':'e3','kind':'edit','target':'src/a.py'},{'status':'applied'})
+        result=self.now([other,source_edit,failed_edit,self.run_at('process_exited_zero'),applied,self.run_at('process_failed')],'process_exited_zero')
+        self.assertEqual(result['prior_run']['action_id'],'run-process_exited_zero')
+        self.assertEqual(result['test_paths_edited_in_task'],['tests/helper.py'])
+        self.assertEqual(result['target_sha256'],'t1')
 
 
 class HardwareTests(unittest.TestCase):

@@ -47,7 +47,7 @@ class InvocationLedger(GovernedContext):
                 self.db.execute(f"CREATE TRIGGER IF NOT EXISTS immutable_{table}_{op} BEFORE {op} ON {table} BEGIN SELECT RAISE(ABORT,'immutable invocation record'); END")
         self.db.commit()
 
-    def register(self, run_id, call_id, role, payload, system, schema, delivery_id, model, charge, budget=None, resource=None):
+    def register(self, run_id, call_id, role, payload, system, schema, delivery_id, model, charge, budget=None, resource=None, model_identity=None):
         expected_system, expected_schema = expected_request(role, payload)
         if system != expected_system or schema != expected_schema:
             raise InvalidUpdate('Role system/schema mismatch')
@@ -55,7 +55,7 @@ class InvocationLedger(GovernedContext):
                     'role': role, 'model': model, 'delivery_id': delivery_id,
                     'system_hash': sha(system), 'schema': schema, 'payload_hash': sha(canonical(payload)),
                     'request_hash': request_hash(call_id, model, system, payload, schema),
-                    'charge': charge, 'budget_profile':budget or {'context_limit':8192,'response_reserve':1024,'template_reserve':256}, 'created_at': time.time()}
+                    'model_identity': model_identity, 'charge': charge, 'budget_profile':budget or {'context_limit':8192,'response_reserve':1024,'template_reserve':256}, 'created_at': time.time()}
         with self.db:
             self.db.execute('BEGIN IMMEDIATE')
             run = self.run(run_id); session = run['session']; config = run['config']
@@ -79,8 +79,14 @@ class InvocationLedger(GovernedContext):
             else:
                 if payload['contract']['contract_hash'] != config['contract_hash']:
                     raise Conflict('Invocation contract changed')
-                if role in ('reviewer','coder','architect','api_mapper','api_reviewer','static_explainer','chat_reviewer','conversation','subagent'):
-                    if role=='subagent':
+                if role in ('reviewer','coder','architect','api_mapper','api_reviewer','static_explainer','chat_reviewer','conversation','subagent','report_reviewer'):
+                    if role=='report_reviewer':
+                        from report_review import request_check
+                        request_check(self,session,payload)
+                        expected=payload['reviewer_selection']['reviewer_identity']
+                        if expected!=model_identity or expected['name']!=model:
+                            raise InvalidUpdate('Architecture reviewer identity differs from committed selection')
+                    elif role=='subagent':
                         from subagent_runtime import request_check
                         request_check(self,session,payload)
                         if payload['route']['model']!=model:raise InvalidUpdate('Child model differs from host route')
@@ -234,6 +240,9 @@ class InvocationLedger(GovernedContext):
         if env['role']=='chat_reviewer':
             from chat_runtime import request_check
             request_check(self,session,payload)
+        if env['role']=='report_reviewer':
+            from report_review import request_check
+            request_check(self,session,payload)
         if env['role']=='subagent':
             from subagent_runtime import request_check
             request_check(self,session,payload)
@@ -278,17 +287,24 @@ class InvocationGateway:
             from local_model import LocalModel
             from monitoring import require_resources
             resource=require_resources(Path(self.db).parent) if isinstance(self.provider,LocalModel) else {'profile':'injected-test-provider'}
-            envelope = ledger.register(self.run_id, call_id, role, payload, system, schema, delivery_id, name, charge, budget={'context_limit':self.provider.budget.context_limit,'response_reserve':self.provider.budget.response_reserve,'template_reserve':self.provider.budget.template_reserve},resource=resource)
+            from model_identity import observe, unknown
+            identity=observe(name) if isinstance(self.provider,LocalModel) else getattr(self.provider,'model_identity',unknown(name))
+            expected=getattr(self.provider,'expected_identity',None)
+            if expected is not None and identity!=expected: raise InvalidUpdate('Selected model identity changed before dispatch')
+            self.provider.dispatch_identity=identity
+            envelope = ledger.register(self.run_id, call_id, role, payload, system, schema, delivery_id, name, charge, budget={'context_limit':self.provider.budget.context_limit,'response_reserve':self.provider.budget.response_reserve,'template_reserve':self.provider.budget.template_reserve},resource=resource,model_identity=identity)
         finally: ledger.close()
         permit = {'hash': envelope['request_hash'], 'used': False}
-        token = _permit.set(permit); error = None; proposal = None;started=time.monotonic()
+        token = _permit.set(permit); error = None; proposal = None; record = None;started=time.monotonic()
         from model_activity import scope
         try:
             with scope(envelope) as activity:
                 proposal, record = self.provider.call(call_id, system, copy.deepcopy(payload), copy.deepcopy(schema))
+                if isinstance(self.provider,LocalModel) and observe(name)!=identity:
+                    raise InvalidUpdate('Model identity changed during inference')
         except Exception as exc:
             error = type(exc).__name__ + ': ' + str(exc)
-            record = getattr(exc, 'call_record', {'call_id': call_id, 'ok': False, 'error': error})
+            record = getattr(exc, 'call_record', None) or record or {'call_id': call_id, 'ok': False, 'error': error}
         finally: _permit.reset(token)
         ledger = InvocationLedger(self.db)
         try:

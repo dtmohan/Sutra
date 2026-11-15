@@ -86,13 +86,26 @@ def verify(s,meta,workspace,root,request,provider=None):
  source=json.loads(s.db.execute('select payload_json from deliveries where id=?',(env['delivery_id'],)).fetchone()[0])
  payload={k:copy.deepcopy(source[k]) for k in ('contract','workspace','pages','api','packet')}
  payload.update(request='Independently reconstruct each API call from source evidence without seeing the proposed map.',candidate_id=candidate_id,readable_sites=roles.readable_sites(source['packet']))
- real=provider is None
- if real:provider=provider_for(root,request.get('reviewer_model','qwen3:4b'),review=True)
+ from model_identity import choose,compare,unknown,enforce
+ real=provider is None;strict=request.get('require_distinct_reviewer',False)
+ mapper=env.get('model_identity') or unknown(env['model'])
+ if real:
+  reviewer,separation=choose(mapper,request.get('reviewer_model','auto'))
+  enforce(separation,strict)
+  provider=provider_for(root,reviewer,review=True);provider.expected_identity=separation['reviewer_identity']
+ else:
+  from model_identity import observe
+  observed=observe(provider.model) if isinstance(provider,LocalModel) else getattr(provider,'model_identity',unknown(provider.model))
+  if isinstance(provider,LocalModel):
+   if getattr(provider,'expected_identity',observed)!=observed:raise InvalidUpdate('Selected reviewer identity changed')
+   provider.expected_identity=observed
+  separation=compare(mapper,observed)
+  separation.update(selection='injected',requested_model=provider.model);enforce(separation,strict)
  result=invoke(s,session,root,'api_reviewer',payload,provider,real)
  if result['admission']['admitted']:
   initialize(s);data=roles.request_check(s,session,'api_reviewer',payload);host=facts.assess(data,candidate);opinions=facts.compare(candidate,result['accepted_output']);decision=facts.decision(host,opinions)
   previous=s.db.execute('select seq,id from api_reviews where session=? order by seq desc limit 1',(session,)).fetchone() or (0,'GENESIS')
-  record={'session':session,'seq':previous[0]+1,'previous_hash':previous[1],'candidate_id':candidate_id,'reviewer_id':result['invocation_id'],'contract_hash':s.origin(session)['contract_hash'],'logic_hash':s.logic_hash,'packet_hash':payload['api']['packet_hash'],'host':host,'reviewer_comparison':opinions,'decision':decision,'created_at':time.time()}
+  record={'session':session,'seq':previous[0]+1,'previous_hash':previous[1],'candidate_id':candidate_id,'reviewer_id':result['invocation_id'],'contract_hash':s.origin(session)['contract_hash'],'logic_hash':s.logic_hash,'packet_hash':payload['api']['packet_hash'],'host':host,'reviewer_comparison':opinions,'decision':decision,'independence':separation,'created_at':time.time()}
   raw=canonical(record);rid=sha('api-review-v1:'+raw)
   with s.db:s.db.execute('insert into api_reviews values(?,?,?,?)',(rid,session,record['seq'],raw));s._audit('API_PUBLICATION',dict(id=rid,**record))
   meta['api_review']=rid
@@ -116,7 +129,7 @@ def state(s,meta,workspace):
   if row:
    reviewer=s.load_result(meta['active'],row['reviewer_id'])
    if row['candidate_id']!=result['candidate_id'] or row['logic_hash']!=s.logic_hash:raise InvalidUpdate('API review is stale')
-   result.update(status='reviewed' if row['decision']['admitted'] else 'quarantined',decision=row['decision'],host=row['host'],reviewer_comparison=row['reviewer_comparison'],reviewer_id=row['reviewer_id'])
+   result.update(status='reviewed' if row['decision']['admitted'] else 'quarantined',decision=row['decision'],host=row['host'],reviewer_comparison=row['reviewer_comparison'],reviewer_id=row['reviewer_id'],independence=row.get('independence'))
    if row['decision']['admitted']:result['report']=render(s,meta['active'],candidate,row,meta.get('api_position'))
  except (InvalidUpdate,PageFault,ValueError) as exc:result.update(status='withheld',error=str(exc))
  return result
@@ -126,7 +139,10 @@ def render(s,session,candidate,row,position):
  nodes={n['id']:n for n in p['packet']['nodes']};sites={c['id']:c for c in p['packet']['sites']};approved=row['decision']['verified_edges'];used=set()
  for key in approved:used.update((candidate['claims'][key]['source'],candidate['claims'][key]['target']))
  def safe(x):return ''.join(c if c.isalnum() or c in '/._ -:@' else '_' for c in x)
- lines=['# Reviewed API call map','',f'Karma task: {session}',f'Mapper invocation: {row["candidate_id"]}',f'Reviewer invocation: {row["reviewer_id"]}',f'Publication receipt: {row["id"]}','',f'Batch {position["offset"]+1}–{position["offset"]+position["count"]} of {position["total"]} indexed call sites.','Static lexical references; no claim that calls execute at runtime.','']
+ sep=row.get('independence')
+ from model_identity import label
+ note=label(sep) if sep and 'weight_relation' in sep else 'Reviewer weight separation was not established for this legacy review.'
+ lines=['# Reviewed API call map','',f'Karma task: {session}',f'Mapper invocation: {row["candidate_id"]}',f'Reviewer invocation: {row["reviewer_id"]}',f'Publication receipt: {row["id"]}',note,'',f'Batch {position["offset"]+1}–{position["offset"]+position["count"]} of {position["total"]} indexed call sites.','Static lexical references; no claim that calls execute at runtime.','']
  if approved:
   lines+=['```mermaid','flowchart LR']
   for key in sorted(used):lines.append('  '+key+'["'+safe(nodes[key]['path']+'::'+nodes[key]['name'])+'"]')

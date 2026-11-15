@@ -111,7 +111,7 @@ window.addEventListener('message',({data:m})=>{
   if(m.type==='busy'){busy=m.value;updateButtons();el('status').textContent=busy?'Working locally…':'';}
   if(m.type==='error')el('error').textContent=m.message;
   if(m.type==='dashboard'){showDashboard(m.data);if(!m.data.hardware?.available||!KarmaTokens.freshAge(m.data.hardware.age_seconds))expireDashboard('Readings expired. Waiting for a fresh update.');}
-  if(m.type==='models'){for(const id of ['model','review-model','api-model','static-model','auto-model']){el(id).replaceChildren(...m.data.map(x=>{const o=document.createElement('option');o.value=x.name;o.textContent=x.name;return o;}));const preferred=id==='api-model'?'qwen3:4b':id==='static-model'&&!current?.static?.model?'qwen3.6:35b':selectedModel;el(id).value=m.data.some(m=>m.name===preferred)?preferred:selectedModel;}}
+  if(m.type==='models'){for(const id of ['model','review-model','api-model','static-model','auto-model']){el(id).replaceChildren(...m.data.map(x=>{const o=document.createElement('option');o.value=x.name;o.textContent=x.name;return o;}));if(id==='api-model'){const opt=document.createElement('option');opt.value='auto';opt.textContent='Auto · prefer different model weights';el(id).prepend(opt);}const preferred=id==='api-model'?'auto':id==='static-model'&&!current?.static?.model?'qwen3.6:35b':selectedModel;el(id).value=preferred==='auto'||m.data.some(m=>m.name===preferred)?preferred:selectedModel;}}
   if(m.type==='state'){
     current=m.data;showTaskSummary(current);selectedModel=current.model;el('model').value=selectedModel;el('review-model').value=selectedModel;
     el('auto-model').value=selectedModel;
@@ -211,10 +211,10 @@ el('refresh-models').onclick=()=>send('refresh_models');
 el('save-model-tiers').onclick=()=>send('save_model_tiers',{models:Object.fromEntries(['low','mid','high'].map(t=>[t,el('tier-'+t).value]))});
 
 window.addEventListener('message',({data:m})=>{
- if(m.type==='runtime-settings'){el('storage-limit').value=m.settings.storageLimitMiB;el('python-path').value=m.settings.pythonPath;el('thinking-mode').value=m.settings.thinking||'off';}
+ if(m.type==='runtime-settings'){el('storage-limit').value=m.settings.storageLimitMiB;el('python-path').value=m.settings.pythonPath;el('thinking-mode').value=m.settings.thinking||'off';el('logit-sensor').value=m.settings.logitSensor||'off';}
  if(m.type==='runtime-saved')el('runtime-save-status').textContent='Runtime settings saved. They apply to subsequent requests.';
 });
-el('save-runtime').onclick=()=>{el('runtime-save-status').textContent='';send('save_runtime_settings',{settings:{storageLimitMiB:Number(el('storage-limit').value),pythonPath:el('python-path').value.trim(),thinking:el('thinking-mode').value}});};
+el('save-runtime').onclick=()=>{el('runtime-save-status').textContent='';send('save_runtime_settings',{settings:{storageLimitMiB:Number(el('storage-limit').value),pythonPath:el('python-path').value.trim(),thinking:el('thinking-mode').value,logitSensor:el('logit-sensor').value}});};
 el('overview-native-use').onclick=()=>send('native_use');el('overview-native-arm').onclick=()=>send(nativeState.armed?'native_disarm':'native_arm');el('native-use').onclick=()=>send('native_use');el('native-arm').onclick=()=>send(nativeState.armed?'native_disarm':'native_arm');el('native-disarm').onclick=()=>send('native_disarm');el('native-toggle').onclick=()=>send('native_toggle');
 
 // Usage filters operate on a bounded, disclosed window of immutable receipts.
@@ -285,4 +285,5 @@ function renderReview(p,fallback=''){
   if(!r[key].length)list.append(textNode('li','No specific finding supported by the delivered excerpts.'));
   root.append(list);
  }
+ if(p.publication_note)root.append(textNode('p',p.publication_note,'muted'));
 }

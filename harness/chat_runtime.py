@@ -113,7 +113,12 @@ def request_check(s,sid,p):
 
         h=p['handoff'];prior=s.load_result(sid,h['invocation_id'])
         env=json.loads(s.db.execute('SELECT record_json FROM invocations WHERE id=?',(h['invocation_id'],)).fetchone()[0])
-        if env['role']!='chat_reviewer' or h!=compact(prior,h['invocation_id'],env['model']):raise InvalidUpdate('Chat handoff differs from admitted receipt')
+        if h.get('reviewer_id'):
+            from report_review import published
+            prior,_=published(s,sid,h['invocation_id'],h['reviewer_id'])
+        expected=compact(prior,h['invocation_id'],env['model'])
+        if h.get('reviewer_id'):expected['reviewer_id']=h['reviewer_id']
+        if env['role']!='chat_reviewer' or h!=expected:raise InvalidUpdate('Chat handoff differs from admitted receipt')
     return data
 
 def validate(s,sid,p,proposal):
@@ -125,7 +130,7 @@ def validate(s,sid,p,proposal):
     report.validate(p, proposal)
     return {'admission':{'admitted':True,'errors':[],'semantic_correctness_verified':False},'checks':['schema','contract','calibration_binding','fresh_source','route_commitment','citations','handoff'],'provisional':True}
 
-def answer(s,meta,workspace,root,request,provider=None):
+def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
     sid=meta['active'];prompt=request.get('prompt','');models=request.get('models');mode=request.get('tier','auto')
     # Validate user configuration before any source operation or inference.
     KarmaAdapter().route(prompt,models,mode,{'source_files':0,'selected_files':0,'unresolved_calls':0})
@@ -157,13 +162,18 @@ def answer(s,meta,workspace,root,request,provider=None):
     old=meta.get('chat',{}).get('checkpoint')
     if old:
         try:
-            prior=s.load_result(sid,old);env=json.loads(s.db.execute('SELECT record_json FROM invocations WHERE id=?',(old,)).fetchone()[0])
+            prior=s.load_result(sid,old)
+            if meta['chat'].get('reviewer_id'):
+                from report_review import published
+                prior,_=published(s,sid,old,meta['chat']['reviewer_id'])
+            env=json.loads(s.db.execute('SELECT record_json FROM invocations WHERE id=?',(old,)).fetchone()[0])
             p['handoff']=compact(prior,old,env['model'])
+            if meta['chat'].get('reviewer_id'):p['handoff']['reviewer_id']=meta['chat']['reviewer_id']
         except (PageFault,InvalidUpdate):pass
     real=provider is None
     if real:
         from api_runtime import provider_for
-        provider=provider_for(root,choice['model'],review=True);context.context_budget(provider,s,sid);provider.keep_alive=0
+        provider=provider_for(root,choice['model'],review=True);context.context_budget(provider,s,sid,slots=4 if report.requested(p) else 2);provider.keep_alive=0
     p['memory_budget']=vars(provider.budget).copy()
     p['excerpt_bytes']=max(64,min(65536,provider.budget.context_limit//3))
     p['map_bytes']=max(512,min(65536,provider.budget.context_limit//3))
@@ -187,15 +197,37 @@ def answer(s,meta,workspace,root,request,provider=None):
         out=InvocationGateway(s.path,run,provider).invoke('chat_reviewer',uuid.uuid4().hex,SYSTEM,p,fmt,delivery)
         if out['admission']['admitted']:
             s.event(run,'ALLOW',{'reason':'chat_review_admitted','invocation_id':out['invocation_id']})
-            meta['chat']={'checkpoint':out['invocation_id'],'route':choice};meta['model']=choice['model'];break
+            break
         s.event(run,'NACK',{'errors':out['admission']['errors']})
         if attempt==2 or out.get('blocked'):s.event(run,'FIN',{'reason':'chat_repair_exhausted'});break
         try:request_check(s,sid,p)
         except (InvalidUpdate,PageFault) as exc:
             s.event(run,'FIN',{'reason':'chat_context_changed','error':str(exc)});break
         s.event(run,'BRIDGE',{'reason':'bounded_chat_repair'});p['repair']={'errors':[e[:140] for e in out['admission']['errors'][:2]]}
+    publication=None
+    if out['admission']['admitted']:
+        checkpoint=out['invocation_id']; reviewer_id=None
+        if 'report' in out['accepted_output']:
+            import report_review
+            try:
+                reviewed=report_review.run(s,sid,root,checkpoint,
+                    provider=review_provider if review_provider is not None else (None if real else provider),
+                    requested=request.get('reviewer_model','auto'),strict=request.get('require_distinct_reviewer',False))
+                from token_usage import summarize
+                calls=out['token_usage']['calls']+reviewed['token_usage']['calls']
+                out['token_usage']={'calls':calls,'totals':summarize(calls),'total_calls':len(calls),'limit':None}
+                if not reviewed['admission']['admitted']:
+                    raise InvalidUpdate('Architecture claim review was withheld: '+'; '.join(reviewed['admission']['errors']))
+                reviewer_id=reviewed['invocation_id']
+                out['accepted_output'],publication=report_review.published(s,sid,checkpoint,reviewer_id)
+                out['publication']=publication
+            except (InvalidUpdate,PageFault,ContextBudgetExceeded) as exc:
+                out['admission']={'admitted':False,'errors':['Architecture report not published: '+str(exc)],'semantic_correctness_verified':False}
+                out['accepted_output']=None
+        if out['admission']['admitted']:
+            meta['chat']={'checkpoint':checkpoint,'route':choice,'reviewer_id':reviewer_id};meta['model']=choice['model']
     out.pop('record',None);out.pop('model_proposal',None)
     return {'result':out,'route':choice,'coverage':dict(record['coverage'],evidence=p['evidence_coverage']),'source_files':list(p['excerpts']),
-            'report_markdown':report.markdown(out['accepted_output']) if out['admission']['admitted'] else None,
+            'report_review':publication,'report_markdown':report.markdown(out['accepted_output']) if out['admission']['admitted'] else None,
             'review_diagram':report.diagram(graph,list(p['excerpts']),data['sources']) if out['admission']['admitted'] else None,
             'diagram':analysis.render(graph) if out['admission']['admitted'] else None,'auto':auto.status(s,meta,workspace)}

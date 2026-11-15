@@ -19,7 +19,7 @@ def catalog(ollama):
             architecture=str(info.get('general.architecture') or details.get('family') or '')
             moe='moe' in architecture.lower() or any('expert_count' in k and type(v) is int and v>1 for k,v in info.items())
             row.update(eligible=eligible,capabilities=capabilities,parameter_count=count,parameter_size=details.get('parameter_size',''),
-                quantization=details.get('quantization_level',''),moe=moe,
+                quantization=details.get('quantization_level',''),moe=moe,architecture=architecture,family=details.get('family') or (tag.get('details') or {}).get('family'),
                 eligibility_reason='local chat model' if eligible else 'autocomplete/base model' if base else 'completion capability not declared')
         except Exception as exc:
             row.update(eligible=False,eligibility_reason='metadata unavailable');errors.append({'model':name,'error':str(exc)[:160]})

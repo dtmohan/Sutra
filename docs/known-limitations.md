@@ -39,3 +39,26 @@
   memory measurements.
 - Private repository access and extension installation do not require or imply
   publication to the VS Code Marketplace.
+
+- Architecture claim reviews are fallible model opinions. Exact-quote checking
+  establishes source provenance, not entailment. The host omits disputed claim
+  groups but cannot guarantee that every unsupported statement is detected.
+  The extra reviewer consumes task allocation and can withhold publication when
+  a valid review does not fit the remaining context, call or time budget.
+- Weight identity uses verified manifest bytes and content-addressed model,
+  named-tensor and adapter references in the local Ollama blob store. It does
+  not re-hash all weight files or attest the server. Template/parameter changes
+  and registry provenance do not establish different weights. A nonstandard
+  server model store may leave weight separation unknown; strict separation
+  refuses dispatch in that case. Family is an architecture heuristic, not a
+  verified training lineage. Different weights do not imply independent errors.
+- Test provenance covers declared test paths and observed runtime/build identity.
+  It cannot prove isolation from every environmental difference or the quality
+  of the tests. A red-to-green observation is not a verified correctness claim.
+- The optional sensor is experimental and off by default. Token likelihood is
+  not a correctness/confidence metric. Top-k conditional entropy is truncated;
+  a sampled token below an alternative does not prove a grammar forced it.
+  Unknown or unaligned probabilities remain unavailable/unattributed. Bootstrap
+  thresholds are uncalibrated, never kernel inputs. Backend request errors still
+  obey normal transport and repair rules. Only numeric mode omits token text
+  from this diagnostic log; existing call traces have their own retention policy.
