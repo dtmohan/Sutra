@@ -1,3 +1,9 @@
+# Sutra 0.35.0 — persistent workspace permissions
+
+Choose **Sutra: Workspace Permissions…** from the Command Palette or pick a profile the first time native chat needs project files. **Read only** enables scoped reads. **Workspace agent** also enables scoped edits and sandboxed tests with the existing action approval flow. Optional tools have their own approval policy.
+
+Sutra restores the profile when you reload a trusted workspace or switch models. Use **Sutra: Revoke Workspace Access** to remove it. Paused requests retain their context, task constraints and consumed budget. Send **continue** to resume a saved request.
+
 # Sutra 0.34.0 — bounded execution sessions and fresh source paging
 
 Workspace requests now have a fixed execution allowance inside the cumulative task budget. Retries, reloads and model switches preserve that allowance, memory and permissions. A later execution uses only the task capacity that remains; an explicit increase creates a linked successor without erasing spending.
@@ -8,7 +14,7 @@ Before asking for more capacity, mapping and synthesis select smaller fresh sour
 
 Sutra can now request Ruff lint checks and Pyright type checks from native chat. Ask “Run Ruff on code.py” or “Check code.py with Pyright.” The host offers installation if needed, then a separate source-check approval. **Sutra: Manage Tools** opens the catalog. Sutra Monitor provides **Manage tools** and **Tool permissions** buttons.
 
-Use **Sutra: Configure Tool Policy** to choose Ask each time, Preapprove selected operations, or Disable optional tools. A preapproval requires one explicit confirmation of the workspace, operation list and registry identity; changing that policy or registry requires confirmation again. A repository settings file cannot grant itself authority. Arming workspace access alone does not authorize installation or execution.
+Use **Sutra: Configure Tool Policy** to choose Ask each time, Preapprove selected operations, or Disable optional tools. A preapproval requires one explicit confirmation of the workspace, operation list and registry identity; changing that policy or registry requires confirmation again. A repository settings file cannot grant itself authority. Workspace permissions and optional tool approvals are separate.
 
 The first registry pins Ruff 0.17.5 and Pyright 1.1.414 to official package URLs and integrity hashes. Installation uses Sutra storage, without package-manager scripts or changes to project dependencies. Checks use fresh, approved Python snapshots in the macOS sandbox, with no network, source writes, fixes or project configuration. Other platforms have package mappings, but execution currently fails closed until a sandbox adapter is implemented and tested.
 
@@ -90,9 +96,7 @@ experimental local tool, not a guarantee that model answers are correct.
    installed models.
 4. Run **Sutra: Open Governed Chat (Sutra Auto)**. This saves the compatible Local
    chat and model selection for new chats. Existing chats retain their selection.
-5. Chat normally. For workspace access, use **Sutra: Arm Workspace Access**. One confirmation enables reading without opening a new chat. A pending workspace request resumes immediately after approval. The first
-   workspace prompt creates or resumes a task; scoped edits and tests request
-   additional permissions when needed, followed by confirmation of the exact action.
+5. Chat normally. The first request that needs project files offers **Read only** or **Workspace agent** permissions and continues in the same chat after approval. Sutra remembers the choice for this trusted workspace across reloads, updates and model changes. Workspace agent access lets Sutra request file scopes for edits and local tests, then confirm each exact action. Manage or revoke access from **Sutra: Workspace Permissions…** or the dashboard.
 
 The native model picker offers **Sutra Auto**, **Sutra Low**, **Sutra Mid** and
 **Sutra High**. The review participant is **@sutra**. The dashboard has Overview,
@@ -113,8 +117,9 @@ consume allocation. Model switches and reloads cannot reset that use. Source
 versions and child receipts are checked again before synthesis.
 
 After interruption, choose a Sutra tier and send **continue** to resume the saved
-workflow. A different prompt cancels its unused child reservations; consumed
-budget and evidence remain. Reloading still requires arming workspace access.
+workflow. Replacing it requires confirmation and releases unused child
+reservations. The saved task retains its constraints, consumed budget and
+evidence. Saved workspace permissions are checked again when work resumes.
 The monitor shows request/child states, model assignments and allocation use.
 
 This version branches read-only reviews. Editing and tests remain governed parent
@@ -146,9 +151,8 @@ Sutra preserves an authenticated checkpoint for recognized compaction requests;
 it does not send those requests to Ollama. See [context and compaction](docs/context-and-compaction.md)
 for model-specific allocations, verbatim recent turns, pinned quotations and older-page retrieval. The working note is still unverified and retrieval is not a guarantee of semantic recall.
 
-A ready or armed badge does not prove that every VS Code prompt uses Sutra.
-Check the selected model and the response's invocation details. Direct Ollama
-models and other providers can bypass this harness.
+The status bar shows workspace access. Check for a Sutra model beneath the
+prompt and invocation details in its response to confirm routing.
 
 ## What is included
 

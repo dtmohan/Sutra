@@ -21,7 +21,7 @@ function fixture(){
  h.cfg['tools.preapproved']={ruff:['check','install']};assert.equal((await h.ui.approve(h.p)).kind,'workspace_policy');assert.equal(h.prompts.length,count+1);
  await h.ui.approve({...h.p,binding:{...h.p.binding,registry_hash:'registry2'}});assert.equal(h.prompts.length,count+2);
  h.cfg['tools.mode']='ask';h.choose(()=>{h.cfg['tools.mode']='disabled';return 'Approve';});await assert.rejects(h.ui.approve(h.p),/changed/);
- h.cfg['tools.mode']='ask';h.choose('Approve');h.arm(false);await assert.rejects(h.ui.approve(h.p),/Arm/);h.arm(true);
+ h.cfg['tools.mode']='ask';h.choose('Approve');h.arm(false);await assert.rejects(h.ui.approve(h.p),/workspace access/);h.arm(true);
  await assert.rejects(h.ui.approve(h.p,{isCancellationRequested:true}),/cancelled/);
  h.vscode.workspace.isTrusted=false;await assert.rejects(h.ui.approve(h.p),/trusted/);h.vscode.workspace.isTrusted=true;
  h.cfg['tools.preapproved']={shell:['run']};await assert.rejects(h.ui.approve(h.p),/registered/);

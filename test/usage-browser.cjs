@@ -115,6 +115,11 @@ monitor.orchestration.nodes[0].resource_fallback={from_model:'large',model:'smal
  await page.click('#reset');await page.selectOption('#status','pending');assert.equal(await page.locator('#input').textContent(),'—');assert.equal(await page.locator('#rows img').count(),0);assert((await page.locator('#rows').textContent()).includes('<img'));
  await page.click('#reset');await send({snapshot:{...snapshot,calls:[calls[4]],total_calls:1}});assert.equal(await page.locator('#input').textContent(),'0');assert.equal(await page.locator('#output').textContent(),'0');assert.equal(await page.locator('#unknown').textContent(),'0');
  await send({snapshot:{...snapshot,calls:[],total_calls:0}});assert.equal(await page.locator('#input').textContent(),'—');assert.equal(await page.locator('#empty-title').textContent(),'No model calls yet');assert(!(await page.locator('#visuals').isVisible()));
+ await send({snapshot,native:{enabled:true,armed:true,accessProfile:'workspace_agent'}});
+ assert.equal(await page.locator('#workspace-access').textContent(),'Workspace permissions · Workspace agent');
+ assert((await page.locator('#native-request').textContent()).includes('No Sutra request observed'));
+ await send({snapshot,native:{enabled:true,armed:false,accessProfile:null}});
+ assert.equal(await page.locator('#workspace-access').textContent(),'Workspace permissions · No workspace access');
  await send({snapshot,routing:{active:true}});assert.equal(await page.locator('#activity').textContent(),'Request in progress');assert(!(await page.locator('#model').isDisabled()));
  assert((await page.locator('#flow-nodes').textContent()).includes('large.py: Static graph work-unit allocation exceeded'));
  await send({snapshot,error:'Reader unavailable'});assert((await page.locator('#error').textContent()).includes('last recorded snapshot'));assert.equal(await page.locator('#input').textContent(),'6,284');assert.equal(await page.locator('#cpu-temp').textContent(),'—');assert.equal(await page.locator('#resource').textContent(),'System pressure unavailable');

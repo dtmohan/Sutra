@@ -109,8 +109,20 @@ function renderMonitor(){
  if(c?.accounting_settlement){const a=c.accounting_settlement;el('context-packet').textContent+=' Task charge: '+T.number(a.used_tokens)+' ('+(a.basis==='runtime_measured'?'completed runtime counts':'reservation retained')+'). Unused reservation released: '+T.number(a.released_unused_reservation)+'.';}
  el('kernel-identity').textContent=d.kernel?'Kernel: '+d.kernel.name+' · SHA-256 '+d.kernel.sha256+' · check order '+(d.kernel.order||[]).join(' → '):'Kernel identity not available.';
  const memory=routing?.memoryUsed===true?' · Smriti memory restored':routing?.memoryUsed===false?' · new conversation':'';
- el('native-request').textContent=routing?'Last Sutra request: '+(routing.model||'model pending')+' · '+(routing.stage||'received')+memory+'. Workspace tools '+(native?.armed?'armed':'unarmed')+'.':'No Sutra request observed in this window. Selected chat routing is unverified.';
- const access={requested:'waiting for dialog response',confirmed:'confirmation received; checking task',granted:'workspace access granted',declined:'confirmation declined',cancelled:'confirmation cancelled',already_armed:'existing workspace grant reused'}[routing?.workspaceAccess?.state];
+ const profiles = {read_only:'Read only',workspace_agent:'Workspace agent'};
+ const profile = profiles[native?.accessProfile];
+ const permission = !native ? 'unavailable' : native.enabled === false ? 'Sutra Auto is off' :
+   native.armed && profile ? profile : 'No workspace access';
+ el('workspace-access').textContent = 'Workspace permissions · '+permission;
+ el('native-request').textContent = routing
+   ? 'Last Sutra request: '+(routing.model||'model pending')+' · '+(routing.stage||'received')+memory+'.'
+   : 'No Sutra request observed in this window. Check the model selected below the chat prompt.';
+ const access = {
+   requested:'waiting for permission choice', confirmed:'confirmation received',
+   granted:'workspace access granted', declined:'permission declined', cancelled:'permission cancelled',
+   already_armed:'saved workspace permissions reused', restored:'saved workspace permissions restored',
+   reused:'saved workspace permissions reused'
+ }[routing?.workspaceAccess?.state];
  if(access)el('native-request').textContent+=' Last permission feedback: '+access+'.';
  const ma=routing?.memoryAllocation,ms=routing?.memoryStatus;if(ma)el('context-packet').textContent+=' Conversation: '+T.number(ma.context_limit)+' context tokens, '+T.number(ma.response_reserve)+' output reserved; working note up to '+T.number(ma.summary_max_chars)+' characters. '+(ms?T.number(ms.stored_turns)+' saved turns · '+T.number(ms.omitted_turns)+' outside this working set.':'');
  const compact=native?.compaction;el('compaction').dataset.missing=String(compact?.status==='missing_checkpoint');

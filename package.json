@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Local orchestration with observe-only task commitments and completion assessments.",
-  "version": "0.34.0",
+  "version": "0.35.0",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -108,11 +108,11 @@
       },
       {
         "command": "karma.armNative",
-        "title": "Sutra: Arm Workspace Access"
+        "title": "Sutra: Workspace Permissions…"
       },
       {
         "command": "karma.disarmNative",
-        "title": "Sutra: Disarm Native Chat"
+        "title": "Sutra: Revoke Workspace Access"
       },
       {
         "command": "karma.toggleNative",
@@ -219,7 +219,7 @@
           "type": "boolean",
           "default": true,
           "scope": "machine",
-          "description": "Make Sutra Auto available for general conversation. Arm a task for workspace tools; arming is revoked on reload or contract changes."
+          "description": "Make Sutra Auto available in native chat. Use the Sutra workspace permissions command to manage saved access. The current task scope still applies."
         },
         "karma.thinking": {
           "type": "string",
@@ -541,7 +541,7 @@
         "name": "karma_native_action",
         "toolReferenceName": "karmaAction",
         "displayName": "Apply a governed Sutra action",
-        "userDescription": "Apply a validated edit or run a permitted sandboxed Python test. Requires an armed task and a single-use action ticket from Sutra Auto.",
+        "userDescription": "Apply a validated edit or run a permitted sandboxed Python test. Requires workspace agent access, a task that permits the action, and a single-use action ticket from Sutra Auto.",
         "modelDescription": "Executes only the exact admitted proposal identified by a Sutra Auto action ticket. Cannot accept patches, paths, shell commands, or task permissions.",
         "canBeReferencedInPrompt": false,
         "inputSchema": {

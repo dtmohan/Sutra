@@ -1,3 +1,9 @@
+Sutra 0.35.0 — persistent workspace permissions
+
+Choose **Sutra: Workspace Permissions…** from the Command Palette or pick a profile the first time native chat needs project files. **Read only** enables scoped reads. **Workspace agent** also enables scoped edits and sandboxed tests with the existing action approval flow. Optional tools have their own approval policy.
+
+Sutra restores the profile when you reload a trusted workspace or switch models. Use **Sutra: Revoke Workspace Access** to remove it. Paused requests retain their context, task constraints and consumed budget. Send **continue** to resume a saved request.
+
 Sutra 0.34.0 — bounded execution sessions and fresh source paging
 
 Workspace requests now have a fixed execution allowance inside the cumulative task budget. Retries, reloads and model switches preserve that allowance, memory and permissions. A later execution uses only the task capacity that remains; an explicit increase creates a linked successor without erasing spending.
@@ -8,7 +14,7 @@ Sutra 0.33.0 — registered tools with governed installation
 
 Sutra can now request Ruff lint checks and Pyright type checks from native chat. Ask “Run Ruff on code.py” or “Check code.py with Pyright.” The host offers installation if needed, then a separate source-check approval. **Sutra: Manage Tools** opens the catalog. Sutra Monitor provides **Manage tools** and **Tool permissions** buttons.
 
-Use **Sutra: Configure Tool Policy** to choose Ask each time, Preapprove selected operations, or Disable optional tools. A preapproval requires one explicit confirmation of the workspace, operation list and registry identity; changing that policy or registry requires confirmation again. A repository settings file cannot grant itself authority. Arming workspace access alone does not authorize installation or execution.
+Use **Sutra: Configure Tool Policy** to choose Ask each time, Preapprove selected operations, or Disable optional tools. A preapproval requires one explicit confirmation of the workspace, operation list and registry identity; changing that policy or registry requires confirmation again. A repository settings file cannot grant itself authority. Workspace permissions and optional tool approvals are separate.
 
 The first registry pins Ruff 0.17.5 and Pyright 1.1.414 to official package URLs and integrity hashes. Installation uses Sutra storage, without package-manager scripts or changes to project dependencies. Checks use fresh, approved Python snapshots in the macOS sandbox, with no network, source writes, fixes or project configuration. Other platforms have package mappings, but execution currently fails closed until a sandbox adapter is implemented and tested.
 
@@ -58,7 +64,7 @@ Sutra Monitor now shows the effective reasoning setting and links to its VS Code
 
 Conversation prompts now focus on the current ask, relevant memory and the required answer format. The host binds context identity and retains the full contract, permissions and consumed budget in the ledger. Missing-context replies need actionable top-level page requests or a specific question. For the tested Ollama 0.40.16 MLX decoder only, a transport schema omits string length bounds that truncated escaped text; the original strict limits remain enforced by the host.
 
-Auto starts new requests with the configured low-tier local model. Greetings and routine questions can finish in that first call without arming workspace access or running review tools.
+Auto starts new requests with the configured low-tier local model. Greetings and routine questions can finish in that first call without workspace authorization or running review tools.
 
 Choose Model reasoning → Adaptive in Sutra → Settings → Reasoning & runtime, then Save runtime settings. Adaptive is the default for new configurations. Existing Off, On and Model default choices are preserved; this upgrade does not silently override them. The native VS Code setting is karma.thinking.
 
@@ -74,7 +80,7 @@ Chat distinguishes loading context, increasing reasoning on the same model, and 
 
 Conversation beside saved workspace work
 
-New messages are classified through the invocation gateway before any saved-review recovery. A greeting stays conversational, with no workspace arming, source mapping or review restart. A saved review keeps its context, constraints and consumed allocation. Send continue/resume explicitly to resume it; new workspace work asks before replacing it. Policy-upgrade restarts remain an explicit choice.
+New messages are classified through the invocation gateway before any saved-review recovery. A greeting stays conversational, with no permission prompt, source mapping or review restart. A saved review keeps its context, constraints and consumed allocation. Send continue/resume explicitly to resume it; new workspace work asks before replacing it. Policy-upgrade restarts remain an explicit choice.
 
 Sutra Monitor separates System pressure from Last model allocation. Healthy system pressure does not prove that the selected model fits. The last allocation is labelled historical and is checked again on dispatch. All existing memory thresholds and the STP kernel remain unchanged.
 
@@ -98,7 +104,7 @@ Sutra Monitor → Runtime memory shows compressed memory, swap, resident models,
 
 Recovery takes at most one release action and a three-second stability observation per attempt, records its result, and leaves the request paused for explicit Resume. Two distinct fresh healthy telemetry samples are required. An interrupted call whose model remains resident cannot be assumed idle. After a model unload, dispatch waits briefly for telemetry sampled after that release so a pre-unload reading cannot cause a false allocation stop. The original prompt, mandatory memory, contract, permissions and consumed budget remain in the ledger; unloading or switching models does not recreate or refund them. Runtime context sizing does not add source caches or replay a full conversation.
 
-Resource admission stops now pause native chat normally instead of causing Autopilot error retries. The saved stop includes the blocking OS pressure/memory measurement or missing/stale telemetry reason. Wait for Resources: ALLOW in Sutra Monitor, choose Resume and send continue in the same chat. Resume checks fresh telemetry before dispatch, retains completed child work, and keeps the original request, constraints and consumed budget across model switches. Conversation routing can resume without arming files. Resource recovery does not replenish task allocation; the STP kernel and resource thresholds are unchanged.
+Resource admission stops now pause native chat normally instead of causing Autopilot error retries. The saved stop includes the blocking OS pressure/memory measurement or missing/stale telemetry reason. Wait for Resources: ALLOW in Sutra Monitor, choose Resume and send continue in the same chat. Resume checks fresh telemetry before dispatch, retains completed child work, and keeps the original request, constraints and consumed budget across model switches. Conversation can resume without workspace authorization. Resource recovery does not replenish task allocation; the STP kernel and resource thresholds are unchanged.
 
 Architecture reports now receive a separate claim-versus-source review before publication. Sutra prefers a smaller installed reviewer with different recorded weights, preserves the task contract, and charges both stages and repairs against the same allocation. Unsupported or contradicted claim groups are omitted; Review details records the verdicts, omitted claims and identities. A malformed or unavailable review withholds publication. Different weights and matching quotations do not prove correctness or statistical independence. API maps use the same identity-aware reviewer selection.
 
@@ -110,13 +116,13 @@ Architecture reviews now have consistently formatted components, request flow, s
 
 Architecture reviewers receive a fresh cross-page file and module inventory, budgeted source excerpts, and available child reports. The evidence-delivery line distinguishes mapped files from sampled implementation coverage. Workspace context uses installed model metadata within remaining allocations; model changes do not reset budgets or permissions.
 
-The conversation stage can request a workspace review in the same chat. Its lack of direct file tools does not disable the harness. Known false file-access refusals are withheld and sent through bounded repair; arming, task scope and remaining budgets still govern execution. Existing conversations keep their saved memory and contracts.
+The conversation stage can request a workspace review in the same chat. Its lack of direct file tools does not disable the harness. Known false file-access refusals are withheld and sent through bounded repair. Workspace permissions, task scope and remaining budgets govern execution. Existing conversations keep their saved memory and contracts.
 
 
 Use Sutra → Settings → Model reasoning to enable reasoning at the lowest supported level or use model defaults. Adaptive is the default for new configurations; existing choices are preserved. Calls & reasoning in Sutra Monitor shows live expandable details for parent and child calls, protocol outcome and final input/output tokens. Compatible VS Code hosts also show thinking inline; older hosts use the Monitor. Reasoning is unverified model commentary and is never saved as task memory or authority. It shares the existing output budget with the answer. Open each call’s reasoning details link in chat, or Sutra Monitor → Calls & reasoning → Open reasoning details. Plain-text diagnostic history survives reloads, bounded to 12 calls, 7 days, 1 MiB per workspace and 16,000 characters per call. It may contain source references. Older vanished streams cannot be recovered because previous versions did not save reasoning.
 
 
-Workspace access waits for the Arm Sutra dialog, then explicitly reports granted or declined. Already armed requests say they reuse the current grant. Sutra Monitor and routing logs include the permission outcome. File operations cannot proceed while confirmation is pending or declined.
+Sutra Monitor shows workspace permissions separately from the last request. A request that needs project files waits for the first permission choice. Future requests use the saved profile within the same trusted workspace.
 
 Saved mapping failures are bound to their parser environment, contract and allocation. After a parser/policy upgrade, legacy failures rejoin the fresh-read queue; unchanged failures are not retried indefinitely. Existing receipts, permissions and consumed budget remain intact.
 
@@ -130,7 +136,7 @@ Whole-codebase Python mapping uses the same source-page work allocation as TypeS
 
 Resume or Discard a saved request from Sutra Monitor. Resume selects it for your next message in the existing Sutra chat; it does not submit a prompt or overwrite a draft. Pauses report model capacity separately from the task allocation. Context allocation shortages are saved stops, not retriable provider errors. Resume returns to the stopped stage under the same contract and remaining budget. Interrupted actions are reconciled without replay.
 
-Task form drafts and expanded source lists survive refreshes. Start Ollama, then use Retry model discovery in Settings if setup is unavailable. File permissions persist with the task; disarm or reload prevents execution until rearming, and every edit/test still needs action confirmation.
+Task form drafts and expanded source lists survive refreshes. Start Ollama, then use Retry model discovery in Settings if setup is unavailable. File scopes persist with the task. Revoking workspace access stops native workspace work. Every edit or test still needs action confirmation.
 
 
 Previously Karma. Your installed extension ID and saved settings are preserved.
@@ -139,17 +145,20 @@ GET STARTED
 Run Sutra: Configure Local Models to select installed Ollama models.
 Run Sutra: Open Governed Chat (Sutra Auto). This saves the compatible Local chat
 and model for new chats. Existing chats retain their own selected model.
-Chat normally. Workspace requests offer one Arm Sutra confirmation and resume
-in the same chat after approval. Sutra: Arm Workspace Access also arms in place.
-Your workspace prompt creates or resumes a task. Edits/tests ask for concrete file permissions at the point of need, then
-confirm the exact action. There are no goal or workflow pickers during arming.
+Chat normally. The first request that needs project files offers Read only
+or Workspace agent permissions. Approval is saved for the trusted workspace
+and continues the request in the same chat. Workspace agent access lets Sutra
+request file scopes for edits and local tests, then confirm each exact action.
+Use Sutra: Workspace Permissions… to change your choice or Sutra: Revoke
+Workspace Access to remove it.
 The review participant is @sutra. Model tiers are Sutra Auto / Low / Mid / High.
 
 ROUTING AND CONTEXT
-A ready or armed badge does not prove a prompt used Sutra. Check the selected
-model and response invocation details. Other providers can bypass this harness.
-Reloading preserves settings and conversation checkpoints, but disarms workspace
-actions. Legacy Karma receipt pointers remain valid under the same host checks.
+The status bar shows workspace access. Check for a Sutra model beneath the
+prompt and invocation details in its response to confirm routing.
+Reloading preserves saved permission choices, settings and conversation
+checkpoints. Legacy Karma receipt pointers remain valid under the same host
+checks.
 
 WORKFLOW
 Native chat now sends events to one persisted host state machine. It classifies
@@ -159,8 +168,9 @@ same chat. Their model calls inherit the full contract, Smriti context and a
 narrower source scope. Parent and child allocations are checked by the unchanged
 STP kernel. Switching models never refreshes spent budgets or grants permissions.
 After an interrupted review, select another Sutra tier and send "continue" to
-resume its saved workflow. A different request cancels unused child reservations
-while retaining consumed budget and evidence. Arming may be required after reload.
+resume its saved workflow. Replacing it requires confirmation and releases unused
+child reservations. The saved task retains constraints, consumed budget and
+evidence.
 
 DASHBOARD
 Click Sutra Monitor in the status bar, or run Sutra: Open Monitor.

@@ -23,7 +23,7 @@ function controller(vscode, context, deps) {
     const before = policy(vscode, deps.workspace(), p.binding.registry_hash);
     if (before.mode === 'disabled') throw new Error('Optional tools are disabled in Sutra settings.');
     if (p.binding.workspace !== before.workspace) throw new Error('Tool proposal belongs to another workspace.');
-    if (!deps.armed()) throw new Error('Arm Sutra workspace access before using tools.');
+    if (!deps.armed()) throw new Error('Grant Sutra workspace access before using tools.');
     let kind = 'user';
     if (before.mode === 'preapproved' && before.allowed[p.capability]?.includes(p.action)) {
       if (context.workspaceState.get(key) !== before.hash) {
@@ -32,7 +32,7 @@ function controller(vscode, context, deps) {
             '\nInstall downloads pinned packages into Sutra storage. Check reads only task-scoped Python snapshots, with no project writes or tool network. Registry or policy changes require approval again.'}, 'Approve policy');
         cancelled(token);
         if (choice !== 'Approve policy') return null;
-        if (policy(vscode, deps.workspace(), p.binding.registry_hash).hash !== before.hash || !deps.armed()) throw new Error('Tool policy or arming changed during approval.');
+        if (policy(vscode, deps.workspace(), p.binding.registry_hash).hash !== before.hash || !deps.armed()) throw new Error('Tool policy or workspace permissions changed during approval.');
         await context.workspaceState.update(key, before.hash);
       }
       kind = 'workspace_policy';
@@ -45,22 +45,22 @@ function controller(vscode, context, deps) {
       cancelled(token);
       if (choice !== 'Approve') return null;
     }
-    if (policy(vscode, deps.workspace(), p.binding.registry_hash).hash !== before.hash || !deps.armed()) throw new Error('Tool policy or arming changed during approval.');
+    if (policy(vscode, deps.workspace(), p.binding.registry_hash).hash !== before.hash || !deps.armed()) throw new Error('Tool policy or workspace permissions changed during approval.');
     return {kind, proposal_id: p.id, policy_hash: before.hash};
   }
-  async function manage() {
-    const data = await deps.request({op: 'capability_list'});
+  async function manage(token) {
+    const data = await deps.request({op: 'capability_list'},token);
     const item = await vscode.window.showQuickPick(data.tools.map(t => ({label: t.id, description: `${t.version} · ${t.installed ? 'installed' : 'not installed'}`, tool: t})), {title: 'Sutra tools'});
     if (!item) return;
-    if (!deps.armed()) throw new Error('Arm Sutra and start a workspace task before installing or running tools.');
+    if (!deps.armed()) throw new Error('Grant Sutra workspace access and start a task before installing or running tools.');
     const action = item.tool.installed ? 'check' : 'install';
-    const state = await deps.request({op: 'state'});
+    const state = await deps.request({op: 'state'},token);
     if (!state.session) throw new Error('Start a Sutra workspace task first.');
     const binding = {armed: true, session: state.session, contract_hash: state.contract.contract_hash, calibration_hash: state.calibration.binding.hash};
-    const p = await deps.request({op: 'capability_preview', ...binding, capability: item.tool.id, action, paths: []});
-    const authorization = await approve(p);
+    const p = await deps.request({op: 'capability_preview', ...binding, capability: item.tool.id, action, paths: []},token);
+    const authorization = await approve(p,token);
     if (!authorization) return;
-    const result = await deps.request({op: 'capability_execute', ...binding, proposal_id: p.id, authorization});
+    const result = await deps.request({op: 'capability_execute', ...binding, proposal_id: p.id, authorization},token);
     await deps.showResult(result);
   }
   async function configure() {

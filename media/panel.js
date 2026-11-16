@@ -8,8 +8,10 @@ function updateButtons(){document.querySelectorAll('button,select').forEach(e=>e
   for(const id of ['review-step','review-auto','review-draft'])el(id).disabled=busy||!current?.architecture;el('review-report').disabled=busy||!current?.report;el('api-build').disabled=busy||!current?.architecture;el('api-verify').disabled=busy||!current?.api?.candidate_id||current.api.status==='withheld';el('api-open').disabled=busy||!current?.api?.report;el('api-next').disabled=busy||current?.api?.position?.next_offset==null;el('use-model-defaults').disabled=busy||!suggestedModels;
   const nativeBusy=busy||nativeState.arming||nativeState.selecting||nativeState.working;
   for(const id of ['native-use','overview-native-use','native-arm','overview-native-arm','native-toggle'])el(id).disabled=!!nativeBusy;
-  for(const id of ['native-arm','overview-native-arm']){el(id).textContent=nativeState.armed?'Disarm Sutra':'Arm Sutra';el(id).disabled=nativeState.armed?false:!!nativeBusy;}
-  el('native-disarm').disabled=!!nativeState.arming||!nativeState.armed;
+  for (const id of ['native-disarm','overview-native-disarm']) {
+    el(id).hidden = !nativeState.accessProfile && !nativeState.armed;
+    el(id).disabled = !!nativeState.arming;
+  }
   el('save-model-tiers').disabled=busy||!modelCandidates.length;
 }
 function save(op){try{const extra={...preservedConstraints};
@@ -215,7 +217,10 @@ window.addEventListener('message',({data:m})=>{
  if(m.type==='runtime-saved')el('runtime-save-status').textContent='Runtime settings saved. They apply to subsequent requests.';
 });
 el('save-runtime').onclick=()=>{el('runtime-save-status').textContent='';send('save_runtime_settings',{settings:{storageLimitMiB:Number(el('storage-limit').value),pythonPath:el('python-path').value.trim(),thinking:el('thinking-mode').value,logitSensor:el('logit-sensor').value,memoryOwnership:el('memory-ownership').value}});};
-el('overview-native-use').onclick=()=>send('native_use');el('overview-native-arm').onclick=()=>send(nativeState.armed?'native_disarm':'native_arm');el('native-use').onclick=()=>send('native_use');el('native-arm').onclick=()=>send(nativeState.armed?'native_disarm':'native_arm');el('native-disarm').onclick=()=>send('native_disarm');el('native-toggle').onclick=()=>send('native_toggle');
+for (const id of ['native-use','overview-native-use']) el(id).onclick = () => send('native_use');
+for (const id of ['native-arm','overview-native-arm']) el(id).onclick = () => send('native_arm');
+for (const id of ['native-disarm','overview-native-disarm']) el(id).onclick = () => send('native_disarm');
+el('native-toggle').onclick = () => send('native_toggle');
 
 // Usage filters operate on a bounded, disclosed window of immutable receipts.
 let usageData={calls:[],total_calls:0},usageFilters={...vscode.getState?.()?.usageFilters};

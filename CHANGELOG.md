@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.35.0
+
+- Save workspace permissions for Sutra native chat and its tools. Choose Read only or Workspace agent once per trusted workspace and revoke access from Sutra settings.
+- Restore permissions after reload and bind resumed work to the saved task. Changes to permissions invalidate live action tickets while retained task scope, context and spending stay in the ledger.
+- Run a native-provider regression through the real bridge, source paging, budget stops, explicit allocation recovery and model switching. Verify the resulting report and reject stale actions after reload or revocation.
+
 ## 0.34.0
 
 - Commit bounded workspace execution sessions beneath cumulative task allocations; retries, reloads and model switches retain the same allowance.

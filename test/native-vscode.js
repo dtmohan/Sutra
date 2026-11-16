@@ -12,9 +12,12 @@ exports.run=async()=>{
   const tool=vscode.lm.tools.find(t=>t.name==='karma_native_action');assert(tool);report.checks.push('real VS Code discovers all four native models and governed action tool');
   const low=models.find(m=>m.name==='Sutra Low'),high=models.find(m=>m.name==='Sutra High');assert(low&&high);
   async function send(model,prompt){const r=await model.sendRequest(Array.isArray(prompt)?prompt:[vscode.LanguageModelChatMessage.User(prompt)],{tools:[tool]},token.token);const parts=[];for await(const part of r.stream)parts.push(part);return parts;}
-  assert((await send(low,'Fix retry')).some(p=>p.value?.includes('Arm Task and Open Chat')));report.checks.push('real native model API refuses inference while disarmed');
-  phase('arming',{storage});await vscode.commands.executeCommand('karma.armNative');const before=await api.getState();assert(before.native.armed);report.binding={session:before.session,contract:before.contract.contract_hash,calibration:before.calibration.binding.hash};
-  report.checks.push('native QuickPick arming uses explicit task and permission confirmation');
+  assert(!api.getRoutingStatus().armed);
+  phase('workspace permissions',{storage});await vscode.commands.executeCommand('karma.armNative');
+  const before=await api.getState();
+  assert.equal(before.native.accessProfile,'workspace_agent');
+  report.binding={session:before.session,contract:before.contract.contract_hash,calibration:before.calibration.binding.hash};
+  report.checks.push('Workspace agent profile granted by the native permission dialog');
   let continuation;
   for(const [model,prompt,status] of [[low,'Fix the off-by-one range(MAX_ATTEMPTS - 1) loop in src/retry.py with a minimal edit, then run its permitted tests. Leave test files unchanged.','applied'],[high,'Continue the pinned task. The host already applied the fix; run the permitted tests/test_retry.py. Leave all source unchanged.','process_exited_zero']]){
    phase('model '+model.name);const parts=await send(model,continuation||prompt);const call=parts.find(p=>p instanceof vscode.LanguageModelToolCallPart);report.last_response=parts.filter(p=>p instanceof vscode.LanguageModelTextPart).map(p=>p.value).join('');assert(call,report.last_response);assert.equal(call.name,'karma_native_action');
@@ -24,7 +27,7 @@ exports.run=async()=>{
    await assert.rejects(vscode.lm.invokeTool(call.name,{input:call.input},token.token),/ticket/);report.checks.push('native tool replay refused');
   }
   assert(fs.readFileSync(path.join(workspace,'src/retry.py'),'utf8').includes('range(MAX_ATTEMPTS):'));
-  await vscode.commands.executeCommand('karma.disarmNative');assert(!(await api.getState()).native.armed);assert((await send(high,'Continue')).some(p=>p.value?.includes('Arm Task and Open Chat')));report.checks.push('status reports disarmed; native API blocks further calls');
+  // The companion native chat smoke reopens this same profile and checks the saved grant.
   report.passed=true;phase('complete');
  }catch(e){report.passed=false;report.error=String(e.stack||e);phase('failed');throw e;}finally{token.dispose();fs.writeFileSync(out,JSON.stringify(report,null,2)+'\n');}
 };

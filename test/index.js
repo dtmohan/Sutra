@@ -6,7 +6,11 @@ exports.run=async()=>{
  try{
   const extension=vscode.extensions.getExtension('deepak-local.karma-local-harness');
   const workspace=vscode.workspace.workspaceFolders[0].uri.fsPath;
-  const storage=path.join(process.env.KARMA_SMOKE_PROFILE,'User','globalStorage','deepak-local.karma-local-harness',crypto.createHash('sha256').update(workspace).digest('hex').slice(0,24));
+  const globalStorage=path.join(process.env.KARMA_SMOKE_PROFILE,'User','globalStorage','deepak-local.karma-local-harness');
+  const storage=path.join(globalStorage,crypto.createHash('sha256').update(workspace).digest('hex').slice(0,24));
+  const {createStore}=require(path.join(extension.extensionPath,'workspace_authorization'));
+  const authorization=createStore(vscode,{globalStorageUri:vscode.Uri.file(globalStorage)});
+  authorization.write({id:crypto.randomUUID(),scope:authorization.scope(),profile:'read_only'});
   const {ActivityArchive,activityUri}=require(path.join(extension.extensionPath,'model_activity'));
   const history=new ActivityArchive(storage),parent='1'.repeat(32),child='2'.repeat(32);
   history.accept({kind:'start',id:parent,model:'fixture-small',role:'conversation'});
@@ -15,6 +19,9 @@ exports.run=async()=>{
   history.accept({kind:'start',id:child,model:'fixture-large',role:'subagent',node_id:'child-fixture'});
   history.accept({kind:'thinking',id:child,text:'Child fixture reasoning survives reload'});history.dispose();
   const api=await extension.activate();
+  assert.equal(api.getRoutingStatus().accessProfile,'read_only');
+  assert.equal(api.getRoutingStatus().routing,null);
+  report.checks.push('packaged extension restores a saved read-only workspace profile without routing a prompt');
   const details=await vscode.workspace.openTextDocument(vscode.Uri.parse(activityUri(storage,child)));
   assert(details.getText().includes('Child fixture reasoning survives reload'));assert(details.getText().includes('Status: interrupted'));
   assert(!details.getText().includes('Router fixture'));assert.equal(details.uri.scheme,'karma-preview');assert.equal(details.languageId,'plaintext');
@@ -60,6 +67,13 @@ exports.run=async()=>{
   await vscode.commands.executeCommand('karma.openAutomaticReport');report.checks.push('governed agent tool maps fresh source through packaged bridge and bundled TypeScript','task contract and allocation preserved','report opens in VS Code without a model call');
   const after=await api.getState();assert.equal(after.auto.pending_files,0);assert.deepEqual(after.calibration.binding,before.calibration.binding);
   report.checks.push('both domain adapters evaluate selected synthetic profiles through packaged bridge','calibration commands declared and receipts verify','calibration selection preserved during governed source mapping');
+  await vscode.commands.executeCommand('karma.disarmNative');
+  assert.equal(api.getRoutingStatus().accessProfile,null);
+  await assert.rejects(vscode.lm.invokeTool('karma_auto_review',{input:{explain:false}},token.token),/permissions?|access|authorization/i);
+  const revoked=await api.getState();
+  assert.deepEqual(revoked.contract,after.contract);
+  assert.deepEqual(revoked.auto.budget.used,after.auto.budget.used);
+  report.checks.push('revocation blocks contributed source tools and retains the task contract and cumulative spending');
   report.calibration=after.calibration;report.state=after.auto;report.passed=true;token.dispose();
  }catch(error){report.passed=false;report.error=String(error.stack||error);throw error;}
  finally{fs.writeFileSync(out,JSON.stringify(report,null,2)+'\n');}

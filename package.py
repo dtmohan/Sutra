@@ -20,7 +20,7 @@ def runtime_files(source):
             for name in names:
                 dep=source/'harness'/(name.replace('.','/')+'.py')
                 if dep.is_file() and dep not in files:files.add(dep);pending.append(dep)
-    files.update(source/name for name in ('package.json','extension.js','capabilities.js','model_selection.js','native_provider.js','native_memory.js','diagram_view.js','usage_view.js','model_activity.js','host_tokens.js','README.txt','runtime-integrity.json','bin/telemetry','bin/telemetry-build.json','harness/canonical-kernel.json','harness/README.txt'))
+    files.update(source/name for name in ('package.json','extension.js','capabilities.js','model_selection.js','native_provider.js','workspace_authorization.js','native_memory.js','diagram_view.js','usage_view.js','model_activity.js','host_tokens.js','README.txt','runtime-integrity.json','bin/telemetry','bin/telemetry-build.json','harness/canonical-kernel.json','harness/README.txt'))
     files.update(p for directory in ('media','vendor') for p in (source/directory).rglob('*') if p.is_file())
     files.update((source/'harness/memory_profiles').glob('*.json'))
     assert not any(p.name.startswith(('test_','experiment','validate_','audit_')) for p in files)

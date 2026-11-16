@@ -514,9 +514,13 @@ function activate(context) {
   const diagrams=diagramView.install(vscode,context,id=>request({op:'conversation_read',invocation_id:id}));
   usage=usageView.install(vscode,context,{refresh:refreshDashboard,storage,activityChanged:uri=>previewChanges.fire(uri)});
   dashboardTimer=setInterval(refreshDashboard,2000);
+  function withWorkspaceAccess(token,invoke){
+    if(!nativeController)throw new Error('Sutra native workspace permissions are unavailable in this VS Code version.');
+    return nativeController.withWorkspaceAccess(token,invoke);
+  }
   const toolController=capabilityUI.controller(vscode,context,{workspace,armed:()=>!!nativeController?.status().armed,
     request:(m,t)=>request(m,t,true),async showResult(r){const uri=vscode.Uri.parse('karma-preview:/tools/'+r.operation_id+'/Diagnostics.md');previewDocuments.set(uri.toString(),capabilityUI.report(r));await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));}});
-  context.subscriptions.push(vscode.commands.registerCommand('karma.manageTools',()=>toolController.manage().catch(e=>vscode.window.showErrorMessage(e.message))),vscode.commands.registerCommand('karma.configureTools',()=>toolController.configure().catch(e=>vscode.window.showErrorMessage(e.message))));
+  context.subscriptions.push(vscode.commands.registerCommand('karma.manageTools',()=>withWorkspaceAccess(undefined,t=>toolController.manage(t)).catch(e=>vscode.window.showErrorMessage(e.message))),vscode.commands.registerCommand('karma.configureTools',()=>toolController.configure().catch(e=>vscode.window.showErrorMessage(e.message))));
   const externalTools={
     karma_capabilities:async()=>request({op:'capability_list'}),
     karma_auto_review:async(input,token)=>request({op:'auto_step',explain:input.explain!==false},token),
@@ -529,11 +533,12 @@ function activate(context) {
     karma_search:async(input,token)=>request({op:'repository_tool',kind:'search',query:input.query},token)
   };
   for(const [name,invoke] of Object.entries(externalTools))context.subscriptions.push(vscode.lm.registerTool(name,{
-    async invoke(options,token){const data=await invoke(options.input,token);if(data.state)panel?.webview.postMessage({type:'state',data:data.state});
+    async invoke(options,token){const data=await (name==='karma_capabilities'?invoke(options.input,token):
+      withWorkspaceAccess(token,t=>invoke(options.input,t)));if(data.state)panel?.webview.postMessage({type:'state',data:data.state});
       if(data.tool_receipt)output.appendLine('KARMA_TOOL_RECEIPT '+data.tool_receipt.id);return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify(data))]);}
   }));
   if(vscode.lm.registerLanguageModelChatProvider){
-    nativeController=nativeProvider.install(vscode,context,{request:(m,t,a)=>request(m,t,true,a),workspace,isBusy:()=>busy||sequence,
+    nativeController=nativeProvider.install(vscode,context,{authorization:require('./workspace_authorization').createStore(vscode,context),request:(m,t,a)=>request(m,t,true,a),workspace,isBusy:()=>busy||sequence,
       approveCapability:(p,t)=>toolController.approve(p,t),capabilityReport:capabilityUI.report,
       activityLink:event=>usage?.activityLink(event),modelSettings,configureModels:(force,t)=>configureModels(force,t,true),simpleChat,publishReview,
       async presentReview(data){await diagrams.openReview(data);},

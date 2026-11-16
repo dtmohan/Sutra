@@ -5,7 +5,7 @@ Sutra 0.33.0 supports Ruff (Python lint) and Pyright (Python types). Built-in sc
 ## Use
 
 1. Ask in native Sutra chat: `Run Ruff on code.py` or `Check code.py with Pyright`.
-2. Arm workspace access if needed. Review the install dialog if the pinned tool is missing.
+2. Grant workspace access if prompted. Review the install dialog if the pinned tool is missing.
 3. Review the separate check dialog, which lists snapshot paths and reserved task capacity.
 4. Read the diagnostics in the same chat. A later model can explain the saved result without rerunning it.
 
@@ -25,7 +25,7 @@ The default is Ask each time. Configure Tool Policy also offers Disable optional
 }
 ```
 
-Sutra asks the user to trust that policy before its first use. Approval is stored separately from repository files and bound to the workspace, normalized policy and registry digest. Reloads and model switches retain it; policy, workspace or registry changes invalidate it. Unlisted operations still ask. Workspace trust and armed access are always required. A disabled policy prevents dispatch.
+Sutra asks the user to trust that policy before its first use. Approval is stored separately from repository files and bound to the workspace, normalized policy and registry digest. Reloads and model switches retain it; policy, workspace or registry changes invalidate it. Unlisted operations still ask. Workspace trust and Sutra workspace authorization are always required. A disabled policy prevents dispatch.
 
 ## Admission and effects
 
