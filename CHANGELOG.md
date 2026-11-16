@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.32.0
+
+- Split architecture claim reviews into immutable, allocation-sized pages with host-generated source evidence IDs. Cover every relevant claim/source pair; withhold publication until all pages pass and omit contradicted or unsupported claims.
+- Replace copied reviewer quotes with claim-scoped ID choices, validate exact source bindings, and link retained claims to their source locations in reports.
+- Reuse accepted draft/page receipts after interruption on the same request, including reviewer changes. Keep contracts, permissions and consumed budgets; cap repairs at two total attempts per page across restarts.
+- Keep the canonical STP kernel unchanged. Review judgments remain fallible model opinions, and partial evidence is explicitly labelled.
+
 ## 0.31.0
 
 - Add **Increase allocation…** in Sutra Monitor and **Sutra: Increase Task Allocation** in the Command Palette for paused context/task-budget stops. Show additions, new totals, consumed use and remaining headroom before explicit confirmation.

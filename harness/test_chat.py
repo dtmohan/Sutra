@@ -17,14 +17,21 @@ class Fake:
     budget=Budget(16384,2048,256)
     def __init__(self,model='fixture-small',fault=None):self.model=model;self.fault=fault;self.payloads=[]
     def call(self,cid,system,p,schema):
-        consume_dispatch(cid,self.model,system,p,schema);self.payloads.append(copy.deepcopy(p));name=next(iter(p['excerpts']))
+        consume_dispatch(cid,self.model,system,p,schema);self.payloads.append(copy.deepcopy(p))
         if 'claims' in schema['properties']:
             judged={key:{'verdict':'supported','reason':'Supported by the delivered fixture source.',
                          'evidence':[{'path':claim['paths'][0],'quote':p['excerpts'][claim['paths'][0]].splitlines()[0]}]}
-                    for key,claim in p['claims'].items()}
+                    for key,claim in p['claims'].items()} if p.get('review_protocol') != 2 else {}
+            if p.get('review_protocol') == 2:
+                judged = {}
+                for key, claim in p['claims'].items():
+                    ids = [eid for eid, entry in p['source_evidence'].items() if entry['path'] in claim['paths']]
+                    judged[key] = {'verdict': 'supported' if ids else 'insufficient_evidence',
+                                   'reason': 'Fixture source judgment.', 'evidence_ids': ids[:1]}
             result={'task_id':p['contract']['task_id'],'constraints':copy.deepcopy(p['constraint_echo']),'claims':judged,'complete':False}
             if getattr(self,'review_fault',None):self.review_fault(result,p)
             return result,{'call_id':cid,'ok':True,'answer':result}
+        name=next(iter(p['excerpts']))
         result={'task_id':p['contract']['task_id'],'constraints':copy.deepcopy(p['constraint_echo']),
             'answer':'The entry function calls the leaf implementation. Static calls do not prove runtime execution.',
             'summary':'Inspected the entry and leaf source.','citations':[{'path':name,'quote':p['excerpts'][name].splitlines()[0]}],

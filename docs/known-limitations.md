@@ -83,12 +83,16 @@
 - A resource pause needs explicit Resume after resources recover; Sutra does not
   automatically retry it or refund consumed task allocation. If pressure blocks
   the independent reviewer after a draft was generated, that report is withheld;
-  the unreviewed draft is not a resumable or publishable checkpoint.
+  a saved claim-review plan permits reuse of the draft and accepted pages on the exact same request after fresh validation. The draft remains unpublished until all review pages finish. A pause before a review plan exists may still require regenerating the draft.
 - Private repository access and extension installation do not require or imply
   publication to the VS Code Marketplace.
 
-- Architecture claim reviews are fallible model opinions. Exact-quote checking
-  establishes source provenance, not entailment. The host omits disputed claim
+- Architecture claim reviews are fallible model opinions. Source-bound evidence IDs
+  establish provenance, not entailment. Every relevant claim/excerpt pair is
+  checked, but a claim that requires joining evidence across pages may remain
+  unsupported. Review coverage is bounded by the writer's excerpts, not every
+  mapped source file. Saved pages must fit a replacement model; smaller context
+  does not silently repartition an existing plan. The host omits disputed claim
   groups but cannot guarantee that every unsupported statement is detected.
   The extra reviewer consumes task allocation and can withhold publication when
   a valid review does not fit the remaining context, call or time budget.

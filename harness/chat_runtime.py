@@ -219,31 +219,43 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
     if real:
         from api_runtime import provider_for
         provider=provider_for(root,choice['model'],review=True);provider.keep_alive=0
-    from review_reasoning import bind, repair
-    bind(provider, p)
-    fmt, attempts = fit_packet(s, sid, p, data, provider, real)
-    run=s.begin_run(sid,prompt,[],None,max_calls=attempts,max_repairs=attempts-1)
-    output_repaired = False
-    for attempt in range(attempts):
-        s.reserve(run,'ATTEMPT',{'attempt':attempt})
-        if real:
-            from monitoring import require_resources
-            hardware=require_resources(root)
-            with s.db:s._audit('RESOURCE_GATE',{'run_id':run,'measurement':hardware})
-        delivery=s.prepare_delivery(sid,p,provider.budget.check(SYSTEM,p,fmt))
-        out=InvocationGateway(s.path,run,provider).invoke('chat_reviewer',uuid.uuid4().hex,SYSTEM,p,fmt,delivery)
-        if out['admission']['admitted']:
-            s.event(run,'ALLOW',{'reason':'chat_review_admitted','invocation_id':out['invocation_id']})
-            break
-        s.event(run,'NACK',{'errors':out['admission']['errors']})
-        recovery = repair(out, p, output_repaired, attempt < attempts-1)
-        if attempt==attempts-1 or (out.get('blocked') and recovery is None):s.event(run,'FIN',{'reason':'chat_repair_exhausted'});break
-        try:request_check(s,sid,p)
-        except (InvalidUpdate,PageFault) as exc:
-            s.event(run,'FIN',{'reason':'chat_context_changed','error':str(exc)});break
-        s.event(run,'BRIDGE',{'reason':'bounded_output_repair' if recovery else 'bounded_chat_repair'})
-        p['repair'] = recovery or {'errors':[e[:140] for e in out['admission']['errors'][:2]]}
-        output_repaired = output_repaired or recovery is not None
+    import report_review
+    resumed = report_review.pending_candidate(s, sid, p)
+    if resumed:
+        from token_usage import summarize
+        checkpoint, draft = resumed
+        out = {'invocation_id': checkpoint, 'accepted_output': draft,
+               'admission': {'admitted': True, 'errors': [], 'semantic_correctness_verified': False},
+               'token_usage': {'calls': [], 'totals': summarize([]), 'total_calls': 0, 'limit': None}}
+        # Publication and reviewer checks use the original fresh candidate packet.
+        # New mapping work remains charged; accepted draft/pages are not replayed.
+        _, _, p = report_review.candidate(s, sid, checkpoint)
+    else:
+        from review_reasoning import bind, repair
+        bind(provider, p)
+        fmt, attempts = fit_packet(s, sid, p, data, provider, real)
+        run=s.begin_run(sid,prompt,[],None,max_calls=attempts,max_repairs=attempts-1)
+        output_repaired = False
+        for attempt in range(attempts):
+            s.reserve(run,'ATTEMPT',{'attempt':attempt})
+            if real:
+                from monitoring import require_resources
+                hardware=require_resources(root)
+                with s.db:s._audit('RESOURCE_GATE',{'run_id':run,'measurement':hardware})
+            delivery=s.prepare_delivery(sid,p,provider.budget.check(SYSTEM,p,fmt))
+            out=InvocationGateway(s.path,run,provider).invoke('chat_reviewer',uuid.uuid4().hex,SYSTEM,p,fmt,delivery)
+            if out['admission']['admitted']:
+                s.event(run,'ALLOW',{'reason':'chat_review_admitted','invocation_id':out['invocation_id']})
+                break
+            s.event(run,'NACK',{'errors':out['admission']['errors']})
+            recovery = repair(out, p, output_repaired, attempt < attempts-1)
+            if attempt==attempts-1 or (out.get('blocked') and recovery is None):s.event(run,'FIN',{'reason':'chat_repair_exhausted'});break
+            try:request_check(s,sid,p)
+            except (InvalidUpdate,PageFault) as exc:
+                s.event(run,'FIN',{'reason':'chat_context_changed','error':str(exc)});break
+            s.event(run,'BRIDGE',{'reason':'bounded_output_repair' if recovery else 'bounded_chat_repair'})
+            p['repair'] = recovery or {'errors':[e[:140] for e in out['admission']['errors'][:2]]}
+            output_repaired = output_repaired or recovery is not None
     publication=None
     if out['admission']['admitted']:
         checkpoint=out['invocation_id']; reviewer_id=None

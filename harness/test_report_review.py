@@ -21,7 +21,7 @@ class ReportReviewTests(unittest.TestCase):
 
     def review(self, writer=None, reviewer=None, **request):
         return chat.answer(self.s,self.meta,self.ws,self.storage,
-            dict(prompt='Explain the architecture.',models=MODELS,tier='low',**request),
+            dict(prompt=request.pop('prompt','Explain the architecture.'),models=MODELS,tier='low',**request),
             provider=writer or Fake(),review_provider=reviewer or Fake('reviewer'))
 
     def test_distinct_review_has_its_own_receipt_and_charged_call(self):
@@ -43,7 +43,7 @@ class ReportReviewTests(unittest.TestCase):
         claim='Invented recursive calls guarantee infinite parallel speed.'
         writer=Fake(fault=lambda r,p:r['report']['flow'][0].update(description=claim))
         reviewer=Fake('reviewer')
-        def reject(r,p):r['claims']['flow/0'].update(verdict='insufficient_evidence',reason='No source supports this relationship.',evidence=[])
+        def reject(r,p):r['claims']['flow/0'].update(verdict='insufficient_evidence',reason='No source supports this relationship.',evidence_ids=[])
         reviewer.review_fault=reject
         out=self.review(writer,reviewer)
         self.assertTrue(out['result']['admission']['admitted'],out)
@@ -70,12 +70,12 @@ class ReportReviewTests(unittest.TestCase):
 
     def test_missing_claims_constraints_and_invented_quotes_are_withheld(self):
         faults=[lambda r,p:r['claims'].pop('overview'),lambda r,p:r['constraints'].pop(),
-                lambda r,p:r['claims']['overview']['evidence'][0].update(quote='fabricated source')]
-        for fault in faults:
+                lambda r,p:r['claims']['overview'].update(evidence_ids=['invented-source'])]
+        for index,fault in enumerate(faults):
             with self.subTest(fault=fault):
                 reviewer=Fake('reviewer');reviewer.review_fault=fault
                 old=copy.deepcopy(self.meta.get('chat'))
-                out=self.review(reviewer=reviewer)
+                out=self.review(reviewer=reviewer,prompt='Explain the architecture. Case '+str(index))
                 self.assertFalse(out['result']['admission']['admitted'])
                 self.assertIsNone(out['report_markdown']);self.assertEqual(len(reviewer.payloads),2)
                 self.assertEqual(old,self.meta.get('chat'))
@@ -89,9 +89,14 @@ class ReportReviewTests(unittest.TestCase):
     def test_initial_review_uses_remaining_budget_instead_of_reserving_an_unaffordable_retry(self):
         from model_identity import compare,unknown
         from paging import Budget
-        out=self.review();candidate_id=out['result']['invocation_id']
+        with patch('report_review.run',side_effect=InvalidUpdate('defer checker')):
+            out=self.review()
+        candidate_id=out['result']['invocation_id']
+        first=report_review.run(self.s,self.sid,self.storage,candidate_id,provider=Fake('reviewer'))
         previous=json.loads(self.s.db.execute('SELECT payload_json FROM deliveries WHERE id=(SELECT delivery_id FROM invocations WHERE id=?)',
-                                             (out['report_review']['reviewer_id'],)).fetchone()[0])
+                                             (first['invocation_id'],)).fetchone()[0])
+        with patch('report_review.run',side_effect=InvalidUpdate('defer checker')):
+            candidate_id=self.review()['result']['invocation_id']
         needed=Budget().charge(report_review.SYSTEM,dict(previous,repair={'errors':['x'*160]*2}),report_review.schema(previous))+4096+300
         current=review_budget.usage(self.s,self.sid);limited=copy.deepcopy(current)
         limited['limits']['tokens']=limited['used']['tokens']+needed
@@ -108,7 +113,7 @@ class ReportReviewTests(unittest.TestCase):
                                            (result['invocation_id'],)).fetchone()[0])
         self.assertEqual(config['max_calls'],1);self.assertEqual(config['max_repairs'],0)
         self.assertEqual(reviewer.payloads[0]['constraint_echo'],previous['constraint_echo'])
-        self.assertEqual(reviewer.payloads[0]['excerpts'],previous['excerpts'])
+        self.assertEqual(sorted(reviewer.payloads[0]['source_evidence'].values(),key=lambda x:x['path']),sorted(previous['source_evidence'].values(),key=lambda x:x['path']))
 
     def test_strict_unknown_identity_spends_no_reviewer_call(self):
         reviewer=Fake('reviewer');before=review_budget.usage(self.s,self.sid)['used']['calls']

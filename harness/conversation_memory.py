@@ -16,6 +16,7 @@ LEGACY_POLICIES = {'2319f693bfd23c67bda96909572c6a5646d1a299497aa3ab9c23fc990721
                    'd71f0acf70b42a1d0cb1332c1413bfb85b90156d5820d590cdb19b41ea79ce04'}
 # Recomputed from the released VSIX policy manifests; never from an untrusted receipt.
 RELEASE_POLICIES = {
+    '0.31.0': 'afa66059b126ec22395c6cb442c1c9311506e314633ee4435eae0e4380b9779e',
     '0.30.0': 'a3db1f5649418030bab929b8020e4d62829f610adcba25efebc938c46170f382',
     '0.29.1': 'ff6f2bc1010a19e838769bcf12bab350ec6dcca9758b58a1748ffaf1cf62c5dd',
     '0.29.0': '96d83eb67c17de6feb928b3b8f153aea2eb7b20472a82ed30650021720f9a698',

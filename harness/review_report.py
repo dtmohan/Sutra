@@ -83,6 +83,16 @@ def markdown(proposal):
         lines += ['## Recommended next checks', '']
         lines += [str(i) + '. ' + prose(step) + '\n' for i, step in enumerate(r['next_steps'], 1)]
     if proposal.get('publication_note'):lines += ['', prose(proposal['publication_note'])]
+    if proposal.get('claim_evidence'):
+        from pathlib import Path
+        lines += ['', '## Source-linked claim evidence', '',
+                  'IDs locate the exact excerpts in the review details. They establish provenance, not semantic correctness.', '',
+                  '| Claim | Evidence ID | Source |', '| --- | --- | --- |']
+        for entry in proposal['claim_evidence']:
+            line = entry['start_line']
+            uri = (Path(entry['workspace']) / entry['path']).as_uri() + ('#L' + str(line) if line else '')
+            label = prose(entry['path']) + (':' + str(line) if line else '')
+            lines.append('| ' + prose(entry['claim']) + ' | ' + entry['id'] + ' | [' + label + '](' + uri + ') |')
     return '\n'.join(lines).strip()
 
 
