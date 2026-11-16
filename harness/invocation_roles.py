@@ -7,6 +7,9 @@ from protocol import SELECT_SYSTEM, SELECT_SCHEMA, schema_for
 
 
 def expected_request(role, payload):
+    if role == 'review_reader':
+        from review_followup import SYSTEM as READ_SYSTEM, schema
+        return READ_SYSTEM, schema(payload)
     if role=='memory_probe':
         from memory_probe import SYSTEM as MEMORY_SYSTEM, SCHEMA as MEMORY_SCHEMA
         return MEMORY_SYSTEM, MEMORY_SCHEMA
@@ -100,6 +103,9 @@ def validate_permission_ops(operations):
 def validate_result(store, session, role, payload, schema, proposal, delivery_id):
     from task_observations import answer_schema, ROLES
     validate_shape(proposal, answer_schema(schema) if role in ROLES else schema)
+    if role == 'review_reader':
+        from review_followup import validate
+        return validate(store, session, payload, proposal)
     if role=='memory_probe':
         from memory_probe import validate
         return validate(store,session,payload,proposal)

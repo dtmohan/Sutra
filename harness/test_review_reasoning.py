@@ -54,6 +54,22 @@ class ControlsTests(unittest.TestCase):
         model.context_metadata = {'thinking': {'values': ['low', 'high']}}
         with self.assertRaises(InvalidUpdate): check_provider(model, p)
 
+    def test_bounded_evidence_selection_keeps_reasoning_capacity_for_answer(self):
+        model = Exhausted()
+        with patch.dict('os.environ', SUTRA_THINKING='model-default'):
+            lookup = {}
+            bind(model, lookup, bounded_selection=True)
+            self.assertIs(model.thinking, False)
+            self.assertEqual(lookup['reasoning']['preference'], 'adaptive')
+            review = {}
+            bind(model, review)
+            self.assertIsNone(model.thinking)
+            self.assertEqual(review['reasoning']['preference'], 'model-default')
+        model.context_metadata = {}
+        with patch.dict('os.environ', SUTRA_THINKING='off'):
+            bind(model, {}, bounded_selection=True)
+            self.assertIs(model.thinking, False)
+
     def test_repair_cannot_create_attempts_or_override_explicit_controls(self):
         model = Exhausted(); result = {'failure_kind': 'output_limit'}
         for preference in ('off', 'on', 'model-default'):

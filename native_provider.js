@@ -259,7 +259,7 @@ function install(vscode,context,deps){
   async function flowEvent(flow,event,tier,token,extra={}){
     const access=refreshAccess();
     const models=['inspect','pending','cancel'].includes(event)?undefined:await deps.configureModels(false,token);
-    const workspaceStep=['step','resume','grant','capability_grant','restart_review'].includes(event) &&
+    const workspaceStep=['step','resume','grant','capability_grant','restart_review','accept_provenance'].includes(event) &&
       flow.state!=='CLASSIFYING' && flow.stop?.resume_phase!=='CLASSIFYING';
     if(workspaceStep){
       assertCurrent(access,token);
@@ -461,7 +461,8 @@ function install(vscode,context,deps){
               if(!recovery.restart_allowed){
                 progress.report(new vscode.LanguageModelTextPart(recovery.message+'\n\nUse **Discard** in Sutra Monitor, then submit your new request.'));return;
               }
-              const choice=await vscode.window.showWarningMessage('This review was started by an older Sutra policy.',{modal:true,detail:recovery.message+'\nSaved request: '+old.prompt},'Restart review');
+              const title=recovery.kind==='provenance_changed'?'Source changed during this review.':'This review was started by an older Sutra policy.';
+              const choice=await vscode.window.showWarningMessage(title,{modal:true,detail:recovery.message+'\nSaved request: '+old.prompt},'Restart review');
               if(activeCancel.token.isCancellationRequested||choice!=='Restart review'){
                 progress.report(new vscode.LanguageModelTextPart('Saved request retained. '+recovery.message));return;
               }
@@ -554,6 +555,18 @@ function install(vscode,context,deps){
           assertCurrent(a,activeCancel.token);
           if(flow.recovery){audit.stage='recovery_required';audit.message=flow.recovery.message;publish();progress.report(new vscode.LanguageModelTextPart(flow.recovery.message+'\n\nSend **continue** to review the recovery options.'));return;}
           if(flow.state==='PAUSED'){
+            if(flow.stop?.status==='provenance_confirmation'){
+              const choice=await vscode.window.showWarningMessage('Use the open source snapshot for this review?',{modal:true,detail:flow.stop.error},'Review open snapshot');
+              assertCurrent(a,activeCancel.token);
+              if(choice==='Review open snapshot'){
+                flow=await flowEvent(flow,'accept_provenance',tier,activeCancel.token,{confirmed:true});
+                showHostProgress(flow,progress);
+                continue;
+              }
+              audit.stage='paused';
+              progress.report(new vscode.LanguageModelTextPart('Review paused before source mapping. Open the intended checkout and submit the review there, or send **continue** here to select this snapshot.'));
+              return;
+            }
             showPause(flow,audit,progress);
             return;
           }
@@ -600,7 +613,11 @@ function install(vscode,context,deps){
         if(assessmentText)progress.report(new vscode.LanguageModelTextPart(assessmentText));
         const evidence=data.coverage?.evidence;
         if(data.coverage?.deferred_files>0)progress.report(new vscode.LanguageModelTextPart(`Source paging: ${data.coverage.fresh_selected_files} fresh files selected; ${data.coverage.deferred_files} mapped files deferred to stay within the current allowance. This response covers the selected evidence.\n\n`));
-        if(evidence)progress.report(new vscode.LanguageModelTextPart(`Evidence delivered: ${evidence.fresh_snapshot_files} freshly mapped files; source excerpts from ${evidence.excerpt_files.length} files; ${evidence.child_reports} child reports. This is a bounded review, not an exhaustive semantic audit.\n\n`));
+        if(evidence){
+          const followupCount=Array.isArray(evidence.followup_files)?evidence.followup_files.length:evidence.followup_files;
+          const followups=Number.isInteger(followupCount)&&followupCount>0?`; governed follow-up reads from ${followupCount} files`:'';
+          progress.report(new vscode.LanguageModelTextPart(`Evidence delivered: ${evidence.fresh_snapshot_files} freshly mapped files; source excerpts from ${evidence.excerpt_files.length} files; ${evidence.child_reports} child reports${followups}. This is a bounded review, not an exhaustive semantic audit.\n\n`));
+        }
         if(['edit','run_tests'].includes(p.action?.kind)){
           if(!canAct){progress.report(new vscode.LanguageModelTextPart('The proposal is retained. Enable the Sutra action tool in native Agent chat to review and apply it. No action executed.'));return;}
           if(!await allowActionProfile())return;

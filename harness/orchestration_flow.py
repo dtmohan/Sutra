@@ -45,6 +45,7 @@ def response(s,fid,**extra):
         ('awaiting_action' if m.state(s,fid)=='AWAITING_ACTION' else 'admitted' if outcome['admission']['admitted'] else 'withheld') if outcome else data.get('observation_delivery'))
     return dict(task_observations=observations,flow_id=fid,state=m.state(s,fid),cursor=history[-1]['receipt'] if history else None,
                 conversation_id=data.get('conversation_id'),binding=data.get('binding'),
+                git_provenance=data.get('git_provenance'),
                 resource_fallback=data.get('resource_fallback'),
                 stop=(data.get('workflow_stop') or data.get('mapping_stop')) if m.state(s,fid)=='PAUSED' else None,
                 recovery=recovery(s,fid),allocation_version=data.get('allocation_version',0),
@@ -61,7 +62,11 @@ def recovery(s,fid):
         return {'kind':'binding_changed','restart_allowed':False,
                 'message':'The saved task calibration is no longer usable. Discard this request and establish a valid task before continuing.'}
     changed=[key for key in old if old[key]!=current.get(key)]
-    if not changed:return None
+    if not changed:
+        if (data.get('workflow_stop') or {}).get('status') != 'provenance_changed':
+            return None
+        return {'kind': 'provenance_changed', 'restart_allowed': True,
+                'message': 'Source changed during this review. Restart with this workspace to check fresh source and retain the request, constraints and consumed budget.'}
     policy_only=changed==['logic_hash']
     return {'kind':'policy_changed' if policy_only else 'binding_changed',
             'restart_allowed':policy_only and bool(s.snapshot(parent['session'])['constraints'].get('auto_review')),
@@ -173,7 +178,15 @@ def handle(s,meta,workspace,root,req,providers=None):
         stop={'status':'memory_fault','stage':target,'resume_phase':target,'error':str(exc),
               'memory_fault':detail,'automatic_retry':False}
         observe_fault(s,(data.get('binding') or {}).get('session',''),exc)
-        move(s,fid,'PAUSED','MEMORY_STOPPED',workflow_stop=stop)
+        kind = 'MEMORY_STOPPED'
+        if target == 'SYNTHESIS' and detail['code'] == 'source_changed':
+            from review_followup import FollowupSourceChanged
+            if isinstance(exc, FollowupSourceChanged):
+                stop['followup_source_changed'] = detail['page']
+                if data.get('resumed_followup_source') == detail['page']:
+                    stop['status'] = 'provenance_changed'
+                    kind = 'GIT_SNAPSHOT_CHANGED'
+        move(s,fid,'PAUSED',kind,workflow_stop=stop)
         save(root,meta)
         return response(s,fid)
     except ResourceWait as exc:
@@ -215,6 +228,54 @@ def handle(s,meta,workspace,root,req,providers=None):
             stop['recovery']={'admitted':False,'error':str(recovery_error),'automatic_inference':False}
             move(s,fid,'PAUSED','RESOURCE_RECOVERY_OBSERVED',workflow_stop=stop)
         return response(s,fid)
+
+
+def review_provenance(s, meta, workspace, fid, data, prompt):
+    """Capture a read-only architecture review's custody before source work."""
+    from git_provenance import inspect, summary, upstream_requested
+    from review_report import requested
+    active = meta.get('active')
+    task = s.snapshot(active) if active else {}
+    constraints = task.get('constraints', {})
+    if (data.get('permission', {}).get('operation', 'read') != 'read' or
+            constraints.get('native_task') or not requested({'contract': {'goal': task.get('goal') or ''},
+                                                             'request': prompt})):
+        return None, None
+    if upstream_requested(prompt):
+        pending = inspect(workspace, include_dirty=False)
+        stop = {'status': 'provenance_confirmation', 'resume_phase': 'BINDING',
+                'error': summary(pending) + ' Open the intended checkout, or confirm review of the open snapshot.'}
+        move(s, fid, 'PAUSED', 'PROVENANCE_CONFIRMATION_REQUIRED', workflow_stop=stop,
+             git_provenance=pending)
+        return None, response(s, fid)
+    snapshot = inspect(workspace)
+    move(s, fid, 'NEED_ARM', 'GIT_SNAPSHOT_RECORDED', git_provenance=snapshot)
+    return snapshot, None
+
+
+def provenance_changed(s, workspace, fid, data):
+    from git_provenance import inspect, same_snapshot, summary
+    before = data.get('git_provenance')
+    if not before:
+        return False
+    current = inspect(workspace)
+    if not same_snapshot(before, current):
+        stop = {'status': 'provenance_changed', 'error': 'Source snapshot changed. ' + summary(current)}
+        move(s, fid, 'PAUSED', 'GIT_SNAPSHOT_CHANGED', workflow_stop=stop)
+        return True
+    return False
+
+
+def with_provenance(out, snapshot):
+    if snapshot is None:
+        return out
+    from git_provenance import summary
+    from review_report import references
+    result = dict(out, git_provenance=snapshot)
+    if result.get('report_markdown'):
+        result['report_markdown'] = ('**Source snapshot** · ' + summary(snapshot) + '\n\n'
+            + references([snapshot['workspace_root']]) + '\n\n' + result['report_markdown'])
+    return result
 
 
 def _handle(s,meta,workspace,root,req,providers=None):
@@ -279,7 +340,7 @@ def _handle(s,meta,workspace,root,req,providers=None):
         m.cancel(s,fid);return response(s,fid)
     incompatibility=recovery(s,fid)
     if event=='restart_review':
-        if not incompatibility or not incompatibility['restart_allowed']:raise InvalidUpdate('This saved request cannot restart as a policy-only review')
+        if not incompatibility or not incompatibility['restart_allowed']:raise InvalidUpdate('This saved request cannot restart as a policy-only or source-snapshot review')
         parent=m.node(s,d['root_node']);sid=parent['session']
         if not req.get('armed') or meta.get('active')!=sid or req.get('binding')!=identity(s,sid):
             raise InvalidUpdate('Restart requires the same user-armed task and current binding')
@@ -292,15 +353,36 @@ def _handle(s,meta,workspace,root,req,providers=None):
         with s.db:
             from execution_sessions import finish
             finish(s, fid, cancelled=True)
-            m.abandon_children(s,parent['id'],'User restarted review after policy upgrade')
+            m.abandon_children(s,parent['id'],'User restarted review after a policy or source change')
             m.cancel(s,fid)
             new=m.create(s,'flow',objective=prompt,workspace=str(workspace),prompt=prompt,
                          conversation_parent=conversation_id,restarted_from=fid)
-            m.transition(s,new['id'],'CLASSIFYING','POLICY_RESTART',{'previous_flow':fid})
-            m.transition(s,new['id'],'NEED_ARM','USER_REVIEW',{'conversation_id':conversation_id,'permission':{'operation':'read','paths':[]}})
-        return response(s,new['id'],progress='Review restarted under the current policy; task constraints and consumed budget retained.')
+            restart_kind = 'SOURCE_RESTART' if incompatibility['kind']=='provenance_changed' else 'POLICY_RESTART'
+            m.transition(s,new['id'],'CLASSIFYING',restart_kind,{'previous_flow':fid})
+            m.transition(s,new['id'],'NEED_ARM','USER_REVIEW',{'conversation_id':conversation_id,
+                         'permission':d.get('permission') or {'operation':'read','paths':[]}})
+        return response(s,new['id'],progress=('Review restarted with the current source snapshot; task constraints and consumed budget retained.'
+                        if incompatibility['kind']=='provenance_changed' else
+                        'Review restarted under the current policy; task constraints and consumed budget retained.'))
     if incompatibility:return response(s,fid)
     if phase=='PAUSED':
+        stop = d.get('workflow_stop') or {}
+        if stop.get('status') == 'provenance_confirmation':
+            if event == 'resume':
+                return response(s, fid)
+            if event != 'accept_provenance' or req.get('confirmed') is not True or not req.get('armed'):
+                raise InvalidUpdate('Source snapshot selection requires explicit confirmation in this workspace')
+            from git_provenance import checkout, inspect, summary
+            snapshot = inspect(workspace, include_dirty=False)
+            if checkout(snapshot) == checkout(d['git_provenance']):
+                snapshot = inspect(workspace)
+            if checkout(snapshot) != checkout(d['git_provenance']):
+                stop = dict(stop, error='The checkout changed before confirmation. ' + summary(snapshot))
+                move(s, fid, 'PAUSED', 'PROVENANCE_CONFIRMATION_REQUIRED', workflow_stop=stop,
+                     git_provenance=snapshot)
+                return response(s, fid)
+            move(s, fid, 'BINDING', 'GIT_SNAPSHOT_CONFIRMED', workflow_stop=None, git_provenance=snapshot)
+            return response(s, fid, progress=summary(snapshot))
         if event!='resume':raise InvalidUpdate('Workflow paused. Choose Resume or Discard; allocations remain unchanged.')
         stopped=[e for e in m.events(s,fid) if e['kind'] in ('MAPPING_STOPPED','CONTEXT_STOPPED','RESOURCE_STOPPED','ROUTING_STOPPED','MEMORY_STOPPED')]
         if not stopped:raise InvalidUpdate('Paused workflow requires inspection before recovery')
@@ -311,6 +393,8 @@ def _handle(s,meta,workspace,root,req,providers=None):
             if not req.get('armed'):raise InvalidUpdate('Workspace workflow requires a user-armed harness')
             if d.get('binding')!=identity(s,meta.get('active')) or req.get('binding')!=d['binding']:
                 raise InvalidUpdate('Workflow task, calibration or permissions changed')
+        if target != 'CLASSIFYING' and provenance_changed(s, workspace, fid, d):
+            return response(s, fid)
         if last['kind']=='RESOURCE_STOPPED':
             from monitoring import require_resources
             from runtime_memory import recover
@@ -321,7 +405,9 @@ def _handle(s,meta,workspace,root,req,providers=None):
                 from monitoring import ResourceWait
                 raise ResourceWait(dict(recovered['after'],runtime_recovery=recovered))
             require_resources(root)
-        move(s,fid,target,'RESUME_REQUESTED',workflow_stop=None,reason='User resumed with existing contract and allocation')
+        move(s,fid,target,'RESUME_REQUESTED',workflow_stop=None,
+             resumed_followup_source=stop.get('followup_source_changed'),
+             reason='User resumed with existing contract and allocation')
         return response(s,fid)
     if phase=='CLASSIFYING':
         from conversation import session_for
@@ -361,7 +447,12 @@ def _handle(s,meta,workspace,root,req,providers=None):
     if phase in m.TERMINAL:return response(s,fid)
     if not req.get('armed'):raise InvalidUpdate('Workspace workflow requires a user-armed harness')
     if phase=='NEED_ARM':
+        snapshot, pending = review_provenance(s, meta, workspace, fid, d, prompt)
+        if pending:
+            return pending
         move(s,fid,'BINDING','ARM_CONFIRMED');phase='BINDING'
+    else:
+        snapshot = None
     if phase in ('BINDING','NEED_PERMISSION'):
         from vscode_bridge import _handle
         sid=meta.get('active')
@@ -389,7 +480,8 @@ def _handle(s,meta,workspace,root,req,providers=None):
         with s.db:
             parent=open_session(s,sid,fid)
             m.transition(s,fid,'WORKSPACE','TASK_BOUND',{'binding':identity(s,sid),'root_node':parent['id']})
-        return response(s,fid)
+        from git_provenance import summary
+        return response(s,fid,**({'progress': summary(snapshot)} if snapshot else {}))
     if d.get('binding')!=identity(s,meta.get('active')) or req.get('binding')!=d['binding']:raise InvalidUpdate('Workflow task, calibration or permissions changed')
     parent=m.checked(s,d['root_node']);sid=parent['session']
     if phase=='NEED_TOOL_APPROVAL':
@@ -468,6 +560,8 @@ def _handle(s,meta,workspace,root,req,providers=None):
         return response(s,fid)
     if phase in ('SYNTHESIS','CODING'):
         from resource_routing import effective
+        if phase == 'SYNTHESIS' and provenance_changed(s, workspace, fid, d):
+            return response(s, fid)
         request={'prompt':prompt,'models':models,'tier':effective(d,models,tier),'conversation_id':d['conversation_id'],**d['binding'],'child_results':d.get('child_results',[]),'orchestration_parent':d.get('result_parent',parent['id'])}
         try:
             with m.scope(parent['id']):
@@ -491,6 +585,10 @@ def _handle(s,meta,workspace,root,req,providers=None):
                 stop['automatic_allocation'] = {'status': 'model_context',
                     'reason': 'The host could not show that more task allocation would fit this packet in the selected model.'}
             return budget_pause(s, meta, root, req, fid, phase, stop)
+        if phase == 'SYNTHESIS':
+            if provenance_changed(s, workspace, fid, d):
+                return response(s, fid)
+            out = with_provenance(out, d.get('git_provenance'))
         save(root,meta)
         action=(out['result'].get('accepted_output') or {}).get('action',{}).get('kind')
         awaiting=phase=='CODING' and action in ('edit','run_tests')

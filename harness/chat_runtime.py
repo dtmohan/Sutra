@@ -70,6 +70,21 @@ def excerpts(sources,prompt,limit,graph=None):
         if quote:result[name]=quote;remaining-=len(quote.encode())
     return result
 
+def packet_excerpts(p, data):
+    limit = p['excerpt_bytes']
+    followups = data.get('followups', {})
+    selected = {}
+    if followups:
+        each = max(1, min(1200, limit * 2 // (3 * len(followups))))
+        for path in sorted(followups):
+            excerpt = followups[path]['text'].encode()[:each].decode('utf-8', 'ignore')
+            if excerpt:
+                selected[path] = excerpt
+                limit -= len(excerpt.encode())
+    base = {name: source for name, source in data['sources'].items() if name not in selected}
+    return dict(selected, **excerpts(base, context.query(p), limit, data['graph']))
+
+
 def compact(previous,iid,model):
     return {'invocation_id':iid,'model':model,'summary_unverified':previous['summary'],'remaining_unverified':previous['remaining']}
 
@@ -103,7 +118,10 @@ def request_check(s,sid,p):
     data=runtime.load_partition(s,sid,p['workspace'],p['snapshot_receipts'],p['snapshot_owner'])
     if p['snapshot_receipt']!=p['snapshot_receipts'][0]:raise InvalidUpdate('Review snapshot identity changed')
     if type(p['excerpt_bytes']) is not int or not 64<=p['excerpt_bytes']<=65536:raise InvalidUpdate('Invalid source excerpt allocation')
-    if p['excerpts']!=excerpts(data['sources'],context.query(p),p['excerpt_bytes'],data['graph']):raise InvalidUpdate('Chat source excerpts differ from fresh snapshot')
+    from review_followup import load as load_followups
+    data['followups'] = load_followups(s, sid, p)
+    if p['excerpts'] != packet_excerpts(p, data):
+        raise InvalidUpdate('Chat source excerpts differ from verified source evidence')
     context.check(p,data)
     if p['facts']!=facts(data['graph'],p['sites']):raise InvalidUpdate('Chat relationships differ from deterministic source map')
     route=p['route'];row=s.db.execute('SELECT seq,event,payload_json,previous_hash,event_hash FROM page_audit WHERE event_hash=?',(route['receipt'],)).fetchone()
@@ -183,7 +201,7 @@ def fit_packet(s, sid, p, data, provider, real):
         p['excerpt_bytes'] = max(64, min(65536, provider.budget.context_limit//3))
         p['map_bytes'] = max(512, min(65536, provider.budget.context_limit//3))
         while True:
-            p['excerpts'] = excerpts(data['sources'], context.query(p), p['excerpt_bytes'], data['graph'])
+            p['excerpts'] = packet_excerpts(p, data)
             context.evidence(p, data)
             p['facts'] = facts(data['graph'], p['sites'])
             fmt = schema(p)
@@ -341,6 +359,11 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
              sites=[], excerpt_bytes=4096, map_bytes=4096, route={'record': record, 'receipt': route_receipt},
              source_page_coverage={'selected_files': len(files), 'deferred_files': len(page_plan['omitted']),
                  'meaning': 'This response uses selected fresh source pages. Deferred files are not semantically reviewed.'})
+    followup_usage = None
+    reader = provider if real else getattr(provider, 'reader_provider', None)
+    if reader and report.requested(p):
+        from review_followup import expand
+        data['followups'], followup_usage = expand(s, sid, p, data, root, reader, real)
     import report_review
     resumed = report_review.pending_candidate(s, sid, p)
     if resumed:
@@ -403,6 +426,10 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
                 out['accepted_output']=None
         if out['admission']['admitted']:
             meta['chat']={'checkpoint':checkpoint,'route':choice,'reviewer_id':reviewer_id};meta['model']=choice['model']
+    if followup_usage:
+        from token_usage import summarize
+        calls = followup_usage['calls'] + out['token_usage']['calls']
+        out['token_usage'] = {'calls': calls, 'totals': summarize(calls), 'total_calls': len(calls), 'limit': None}
     out.pop('record',None);out.pop('model_proposal',None)
     return {'result':out,'route':choice,'coverage':dict(record['coverage'],evidence=p['evidence_coverage']),'source_files':list(p['excerpts']),
             'report_review':publication,'report_markdown':report.markdown(out['accepted_output']) if out['admission']['admitted'] else None,

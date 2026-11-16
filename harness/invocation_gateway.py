@@ -95,11 +95,16 @@ class InvocationLedger(GovernedContext):
             else:
                 if payload['contract']['contract_hash'] != config['contract_hash']:
                     raise Conflict('Invocation contract changed')
-                if role in ('memory_probe','reviewer','coder','architect','api_mapper','api_reviewer','static_explainer','chat_reviewer','conversation','subagent','report_reviewer'):
+                if role in ('memory_probe','reviewer','coder','architect','api_mapper','api_reviewer','static_explainer','chat_reviewer','review_reader','conversation','subagent','report_reviewer'):
                     if role=='memory_probe':
                         from memory_probe import check
                         check(self,session,payload)
                         if payload['model']!=model:raise InvalidUpdate('Memory probe model changed')
+                    elif role == 'review_reader':
+                        from review_followup import check
+                        check(self, session, payload)
+                        if payload['planning_model'] != model:
+                            raise InvalidUpdate('Architecture read planner differs from the selected model')
                     elif role=='report_reviewer':
                         from report_review import request_check
                         request_check(self,session,payload)

@@ -175,13 +175,21 @@ def execute(s,session,workspace,root,kind,*,target='',query='',line=1,cursor=Non
    if op['contract_hash']!=s.origin(session)['contract_hash'] or op['logic_hash']!=s.logic_hash:raise InvalidUpdate('Replayed tool receipt is stale')
    return dict(row,replayed=True)
  request_check(s,session,kind,target,query,line,cursor)
+ planned_read=False
  if invocation_id:
   p=s.load_result(session,invocation_id)
   expected={'kind':kind,'target':target,'query':query,'line':line}
   if cursor is not None:expected['cursor']=cursor
-  if p.get('tool')!=expected:raise InvalidUpdate('Tool request differs from accepted model proposal')
+  if 'reads' in p:
+   from review_followup import authorizes
+   if kind!='read' or query or cursor is not None or not authorizes(s,session,invocation_id,target,line):
+    raise InvalidUpdate('Follow-up source request differs from approved plan')
+   planned_read=True
+  elif p.get('tool')!=expected:raise InvalidUpdate('Tool request differs from accepted model proposal')
  from review_budget import require
  source_charge=sum((Path(workspace)/p).stat().st_size for p in target.split('\n')) if kind=='static_map' else 0 if kind in ('catalog','list') else MAX_FILE
+ if planned_read:
+  source_charge=min(MAX_FILE,max(1,(Path(workspace)/target).stat().st_size))
  from storage_policy import require_space
  require_space(root,max(16*1024**2,source_charge*32))
  cost={'operations':1,'source_bytes':source_charge,'seconds':20}
@@ -222,7 +230,7 @@ def execute(s,session,workspace,root,kind,*,target='',query='',line=1,cursor=Non
    selected=[target] if kind=='read' else names;excerpts=[];versions={};started=time.monotonic();truncated=False;next_position=None
    for name in selected:
     if time.monotonic()-started>3:truncated=True;break
-    raw=read_bytes(workspace,name);text=raw.decode();version=hashlib.sha256(raw).hexdigest();versions[name]=version;lines=text.splitlines(True)
+    raw=read_bytes(workspace,name,limit=source_charge if planned_read else MAX_FILE);text=raw.decode();version=hashlib.sha256(raw).hexdigest();versions[name]=version;lines=text.splitlines(True)
     if kind=='read':
      if cursor and cursor['sha256']!=version:raise InvalidUpdate('Source changed since read continuation; restart the read')
      column=cursor['column'] if cursor else 0

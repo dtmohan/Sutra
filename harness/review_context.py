@@ -136,15 +136,23 @@ def evidence(p, data):
     p['workspace_map'] = overview(data, p['map_bytes'], query(p))
     p['sites'] = select_sites(data['graph'], p['excerpts'])
     p['excerpt_locations'] = {}
+    followup_files = []
     for name, excerpt in p['excerpts'].items():
-        start = data['sources'][name].find(excerpt)
-        line = data['sources'][name][:start].count('\n') + 1
-        p['excerpt_locations'][name] = {'start_line': line, 'end_line': line + excerpt.count('\n'), 'partial_file': excerpt != data['sources'][name]}
+        entry = data.get('followups', {}).get(name)
+        if entry and entry['text'].startswith(excerpt):
+            followup_files.append(name)
+            line, partial = entry['line'], True
+        else:
+            source = data['sources'][name]
+            line, partial = source[:source.find(excerpt)].count('\n') + 1, excerpt != source
+        p['excerpt_locations'][name] = {'start_line': line, 'end_line': line + excerpt.count('\n'), 'partial_file': partial}
     p['evidence_coverage'] = {
         'fresh_snapshot_files': p['workspace_map']['source_files'], 'excerpt_files': sorted(p['excerpts']),
         'excerpt_bytes': sum(len(t.encode()) for t in p['excerpts'].values()),
         'child_reports': len(p.get('child_results', [])), 'exhaustive_semantic_review': False,
     }
+    if data.get('followups'):
+        p['evidence_coverage']['followup_files'] = sorted(followup_files)
 
 
 def check(p, data):

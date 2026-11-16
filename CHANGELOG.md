@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.38.0
+
+- Record Git checkout provenance for architecture reviews and ask for confirmation when the request calls for a newer upstream snapshot.
+- Give architecture reviews a bounded, source-scoped round of targeted follow-up reads. Reuse current read receipts on retry and attach their source locations to the final evidence.
+- Pause when the checked-out snapshot or follow-up evidence changes during the review. A restart retains the request, constraints and spending.
+
 ## 0.37.0
 
 - Give read-only native reviews an automatic workspace reserve. A measured shortfall can authorize a versioned increase within the applicable user-owned ceiling.

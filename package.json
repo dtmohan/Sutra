@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Local orchestration with observe-only task commitments and completion assessments.",
-  "version": "0.37.0",
+  "version": "0.38.0",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -317,7 +317,7 @@
             "Use each installed model\u2019s default reasoning setting."
           ],
           "default": "adaptive",
-          "description": "Local-model reasoning. Adaptive applies to routing and workspace generation. Explicit Off, On and Model default choices are preserved. Reasoning and answers share the existing token, call and time allocations."
+          "description": "Local-model reasoning. Adaptive applies to routing and workspace generation. Evidence selection uses the lowest advertised effort or the model default when its controls are unknown. Off requests thinking off throughout. Reasoning and answers share the existing token, call and time allocations."
         },
         "karma.logitSensor": {
           "type": "string",

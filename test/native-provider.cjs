@@ -344,6 +344,38 @@ function setup(saved={}){
  shouldPause=false;await paused.send('high',[{role:1,content:[new Text('continue')]}]);
  const afterPause=paused.calls.find(c=>c.op==='native_work');assert.equal(afterPause.prompt,'Fix retry');assert.equal(afterPause.tier,'high');assert.equal(afterPause.contract_hash,'contract-1');
  checks.push('mapping pauses return actionable details without a client error; original context and permission binding resume on another model');
+ for(const approve of [false,true]){
+  const provenance=setup();provenance.kind('report');await provenance.arm();
+  const original=provenance.deps.request;let selected,confirmation;
+  const prompt='Review the latest upstream architecture.';
+  provenance.deps.request=async(m,t)=>{
+   if(m.op==='orchestrate'&&m.event==='step'&&!selected){
+    return {flow_id:m.flow_id,cursor:m.cursor,state:'PAUSED',
+            stop:{status:'provenance_confirmation',resume_phase:'BINDING',error:'Live upstream freshness was not checked.'}};
+   }
+   if(m.op==='orchestrate'&&m.event==='accept_provenance'){
+    selected=m;
+    return original({...m,event:'step'},t);
+   }
+   return original(m,t);
+  };
+  provenance.v.window.showWarningMessage=async(title,options,label)=>{
+   confirmation={title,options,label};return approve?label:undefined;
+  };
+  const reply=await provenance.send('high',[{role:1,content:[new Text(prompt)]}]);
+  assert.equal(confirmation.label,'Review open snapshot');
+  assert(confirmation.options.modal);
+  assert.equal(confirmation.options.detail,'Live upstream freshness was not checked.');
+  if(approve){
+   assert(selected.confirmed&&selected.armed);
+   assert.equal(provenance.calls.find(c=>c.op==='native_work').prompt,prompt);
+  }else{
+   assert(!selected);
+   assert(!provenance.calls.some(c=>c.op==='native_work'||c.op==='auto_new'));
+   assert(reply.some(p=>p.value?.includes('Review paused before source mapping')));
+  }
+ }
+ checks.push('an explicit upstream review waits for an in-chat snapshot choice before source work');
  const tight=setup();tight.kind('report');await tight.arm();const tightRequest=tight.deps.request;
  tight.deps.request=async(m,t)=>{
   const r=await tightRequest(m,t);
