@@ -149,7 +149,7 @@ def build(system, payload, schema):
     elif role in REVIEW_ROLES:
         body = {'request': payload.get('request', payload['contract']['goal']), 'task': {'goal': payload['contract']['goal'],
                 'requirements': requirements(payload['contract'])}}
-        body.update(select(payload, ('excerpts', 'workspace_map', 'facts', 'packet', 'readable_sites', 'claims', 'mode', 'phase', 'source_text', 'source_mode', 'evidence_coverage')))
+        body.update(select(payload, ('excerpts', 'workspace_map', 'facts', 'packet', 'readable_sites', 'claims', 'mode', 'phase', 'source_text', 'source_mode', 'evidence_coverage', 'source_page_coverage')))
         if role in ('chat_reviewer', 'subagent') and 'facts' in body:
             body['facts'] = facts_view(body['facts'], payload.get('map_bytes'))
         if role == 'report_reviewer' and payload.get('review_protocol') == 2:

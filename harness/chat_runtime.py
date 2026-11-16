@@ -184,13 +184,18 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
     import orchestration as machine
     files=auto.ranked({name for page in pages for name in page['files']},s.pinned(sid)['goal']+' '+prompt)
     owner=machine.ACTIVE.get() or machine.task(s,sid)['id']
+    s.db.commit()
+    from source_paging import select
+    files=context.ordered_sources(dict.fromkeys(files),None,s.pinned(sid)['goal']+' '+prompt)
+    files,page_plan=select(s,sid,workspace,files,'workspace_synthesis')
     receipts=runtime.build_partition(s,meta,workspace,root,files,real=provider is None)
     data=runtime.load_partition(s,sid,workspace,receipts,owner);graph=data['graph']
     signals={'source_files':st['source_files'],'selected_files':len(files),'unresolved_calls':sum(c['target'] is None for c in graph['calls'])}
     choice=KarmaAdapter().route(prompt,models,mode,signals)
     if provider is not None and provider.model!=choice['model']:raise InvalidUpdate('Provider does not match routed model')
     record={'session':sid,'contract_hash':s.origin(sid)['contract_hash'],'request_hash':sha(prompt),'snapshot_receipt':receipts[0],'snapshot_receipts':receipts,'snapshot_owner':owner,'choice':choice,
-            'coverage':{k:st[k] for k in ('mapped_files','source_files','pending_files','semantic_review_complete')}}
+            'coverage':dict({k:st[k] for k in ('mapped_files','source_files','pending_files','semantic_review_complete')},
+                            fresh_selected_files=len(files),deferred_files=len(page_plan['omitted']))}
     with s.db:s._audit('CHAT_ROUTE',record)
     route={'record':record,'receipt':s.db.execute('SELECT event_hash FROM page_audit ORDER BY seq DESC LIMIT 1').fetchone()[0]}
     p={'_request_nonce':uuid.uuid4().hex,'contract':s.pinned(sid),'workspace':str(workspace),'request':prompt,'pages':[],
@@ -203,6 +208,8 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
         from subagent_runtime import joined_results
         p['orchestration_parent']=request['orchestration_parent']
         p['child_results']=joined_results(s,sid,request['orchestration_parent'],request['child_results'],prompt)
+    p['source_page_coverage']={'selected_files':len(files),'deferred_files':len(page_plan['omitted']),
+                             'meaning':'This response uses selected fresh source pages. Deferred files are not semantically reviewed.'}
 
     old=meta.get('chat',{}).get('checkpoint')
     if old:

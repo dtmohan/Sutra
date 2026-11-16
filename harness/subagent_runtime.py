@@ -131,7 +131,9 @@ def run(s,meta,workspace,root,nid,models,tier='auto',provider=None):
 
 
 def joined_results(s,sid,parent,ids,prompt):
-    n=machine.checked(s,parent)
+    n=machine.node(s,parent)
+    if n['binding']!=machine.binding(s,sid) or machine.state(s,parent) in ('CANCELLED','QUARANTINED'):
+        raise InvalidUpdate('Child result parent binding changed or was revoked')
     if n['session']!=sid:raise InvalidUpdate('Cross-task child join')
     joins=[e for e in machine.events(s,parent) if e['kind']=='JOIN']
     if not joins or joins[-1]['data']['invocations']!=ids:raise InvalidUpdate('Uncommitted child join')

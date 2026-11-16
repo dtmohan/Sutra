@@ -18,7 +18,12 @@ def info(s,fid):
     return n,data
 
 def move(s,fid,target,kind,**data):
-    with s.db:return m.transition(s,fid,target,kind,data)
+    with s.db:
+        result = m.transition(s,fid,target,kind,data)
+        if target == 'DONE':
+            from execution_sessions import finish
+            finish(s, fid)
+        return result
 
 def pending_flows(s,workspace,exclude=None):
     return [nid for nid, in s.db.execute(
@@ -43,6 +48,7 @@ def response(s,fid,**extra):
                 resource_fallback=data.get('resource_fallback'),
                 stop=(data.get('workflow_stop') or data.get('mapping_stop')) if m.state(s,fid)=='PAUSED' else None,
                 recovery=recovery(s,fid),allocation_version=data.get('allocation_version',0),
+                execution_id=data.get('root_node') if data.get('root_node') and m.node(s,data['root_node'])['kind']=='execution' else None,
                 children=[{'id':i,'state':m.state(s,i),'files':m.node(s,i)['files']} for i in data.get('children',[])],**extra)
 
 def recovery(s,fid):
@@ -67,7 +73,7 @@ def recovery(s,fid):
 def identity(s,sid):
     return {k:v for k,v in m.binding(s,sid).items() if k!='logic_hash'}
 
-def plan(s,meta,workspace,prompt,conversation_id):
+def plan(s,meta,workspace,prompt,conversation_id,parent_id=None):
     """Measured partition proposal; every allocation still needs kernel ALLOW.
 
     Reserve worst-case repair capacity for each child and parent synthesis.
@@ -75,7 +81,7 @@ def plan(s,meta,workspace,prompt,conversation_id):
     """
     import auto_review as auto
     import static_analysis as analysis
-    parent=m.task(s,meta['active']);s.db.commit()
+    parent=m.checked(s,parent_id) if parent_id else m.task(s,meta['active']);s.db.commit()
     if m.state(s,parent['id'])=='WAITING_CHILDREN':
         fork=[e for e in m.events(s,parent['id']) if e['kind']=='FORK'][-1]
         children=[m.node(s,i) for i in fork['data']['children']]
@@ -85,7 +91,7 @@ def plan(s,meta,workspace,prompt,conversation_id):
     for page in pages:
         data=analysis.load(s,meta['active'],workspace,page['receipt'])
         versions.update(data['versions']);calls+=len(data['graph']['calls']);unresolved+=sum(c['target'] is None for c in data['graph']['calls'])
-    parent=m.task(s,meta['active']);s.db.commit();used=m.spent(s,parent['id'])
+    s.db.commit();used=m.spent(s,parent['id'])
     left={k:max(0,v-used[k]) for k,v in m.effective_limits(s,parent).items()}
     # One fresh map plus up to three calls per participant. Actual use is charged.
     minimum={'calls':3,'tokens':3*16384,'seconds':470,'operations':1}
@@ -129,7 +135,7 @@ def handle(s,meta,workspace,root,req,providers=None):
         return _handle(s,meta,workspace,root,req,providers)
     except (BudgetStop,m.OrchestrationStop) as exc:
         fid=req.get('flow_id')
-        if not fid or m.state(s,fid) not in ('WORKSPACE','NEED_TOOL_APPROVAL'):raise
+        if not fid or m.state(s,fid) not in ('BINDING','WORKSPACE','NEED_TOOL_APPROVAL','MAPPING','BRANCHING','CHILDREN'):raise
         phase=m.state(s,fid)
         move(s,fid,'PAUSED','CONTEXT_STOPPED',workflow_stop={'status':'task_budget','stage':phase,'error':str(exc),'automatic_retry':False})
         return response(s,fid)
@@ -242,7 +248,10 @@ def _handle(s,meta,workspace,root,req,providers=None):
     if event=='cancel':
         if phase in ('EXECUTING_ACTION','CANCELLING'):
             m.cancel(s,fid);return response(s,fid)
-        if d.get('root_node'):m.abandon_children(s,d['root_node'],'Workflow cancelled')
+        if d.get('root_node'):
+            from execution_sessions import finish
+            finish(s, fid, cancelled=True)
+            m.abandon_children(s,d['root_node'],'Workflow cancelled')
         m.cancel(s,fid);return response(s,fid)
     incompatibility=recovery(s,fid)
     if event=='restart_review':
@@ -257,6 +266,8 @@ def _handle(s,meta,workspace,root,req,providers=None):
         # This is an explicit host UI event. Keep the task and all consumed use;
         # do not transfer old model results or authorize any new file/action scope.
         with s.db:
+            from execution_sessions import finish
+            finish(s, fid, cancelled=True)
             m.abandon_children(s,parent['id'],'User restarted review after policy upgrade')
             m.cancel(s,fid)
             new=m.create(s,'flow',objective=prompt,workspace=str(workspace),prompt=prompt,
@@ -348,8 +359,12 @@ def _handle(s,meta,workspace,root,req,providers=None):
             return response(s,fid,permission=wanted,bound_task=identity(s,sid))
         from conversation import workspace_handoff
         if d['conversation_id']:workspace_handoff(s,sid,d['conversation_id'],prompt)
-        parent=m.task(s,sid);s.db.commit()
-        move(s,fid,'WORKSPACE','TASK_BOUND',binding=identity(s,sid),root_node=parent['id'])
+        from execution_sessions import open_session
+        task=m.task(s,sid);s.db.commit()
+        move(s,fid,'BINDING','EXECUTION_PENDING',binding=identity(s,sid),root_node=task['id'])
+        with s.db:
+            parent=open_session(s,sid,fid)
+            m.transition(s,fid,'WORKSPACE','TASK_BOUND',{'binding':identity(s,sid),'root_node':parent['id']})
         return response(s,fid)
     if d.get('binding')!=identity(s,meta.get('active')) or req.get('binding')!=d['binding']:raise InvalidUpdate('Workflow task, calibration or permissions changed')
     parent=m.checked(s,d['root_node']);sid=parent['session']
@@ -361,7 +376,8 @@ def _handle(s,meta,workspace,root,req,providers=None):
             capabilities.materialize(s,receipt,receipt['receipt'])
         else:
             if event!='capability_grant':raise InvalidUpdate('Tool approval required')
-            receipt=capabilities.execute(s,sid,workspace,root,p['id'],req.get('authorization'))
+            with m.scope(parent['id']):
+                receipt=capabilities.execute(s,sid,workspace,root,p['id'],req.get('authorization'))
         if receipt['result']['status']=='installed' and d['permission'].get('capability_action')=='check':
             move(s,fid,'WORKSPACE','TOOL_INSTALLED',capability_proposal=None)
             return response(s,fid,progress='Approved tool installed; preparing its separate source-check permission.',capability_result=receipt)
@@ -372,7 +388,8 @@ def _handle(s,meta,workspace,root,req,providers=None):
             import capabilities
             wanted=d['permission'];name=wanted['capability'];action=wanted['capability_action']
             if action=='check' and not capabilities.installed(s,root,name):action='install'
-            p=capabilities.preview(s,sid,workspace,root,name,action,wanted['paths'] if action=='check' else [])
+            with m.scope(parent['id']):
+                p=capabilities.preview(s,sid,workspace,root,name,action,wanted['paths'] if action=='check' else [])
             move(s,fid,'NEED_TOOL_APPROVAL','TOOL_PROPOSED',capability_proposal=p)
             return response(s,fid,capability_proposal=p)
         c=s.snapshot(sid)['constraints']
@@ -389,6 +406,10 @@ def _handle(s,meta,workspace,root,req,providers=None):
         if status=='structural_pass_complete':
             move(s,fid,'WORKSPACE','SOURCE_MAPPED')
             move(s,fid,'BRANCHING','PLAN_CHILDREN')
+        elif status=='bounded_source_pass':
+            move(s,fid,'WORKSPACE','SOURCE_BREADTH_DEFERRED')
+            move(s,fid,'BRANCHING','PLAN_BOUNDED_SYNTHESIS')
+            move(s,fid,'SYNTHESIS','PAGING_BEFORE_INCREASE',children=[],signals={'policy':'bounded-source-pages','pending_files':out['auto']['pending_files']})
         elif status not in ('ready','page_rejected'):
             detail=out.get('auto',out);failures=detail.get('failures') or {}
             stop={'status':status,'error':detail.get('error'),'failure_count':len(failures),
@@ -398,7 +419,7 @@ def _handle(s,meta,workspace,root,req,providers=None):
             move(s,fid,'PAUSED','MAPPING_STOPPED',reason=status,mapping_stop=stop,workflow_stop=stop)
         return response(s,fid,progress='Fresh source mapping: '+str(status),mapping=out)
     if phase=='BRANCHING':
-        parent,children,signals=plan(s,meta,workspace,prompt,d['conversation_id'])
+        parent,children,signals=plan(s,meta,workspace,prompt,d['conversation_id'],parent['id'])
         move(s,fid,'CHILDREN' if children else 'SYNTHESIS','BRANCH_PLAN',children=[c['id'] for c in children],signals=signals)
         return response(s,fid,progress=('Reviewing '+str(len(children))+' source partitions' if children else 'Preparing a bounded overview directly; no child review was allocated'))
     if phase=='CHILDREN':
@@ -419,7 +440,7 @@ def _handle(s,meta,workspace,root,req,providers=None):
         return response(s,fid)
     if phase in ('SYNTHESIS','CODING'):
         from resource_routing import effective
-        request={'prompt':prompt,'models':models,'tier':effective(d,models,tier),'conversation_id':d['conversation_id'],**d['binding'],'child_results':d.get('child_results',[]),'orchestration_parent':parent['id']}
+        request={'prompt':prompt,'models':models,'tier':effective(d,models,tier),'conversation_id':d['conversation_id'],**d['binding'],'child_results':d.get('child_results',[]),'orchestration_parent':d.get('result_parent',parent['id'])}
         try:
             with m.scope(parent['id']):
                 if phase=='CODING':

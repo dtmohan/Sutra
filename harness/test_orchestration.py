@@ -131,7 +131,9 @@ class OrchestrationTests(unittest.TestCase):
         with self.assertRaises(m.OrchestrationStop):m.allowed(m.gates(self.s,cid,{'calls':n['limits']['calls']*3}))
         out=self.step(out);used=m.spent(self.s,parent)
         self.step(out,event='cancel');self.assertEqual(m.spent(self.s,parent),used)
-        self.assertEqual(m.state(self.s,parent),'READY');self.assertTrue(all(v==0 for v in m.gates(self.s,parent,{})[0]['reserved_for_other_children'].values()))
+        self.assertEqual(m.state(self.s,parent),'CANCELLED')
+        task=m.node(self.s,parent)['parent_id']
+        self.assertTrue(all(v==0 for v in m.gates(self.s,task,{})[0]['reserved_for_other_children'].values()))
     def test_source_change_after_child_completion_blocks_join(self):
         out=self.children();out=self.step(out);first=m.node(self.s,out['children'][0]['id'])
         (self.ws/first['files'][0]).write_text('def changed(): return 99\n')
@@ -178,7 +180,7 @@ class OrchestrationTests(unittest.TestCase):
 
     def test_committed_fork_and_join_recover_without_duplicate_children(self):
         out=self.until('BRANCHING');n,d=flow.info(self.s,out['flow_id'])
-        parent,children,_=flow.plan(self.s,self.meta,self.ws,n['prompt'],d['conversation_id'])
+        parent,children,_=flow.plan(self.s,self.meta,self.ws,n['prompt'],d['conversation_id'],d['root_node'])
         out=self.step(out);self.assertEqual([i['id'] for i in out['children']],[c['id'] for c in children])
         while any(i['state']!='DONE' for i in out['children']):out=self.step(out)
         ids=m.join(self.s,parent['id']);out=self.step(out);self.assertEqual(out['state'],'SYNTHESIS')

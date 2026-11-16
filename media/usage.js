@@ -91,11 +91,13 @@ function renderMonitor(){
  el('flow-nodes').replaceChildren();
  for(const n of rows){
   const box=node('div',undefined,'gate');box.dataset.nodeId=n.id;box.dataset.decision=snapshotFresh?n.kernel?.decision||'':'';
-  const title=node('div',(n.kind==='branch'?'Child review':'Request')+' · '+n.state+' · '+n.id.slice(0,8));
+  const title=node('div',(n.kind==='branch'?'Child review':n.kind==='execution'?'Execution session':'Request')+' · '+n.state+' · '+n.id.slice(0,8));
   box.append(title,node('div',n.kind==='branch'?n.files.slice(0,3).join(', ')+(n.files.length>3?' · '+(n.files.length-3)+' more files':''):n.objective));
   if(n.resource_fallback)box.append(node('div','Auto memory fallback: '+n.resource_fallback.from_model+' → '+n.resource_fallback.model+'. Context is repaged; permissions and spent budget are retained.'));
   if(n.stop){const stop=n.stop;box.append(node('div',stop.error||stop.status));for(const f of stop.failures||[])box.append(node('div',f.path+': '+f.error));if(stop.failure_count>(stop.failures||[]).length)box.append(node('small',stop.failure_count+' file failures in total.'));}
   if(n.kind==='branch'&&n.files.length>3){const details=node('details');details.open=opened.has(n.id);details.append(node('summary','Full source scope'),node('div',n.files.join(', ')));box.append(details);}
+  if(n.kind==='execution')box.append(node('small','Session spending: '+T.number(n.used?.calls)+' / '+T.number(n.limits?.calls)+' calls · '+T.number(n.used?.tokens)+' / '+T.number(n.limits?.tokens)+' model units · '+T.number(n.used?.source_bytes)+' / '+T.number(n.limits?.source_bytes)+' source bytes. Drawn from the cumulative task allowance; retries do not refill it.'));
+  if(n.source_paging)box.append(node('small','Fresh source page: '+n.source_paging.selected.length+' files, '+T.number(n.source_paging.selected_bytes)+' bytes; '+n.source_paging.omitted.length+' files deferred. No spending refunded.'));
   if(n.kind==='branch')box.append(node('small',(n.model||'Model pending')+' · '+T.number(n.used?.calls)+' / '+T.number(n.limits?.calls)+' calls · '+T.number(n.used?.tokens)+' / '+T.number(n.limits?.tokens)+' token allocation · read only · last admission '+(n.kernel?.decision||'not dispatched')));
   el('flow-nodes').append(box);
   if(focused===n.id)box.querySelector('summary')?.focus({preventScroll:true});

@@ -152,7 +152,7 @@ function install(vscode,context,deps){
       const fmt=x=>Number(x).toLocaleString(undefined,{maximumFractionDigits:1});
       const rows=Object.entries(p.additions).map(([key,add])=>labels[key]+': '+fmt(p.before[key])+' + '+fmt(add)+' = '+fmt(p.after[key])+' total. Spent '+fmt(p.used[key])+'; '+fmt(p.remaining_after[key])+' remains.');
       const yes=await vscode.window.showWarningMessage('Increase this task’s allocation?',{modal:true,detail:
-        p.goal+'\n\n'+rows.join('\n')+'\n\nThis adds capacity; it does not reset spending. Context, constraints and permissions are retained. Model context and memory limits still apply. Approval does not start a model call. Continue the saved request afterward.'},'Increase allocation');
+        p.goal+'\n\n'+rows.join('\n')+'\n\nThis adds capacity; it does not reset spending. A new bounded execution can use the added capacity. Context, constraints and permissions are retained. Model context and memory limits still apply. Approval does not start a model call. Continue the saved request afterward.'},'Increase allocation');
       if(yes!=='Increase allocation')return;
       if(deps.workspace()!==workspace||running||routing?.active||deps.isBusy())throw new Error('The workspace or request changed. Review a fresh allocation proposal.');
       const next=await deps.request({op:'orchestrate',event:'allocation_grant',flow_id:preview.flow_id,cursor:preview.cursor,confirmed:true,proposal:p});
@@ -453,6 +453,7 @@ function install(vscode,context,deps){
         }else progress.report(new vscode.LanguageModelTextPart(`Sutra routing confirmed · ${lastRoute} · task ${a.session}\nRequest ${audit.id} · protocol invocation ${r.invocation_id}\n\n${p.answer||p.summary}\n\n`));
         if(assessmentText)progress.report(new vscode.LanguageModelTextPart(assessmentText));
         const evidence=data.coverage?.evidence;
+        if(data.coverage?.deferred_files>0)progress.report(new vscode.LanguageModelTextPart(`Source paging: ${data.coverage.fresh_selected_files} fresh files selected; ${data.coverage.deferred_files} mapped files deferred to stay within the current allowance. This response covers the selected evidence.\n\n`));
         if(evidence)progress.report(new vscode.LanguageModelTextPart(`Evidence delivered: ${evidence.fresh_snapshot_files} freshly mapped files; source excerpts from ${evidence.excerpt_files.length} files; ${evidence.child_reports} child reports. This is a bounded review, not an exhaustive semantic audit.\n\n`));
         if(['edit','run_tests'].includes(p.action?.kind)){
           if(!canAct){progress.report(new vscode.LanguageModelTextPart('The proposal is retained. Enable the Sutra action tool in native Agent chat to review and apply it. No action executed.'));return;}

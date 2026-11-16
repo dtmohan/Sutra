@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.34.0
+
+- Commit bounded workspace execution sessions beneath cumulative task allocations; retries, reloads and model switches retain the same allowance.
+- Retain spending and context across explicit allocation successors, without widening child permissions or budgets.
+- Select smaller fresh source pages before budget increases, retain protected context, and disclose deferred coverage.
+- Show execution spending and source-page selection in Sutra Monitor.
+- Validate recovery, source freshness, saved-task paging and live local-model switching; canonical STP kernel unchanged.
+
 ## 0.33.0
 
 - Add a release-owned capability registry, pinned Ruff/Pyright installation and sandboxed static checks from native chat or Manage Tools. Never accept model-provided commands, package names or URLs.

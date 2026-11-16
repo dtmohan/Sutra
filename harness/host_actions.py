@@ -235,6 +235,8 @@ def receipt(s, action, result):
         if action.get('workflow_id'):
             from orchestration import transition
             transition(s,action['workflow_id'],'DONE','ACTION_SETTLED',{'action_id':action['id'],'receipt':digest,'status':result.get('status'),'assertions_verified':False})
+            from execution_sessions import finish
+            finish(s, action['workflow_id'])
     return dict(record,id=digest)
 
 
@@ -392,7 +394,10 @@ def execute(s,session,iid,workspace,root,resource_check=True):
         if workflow:
             transition(s,workflow,'EXECUTING_ACTION','ACTION_DISPATCH',{'action_id':aid})
             commit['workflow_id']=workflow
-        commit['orchestration']=admit(s,session,kind,aid,{'actions':1,'seconds':constraints.get('test_timeout_ms',10000)/1000 if kind=='run_tests' else 1},paths=[action['target']],resource=hardware)
+        from orchestration import scope
+        owner=(env.get('orchestration') or {}).get('node_id')
+        with scope(owner):
+            commit['orchestration']=admit(s,session,kind,aid,{'actions':1,'seconds':constraints.get('test_timeout_ms',10000)/1000 if kind=='run_tests' else 1},paths=[action['target']],resource=hardware)
         raw=canonical(commit);s.db.execute('INSERT INTO host_actions VALUES(?,?,?,?,?)',(aid,session,iid,raw,sha('action-v1:'+raw)))
         s._audit('HOST_ACTION_DISPATCH',commit)
     directory=Path(root)/'actions'/aid;directory.mkdir(parents=True)

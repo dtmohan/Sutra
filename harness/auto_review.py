@@ -132,6 +132,19 @@ def step(s,meta,workspace,root,request,provider=None):
   if not primary:
    a['status']='structural_pass_complete' if st['pending_files']==0 else 'needs_attention'
    return {'result':None,'auto':status(s,meta,workspace)}
+  # Keep capacity for fresh evidence at synthesis. Optional breadth yields to
+  # a smaller page before asking the user to increase the task ceiling.
+  from source_paging import select, remaining
+  left=remaining(s,meta['active'])
+  required=sum((workspace/p).stat().st_size for p in files)
+  if required*2>=left['source_bytes']:
+   smallest=min((workspace/p).stat().st_size for p in primary)
+   if valid and smallest*2>=left['source_bytes']:
+    a['status']='bounded_source_pass'
+    with s.db:s._audit('MAPPING_BREADTH_DEFERRED',{'session':meta['active'],'remaining':left,'pending_files':st['pending_files']})
+    return {'result':None,'auto':status(s,meta,workspace)}
+   files,_=select(s,meta['active'],workspace,files,'source_mapping',reserve_fraction=0.5)
+   primary=[p for p in primary if p in files]
   # A parser work-unit overflow bridges to a smaller page, not task completion.
   while primary:
    try:row=runtime.build(s,meta,workspace,root,files,real=provider is None);break

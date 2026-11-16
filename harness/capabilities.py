@@ -76,7 +76,7 @@ def preview(s, sid, workspace, root, name, action, paths):
     if action=='check' and not installed(s,root,name): raise InvalidUpdate('Install this approved capability first')
     files=sources(s,sid,workspace,paths) if action=='check' else {}
     cost={'operations':1,'seconds':120 if action=='install' else 30,'source_bytes':sum(map(len,files.values()))}
-    parent=orchestration.task(s,sid);s.db.commit()
+    parent=orchestration.checked(s,orchestration.ACTIVE.get()) if orchestration.ACTIVE.get() else orchestration.task(s,sid);s.db.commit()
     frames=orchestration.gates(s,parent['id'],cost);orchestration.allowed(frames)
     proposal={'id':uuid.uuid4().hex,'binding':binding(s,sid,workspace),'capability':name,'action':action,
               'version':registry.specification(name)['version'],'source_versions':{p:sha(raw.decode()) for p,raw in files.items()},

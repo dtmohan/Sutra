@@ -161,3 +161,7 @@ The first live 0.29.1 run completed but manual review found unsupported claims t
 - Installation approval authorizes only the pinned registry download into Sutra storage. It does not enable task-wide networking, dependency changes or network access by the installed tool.
 - Historical diagnostics retain source hashes and are labelled as historical when passed to another model. They are not silently treated as fresh after source changes. A new check rereads and revalidates source.
 - Tool output is capped at 64 KiB, checks at 30 seconds and installations reserve 120 seconds. Observed elapsed time is charged; a killed operation retains its full reservation. Interrupted installation copies are quarantined on explicit repair and count toward storage usage.
+
+## 0.34.0 execution and paging limits
+
+Execution allowances are bounded within the cumulative task ceiling; a new turn does not erase prior spending. Source paging selects complete files and can produce a partial review. It cannot refund earlier work or guarantee useful evidence fits a nearly exhausted allowance. See [execution sessions](execution-sessions.md).

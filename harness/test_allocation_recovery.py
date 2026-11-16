@@ -104,8 +104,12 @@ class AllocationTests(unittest.TestCase):
         nodes = [m.node(self.s, nid) for nid in m.descendants(self.s, parent)]
         prior = m.effective_limits(self.s, nodes[0])
         preview = self.preview(out, additions={'tokens': 50000})
-        self.grant(preview, confirmed=True)
-        self.assertEqual(m.effective_limits(self.s, nodes[0])['tokens'], prior['tokens'] + 50000)
+        approved=self.grant(preview, confirmed=True)
+        successor=m.node(self.s,approved['execution_id'])
+        self.assertEqual(m.effective_limits(self.s,nodes[0]),prior)
+        self.assertEqual(m.state(self.s,parent),'DONE')
+        self.assertEqual(successor['previous'],parent)
+        self.assertEqual(successor['limits']['tokens'],prior['tokens']-m.spent(self.s,parent)['tokens']+50000)
         for n in nodes[1:]:
             self.assertEqual(m.effective_limits(self.s, n), n['limits'])
         self.assertEqual([m.node(self.s, n['id']) for n in nodes], nodes)
@@ -172,7 +176,7 @@ class AllocationTests(unittest.TestCase):
         out = self.pause(); sid = self.meta['active']
         root = flow.info(self.s, out['flow_id'])[1]['root_node']
         with self.s.db:
-            m.admit(self.s, sid, 'model', 'interrupted', {'tokens': 100, 'calls': 1})
+            with m.scope(root):m.admit(self.s, sid, 'model', 'interrupted', {'tokens': 100, 'calls': 1})
             m.transition(self.s, root, 'READY', 'TEST_INCOMPLETE_RECOVERY')
         with self.assertRaisesRegex(InvalidUpdate, 'interrupted work'):
             self.preview(out)

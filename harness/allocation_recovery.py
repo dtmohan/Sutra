@@ -135,6 +135,8 @@ def grant(s, fid, meta, proposed):
         raw = canonical(record); digest = sha('allocation-amendment-v1:' + raw)
         s.db.execute('INSERT INTO allocation_amendments VALUES(?,?,?,?,?)',
                      (expected['session'], expected['binding']['contract_hash'], version + 1, raw, digest))
+        from execution_sessions import renew_after_grant
+        renew_after_grant(s, fid)
         m.transition(s, fid, 'PAUSED', 'ALLOCATION_INCREASED',
                      {'allocation_receipt': digest, 'allocation_version': version + 1}, expected['allocation_gate'])
         s._audit('ALLOCATION_INCREASED', {'session': expected['session'], 'receipt': digest,
