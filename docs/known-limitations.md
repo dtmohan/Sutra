@@ -113,3 +113,7 @@
 - Adaptive initial effort uses current-request keywords and structure, not a semantic classifier. Some easy prompts can receive extra effort and some difficult prompts can stay at the lowest effort. More reasoning can cost more without improving the answer.
 - Blank answers and incomplete code fences are detectable, but an apparently complete and well-formed wrong answer can still be admitted. The kernel governs allocation and permissions; it does not certify semantic correctness.
 - Paging controls must be explicit. Bounded repair can fix malformed requests, but cannot guarantee that a model selects every relevant page or recognizes missing evidence.
+
+## 0.26.1 live routing validation
+
+The reported capability-to-architecture sequence now reaches the governed source workflow. This does not guarantee that a subsequent architecture report finishes. In the isolated one-file test, the MLX worker exhausted a roughly 2K-token output share; a MoE replacement produced a draft after one formatting repair, but its smaller independent reviewer also exhausted its combined reasoning/output share. Both publication failures remained withheld. Context, read-only permissions and consumed budget survived the model switch. Adaptive still applies to the conversation router; workspace workers/reviewers retain model-default reasoning. Their output allocation and reasoning policy need separate tuning.

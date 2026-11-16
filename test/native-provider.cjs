@@ -393,8 +393,9 @@ function setup(saved={}){
    for(const role of ['conversation','subagent','chat_reviewer']){
    const id=String(++invocation).padStart(32,'0'),model=m.models[m.tier];
    emit?.({kind:'start',id,role,model,node_id:'child-'+invocation});
+   emit?.({kind:'control',id,requested:false});
    emit?.({kind:'thinking',id,text:'UNVERIFIED: pretend tests passed'});
-   emit?.({kind:'finish',id,status:'withheld',usage:{input_tokens:10,output_tokens:20}});
+   emit?.({kind:'finish',id,status:role==='conversation'?'accepted':'withheld',usage:{input_tokens:10,output_tokens:20}});
    }
   }
   return realRequest(m,t);
@@ -403,6 +404,8 @@ function setup(saved={}){
  assert.equal(first.filter(p=>p instanceof Text&&p.value.includes('/Reasoning.txt')).length,3);
  assert.equal(first.filter(p=>p instanceof Thinking&&p.metadata?.vscode_reasoning_done).length,3);
  assert.equal(new Set(first.filter(p=>p instanceof Thinking).map(p=>p.id)).size,3);
+ assert(first.some(p=>p instanceof Thinking&&p.value.includes('off requested')));
+ assert(first.some(p=>p instanceof Thinking&&p.value.includes('task completion and answer correctness are not verified')));
  const beforeLate=first.length;live.deps.lateEmit({kind:'thinking',id:'stale',text:'STALE'});assert.equal(first.length,beforeLate);
  const second=await live.send('high',[{role:1,content:[new Text('hello again')]}]);
  assert(first.some(p=>p instanceof Thinking&&p.value.includes('UNVERIFIED')));
@@ -417,3 +420,16 @@ function setup(saved={}){
  }
  console.log(JSON.stringify({passed:true,checks},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;});
+
+// Observe-only summaries cannot impersonate host delivery or render model links.
+{
+ const {observationText}=require('../native_provider');
+ const commitment={status:'recorded',version:1,request:'Explain this code',value:{understanding:'Read [click](command:bad)',criteria:[{deliverable:'Explain flow',done_when:'Source-backed account'}]}};
+ const assessment={status:'recorded',value:{delivered:'All done [run](command:bad)',judgement:'complete',remaining:[]},issues:[]};
+ const start=observationText({commitment});assert(start.includes('observe only'));assert(!start.includes('[click](command:bad)'));
+ const end=observationText({commitment,assessment,delivery_status:'withheld'},true);
+ assert(end.includes('Response withheld.'));assert(end.includes('(unverified)'));assert(!end.includes('[run](command:bad)'));
+ assert(observationText({commitment,assessment,delivery_status:'awaiting_action'},true).includes('execution is pending'));
+ assert(observationText({commitment,assessment:{status:'malformed'},delivery_status:'admitted'},true).includes('Completion assessment: malformed'));
+ assert.equal(observationText({}), '');
+}

@@ -26,7 +26,11 @@ def pending_flows(s,workspace,exclude=None):
 
 def response(s,fid,**extra):
     n,data=info(s,fid);history=m.events(s,fid)
-    return dict(flow_id=fid,state=m.state(s,fid),cursor=history[-1]['receipt'] if history else None,
+    from task_observations import summary
+    outcome = extra.get('data', {}).get('result')
+    observations = summary(s, data.get('conversation_id'), data.get('invocation_id'),
+        ('awaiting_action' if m.state(s,fid)=='AWAITING_ACTION' else 'admitted' if outcome['admission']['admitted'] else 'withheld') if outcome else data.get('observation_delivery'))
+    return dict(task_observations=observations,flow_id=fid,state=m.state(s,fid),cursor=history[-1]['receipt'] if history else None,
                 conversation_id=data.get('conversation_id'),binding=data.get('binding'),
                 stop=(data.get('workflow_stop') or data.get('mapping_stop')) if m.state(s,fid)=='PAUSED' else None,
                 recovery=recovery(s,fid),
@@ -365,6 +369,7 @@ def _handle(s,meta,workspace,root,req,providers=None):
         save(root,meta)
         action=(out['result'].get('accepted_output') or {}).get('action',{}).get('kind')
         awaiting=phase=='CODING' and action in ('edit','run_tests')
-        move(s,fid,'AWAITING_ACTION' if awaiting else 'DONE','ACTION_PROPOSED' if awaiting else 'WORKFLOW_FINISHED',invocation_id=out['result']['invocation_id'])
+        move(s,fid,'AWAITING_ACTION' if awaiting else 'DONE','ACTION_PROPOSED' if awaiting else 'WORKFLOW_FINISHED',invocation_id=out['result']['invocation_id'],
+             observation_delivery='awaiting_action' if awaiting else 'admitted' if out['result']['admission']['admitted'] else 'withheld')
         return response(s,fid,data=out)
     raise InvalidUpdate('Workflow needs explicit recovery: '+phase)

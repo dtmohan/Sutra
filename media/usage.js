@@ -1,12 +1,37 @@
 'use strict';
 const vscode=acquireVsCodeApi(),el=id=>document.getElementById(id),T=KarmaTokens;
 const node=(tag,text,cls)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;};
-let workflowSignature='';
+let workflowSignature='',observationSignature='';
 let snapshot,routing,native,error,filters={...vscode.getState()?.filters};
 const finite=n=>typeof n==='number'&&Number.isFinite(n);
 const decisions=new Set(['ALLOW','BRIDGE','FIN','COMPOUND_FIN']);
+function renderTaskObservations(rows){
+ const signature=JSON.stringify(rows||[]);if(signature===observationSignature)return;observationSignature=signature;
+ const box=el('task-observations'),open=new Set([...box.querySelectorAll('details[open]')].map(n=>n.dataset.id));
+ box.replaceChildren();el('task-observation-empty').hidden=!!rows?.length;
+ for(const row of rows||[]){
+  const o=row.observation,d=node('details');d.dataset.id=o.invocation_id;d.open=open.has(o.invocation_id);
+  d.append(node('summary',(o.kind==='commitment'?'Commitment v'+o.version:'Assessment')+' · '+o.model+' · '+o.status));
+  d.append(node('p','Gateway: '+row.gateway_status+' · unverified model observation','muted'));
+  d.append(node('p','Asked: '+o.request));
+  if(o.kind==='commitment'&&o.value){
+   d.append(node('p','Understood: '+o.value.understanding));
+   const list=node('ul');for(const c of o.value.criteria)list.append(node('li',c.id+': '+c.deliverable+' — '+c.done_when));d.append(list);
+   if(o.value.assumptions.length)d.append(node('p','Assumptions: '+o.value.assumptions.join('; ')));
+  }else if(o.value){
+   d.append(node('p','Model judgement: '+o.value.judgement+' · '+o.scope));
+   d.append(node('p','Model says it delivered: '+o.value.delivered));
+   d.append(node('p','Remaining: '+(o.value.remaining.join('; ')||'None reported (unverified)')));
+   const list=node('ul');for(const c of o.value.items)list.append(node('li',c.criterion_id+': '+c.status+' — '+c.evidence));d.append(list);
+   d.append(node('p','Commitment: '+(o.commitment_id||'not recorded')+' · version '+(o.commitment_version||'unknown'),'muted'));
+  }
+  if(o.issues.length)d.append(node('p','Observation issues: '+o.issues.join('; '),'notice'));
+  box.append(d);
+ }
+}
 function renderMonitor(){
  const d=snapshot?.monitor||{},h=d.hardware||{},s=h.sample||{},now=Date.now(),elapsed=(now-Date.parse(snapshot?.updatedAt))/1000;
+ renderTaskObservations(d.task_observations);
  const snapshotFresh=!!snapshot&&!error&&finite(elapsed)&&elapsed>=0&&elapsed<=8;
  const hwFresh=snapshotFresh&&h.available===true&&T.freshAge(h.age_seconds,elapsed);
  const why=error?'Readings unavailable':!snapshotFresh&&snapshot?'Readings expired':h.reason||'Waiting for system readings';
@@ -90,6 +115,12 @@ for(const key of ['model','stage','status','time']){el(key).value=filters[key]||
 el('reset').onclick=()=>{filters={};for(const key of ['model','stage','status','time'])el(key).value='';vscode.setState({filters});render();};
 el('refresh').onclick=()=>vscode.postMessage({type:'refresh'});
 el('telemetry').onclick=()=>vscode.postMessage({type:'telemetry'});
+el('reasoning-settings').onclick=()=>vscode.postMessage({type:'reasoning_settings'});
+function renderReasoningPreference(preference){
+ const labels={adaptive:'Adaptive',off:'Off',on:'On','model-default':'Model default'};
+ el('reasoning-preference').textContent='Reasoning setting: '+(labels[preference]||'Unavailable');
+ el('reasoning-preference-note').textContent=preference==='adaptive'?'Conversation starts with supported effort for the request; workspace workers use model default. Each call below shows the control actually requested.':labels[preference]?'Adaptive is inactive. This saved choice applies to new calls; change it in Reasoning settings.':'Waiting for the effective VS Code setting.';
+}
 function fillOptions(key){
  const values=[...new Set((snapshot?.calls||[]).map(c=>c[key]))].sort();if(filters[key]&&!values.includes(filters[key]))values.push(filters[key]);
  el(key).replaceChildren();const all=node('option','All '+(key==='model'?'models':'stages'));all.value='';el(key).append(all);
@@ -133,7 +164,7 @@ function renderActivity(calls){
    const open=node('button','Open reasoning details');open.onclick=()=>vscode.postMessage({type:'activity_details',id:c.id});
    card.append(node('summary'),node('p',undefined,'plot-note'),node('pre'),node('p',undefined,'plot-note'),open);box.prepend(card);
   }
-  card.children[0].textContent=(c.role==='report_reviewer'?'Architecture claim review':c.role==='subagent'?'Child review':c.role==='chat_reviewer'?'Workspace review':c.role==='conversation'?'Conversation / routing':'Model call')+' · '+c.model+' · '+c.role+' · '+c.status;
+  card.children[0].textContent=(c.role==='report_reviewer'?'Architecture claim review':c.role==='subagent'?'Child review':c.role==='chat_reviewer'?'Workspace review':c.role==='conversation'?'Conversation / routing':'Model call')+' · '+c.model+' · '+c.role+' · '+(c.status==='accepted'?'Protocol checks passed':c.status);
   card.children[1].textContent='Invocation '+c.id+(c.node_id?' · task '+c.node_id:'')+' · reasoning requested: '+(c.requested===null?'model default':c.requested??'pending');
   card.children[2].textContent=c.text||'No reasoning emitted yet. The model may have reasoning disabled or may not support a separate thinking stream.';
   const usage=c.usage,elapsed=((c.finishedAt||Date.now())-c.startedAt)/1000;
@@ -141,7 +172,7 @@ function renderActivity(calls){
  }
  el('reasoning-empty').hidden=calls.length>0;
 }
-window.addEventListener('message',({data:m})=>{if(m.type!=='usage')return;renderActivity(m.activity||[]);el('reasoning-error').textContent=m.activityError||'';el('reasoning-error').hidden=!m.activityError;snapshot=m.snapshot;routing=m.routing;native=m.native;error=m.error;for(const key of ['model','stage'])fillOptions(key);if(!snapshot){for(const key of ['input','output','calls','unknown'])el(key).textContent='—';for(const key of ['input','output'])el(key+'-note').textContent='Waiting for measurements';el('scope').textContent='This workspace · waiting for recorded calls…';el('visuals').hidden=true;el('details').hidden=true;el('empty').hidden=true;el('window').textContent='';}render();});
+window.addEventListener('message',({data:m})=>{if(m.type!=='usage')return;renderReasoningPreference(m.reasoningPreference);renderActivity(m.activity||[]);el('reasoning-error').textContent=m.activityError||'';el('reasoning-error').hidden=!m.activityError;snapshot=m.snapshot;routing=m.routing;native=m.native;error=m.error;for(const key of ['model','stage'])fillOptions(key);if(!snapshot){for(const key of ['input','output','calls','unknown'])el(key).textContent='—';for(const key of ['input','output'])el(key+'-note').textContent='Waiting for measurements';el('scope').textContent='This workspace · waiting for recorded calls…';el('visuals').hidden=true;el('details').hidden=true;el('empty').hidden=true;el('window').textContent='';}render();});
 // Expire live readings even if the host/reader stops delivering messages.
 el('resume-workflow').onclick=()=>vscode.postMessage({type:'resume'});el('discard-workflow').onclick=()=>vscode.postMessage({type:'discard'});
 setInterval(()=>{if(!document.hidden)renderMonitor();},1000);

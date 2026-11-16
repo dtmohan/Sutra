@@ -1,8 +1,8 @@
 {
   "name": "karma-local-harness",
   "displayName": "Sutra",
-  "description": "Local model orchestration with task-focused prompts, host-bound contracts and governed reasoning.",
-  "version": "0.26.0",
+  "description": "Local orchestration with observe-only task commitments and completion assessments.",
+  "version": "0.27.0",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"

@@ -97,7 +97,8 @@ def schema(p):
                 'diagram': visuals.diagram_schema()})
     # Older providers/fixtures may omit advisory fields. Absence grants nothing.
     fmt['required'] = [k for k in fmt['required'] if k not in ('facts', 'workspace_request', 'context_question')]
-    return fmt
+    from task_observations import add_schema
+    return add_schema(fmt, 'commitment')
 
 
 def contract(s, sid):
@@ -155,7 +156,9 @@ def workspace_handoff(s, sid, iid, prompt):
     from native_access import has_binding
     if (p['workspace_context'] != workspace_context(s, {'active': sid}) and not has_binding(s, sid, iid, p)) or p['request'].strip() != prompt.strip():
         raise InvalidUpdate('Conversation handoff belongs to another request or workspace contract')
-    return dict(note, authority='model_unverified')
+    from task_observations import commitment, context
+    observation = context(commitment(s, iid))
+    return dict(note, authority='model_unverified', **({'task_commitment': observation} if observation else {}))
 
 
 def check_workspace_handoff(s, sid, p):
@@ -212,6 +215,9 @@ def check_delivery(p, proposal):
     if not answer or len(re.findall(r'^\s*```[^\n]*$', answer, re.M)) % 2:
         raise InvalidUpdate('Complete the answer and close every fenced code block; summary cannot finish the answer.')
     pages = proposal.get('page_requests', [])
+    if (proposal.get('workspace_request', {}).get('operation') in ('edit', 'test')
+            and proposal['intent'] != 'workspace'):
+        raise InvalidUpdate('An edit/test workspace_request needs intent=workspace for host handoff; omit it for conversation.')
     if len(pages) != len(set(pages)):
         raise InvalidUpdate('Request each memory page only once.')
     question = proposal.get('context_question', '').strip()

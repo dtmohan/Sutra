@@ -109,6 +109,8 @@ class ActivityArchive extends ActivityLog{
       'This is diagnostic text, not an accepted answer, task memory or protocol evidence.',
       '',`Invocation: ${c.id}`,`Model: ${c.model}`,`Stage: ${c.role}`,`Task: ${c.node_id||'not recorded'}`,
       `Status: ${c.status}${c.interruptedOnReload?' (window closed before completion was observed)':''}`,
+      'Protocol admission does not verify task completion or answer correctness.',
+      `Reasoning control requested: ${c.requested===null?'model default':c.requested}`,
       `Tokens: ${c.usage?.input_tokens??'?'} input / ${c.usage?.output_tokens??'?'} output (includes reasoning)`,
       c.display_truncated?'Display shortened at 16,000 characters; generation remains charged.':'',
       '', '--- Model commentary (plain text) ---', '',c.text||'No separate reasoning was emitted.', ''].join('\n');

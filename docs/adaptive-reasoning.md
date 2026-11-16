@@ -3,7 +3,7 @@
 Select **Sutra → Settings → Reasoning & runtime → Model reasoning → Adaptive**
 and save. The native setting is `karma.thinking`. New configurations default to
 Adaptive; existing `off`, `on`, and `model-default` preferences remain explicit
-choices. Installing this release does not change a saved preference.
+choices. Installing this release does not change a saved preference. Sutra Monitor shows the effective setting (including workspace overrides), a **Reasoning settings** button and the control requested for each call. **Model default** means Adaptive is inactive.
 
 ## Scope and order
 
@@ -24,8 +24,7 @@ step skips the lowest step for that request.
 For an admitted conversation proposal that needs help:
 
 1. Load any newly requested receipt-backed Smriti pages at the same effort.
-2. If evidence is unavailable, ask for clarification; changing a model cannot
-   supply the missing fact.
+2. If answering requires actual project evidence, request a workspace handoff for fresh scoped reads. If the evidence is unavailable from both memory and workspace, ask for clarification; changing a model cannot supply the missing fact.
 3. If the model proposes `reasoning_capacity`, select its next supported effort.
 4. Once those choices are exhausted, Auto can select the next untried configured
    model tier. An explicit model tier stays fixed and pauses instead.
@@ -218,3 +217,9 @@ Recovery/reload, permission tampering, page-before-effort order and exhausted
 allocation are covered by deterministic fixtures with injected failures; the
 live runs did not manufacture system pressure. Full host context preservation
 still does not guarantee arbitrary semantic completeness.
+
+## Routing regression in 0.26.1
+
+A capability question followed by an architecture/onboarding request must retain the prior turn and hand off for source review. It must not ask the user to manually select files before discovery or invent a project from generic architectural patterns. The model sees a compact field guide instead of raw JSON Schema; transport and host still enforce the original schema. Optional fields are omitted when unused. This reduces format ambiguity without treating semantic routing as a deterministic proof.
+
+Run `test/live-routing-trial.py --output <new-directory> --review` for the exact reported prompts with fresh bridge processes and synthetic source. The run uses installed local models and normal resource gates. `--harness <baseline-source>` selects a frozen baseline; all raw results, including failures, are retained.

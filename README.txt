@@ -1,4 +1,11 @@
-Sutra 0.26.0 — task-focused prompts and host-owned contracts
+Sutra 0.27.0 — workspace routing and reasoning visibility
+
+TASK COMMITMENTS — OBSERVE ONLY
+Workspace routing can record the model's interpretation and completion criteria before source work. Workers inherit the saved commitment and can report what was delivered and what remains. Native chat shows a concise summary; Sutra Monitor shows the last 12 observations. Model claims are unverified and cannot grant permissions, authorize completion, trigger escalation or refund budgets. Missing/malformed observations never request a repair. Existing calls carry the observations; generated tokens still consume allocation. Greetings and direct calls without a routing commitment do not manufacture precommitments.
+
+Architecture and onboarding requests about the current project request a same-chat source review. Capability-only questions stay in conversation. The model receives a compact response guide; the decoder and host retain the full strict schema, permissions, context binding and budgets.
+
+Sutra Monitor now shows the effective reasoning setting and links to its VS Code setting. Existing choices remain unchanged by installation. Choose Adaptive to use the request-based reasoning policy. Protocol checks passing does not verify task completion or answer correctness.
 
 Conversation prompts now focus on the current ask, relevant memory and the required answer format. The host binds context identity and retains the full contract, permissions and consumed budget in the ledger. Missing-context replies need actionable top-level page requests or a specific question. For the tested Ollama 0.40.16 MLX decoder only, a transport schema omits string length bounds that truncated escaped text; the original strict limits remain enforced by the host.
 

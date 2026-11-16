@@ -20,6 +20,26 @@ monitor.runtime_memory.plan.calibration={profile_sha256:'a'.repeat(64),covered_t
  const html=saved=>fs.readFileSync(path.join(root,'media/usage.html'),'utf8').replaceAll('NONCE_VALUE','test-nonce').replace('<script nonce="test-nonce" src="TOKENS_URI"></script>','<script nonce="test-nonce">'+fs.readFileSync(path.join(root,'media/token_usage.js'),'utf8')+'</script>').replace('<script nonce="test-nonce" src="SCRIPT_URI"></script>','<script nonce="test-nonce">window.sent=[];window.saved='+JSON.stringify(saved||{})+';function acquireVsCodeApi(){return {postMessage:m=>sent.push(m),setState:s=>window.saved=s,getState:()=>window.saved}}\n'+fs.readFileSync(path.join(root,'media/usage.js'),'utf8')+'</script>');
  await page.setContent(html());const send=data=>page.evaluate(d=>window.dispatchEvent(new MessageEvent('message',{data:d})),{type:'usage',...data,snapshot:data.snapshot?{...data.snapshot,updatedAt:data.aged?data.snapshot.updatedAt:new Date().toISOString()}:undefined});
  assert.deepEqual(await page.evaluate(()=>sent),[{type:'ready'}]);assert.equal(await page.locator('#input').textContent(),'—');
+ await send({snapshot,reasoningPreference:'model-default'});
+ assert.equal(await page.locator('#reasoning-preference').textContent(),'Reasoning setting: Model default');
+ assert((await page.locator('#reasoning-preference-note').textContent()).includes('Adaptive is inactive'));
+ await page.click('#reasoning-settings');assert.deepEqual((await page.evaluate(()=>sent)).at(-1),{type:'reasoning_settings'});
+ await send({snapshot,reasoningPreference:'adaptive'});
+ assert.equal(await page.locator('#reasoning-preference').textContent(),'Reasoning setting: Adaptive');
+ assert(!(await page.locator('#reasoning-preference-note').textContent()).includes('inactive'));
+ await page.screenshot({path:path.join(out,'Reasoning-setting.png')});
+ const observations=[{gateway_status:'accepted',observation:{mode:'observe_only',kind:'commitment',status:'recorded',invocation_id:'commit-1',version:1,model:'qwen3:4b',request:'Explain source <img src=x onerror=alert(1)>',value:{understanding:'Read source',criteria:[{id:'c1',deliverable:'Overview',done_when:'Source references'}],assumptions:[]},issues:[]}},
+ {gateway_status:'quarantined',observation:{mode:'observe_only',kind:'assessment',status:'recorded',invocation_id:'assess-1',model:'larger-model',scope:'worker_response',commitment_id:'commit-1',commitment_version:1,request:'Explain source',value:{judgement:'complete',delivered:'A draft <script>bad</script>',remaining:[],items:[{criterion_id:'c1',status:'met',evidence:'entry.py'}]},issues:['Completion is a model claim.']}}];
+ await send({snapshot:{...snapshot,monitor:{...monitor,task_observations:observations}}});
+ assert.equal(await page.locator('#task-observations details').count(),2);
+ await page.locator('#task-observations summary').first().click();
+ assert((await page.locator('#task-observations').textContent()).includes('Gateway: quarantined'));
+ assert.equal(await page.locator('#task-observations img,#task-observations script').count(),0);
+ await page.waitForTimeout(1200);assert(await page.locator('#task-observations details').first().evaluate(e=>e.open));
+ await page.locator('#task-observations').scrollIntoViewIfNeeded();
+ await page.screenshot({path:path.join(out,'Task-observations.png')});
+ await send({snapshot});assert.equal(await page.locator('#task-observations details').count(),0);
+ assert(await page.locator('#task-observation-empty').isVisible());
  await send({snapshot});assert.equal(await page.locator('#input').textContent(),'6,284');assert.equal(await page.locator('#output').textContent(),'362');assert.equal(await page.locator('#unknown').textContent(),'1');assert.equal(await page.locator('#calls').textContent(),'5');assert((await page.locator('#window').textContent()).includes('latest 5 of 300'));assert.equal(await page.locator('.call-bar').count(),5);
  assert.equal(await page.locator('#cpu-temp').textContent(),'48.2 °C');assert.equal(await page.locator('#gpu-temp').textContent(),'44.6 °C');assert.equal(await page.locator('#cpu-load').textContent(),'20%');assert.equal(await page.locator('#ram').textContent(),'24.5 GiB');assert.equal(await page.locator('#resource').textContent(),'System pressure: ALLOW');assert((await page.locator('#gates').textContent()).includes('BRIDGE'));
  assert.equal(await page.locator('#compressed-memory').textContent(),'6.0 GiB');assert.equal(await page.locator('#swap-memory').textContent(),'2.0 GiB');assert((await page.locator('#memory-policy').textContent()).includes('Shared Ollama'));assert((await page.locator('#resident-models').textContent()).includes('small <img'));assert.equal(await page.locator('#resident-models img').count(),0);assert((await page.locator('#memory-plan').textContent()).includes('8,192 context tokens'));assert((await page.locator('#memory-plan').textContent()).includes('Peak memory is not verified'));assert((await page.locator('#memory-recovery').textContent()).includes('observe only shared server'));assert((await page.locator('#memory-plan').textContent()).includes('MLX calibration aaaaaaaaaaaa'));assert((await page.locator('#memory-plan').textContent()).includes('16,384 tokens'));assert((await page.locator('#memory-plan').textContent()).includes('1.0 GiB uncertainty margin'));

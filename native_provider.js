@@ -19,6 +19,25 @@ function latestRequest(vscode,messages){
   const parent=previous.map(m=>m.content.filter(p=>p instanceof vscode.LanguageModelTextPart).map(p=>p.value).join('')).map(text=>{const matches=[...text.matchAll(/\[(?:Karma|Sutra)[^\n]*\]\(karma-preview:\/conversation\/([a-f0-9]{32})\/Response\.md\)/g)];return matches.at(-1)?.[1]||text.match(/^(?:Karma|Sutra) conversation receipt: ([a-f0-9]{32})$/m)?.[1];}).find(Boolean);
   return {prompt,parent};
 }
+// Model task observations are inert prose. They never create actions or grants.
+function observationText(observations, final=false){
+  if(!observations)return '';
+  const c=observations.commitment,a=observations.assessment;
+  if(!c&&!a)return '';
+  const safe=value=>String(value||'').replace(/\s+/g,' ').replace(/[\\`*_{}\[\]()<>#|!]/g,'\\$&');
+  if(!final){
+    if(c?.status!=='recorded')return 'Task commitment: not recorded. Observe-only tracking does not block work.\n\n';
+    return '**Task commitment · observe only · v'+c.version+'**\n\n'+safe(c.value.understanding)+'\n\n'+c.value.criteria.map(x=>'- '+safe(x.deliverable)+' — '+safe(x.done_when)).join('\n')+'\n\n';
+  }
+  const status=observations.delivery_status==='withheld'?'Response withheld.':observations.delivery_status==='awaiting_action'?'Action proposed; execution is pending.':'Response delivered; task success is not verified.';
+  const lines=['**Task assessment · observe only**','',status,'','**Asked:** '+safe(c?.request||a?.request)];
+  if(a?.status==='recorded'){
+    lines.push('','**Model says it delivered:** '+safe(a.value.delivered),'','**Model judgement:** '+safe(a.value.judgement)+' (unverified).',
+      '','**Remaining, per model:** '+(a.value.remaining.map(safe).join('; ')||'None reported; this is not verification.'));
+    if(a.issues?.length)lines.push('','Observation issues: '+a.issues.map(safe).join('; '));
+  }else lines.push('','Completion assessment: '+safe(a?.status||'not recorded')+'.');
+  return lines.join('\n')+'\n\n';
+}
 function install(vscode,context,deps){
 
   let armPromise,accessEpoch=0,armingStep='',armed,activeCancel,arming=false,running=false,selecting=false,lastRoute='',routing,reason='Open Sutra chat to talk. Arm Sutra when you need workspace access.';
@@ -277,7 +296,8 @@ function install(vscode,context,deps){
         let text='';
         if(e.kind==='start')text=label+' · '+e.model+' · '+e.role+'\n'+(e.node_id?'Task '+e.node_id+'\n':'')+'Unverified local-model reasoning.\n';
         else if(e.kind==='thinking')text=e.text;
-        else if(e.kind==='finish')text='\nProtocol: '+e.status+' · '+(e.usage?.input_tokens??'?')+' input / '+(e.usage?.output_tokens??'?')+' output tokens (reasoning included).'+(e.display_truncated?' Display shortened; full generation still charged.':'')+'\n';
+        else if(e.kind==='control')text='Reasoning control: '+(e.requested===null?'model default':e.requested===false?'off requested':e.requested===true?'on requested':e.requested)+'.\n';
+        else if(e.kind==='finish')text='\nProtocol: '+(e.status==='accepted'?'checks passed; task completion and answer correctness are not verified':e.status)+' · '+(e.usage?.input_tokens??'?')+' input / '+(e.usage?.output_tokens??'?')+' output tokens (reasoning included).'+(e.display_truncated?' Display shortened; full generation still charged.':'')+'\n';
         if(text)progress.report(new vscode.LanguageModelThinkingPart(text,e.id));
         if(e.kind==='finish')progress.report(new vscode.LanguageModelThinkingPart('',e.id,{vscode_reasoning_done:true}));
       };
@@ -351,6 +371,8 @@ function install(vscode,context,deps){
           progress.report(new vscode.LanguageModelTextPart((flow.state!=='DONE'?'Continuing this request through Sutra’s workspace workflow.':p.answer)+'\n\n'));
           if(p.diagram){try{await deps.presentConversation?.(chat);progress.report(new vscode.LanguageModelTextPart('Diagram opened beside the chat. Use **Sutra: Open Last Diagram** to reopen it.\n\n'));}catch(error){progress.report(new vscode.LanguageModelTextPart('Diagram preview could not open: '+error.message+'\n\n'));}}
           if(flow.state==='DONE')return;
+          const commitmentText=observationText(flow.task_observations);
+          if(commitmentText)progress.report(new vscode.LanguageModelTextPart(commitmentText));
           conversationId=r.invocation_id;audit.conversationInvocationId=r.invocation_id;
           }
           if(!a){
@@ -398,13 +420,15 @@ function install(vscode,context,deps){
         if(data?.notice){audit.stage='guidance';progress.report(new vscode.LanguageModelTextPart(data.notice.message+'\n\nSutra setup guidance — no model invocation.'));return;}
         if(!data?.result)throw new Error(data?.notice?.message||'No governed response available.');
         const reviewLinks=deps.publishReview(data);lastRoute=data.route?.model||data.result.model||'';publish();
-        const r=data.result;recordUsage(r);audit.invocationId=r.invocation_id;audit.model=lastRoute;audit.stage=r.admission.admitted?'admitted':'withheld';publish();if(!r.admission.admitted){progress.report(new vscode.LanguageModelTextPart('Sutra withheld the response: '+r.admission.errors.join('; ')));return;}
+        const assessmentText=observationText(flow.task_observations,true);
+        const r=data.result;recordUsage(r);audit.invocationId=r.invocation_id;audit.model=lastRoute;audit.stage=r.admission.admitted?'admitted':'withheld';publish();if(!r.admission.admitted){if(assessmentText)progress.report(new vscode.LanguageModelTextPart(assessmentText));progress.report(new vscode.LanguageModelTextPart('Sutra withheld the response: '+r.admission.errors.join('; ')));return;}
         const p=r.accepted_output;if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&!['edit','run_tests'].includes(p.action?.kind))throw new Error('No admitted action is available to satisfy required tool mode.');
         if(data.report_markdown){
           progress.report(new vscode.LanguageModelTextPart(data.report_markdown+'\n\n'));
           if(data.review_diagram){try{await deps.presentReview?.(data);progress.report(new vscode.LanguageModelTextPart('The **source dependency diagram** is open beside this chat. Its arrows show local import candidates, not execution order.\n\n'));}catch(error){progress.report(new vscode.LanguageModelTextPart('Diagram preview unavailable: '+error.message+'\n\n'));}}
           if(reviewLinks?.reportUri)progress.report(new vscode.LanguageModelTextPart(`[Review details and source citations](${reviewLinks.reportUri}) · Reviewed through Sutra with **${lastRoute}**.\n\n`));
         }else progress.report(new vscode.LanguageModelTextPart(`Sutra routing confirmed · ${lastRoute} · task ${a.session}\nRequest ${audit.id} · protocol invocation ${r.invocation_id}\n\n${p.answer||p.summary}\n\n`));
+        if(assessmentText)progress.report(new vscode.LanguageModelTextPart(assessmentText));
         const evidence=data.coverage?.evidence;
         if(evidence)progress.report(new vscode.LanguageModelTextPart(`Evidence delivered: ${evidence.fresh_snapshot_files} freshly mapped files; source excerpts from ${evidence.excerpt_files.length} files; ${evidence.child_reports} child reports. This is a bounded review, not an exhaustive semantic audit.\n\n`));
         if(['edit','run_tests'].includes(p.action?.kind)){
@@ -440,4 +464,4 @@ function install(vscode,context,deps){
   if(vscode.lm.selectChatModels)Promise.resolve(vscode.lm.selectChatModels({vendor:'karma'})).catch(error=>{reason='Native model discovery: '+error.message;publish();});
   publish();return {status,publish,disarm,dispose(){disarm('Extension stopped.');}};
 }
-module.exports={install,latestRequest};
+module.exports={install,latestRequest,observationText};

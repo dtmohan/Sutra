@@ -98,7 +98,8 @@ def validate_permission_ops(operations):
 
 
 def validate_result(store, session, role, payload, schema, proposal, delivery_id):
-    validate_shape(proposal, schema)
+    from task_observations import answer_schema, ROLES
+    validate_shape(proposal, answer_schema(schema) if role in ROLES else schema)
     if role=='memory_probe':
         from memory_probe import validate
         return validate(store,session,payload,proposal)

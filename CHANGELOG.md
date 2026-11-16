@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.27.0
+- Record optional, versioned task commitments in routing receipts before workspace execution; preserve the original request and pinned host constraints.
+- Pass the commitment through fresh parent/child calls and model switches. Workers may assess each criterion and summarize delivery and remaining work.
+- Keep observations outside action proposals and admission checks. Missing, malformed or inconsistent observations do not trigger repair, escalation, completion or permission changes. No separate assessment calls; all generated tokens remain charged.
+- Show observe-only summaries in native chat and the latest 12 observations in Sutra Monitor. Distinguish model judgement, gateway admission, withheld publication and pending actions.
+- Preserve all 0.26.1 routing and reasoning-setting fixes; keep the STP kernel byte-for-byte unchanged.
+
+## 0.26.1
+
+- Route questions about the actual project, architecture, implementation and onboarding toward the governed workspace handoff. Capability-only questions and general explanations stay in conversation; missing source is distinct from missing conversation memory.
+- Replace raw JSON Schema in the model prompt with a compact response guide and explicit optional-field omission. The strict decoder schema, host validation, context binding and bounded repairs remain intact. Repair contradictory edit/test controls; inactive read hints in conversation cannot dispatch source tools and do not trigger needless retries.
+- Show the effective reasoning preference in Sutra Monitor with direct settings navigation; show each requested control in native call details. Clarify that protocol admission does not verify task completion or answer correctness. Preserve saved user preferences on installation.
+- Preserve data-only conversation memory from 0.26.0; keep existing permissions, consumed budgets and the canonical STP kernel unchanged.
+
 ## 0.26.0
 
 - Separate the conversation model view from the complete host contract. Models answer the task and request context; the host binds context identity and records both raw-response and admitted-response hashes. Existing permission and budget checks stay in the gateway.

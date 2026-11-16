@@ -10,7 +10,6 @@ Return task_id and exactly every contract.constraints field as key/value strings
 For mode=edit, propose one exact replacement in one currently supplied Python file: action.kind=edit, target is an allowed FILE path, old is a unique verbatim substring of a supplied page, new is the corrected text. Preserve unrelated code. Never invent a preimage. For mode=test, propose run_tests on a permitted test FILE path, old="", new="". For mode=review, report using current host execution evidence. If missing authority or input, clarify with empty target/old/new.
 Do not claim a proposed edit or test has executed. Host receipts establish process execution, not successful assertions: test code shares the runner process and can forge its output. Describe exit status and reported results as observations only. Always return complete=false; this adapter has no isolated trusted assertion verifier. Keep summary at most 600 characters, and completed/remaining at most three short items each (160 characters per item). The whole working note must stay under 2200 bytes. Carry forward remaining work. Output only the schema. In mode=auto choose one permitted action needed for the current request: edit to propose a fix, run_tests to test a fix already present, or report when no further action is requested. Do not repeat actions recorded in host execution receipts.'''
 
-
 def coding_schema(payload):
     schema=review_schema(payload);fields=schema['properties'];fields.pop('next_action')
     kinds={'edit':['edit','clarify'],'test':['run_tests','clarify'],'review':['report','clarify'],'auto':['edit','run_tests','report','clarify']}
@@ -24,7 +23,8 @@ def coding_schema(payload):
         fields[key]['maxItems']=3;fields[key]['items']={'type':'string','maxLength':160}
     fields['complete']={'type':'boolean','enum':[False]}
     schema['required']=list(fields)
-    return schema
+    from task_observations import add_schema
+    return add_schema(schema, 'assessment', payload)
 
 
 def validate(store,session,payload,proposal):

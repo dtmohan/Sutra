@@ -36,7 +36,10 @@ class BoundaryTests(unittest.TestCase):
         for value in (p['context_binding'], p['_request_nonce'], p['contract']['contract_hash']):
             self.assertNotIn(value, canonical(wire))
         self.assertNotIn('Echo context_binding', canonical(wire))
-        self.assertIn('OUTPUT_SCHEMA', wire[0]['content'])
+        self.assertIn('RESPONSE_FORMAT', wire[0]['content'])
+        self.assertNotIn('"minLength"', wire[0]['content'])
+        self.assertNotIn('"additionalProperties"', wire[0]['content'])
+        self.assertIn('Omit unused optional fields entirely', wire[0]['content'])
 
     def test_decoder_copy_is_version_scoped_and_host_limits_remain_strict(self):
         provider = Fake(); self.ask(provider=provider); p = provider.payloads[0]
@@ -126,7 +129,9 @@ class BoundaryTests(unittest.TestCase):
             self.assertTrue(all(not p['contract']['constraints']['edits_allowed'] for p in provider.payloads))
 
     def test_task_selected_effort_still_obeys_user_override_and_gateway_binding(self):
-        for prompt, expected in [('Hello there', False), ('Maximise value under a budget of 7.', 'low'),
+        for prompt, expected in [('Hello there', False), ('can you access the codebase?', False),
+                                 ('i want you to explain to me the aarchitecture using diagrams in a way you would to a new intern joining the team who will take care of the project going forward', False),
+                                 ('Maximise value under a budget of 7.', 'low'),
                                  ('What is JSON?', False), ('Reply with a fenced JSON object.', 'low'),
                                  ('Trace this implementation: ```python\npass\n```', 'low')]:
             provider = model(values=[False, 'low', 'medium'], fault=None)
@@ -140,6 +145,57 @@ class BoundaryTests(unittest.TestCase):
         self.assertIs(out['reasoning']['requested'], False)
         altered = copy.deepcopy(provider.payloads[0]); altered['reasoning']['step'] = 1
         with self.assertRaises(InvalidUpdate): chat.request_check(self.s, out['session'], altered)
+
+    def test_optional_fields_are_omitted_and_contradictory_handoff_is_repaired(self):
+        def respond(r, p):
+            r['workspace_request'] = {'operation': 'edit', 'paths': []}
+            if p.get('repair'):
+                r['intent'] = 'workspace'
+        provider = Fake(fault=respond)
+        out = self.ask('Explain the current project architecture.', provider=provider)
+        self.assertEqual(len(provider.payloads), 2)
+        self.assertIn('intent=workspace', provider.payloads[-1]['repair']['errors'][0])
+        self.assertTrue(out['result']['admission']['admitted'])
+        proposal = out['result']['accepted_output']
+        self.assertEqual(proposal['intent'], 'workspace')
+        self.assertNotIn('context_question', proposal)
+        self.assertNotIn('facts', proposal)
+        self.assertFalse(out['workspace_tools_used'])
+        self.assertNotIn('active', self.meta)
+        self.assertEqual(usage(self.s, out['session'])['used']['calls'], 2)
+
+    def test_unused_read_hint_does_not_trigger_repairs_or_file_access(self):
+        provider = Fake(fault=lambda r, p: r.update(workspace_request={'operation': 'read', 'paths': []}))
+        out = self.ask('Explain the supplied code: def twice(x): return x * 2', provider=provider)
+        self.assertTrue(out['result']['admission']['admitted'])
+        self.assertEqual(out['result']['accepted_output']['intent'], 'conversation')
+        self.assertEqual(len(provider.payloads), 1)
+        self.assertIsNone(out['routing_followup'])
+        self.assertFalse(out['workspace_tools_used'])
+        self.assertNotIn('active', self.meta)
+
+    def test_capability_then_workspace_handoff_survives_reload_and_model_switch(self):
+        from invocation_gateway import InvocationLedger
+        first_provider = Fake()
+        first = self.ask('can you access the codebase?', provider=first_provider)
+        contract = chat.contract(self.s, first['session'])
+        before = usage(self.s, first['session'])
+        self.s.close()
+        self.s = InvocationLedger(self.storage/'state.sqlite')
+        next_provider = Fake('large', lambda r, p: r.update(intent='workspace',
+                             answer='I will inspect the source and explain the architecture.'))
+        second = self.ask('Explain the architecture to a new intern.',
+                          first['result']['invocation_id'], next_provider, 'high')
+        packet = next_provider.payloads[0]
+        self.assertIn('can you access the codebase?', canonical(packet['memory']))
+        self.assertEqual(chat.contract(self.s, second['session']), contract)
+        self.assertEqual(second['session'], first['session'])
+        self.assertEqual(usage(self.s, second['session'])['limits'], before['limits'])
+        self.assertEqual(usage(self.s, second['session'])['used']['calls'], before['used']['calls']+1)
+        self.assertFalse(second['workspace_tools_used'])
+        self.assertNotIn('active', self.meta)
+        self.assertFalse(packet['contract']['constraints']['edits_allowed'])
+        self.assertTrue(self.s.verify_invocations(second['session']))
 
 
 if __name__ == '__main__':

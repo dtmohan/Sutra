@@ -1,4 +1,10 @@
+# Sutra 0.27.0 — observe-only task commitments
+
+Workspace tasks can now record what the routing model understands and what it plans to deliver, then collect the worker’s assessment against those criteria. The original prompt and host constraints remain authoritative. Native chat and Sutra Monitor display these as unverified observations. See [task commitments](docs/task-commitments.md) for scope, evidence and limitations.
+
 # Sutra
+
+Sutra 0.26.1 clarifies workspace routing for architecture and onboarding requests, replaces the raw schema in the prompt with a compact writing guide, and shows the effective reasoning setting in **Sutra Monitor**. The full decoder and host schema remain enforced. Protocol admission is explicitly distinct from task completion or answer correctness.
 
 Sutra 0.26.0 gives conversation models a task-focused prompt while the host
 retains the full contract and attaches context identity to admitted responses.

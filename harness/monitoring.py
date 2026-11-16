@@ -59,6 +59,9 @@ def dashboard(root):
         data['token_usage']=history(db)
         from orchestration import overview as orchestration_overview
         data['orchestration']=orchestration_overview(db)
+        from task_observations import latest
+        from types import SimpleNamespace
+        data['task_observations']=latest(SimpleNamespace(db=db))
         meta=json.loads((root/'workspace.json').read_text()) if (root/'workspace.json').exists() else {}
         session=meta.get('active');data['session']=session;data['model']=meta.get('model');data['checkpoint']=meta.get('checkpoint')
         from types import SimpleNamespace

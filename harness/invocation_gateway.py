@@ -143,6 +143,8 @@ class InvocationLedger(GovernedContext):
     def finalize(self, envelope, payload, proposal, transport_error=None, elapsed_seconds=None, token_usage=None):
         session = envelope['session']; rid = envelope['delivery_id']
         model_proposal = copy.deepcopy(proposal)
+        from task_observations import split, capture
+        proposal, observation_fields = split(envelope['role'], proposal)
         host_fields = {}
         with self.db:
             self.db.execute('BEGIN IMMEDIATE')
@@ -186,7 +188,12 @@ class InvocationLedger(GovernedContext):
                        'admission': result['admission'], 'checks': result['checks'],
                        'status': 'accepted' if admitted else 'quarantined', 'previous_hash': prev,
                        'resulting_contract_hash': self.origin(session, bootstrap=True)['contract_hash']}
-            if envelope['role'] == 'conversation' and payload.get('response_contract') == 2:
+            observation = capture(self, envelope, payload, proposal, observation_fields)
+            if observation is not None:
+                receipt['task_observation'] = observation
+            if observation_fields:
+                receipt['observation_fields'] = observation_fields
+            if observation_fields or (envelope['role'] == 'conversation' and payload.get('response_contract') == 2):
                 receipt.update(model_response_hash=sha(canonical(model_proposal)), host_fields=host_fields)
             raw = canonical(receipt); digest = sha('invocation-receipt-v1:' + raw)
             self.db.execute('INSERT INTO invocation_receipts VALUES(?,?,?,?,?)', (session,seq+1,envelope['id'],digest,raw))
@@ -197,6 +204,8 @@ class InvocationLedger(GovernedContext):
         result.update(invocation_id=envelope['id'], invocation_receipt_id=digest,
                       accepted_output=copy.deepcopy(proposal) if admitted else None,
                       model_proposal=model_proposal)
+        if observation is not None:
+            result['task_observation'] = observation
         return result
 
     def quarantine_invocation(self, session, invocation_id, reason):
@@ -283,6 +292,11 @@ class InvocationLedger(GovernedContext):
                     if fields != {'context_binding': delivered['context_binding']} or r['role'] != 'conversation': return False
                     if not isinstance(original, dict) or any(original.get(k) != v for k, v in fields.items()): return False
                     for key in fields: original.pop(key)
+                observed = r.get('observation_fields', {})
+                if observed:
+                    from task_observations import FIELD, ROLES
+                    if r['role'] not in ROLES or set(observed) != {FIELD} or not isinstance(original, dict) or FIELD in original: return False
+                    original.update(observed)
                 if sha(canonical(original)) != r['model_response_hash']: return False
             payload = self.db.execute('SELECT payload_hash FROM deliveries WHERE id=?', (env[2],)).fetchone()
             if not payload or payload[0] != r['payload_hash']: return False

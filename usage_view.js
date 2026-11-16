@@ -14,7 +14,7 @@ function install(vscode,context,deps){
   const item=vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right,19);
   item.name='Sutra Monitor';item.text='$(dashboard) Sutra Monitor';item.command='karma.openMonitor';
   item.tooltip='Open tokens, system telemetry and kernel decisions';item.show();
-  const publish=()=>{const a=currentActivity();if(ready)view?.webview.postMessage({type:'usage',snapshot,routing,native,error,activity:a?.calls||[],activityError:a?.error||''});};
+  const publish=()=>{const a=currentActivity();if(ready)view?.webview.postMessage({type:'usage',snapshot,routing,native,error,reasoningPreference:vscode.workspace.getConfiguration('karma').get('thinking','adaptive'),activity:a?.calls||[],activityError:a?.error||''});};
   const link=id=>{const a=currentActivity();return a?activityUri(a.directory,id):null;};
   const openDetails=async id=>{
     const uri=link(id);if(!uri)return;
@@ -37,12 +37,14 @@ function install(vscode,context,deps){
       else if(message?.type==='resume')void vscode.commands.executeCommand('karma.resumeWorkflow');
       else if(message?.type==='discard')void vscode.commands.executeCommand('karma.discardWorkflow');
       else if(message?.type==='telemetry')void vscode.commands.executeCommand('karma.open');
+      else if(message?.type==='reasoning_settings')void vscode.commands.executeCommand('workbench.action.openSettings','karma.thinking');
       else if(message?.type==='activity_details')void openDetails(message.id);
     },null,context.subscriptions);
     current.onDidChangeVisibility(()=>{if(current.visible)void refresh();},null,context.subscriptions);
     current.onDidDispose(()=>{if(view===current){view=undefined;ready=false;}},null,context.subscriptions);
   }};
   context.subscriptions.push(item,
+    vscode.workspace.onDidChangeConfiguration(e=>{if(e.affectsConfiguration('karma.thinking'))publish();}),
     vscode.window.registerWebviewViewProvider('karma.usage',provider),
     vscode.commands.registerCommand('karma.openMonitor',()=>vscode.commands.executeCommand('karma.usage.focus')),
     vscode.commands.registerCommand('karma.openUsage',()=>vscode.commands.executeCommand('karma.usage.focus')),
@@ -51,8 +53,9 @@ function install(vscode,context,deps){
     get visible(){return !!view?.visible;},
     setData(data,workspace){
       const monitor={};
-      // Only monitoring fields cross into the view; no source, prompt or action payloads.
-      for(const key of ['runtime_memory','orchestration','hardware','kernel','review_budget','repository','action_budget','storage','context','adapter_health','session','contract'])monitor[key]=data[key];
+      // Monitoring and bounded, unverified task observations only. Observations
+      // include the original request; source and executable action payloads stay out.
+      for(const key of ['task_observations','runtime_memory','orchestration','hardware','kernel','review_budget','repository','action_budget','storage','context','adapter_health','session','contract'])monitor[key]=data[key];
       snapshot={...(data.token_usage||{calls:[],total_calls:0,limit:250}),monitor,workspace,updatedAt:new Date().toISOString()};error=undefined;publish();
     },
     activity(event){
