@@ -6,10 +6,11 @@ import shutil
 import time
 from context_manager import InvalidUpdate, canonical, sha
 from karma_adapter import KarmaAdapter
+from memory_layer import LIMITS
 
-TRACE_BYTES=8*1024**2
-SNAPSHOT_BYTES=32*1024**2
-MAX_AGE=7*86400
+TRACE_BYTES=LIMITS['trace_bytes']
+SNAPSHOT_BYTES=LIMITS['settled_snapshot_bytes']
+MAX_AGE=LIMITS['max_age_seconds']
 
 def size(path):
     path=Path(path)

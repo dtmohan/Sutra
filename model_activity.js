@@ -1,7 +1,8 @@
 'use strict';
 const {StringDecoder}=require('node:string_decoder');
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
-const MAX_BYTES=1024*1024,MAX_AGE=7*86400000;
+const retention=require('./harness/memory-policy.json').diagnostics;
+const MAX_BYTES=retention.reasoning_bytes,MAX_AGE=retention.max_age_seconds*1000;
 const KINDS=new Set(['start','control','thinking','finish']);
 // Only the private bridge transport uses this decoder. Events never become tools,
 // conversation memory, grants or ledger receipts.
@@ -20,7 +21,7 @@ function decoder(onEvent,onStderr){
     const event={...state.identity,kind:e.kind,seq:e.seq};
     if(e.kind==='thinking'){
       if(typeof e.text!=='string')return;
-      event.text=e.text.slice(0,Math.min(2048,Math.max(0,16000-state.chars)));state.chars+=event.text.length;
+      event.text=e.text.slice(0,Math.min(2048,Math.max(0,retention.reasoning_chars-state.chars)));state.chars+=event.text.length;
       if(!event.text)return;
     }
     if(e.kind==='control')event.requested=(typeof e.requested==='string'||typeof e.requested==='boolean'||e.requested===null)?e.requested:null;
@@ -46,10 +47,10 @@ class ActivityLog{
   accept(e){
     if(e.kind==='start'){
       this.calls.push({...e,text:'',status:'generating',startedAt:Date.now()});
-      this.calls=this.calls.slice(-12);
+      this.calls=this.calls.slice(-retention.reasoning_calls);
     }else{
       const c=this.calls.find(x=>x.id===e.id);if(!c)return;
-      if(e.kind==='thinking')c.text=(c.text+e.text).slice(0,16000);
+      if(e.kind==='thinking')c.text=(c.text+e.text).slice(0,retention.reasoning_chars);
       if(e.kind==='control')c.requested=e.requested;
       if(e.kind==='finish')Object.assign(c,{status:e.status,usage:e.usage,display_truncated:e.display_truncated,finishedAt:Date.now()});
     }
@@ -69,7 +70,7 @@ class ActivityArchive extends ActivityLog{
       const saved=JSON.parse(fs.readFileSync(fd,'utf8'));
       if(saved.version!==1||!Array.isArray(saved.calls))throw Error('Unknown reasoning archive');
       const seen=new Set();
-      for(const raw of saved.calls.slice(-12)){
+      for(const raw of saved.calls.slice(-retention.reasoning_calls)){
         const c=cleanCall(raw);if(!c||seen.has(c.id))continue;seen.add(c.id);
         if(c.status==='generating'){c.status='interrupted';c.finishedAt=c.updatedAt;c.interruptedOnReload=true;}
         this.calls.push(c);
@@ -79,7 +80,7 @@ class ActivityArchive extends ActivityLog{
     finally{if(fd!==undefined)fs.closeSync(fd);}
   }
   prune(){
-    this.calls=this.calls.filter(c=>c.startedAt>=Date.now()-MAX_AGE).slice(-12);
+    this.calls=this.calls.filter(c=>c.startedAt>=Date.now()-MAX_AGE).slice(-retention.reasoning_calls);
     while(this.calls.length&&Buffer.byteLength(JSON.stringify({version:1,calls:this.calls}))>MAX_BYTES)this.calls.shift();
   }
   accept(e){
@@ -120,7 +121,7 @@ function cleanCall(c){
   if(!c||!/^[a-f0-9]{32}$/.test(c.id)||typeof c.model!=='string'||typeof c.role!=='string'||!Number.isFinite(c.startedAt)||c.startedAt>Date.now()+60000)return null;
   const number=n=>Number.isSafeInteger(n)&&n>=0?n:null;
   return {id:c.id,model:c.model.slice(0,160),role:c.role.slice(0,80),node_id:typeof c.node_id==='string'?c.node_id.slice(0,128):null,
-    text:typeof c.text==='string'?c.text.slice(0,16000):'',status:['generating','accepted','withheld','interrupted'].includes(c.status)?c.status:'interrupted',
+    text:typeof c.text==='string'?c.text.slice(0,retention.reasoning_chars):'',status:['generating','accepted','withheld','interrupted'].includes(c.status)?c.status:'interrupted',
     startedAt:c.startedAt,updatedAt:Number.isFinite(c.updatedAt)?c.updatedAt:c.startedAt,finishedAt:Number.isFinite(c.finishedAt)?c.finishedAt:undefined,
     requested:typeof c.requested==='string'?c.requested.slice(0,80):typeof c.requested==='boolean'?c.requested:null,
     usage:c.usage?{input_tokens:number(c.usage.input_tokens),output_tokens:number(c.usage.output_tokens)}:undefined,

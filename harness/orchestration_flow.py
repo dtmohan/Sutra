@@ -3,6 +3,7 @@ import copy,json,math
 from pathlib import Path
 from context_manager import InvalidUpdate,ContextBudgetExceeded,canonical,sha
 import orchestration as m
+from memory_layer import PageFault, fault_details, observe_fault
 
 
 def save(root,meta):
@@ -118,6 +119,19 @@ def handle(s,meta,workspace,root,req,providers=None):
     req.pop('_created_flow_id',None)
     try:
         return _handle(s,meta,workspace,root,req,providers)
+    except (PageFault, ContextBudgetExceeded) as exc:
+        fid=req.get('_created_flow_id') or req.get('flow_id')
+        if not fid:raise
+        _,data=info(s,fid);phase=m.state(s,fid)
+        target=(data.get('workflow_stop') or {}).get('resume_phase') if phase=='PAUSED' else phase
+        if target not in ('CLASSIFYING','MAPPING','BRANCHING','CHILDREN','SYNTHESIS','CODING'):raise
+        detail=fault_details(exc)
+        stop={'status':'memory_fault','stage':target,'resume_phase':target,'error':str(exc),
+              'memory_fault':detail,'automatic_retry':False}
+        observe_fault(s,(data.get('binding') or {}).get('session',''),exc)
+        move(s,fid,'PAUSED','MEMORY_STOPPED',workflow_stop=stop)
+        save(root,meta)
+        return response(s,fid)
     except ResourceWait as exc:
         fid=req.get('_created_flow_id') or req.get('flow_id')
         if not fid:
@@ -221,10 +235,10 @@ def _handle(s,meta,workspace,root,req,providers=None):
     if incompatibility:return response(s,fid)
     if phase=='PAUSED':
         if event!='resume':raise InvalidUpdate('Workflow paused. Choose Resume or Discard; allocations remain unchanged.')
-        stopped=[e for e in m.events(s,fid) if e['kind'] in ('MAPPING_STOPPED','CONTEXT_STOPPED','RESOURCE_STOPPED','ROUTING_STOPPED')]
+        stopped=[e for e in m.events(s,fid) if e['kind'] in ('MAPPING_STOPPED','CONTEXT_STOPPED','RESOURCE_STOPPED','ROUTING_STOPPED','MEMORY_STOPPED')]
         if not stopped:raise InvalidUpdate('Paused workflow requires inspection before recovery')
         last=stopped[-1]
-        target=(last['data']['workflow_stop']['resume_phase'] if last['kind'] in ('RESOURCE_STOPPED','ROUTING_STOPPED')
+        target=(last['data']['workflow_stop']['resume_phase'] if last['kind'] in ('RESOURCE_STOPPED','ROUTING_STOPPED','MEMORY_STOPPED')
                 else last['from'] if last['kind']=='CONTEXT_STOPPED' else 'MAPPING')
         if target!='CLASSIFYING':
             if not req.get('armed'):raise InvalidUpdate('Workspace workflow requires a user-armed harness')
@@ -254,6 +268,7 @@ def _handle(s,meta,workspace,root,req,providers=None):
         try:
             chat=converse(s,meta,root,request,provider=provider('conversation'))
         except (ContextBudgetExceeded,BudgetStop,m.OrchestrationStop,RoutingBlocked) as exc:
+            if isinstance(exc,ContextBudgetExceeded):observe_fault(s,request['conversation_session'],exc)
             stop={'status':'routing_budget','resume_phase':'CLASSIFYING','error':str(exc),
                   'budget':getattr(exc,'frame',None),'automatic_retry':False}
             move(s,fid,'PAUSED','ROUTING_STOPPED',workflow_stop=stop)
@@ -360,6 +375,7 @@ def _handle(s,meta,workspace,root,req,providers=None):
                     from chat_runtime import answer
                     out=answer(s,meta,workspace,root,request,provider=provider('synthesis'))
         except ContextBudgetExceeded as exc:
+            observe_fault(s,sid,exc)
             import review_budget
             stop={'status':'context_budget','stage':phase,'error':str(exc),
                   'allocation':getattr(exc,'details',None),'budget':review_budget.usage(s,sid)}

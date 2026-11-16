@@ -16,6 +16,7 @@ LEGACY_POLICIES = {'2319f693bfd23c67bda96909572c6a5646d1a299497aa3ab9c23fc990721
                    'd71f0acf70b42a1d0cb1332c1413bfb85b90156d5820d590cdb19b41ea79ce04'}
 # Recomputed from the released VSIX policy manifests; never from an untrusted receipt.
 RELEASE_POLICIES = {
+    '0.27.0': 'c3c0e82616e83a2b44fae6be3b22db2d323446ccaa4cdabc7aaf79e496a2b39a',
     '0.26.1': '60e91424e2b6e8fa668e22d090245e17bb8705b97f6a0c29ce982ca975295d6e',
     '0.26.0': 'a5fdce688256461b10014a840819b3fd213047b60646c5080dbc73adbb2a5e7d',
     '0.25.0': '76b0ce0cb8bba39c3d9f04a1d0523642ce8497e819001980c6ffe5b5ab8655fb',
@@ -47,17 +48,17 @@ def check_routing_ancestry(s,sid,payload):
     """Intermediate routing drafts never become memory, but remain dependencies."""
     previous=payload.get('routing_state',{}).get('previous');seen=set()
     while previous:
-        if previous in seen:raise PageFault('Routing receipt ancestry cycle')
+        if previous in seen:raise PageFault('Routing receipt ancestry cycle', code='corrupt')
         seen.add(previous)
         row=s.db.execute('SELECT i.record_json,r.record_json,d.payload_json,d.payload_hash FROM invocations i JOIN invocation_receipts r ON r.invocation_id=i.id JOIN deliveries d ON d.id=i.delivery_id WHERE i.id=? AND i.session=?',(previous,sid)).fetchone()
         if not row or s.db.execute('SELECT 1 FROM invocation_quarantine WHERE invocation_id=?',(previous,)).fetchone():
-            raise PageFault('Routing ancestor is unavailable or quarantined')
+            raise PageFault('Routing ancestor is unavailable or quarantined', code='corrupt')
         env,receipt,prior=json.loads(row[0]),json.loads(row[1]),json.loads(row[2])
         if (env['role']!='conversation' or receipt['status']!='accepted' or receipt['logic_hash'] not in LEGACY_POLICIES|{s.logic_hash}
                 or sha(row[2])!=row[3] or row[3]!=receipt['payload_hash'] or prior.get('pages')
                 or any(prior[k]!=payload[k] for k in ('contract','workspace_context','request','context_binding'))
                 or prior['routing_state']['parent']!=payload['routing_state']['parent']):
-            raise PageFault('Routing ancestor differs from retained context or policy')
+            raise PageFault('Routing ancestor differs from retained context or policy', code='corrupt')
         previous=prior['routing_state'].get('previous')
 
 
@@ -66,38 +67,38 @@ def history(s, sid, parent):
     if not parent:
         return []
     if not s.verify_invocations(sid, complete=False):
-        raise PageFault('Conversation receipt chain is invalid')
+        raise PageFault('Conversation receipt chain is invalid', code='corrupt')
     origin = s.origin(sid)['contract_hash']
     state = s.snapshot(sid)
     result, seen = [], set()
     while parent:
         if parent in seen:
-            raise PageFault('Conversation ancestry cycle')
+            raise PageFault('Conversation ancestry cycle', code='corrupt')
         seen.add(parent)
         row = s.db.execute('SELECT record_json FROM invocations WHERE session=? AND id=?', (sid, parent)).fetchone()
         receipt = s.db.execute('SELECT record_json FROM invocation_receipts WHERE session=? AND invocation_id=?', (sid, parent)).fetchone()
         if not row or not receipt:
-            raise PageFault('Conversation receipt unavailable')
+            raise PageFault('Conversation receipt unavailable', code='missing')
         env, r = json.loads(row[0]), json.loads(receipt[0])
         if env['role'] != 'conversation' or r['status'] != 'accepted' or s.db.execute('SELECT 1 FROM invocation_quarantine WHERE invocation_id=?', (parent,)).fetchone():
-            raise PageFault('Conversation or ancestor is quarantined')
+            raise PageFault('Conversation or ancestor is quarantined', code='corrupt')
         if r['logic_hash'] not in LEGACY_POLICIES | {s.logic_hash}:
             raise PageFault('Conversation uses an unsupported historical policy')
         if r['resulting_contract_hash'] != origin or env['revision'] != state['revision']:
-            raise PageFault('Conversation contract changed')
+            raise PageFault('Conversation contract changed', code='denied')
         from calibration import assert_binding, EMPTY_HASH
         assert_binding(s, sid, env.get('calibration_binding', {'hash': EMPTY_HASH, 'profiles': []}))
         delivery = s.db.execute('SELECT payload_json,payload_hash FROM deliveries WHERE id=? AND session=?', (env['delivery_id'], sid)).fetchone()
         if not delivery or sha(delivery[0]) != delivery[1] or delivery[1] != r['payload_hash']:
-            raise PageFault('Conversation delivery is corrupt')
+            raise PageFault('Conversation delivery is corrupt', code='corrupt')
         p = json.loads(delivery[0])
         check_routing_ancestry(s,sid,p)
         if p.get('pages') or p['contract']['contract_hash'] != origin:
-            raise PageFault('Historical conversation is not tool-free')
+            raise PageFault('Historical conversation is not tool-free', code='denied')
         proposal = r['proposal']
         # Recheck source quotations even for compatible historical data.
         if any(not isinstance(q, str) or not q or q not in p['request'] for q in proposal.get('facts', [])):
-            raise PageFault('Conversation fact has no user source')
+            raise PageFault('Conversation fact has no user source', code='corrupt')
         result.append({'id': parent, 'model': env['model'], 'user': p['request'],
                        'assistant': proposal['answer'], 'summary': proposal['summary'],
                        'facts': proposal.get('facts', []), 'legacy': r['logic_hash'] != s.logic_hash})
@@ -111,16 +112,18 @@ def materialize(s, sid, rows):
         text = canonical({'user': row['user'], 'assistant_unverified': row['assistant']})
         try:
             page = s.read_page(sid, key)
-        except PageFault:
+        except PageFault as exc:
             # A missing page may be rebuilt from verified immutable receipts.
             # An existing expired/corrupt page must not be silently replaced.
-            if s.db.execute('SELECT 1 FROM page_heads WHERE session=? AND key=?', (sid, key)).fetchone():
+            if exc.code != 'missing' or s.db.execute('SELECT 1 FROM pages WHERE session=? AND key=?', (sid, key)).fetchone():
                 raise
             page = s.put_page(sid, key, 'conversation', row['user'][:160], text,
                               authority='model', ttl_s=315576000,
                               source={'invocation_id': row['id'], 'meaning': 'user statement plus unverified model reply'})
+            from memory_layer import recovered
+            recovered(s, sid, page, row['id'])
         if page.payload['text'] != text:
-            raise PageFault('Conversation page differs from its receipt')
+            raise PageFault('Conversation page differs from its receipt', code='corrupt', key=key)
 
 
 def summary_limit(budget):
@@ -182,7 +185,7 @@ def working_set(s, sid, parent, request, budget, base, system, schema_for, extra
             continue
         row = next((r for r in rows if r['id'] == iid), None)
         if row is None:
-            raise PageFault('Requested conversation page is outside this ancestry')
+            raise PageFault('Requested conversation page is outside this ancestry', code='denied')
         if not add(row, 'retrieved_turns'):
             raise ContextBudgetExceeded('The requested older page cannot fit with the latest turn and pinned statements. Choose a larger context.')
     if extra_bytes is not None:

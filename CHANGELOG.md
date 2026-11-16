@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.28.0
+
+- Share typed memory faults, dependency-safe eviction and retention rules across page/evidence stores, conversation recovery and disposable diagnostics.
+- Pause unresolved memory faults in the central workflow; retain context, permissions, completed children and consumed budgets across recovery/model switches.
+- Restore missing conversation pages only from verified immutable receipts; never overwrite corrupt, expired or inconsistent evidence.
+- Add bounded confirmed-working-set counters and fault/recovery history to Sutra Monitor. Selection, validation and monitoring do not count as page delivery; conversation forks remain isolated.
+- Preserve the canonical STP kernel unchanged and migrate known 0.27.0 conversation data without admitting old executable authority.
+
 ## 0.27.0
 - Record optional, versioned task commitments in routing receipts before workspace execution; preserve the original request and pinned host constraints.
 - Pass the commitment through fresh parent/child calls and model switches. Workers may assess each criterion and summarize delivery and remaining work.

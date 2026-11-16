@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "retention": {
+    "authority": "durable; never automatically evicted or pruned",
+    "evidence": "versioned durable original; validate freshness before reuse",
+    "derived": "unverified or derived view; retain provenance and original",
+    "working_set": "evict from prompt only; retain exact backing pages",
+    "diagnostic": "bounded disposable data; never grants authority"
+  },
+  "diagnostics": {
+    "max_age_seconds": 604800,
+    "trace_bytes": 8388608,
+    "settled_snapshot_bytes": 33554432,
+    "reasoning_bytes": 1048576,
+    "reasoning_calls": 12,
+    "reasoning_chars": 16000,
+    "memory_events": 256,
+    "working_sets": 256
+  }
+}

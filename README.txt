@@ -1,4 +1,7 @@
-Sutra 0.27.0 — workspace routing and reasoning visibility
+Sutra 0.28.0 — unified memory faults and retention
+
+CONTEXT MEMORY
+Open Sutra Monitor to see confirmed working sets, page-ins, evictions, refaults and recovery. Exact originals remain in durable storage when optional pages leave a prompt. Common memory faults pause the workflow with its context, permissions and consumed allocation retained. Resume rechecks the saved stage; it never refunds budget or replays completed children. Missing conversation pages can be rebuilt from verified receipts. Corrupt or stale evidence is withheld for trusted recovery. Diagnostic history is bounded and never supplies authority. The STP kernel is unchanged.
 
 TASK COMMITMENTS — OBSERVE ONLY
 Workspace routing can record the model's interpretation and completion criteria before source work. Workers inherit the saved commitment and can report what was delivered and what remains. Native chat shows a concise summary; Sutra Monitor shows the last 12 observations. Model claims are unverified and cannot grant permissions, authorize completion, trigger escalation or refund budgets. Missing/malformed observations never request a repair. Existing calls carry the observations; generated tokens still consume allocation. Greetings and direct calls without a routing commitment do not manufacture precommitments.

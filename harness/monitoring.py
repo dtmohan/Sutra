@@ -55,6 +55,8 @@ def dashboard(root):
     db=sqlite3.connect('file:'+str(path)+'?mode=ro',uri=True,timeout=.2)
     try:
         tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        from memory_layer import snapshot as memory_snapshot
+        data['logical_memory']=memory_snapshot(db)
         from token_usage import history
         data['token_usage']=history(db)
         from orchestration import overview as orchestration_overview

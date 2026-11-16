@@ -222,17 +222,8 @@ class EvidenceContext(PagedContext):
                 charge = budget.check(system, payload, schema_factory(payload) if schema_factory else schema_for(payload, schema))
                 break
             except ContextBudgetExceeded:
-                optional = [key for key in pages if key not in mandatory]
-                if not optional:
-                    raise
-                dropping = {optional[0]}
-                while True:
-                    more = {key for key, p in pages.items() if any(dep in dropping for dep, _ in p.dependencies)}
-                    if more <= dropping:
-                        break
-                    dropping |= more
-                if dropping & mandatory:
-                    raise ContextBudgetExceeded('Required prerequisite cannot be evicted')
+                from memory_layer import eviction_closure
+                dropping = eviction_closure(pages, mandatory)
                 for key in list(pages):
                     if key in dropping:
                         del pages[key]

@@ -29,9 +29,27 @@ function renderTaskObservations(rows){
   box.append(d);
  }
 }
+function renderLogicalMemory(m){
+ const counts=m?.counters||{},events=m?.events||[];
+ document.getElementById('memory-summary').textContent=Object.keys(counts).length
+  ? `${counts.deliveries||0} confirmed working sets · ${counts.page_ins||0} page-ins · ${counts.evictions||0} evictions · ${counts.refaults||0} refaults`
+  : 'No recorded working sets yet.';
+ const rows=document.getElementById('memory-events');rows.replaceChildren();
+ if(m?.diagnostic_issues)rows.append(node('p','Some memory diagnostics are unreadable; original evidence and task state remain subject to their integrity checks.','notice'));
+ for(const e of events){
+  const text=e.kind==='working_set'?`${e.resident_pages} pages in prompt · ${e.evictions} evicted · ${e.refaults} returned${e.thrashing_observed?' · repeated refaults observed':''}`
+   : e.kind==='fault'?`${e.code}: ${e.error} · ${(e.recovery||'inspect').replaceAll('_',' ')}`
+   : `Restored ${e.page} from a verified receipt; original authority retained`;
+  rows.append(node('p',text,'plot-note'));
+  if(e.diagnostic_history_gap)rows.append(node('p','Working-set history has a diagnostic gap; refault counts may be incomplete.','plot-note'));
+ }
+ const retention=document.getElementById('memory-retention');retention.replaceChildren();
+ for(const [kind,rule] of Object.entries(m?.retention||{}))retention.append(node('p',kind.replaceAll('_',' ')+': '+rule,'plot-note'));
+}
 function renderMonitor(){
  const d=snapshot?.monitor||{},h=d.hardware||{},s=h.sample||{},now=Date.now(),elapsed=(now-Date.parse(snapshot?.updatedAt))/1000;
  renderTaskObservations(d.task_observations);
+ renderLogicalMemory(d.logical_memory);
  const snapshotFresh=!!snapshot&&!error&&finite(elapsed)&&elapsed>=0&&elapsed<=8;
  const hwFresh=snapshotFresh&&h.available===true&&T.freshAge(h.age_seconds,elapsed);
  const why=error?'Readings unavailable':!snapshotFresh&&snapshot?'Readings expired':h.reason||'Waiting for system readings';

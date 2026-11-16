@@ -7,8 +7,7 @@ from dataclasses import dataclass
 import hashlib, json, math, pathlib, sqlite3, time, uuid
 from context_manager import ContextStore, Conflict, InvalidUpdate, ContextBudgetExceeded, canonical, sha
 from smriti_adapter import SmritiAdapter
-
-class PageFault(Exception): pass
+from memory_layer import PageFault, eviction_closure
 
 @dataclass(frozen=True)
 class Page:
@@ -72,6 +71,8 @@ class PagedContext(ContextStore):
             for op in ('UPDATE','DELETE'):
                 self.db.execute(f"CREATE TRIGGER IF NOT EXISTS immutable_{table}_{op} BEFORE {op} ON {table} BEGIN SELECT RAISE(ABORT,'immutable record'); END")
         self.db.commit()
+        from memory_layer import initialize
+        initialize(self.db)
         self._audit_verified = None
         self._audit_file_identity = self._audit_identity()
 
@@ -137,10 +138,10 @@ class PagedContext(ContextStore):
     def page(self, session, key, version=None):
         if version is None:
             row=self.db.execute('SELECT version FROM page_heads WHERE session=? AND key=?',(session,key)).fetchone()
-            if row is None: raise PageFault('Unknown page in this session: '+key)
+            if row is None: raise PageFault('Unknown page in this session: '+key, code='missing', key=key)
             version=row[0]
         row=self.db.execute('SELECT * FROM pages WHERE session=? AND key=? AND version=?',(session,key,version)).fetchone()
-        if row is None: raise PageFault('Missing page version: '+key)
+        if row is None: raise PageFault('Missing page version: '+key, code='missing', key=key)
         return Page(*row)
 
     def put_page(self, session, key, group, subject, text, *, authority='model', facts=None,
@@ -211,7 +212,7 @@ class PagedContext(ContextStore):
 
     def read_page(self, session, key, version=None, now=None):
         page=self.page(session,key,version); status=self.status(page,now)
-        if status not in ('current','aging','unverified'): raise PageFault(key+': '+status)
+        if status not in ('current','aging','unverified'): raise PageFault(key+': '+status, code=status, key=key)
         return page
 
     def catalog(self, session, group=None, offset=0, limit=6):
@@ -267,15 +268,7 @@ class PagedContext(ContextStore):
             from protocol import schema_for
             try: charge=budget.check(system,payload,schema_for(payload,schema)); break
             except ContextBudgetExceeded:
-                optional=[key for key in pages if key not in required]
-                if not optional: raise
-                # resident is ordered by previous delivery; evict its oldest optional page.
-                dropping={optional[0]}
-                while True:
-                    more={key for key,p in pages.items() if any(dep in dropping for dep,_ in p.dependencies)}
-                    if more<=dropping: break
-                    dropping|=more
-                if dropping & required: raise ContextBudgetExceeded('Required dependency cannot be evicted')
+                dropping=eviction_closure(pages,required)
                 for key in list(pages):
                     if key in dropping: del pages[key]; evicted.append(key)
                 render()
@@ -301,6 +294,8 @@ class PagedContext(ContextStore):
         with self.db:
             self.db.execute('INSERT INTO delivery_success VALUES(?)',(rid,))
             self._audit('PACKET_DELIVERED',{'id':rid})
+            from memory_layer import observe_delivery
+            observe_delivery(self.db,rid)
 
     def admission(self, session, rid, answer, required_facts=()):
         row=self.db.execute('SELECT session,revision,payload_json,refs_json FROM deliveries WHERE id=?',(rid,)).fetchone()

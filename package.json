@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Local orchestration with observe-only task commitments and completion assessments.",
-  "version": "0.27.0",
+  "version": "0.28.0",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"

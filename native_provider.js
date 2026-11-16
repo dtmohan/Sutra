@@ -150,6 +150,7 @@ function install(vscode,context,deps){
     const details=[stop.error,...failures.map(f=>f.path+': '+f.error)].filter(Boolean);
     const coverage=Number.isInteger(stop.mapped_files)&&Number.isInteger(stop.source_files)?` Mapped ${stop.mapped_files} of ${stop.source_files} source files.`:'';
     if(stop.recovery)details.push('Runtime memory recovery: '+(stop.recovery.error||stop.recovery.action?.replaceAll('_',' ')||'observed')+'. Task allocation is unchanged.');
+    if(stop.memory_fault)details.push('Memory recovery: '+stop.memory_fault.recovery.replaceAll('_',' ')+'. Exact saved pages and task grants are retained.');
     const reason=details.length?details.join('\n'):(stop.status||'Inspect Sutra Monitor for details.');
     audit.stage='paused';audit.message=reason;publish();
     const guidance=stop.status==='resource_wait'
