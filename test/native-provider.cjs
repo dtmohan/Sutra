@@ -10,7 +10,7 @@ class CTS{constructor(){const listeners=[];this.token={isCancellationRequested:f
 function setup(saved={}){
  let provider,tool,kind='edit',pick=0,discoveries=0,hold;const commands={},uiCalls=[],calls=[],statuses=[],routeEvents=[],models={low:'model-a',mid:'model-b',high:'model-c'},cfg={nativeEnabled:true},policies={},overrides={};
  const st={session:'task-1',contract:{contract_hash:'contract-1',contract:{goal:'Fix retry',constraints:{native_task:true,allowed_paths:['src/retry.py'],edits_allowed:true,tests_allowed:true,network_allowed:false}}},calibration:{binding:{hash:'cal-1'}}};
- const v={EventEmitter,CancellationTokenSource:CTS,LanguageModelTextPart:Text,LanguageModelToolCallPart:Call,LanguageModelToolResultPart:Result,LanguageModelToolResult:class{constructor(content){this.content=content;}},LanguageModelChatMessageRole:{User:1,Assistant:2},LanguageModelChatToolMode:{Auto:1,Required:2},ConfigurationTarget:{Global:1},MarkdownString:class{value='';appendText(t){this.value+=t;}appendCodeblock(t){this.value+='\n'+t;}},Uri:{file:p=>({fsPath:p})},workspace:{getConfiguration:()=>({get:(k,d)=>overrides[k]??cfg[k]??d,inspect:k=>({globalValue:cfg[k],policyValue:policies[k]}),update:async(k,x)=>{cfg[k]=x;}}),onDidChangeConfiguration:()=>disposable()},window:{showInformationMessage:async message=>{uiCalls.push(['notice',message]);},showWarningMessage:async(_m,_o,label)=>label,showQuickPick:async choices=>{pick++;return choices[0];}},commands:{getCommands:async()=>['workbench.action.chat.newLocalChat'],executeCommand:async(...args)=>{uiCalls.push(args);},registerCommand:(n,f)=>{commands[n]=f;return disposable();}},lm:{selectChatModels:async()=>{discoveries++;return provider.provideLanguageModelChatInformation();},registerLanguageModelChatProvider:(n,p)=>{assert.equal(n,'karma');provider=p;return disposable();},registerTool:(n,t)=>{assert.equal(n,'karma_native_action');tool=t;return disposable();}}};
+ const v={EventEmitter,CancellationTokenSource:CTS,LanguageModelTextPart:Text,LanguageModelToolCallPart:Call,LanguageModelToolResultPart:Result,LanguageModelToolResult:class{constructor(content){this.content=content;}},LanguageModelChatMessageRole:{User:1,Assistant:2},LanguageModelChatToolMode:{Auto:1,Required:2},ConfigurationTarget:{Global:1},MarkdownString:class{value='';appendText(t){this.value+=t;}appendCodeblock(t){this.value+='\n'+t;}},Uri:{file:p=>({fsPath:p})},workspace:{getConfiguration:()=>({get:(k,d)=>overrides[k]??cfg[k]??d,inspect:k=>({globalValue:cfg[k],policyValue:policies[k]}),update:async(k,x)=>{cfg[k]=x;}}),onDidChangeConfiguration:()=>disposable()},window:{showErrorMessage:async message=>{uiCalls.push(['error',message]);},showInformationMessage:async message=>{uiCalls.push(['notice',message]);},showWarningMessage:async(_m,_o,label)=>label,showQuickPick:async choices=>{pick++;return choices[0];}},commands:{getCommands:async()=>['workbench.action.chat.newLocalChat'],executeCommand:async(...args)=>{uiCalls.push(args);},registerCommand:(n,f)=>{commands[n]=f;return disposable();}},lm:{selectChatModels:async()=>{discoveries++;return provider.provideLanguageModelChatInformation();},registerLanguageModelChatProvider:(n,p)=>{assert.equal(n,'karma');provider=p;return disposable();},registerTool:(n,t)=>{assert.equal(n,'karma_native_action');tool=t;return disposable();}}};
  const deps={workspace:()=>'/project',isBusy:()=>false,modelSettings:()=>models,configureModels:async()=>models,onStatus:s=>statuses.push(s),onRoute:r=>routeEvents.push(r),publishReview:noop,showDiff:async()=>{},request:async(m,t)=>{
   calls.push(structuredClone(m));if(m.op==='state')return structuredClone(st);
   if(m.op==='conversation_read')return {result:{invocation_id:m.invocation_id,admission:{admitted:true},accepted_output:{summary:'retained context'}}};
@@ -327,6 +327,32 @@ function setup(saved={}){
  assert.equal(tight.controller.status().pending.stop.status,'context_budget');
  assert(!tight.calls.some(c=>c.op==='native_work'));
  checks.push('context allocation shortages return a saved, explained pause instead of a retriable provider exception');
+ assert(tightReply.some(p=>p.value?.includes('Increase allocation')));
+ assert(tightReply.some(p=>p.value?.includes('No reasoning stream was generated')));
+ {
+  const raw=tight.deps.request,grants=[];let previewCount=0,detail='';
+  const proposal={version:0,goal:'Review project',before:{tokens:250000},used:{tokens:228975},additions:{tokens:228975},after:{tokens:478975},remaining_after:{tokens:250000}};
+  tight.deps.request=async(m,t)=>{
+   if(m.event==='allocation_preview'){previewCount++;return {flow_id:m.flow_id,cursor:m.cursor,state:'PAUSED',allocation_proposal:proposal};}
+   if(m.event==='allocation_grant'){grants.push(m);return {...tight.controller.status().pending,cursor:'amended',allocation_version:1,allocation_amendment:{version:1}};}
+   return raw(m,t);
+  };
+  tight.v.window.showWarningMessage=async(_m,o)=>{detail=o.detail;return undefined;};
+  const callsBefore=tight.calls.length,chatBefore=tight.uiCalls.length;
+  await tight.commands['karma.increaseAllocation']({confirmed:true,proposal:{after:{tokens:999999}}});
+  assert.equal(grants.length,0);assert.equal(previewCount,1);
+  assert(detail.includes('250,000 + 228,975 = 478,975'));assert(detail.includes('does not reset spending'));
+  tight.v.window.showWarningMessage=async(_m,_o,label)=>label;
+  await tight.commands['karma.increaseAllocation']();
+  assert.equal(grants.length,1);assert.deepEqual(grants[0].proposal,proposal);assert.equal(grants[0].confirmed,true);
+  assert.equal(tight.calls.length,callsBefore);assert(!tight.uiCalls.slice(chatBefore).some(x=>x[0].includes('chat.')));
+  assert.equal(tight.controller.status().pending.allocation_version,1);
+  assert.equal(tight.controller.status().pending.allocation_proposal,undefined);
+  assert.equal(tight.controller.status().pending.allocation_amendment,undefined);
+  assert.equal(tight.controller.status().pending.state,'PAUSED');
+  checks.push('allocation preview requires explicit modal acceptance, ignores command arguments, preserves chat and does not dispatch a model');
+ }
+
  const pressured=setup();pressured.kind('report');await pressured.arm();const pressuredRequest=pressured.deps.request;
  pressured.deps.request=async(m,t)=>{const r=await pressuredRequest(m,t);return m.op==='orchestrate'&&r.state==='CODING'?{...r,state:'PAUSED',stop:{status:'resource_wait',resume_phase:'CODING',error:'RESOURCE_WAIT: OS thermal pressure: serious; kernel: BRIDGE'}}:r;};
  const pressureReply=await pressured.send();

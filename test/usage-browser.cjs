@@ -126,6 +126,16 @@ monitor.orchestration.nodes[0].resource_fallback={from_model:'large',model:'smal
  await send({snapshot,native:{compaction:{status:'missing_checkpoint',time:new Date().toISOString()}}});assert((await page.locator('#compaction').textContent()).includes('no authenticated checkpoint'));
  await send({snapshot,native:{pending:{state:'PAUSED',stop:{status:'context_budget',error:'41,403 budget units remain; required review context cannot fit.'}}}});
  assert((await page.locator('#recovery-status').textContent()).includes('41,403 budget units remain'));
+ assert(await page.locator('#increase-allocation').isVisible());
+ await page.locator('#increase-allocation').click();
+ assert.deepEqual((await page.evaluate(()=>sent)).at(-1),{type:'increase_allocation'});
+ await send({snapshot:{...snapshot,monitor:{...monitor,review_budget:{...frame('ALLOW'),used:{tokens:228975,calls:12,operations:457,seconds:950,source_bytes:65540928},limits:{tokens:478975,calls:52,operations:1457,seconds:2751,source_bytes:132649792},allocation_version:1}}},native:{pending:{state:'PAUSED',stop:{status:'context_budget'}},working:true}});
+ assert(await page.locator('#increase-allocation').isDisabled());
+ assert((await page.locator('#task-allocation').textContent()).includes('228,975 / 478,975'));
+ await page.screenshot({path:path.join(out,'Allocation-recovery.png'),fullPage:true});
+ await send({snapshot,native:{pending:{state:'PAUSED',stop:{status:'resource_wait'}}}});
+ assert(!(await page.locator('#increase-allocation').isVisible()));
+
  for(const code of ['BRIDGE','FIN','COMPOUND_FIN']){await send({snapshot:{...snapshot,monitor:{...monitor,hardware:{...monitor.hardware,decision:code,admitted:false}}}});assert.equal(await page.locator('#resource').textContent(),'System pressure: '+code);}
  await send({snapshot:{...snapshot,monitor:{...monitor,hardware:{...monitor.hardware,available:false,reason:'No collector'}}}});assert.equal(await page.locator('#cpu-temp').textContent(),'—');assert.equal(await page.locator('#cpu-load').textContent(),'—');
  await send({snapshot:{...snapshot,monitor:{...monitor,hardware:{...monitor.hardware,sample:{cpu_busy_pct:0},temperatures:{age_seconds:0,cpu:{available:false,reason:'No CPU sensor'},gpu:{available:false,reason:'No GPU sensor'}}}}}});assert.equal(await page.locator('#cpu-temp').textContent(),'—');assert.equal(await page.locator('#cpu-load').textContent(),'0%');

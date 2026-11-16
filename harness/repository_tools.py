@@ -111,7 +111,9 @@ def catalog(s,session):
 def usage(s,session):
  c=settings(s,session);origin=s.origin(session)
  used=sum(json.loads(raw)['contract_hash']==origin['contract_hash'] for raw, in s.db.execute('SELECT record_json FROM repository_ops WHERE session=?',(session,))) if c.get('auto_review') else sum(r['operation']['contract_hash']==origin['contract_hash'] for r in records(s,session))
- return budget_decision(used,c['max_tools'])
+ from review_budget import usage as task_usage
+ allocation=task_usage(s,session)
+ return budget_decision(used,allocation['limits']['operations'] if allocation else c['max_tools'])
 
 def request_check(s,session,kind,target='',query='',line=1,cursor=None):
  c=settings(s,session)

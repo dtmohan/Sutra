@@ -30,12 +30,14 @@ def usage(s,session):
   from budget_accounting import used as settled_tokens
   receipt=json.loads(receipt_raw) if receipt_raw else {}
   used['calls']+=1;used['tokens']+=settled_tokens(inv,receipt);used['seconds']+=receipt.get('elapsed_seconds',150)
- return {'limits':limits,'used':used}
+ from allocation_recovery import effective
+ amended,version,_=effective(s,session,limits)
+ return {'limits':amended,'used':used,'base_limits':limits,'allocation_version':version}
 
 def decision(s,session,cost=None):
  data=usage(s,session)
  if data is None:return None
- try:return KarmaAdapter().allocations(data['used'],data['limits'],cost)
+ try:return dict(KarmaAdapter().allocations(data['used'],data['limits'],cost),base_limits=data['base_limits'],allocation_version=data['allocation_version'])
  except ValueError as exc:raise InvalidUpdate(str(exc)) from None
 
 class BudgetStop(InvalidUpdate):

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.31.0
+
+- Add **Increase allocation…** in Sutra Monitor and **Sutra: Increase Task Allocation** in the Command Palette for paused context/task-budget stops. Show additions, new totals, consumed use and remaining headroom before explicit confirmation.
+- Record additive, versioned allocation amendments without modifying the task contract or clearing previous charges. Recheck proposal freshness and task binding atomically; reject replay, tampering, active/interrupted work, permission changes and unsupported totals.
+- Apply effective allocations to task, ancestor and repository admission. Child grants remain bounded. Resume and policy-upgrade restart retain context, permissions, receipts and spending across model switches.
+- Distinguish host allocation stops from model reasoning, and show spent/total task allocations in the Monitor. Approval starts no inference and overrides no model-capability, memory or resource check.
+- Keep the canonical STP kernel unchanged. The host allocation handshake borrows explicit proposal/acceptance/receipt mechanics from SSTP; it is not a claim of full protocol conformance or model-authorized budget increases.
+
 ## 0.30.0
 
 - Separate task-facing model packets from the complete committed host envelope; bind both at the gateway and validate raw output before attaching host identity, constraints and non-certifying completion metadata.

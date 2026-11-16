@@ -37,6 +37,8 @@ EDGES = {
 }
 
 def initialize(s):
+    from allocation_recovery import initialize as initialize_allocations
+    initialize_allocations(s)
     s.db.executescript('''
       CREATE TABLE IF NOT EXISTS orchestration_nodes(id TEXT PRIMARY KEY,parent_id TEXT,session TEXT,record_json TEXT,digest TEXT);
       CREATE TABLE IF NOT EXISTS orchestration_events(node_id TEXT,seq INTEGER,record_json TEXT,digest TEXT,PRIMARY KEY(node_id,seq));
@@ -152,10 +154,16 @@ def gates(s,nid,cost):
             c=node(s,child);actual=spent(s,child)
             for key in reserved:reserved[key]+=max(0,c['limits'][key]-actual[key])
         effective={k:used[k]+reserved[k] for k in used}
-        k=KarmaAdapter().allocations(effective,n['limits'],cost)
+        k=KarmaAdapter().allocations(effective,effective_limits(s,n),cost)
         frames.append(dict(k,node_id=n['id'],consumed=used,reserved_for_other_children=reserved))
         excluded=n['id'];n=checked(s,n['parent_id']) if n['parent_id'] else None
     return frames
+
+def effective_limits(s,n):
+    if n['kind'] != 'task': return n['limits']
+    from review_budget import usage
+    budget = usage(s,n['session'])
+    return dict(n['limits'], **budget['limits']) if budget else n['limits']
 
 class OrchestrationStop(InvalidUpdate):
     def __init__(self,frames):

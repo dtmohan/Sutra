@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Local orchestration with observe-only task commitments and completion assessments.",
-  "version": "0.30.0",
+  "version": "0.31.0",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -148,6 +148,10 @@
       {
         "command": "karma.discardWorkflow",
         "title": "Sutra: Discard Saved Request"
+      },
+      {
+        "command": "karma.increaseAllocation",
+        "title": "Sutra: Increase Task Allocation"
       }
     ],
     "configuration": {

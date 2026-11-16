@@ -4,6 +4,7 @@ from pathlib import Path
 from context_manager import InvalidUpdate,ContextBudgetExceeded,canonical,sha
 import orchestration as m
 from memory_layer import PageFault, fault_details, observe_fault
+from review_budget import BudgetStop
 
 
 def save(root,meta):
@@ -35,7 +36,7 @@ def response(s,fid,**extra):
                 conversation_id=data.get('conversation_id'),binding=data.get('binding'),
                 resource_fallback=data.get('resource_fallback'),
                 stop=(data.get('workflow_stop') or data.get('mapping_stop')) if m.state(s,fid)=='PAUSED' else None,
-                recovery=recovery(s,fid),
+                recovery=recovery(s,fid),allocation_version=data.get('allocation_version',0),
                 children=[{'id':i,'state':m.state(s,i),'files':m.node(s,i)['files']} for i in data.get('children',[])],**extra)
 
 def recovery(s,fid):
@@ -79,7 +80,7 @@ def plan(s,meta,workspace,prompt,conversation_id):
         data=analysis.load(s,meta['active'],workspace,page['receipt'])
         versions.update(data['versions']);calls+=len(data['graph']['calls']);unresolved+=sum(c['target'] is None for c in data['graph']['calls'])
     parent=m.task(s,meta['active']);s.db.commit();used=m.spent(s,parent['id'])
-    left={k:max(0,v-used[k]) for k,v in parent['limits'].items()}
+    left={k:max(0,v-used[k]) for k,v in m.effective_limits(s,parent).items()}
     # One fresh map plus up to three calls per participant. Actual use is charged.
     minimum={'calls':3,'tokens':3*16384,'seconds':470,'operations':1}
     affordable=min(int(left[k]//v) for k,v in minimum.items())-1
@@ -217,6 +218,14 @@ def _handle(s,meta,workspace,root,req,providers=None):
             return response(s,fid,**extra)
         if req.get('cursor')!=response(s,fid)['cursor']:raise InvalidUpdate('Workflow event is stale or replayed')
     f,d=info(s,fid);phase=m.state(s,fid);prompt=f['prompt']
+    if event in ('allocation_preview','allocation_grant'):
+        from allocation_recovery import preview,grant
+        if event=='allocation_preview':
+            return response(s,fid,allocation_proposal=preview(s,fid,meta,req.get('additions')))
+        if req.get('confirmed') is not True:
+            raise InvalidUpdate('Allocation increase requires explicit user confirmation')
+        amended=grant(s,fid,meta,req.get('proposal'))
+        return response(s,fid,allocation_amendment=amended)
     if event=='cancel':
         if phase in ('EXECUTING_ACTION','CANCELLING'):
             m.cancel(s,fid);return response(s,fid)
@@ -269,7 +278,6 @@ def _handle(s,meta,workspace,root,req,providers=None):
     if phase=='CLASSIFYING':
         from conversation import session_for
         from conversation_routing import RoutingBlocked
-        from review_budget import BudgetStop
         request={'prompt':prompt,'parent':f.get('conversation_parent'),'models':models,'tier':tier,
                  'conversation_session':d.get('conversation_session'),'routing_continuation':d.get('routing_continuation'),'one_step':True}
         request['conversation_session']=session_for(s,request)
@@ -386,10 +394,10 @@ def _handle(s,meta,workspace,root,req,providers=None):
                 else:
                     from chat_runtime import answer
                     out=answer(s,meta,workspace,root,request,provider=provider('synthesis'))
-        except ContextBudgetExceeded as exc:
+        except (ContextBudgetExceeded, m.OrchestrationStop, BudgetStop) as exc:
             observe_fault(s,sid,exc)
             import review_budget
-            stop={'status':'context_budget','stage':phase,'error':str(exc),
+            stop={'status':'context_budget' if isinstance(exc,ContextBudgetExceeded) else 'task_budget','stage':phase,'error':str(exc),
                   'allocation':getattr(exc,'details',None),'budget':review_budget.usage(s,sid)}
             move(s,fid,'PAUSED','CONTEXT_STOPPED',workflow_stop=stop)
             save(root,meta)

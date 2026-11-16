@@ -78,7 +78,12 @@ function renderMonitor(){
  el('flow-status').textContent=!snapshotFresh?'Awaiting fresh snapshot':rows.length?(workflow.execution||'Recorded workflow'):'No workflow yet';
  const pending=native?.pending;el('recovery-controls').hidden=!pending;
  el('recovery-status').textContent=pending?(pending.recovery?.message||pending.stop?.error||'Saved request · '+pending.state+'. Context and consumed budget are retained. Use Resume, then send continue. Other messages remain separate.'):'';
- for(const id of ['resume-workflow','discard-workflow'])el(id).disabled=!!native?.working;
+ for(const id of ['resume-workflow','discard-workflow','increase-allocation'])el(id).disabled=!!native?.working;
+ el('increase-allocation').hidden=pending?.state!=='PAUSED'||!(['context_budget','task_budget','budget_stopped'].includes(pending?.stop?.status)||pending?.stop?.memory_fault?.code==='capacity');
+ const budget=d.review_budget;
+ el('task-allocation').textContent=budget?.limits&&budget?.used
+   ? (snapshotFresh?'':'Last snapshot · ')+'Task allocation v'+(budget.allocation_version||0)+' · '+Object.entries({tokens:'model units',calls:'calls',source_bytes:'source bytes',operations:'operations',seconds:'seconds'}).map(([key,label])=>Number(budget.used[key]).toLocaleString(undefined,{maximumFractionDigits:1})+' / '+Number(budget.limits[key]).toLocaleString()+' '+label).join(' · ')+'. Spent / total; increases never erase spending.'
+   : '';
  const signature=JSON.stringify([rows,snapshotFresh]);
  if(signature!==workflowSignature){workflowSignature=signature;
  const opened=new Set([...el('flow-nodes').querySelectorAll('details[open]')].map(e=>e.parentElement.dataset.nodeId));
@@ -198,6 +203,7 @@ function renderActivity(calls){
 window.addEventListener('message',({data:m})=>{if(m.type!=='usage')return;renderReasoningPreference(m.reasoningPreference);renderActivity(m.activity||[]);el('reasoning-error').textContent=m.activityError||'';el('reasoning-error').hidden=!m.activityError;snapshot=m.snapshot;routing=m.routing;native=m.native;error=m.error;for(const key of ['model','stage'])fillOptions(key);if(!snapshot){for(const key of ['input','output','calls','unknown'])el(key).textContent='—';for(const key of ['input','output'])el(key+'-note').textContent='Waiting for measurements';el('scope').textContent='This workspace · waiting for recorded calls…';el('visuals').hidden=true;el('details').hidden=true;el('empty').hidden=true;el('window').textContent='';}render();});
 // Expire live readings even if the host/reader stops delivering messages.
 el('resume-workflow').onclick=()=>vscode.postMessage({type:'resume'});el('discard-workflow').onclick=()=>vscode.postMessage({type:'discard'});
+el('increase-allocation').onclick=()=>vscode.postMessage({type:'increase_allocation'});
 setInterval(()=>{if(!document.hidden)renderMonitor();},1000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)renderMonitor();});
 vscode.postMessage({type:'ready'});

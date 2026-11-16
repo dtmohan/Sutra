@@ -115,7 +115,7 @@ def dashboard(root):
                 data['actions'].append({'id':aid,'kind':a['kind'],'target':a['target'],'kernel':a['budget_kernel'],'result':result})
         if 'repository_ops' in tables:
             contract=db.execute('SELECT record_json,digest FROM contract_epochs WHERE session=? ORDER BY epoch DESC LIMIT 1',(session,)).fetchone()
-            limit=json.loads(contract[0])['contract']['constraints'].get('max_tools') if contract else None
+            limit=(data.get('review_budget') or {}).get('limits',{}).get('operations') or (json.loads(contract[0])['contract']['constraints'].get('max_tools') if contract else None)
             if limit:
                 from karma_adapter import budget_decision
                 operations=[json.loads(r[0]) for r in db.execute('SELECT record_json FROM repository_ops WHERE session=?',(session,))]

@@ -36,6 +36,7 @@ function install(vscode,context,deps){
       else if(message?.type==='refresh')void refresh();
       else if(message?.type==='resume')void vscode.commands.executeCommand('karma.resumeWorkflow');
       else if(message?.type==='discard')void vscode.commands.executeCommand('karma.discardWorkflow');
+      else if(message?.type==='increase_allocation')void vscode.commands.executeCommand('karma.increaseAllocation');
       else if(message?.type==='telemetry')void vscode.commands.executeCommand('karma.open');
       else if(message?.type==='reasoning_settings')void vscode.commands.executeCommand('workbench.action.openSettings','karma.thinking');
       else if(message?.type==='activity_details')void openDetails(message.id);

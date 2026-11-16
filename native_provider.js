@@ -41,6 +41,7 @@ function observationText(observations, final=false){
 }
 function install(vscode,context,deps){
 
+  let allocationPending=false;
   let armPromise,accessEpoch=0,armingStep='',armed,activeCancel,arming=false,running=false,selecting=false,lastRoute='',routing,reason='Open Sutra chat to talk. Arm Sutra when you need workspace access.';
   const memory=new NativeMemory(context);let lastCompaction;
   const tickets=new Map(),completed=new Map(),changed=new vscode.EventEmitter();
@@ -54,7 +55,7 @@ function install(vscode,context,deps){
     const label=!enabled()?'Sutra: off':arming?'Sutra: finish arming':selecting?'Sutra: opening chat':live?'Sutra: request received':running?'Sutra: action running':armed?'Sutra: armed · routing unverified':'Sutra: chat ready · workspace unarmed';
     const explanation=arming?armingStep:selecting?'Opening Local chat with Sutra Auto. No prompt is being sent.':live?'This request reached Sutra. Protocol admission is checked before model dispatch.':
       'No Sutra request is in flight. The current chat selection is unverified; check for Sutra Auto beneath the prompt. Direct Ollama and other chats bypass Sutra.';
-    return {enabled:enabled(),arming,armingStep,selecting,armed:!!armed&&enabled(),working:running||live,session:armed?.session,scope:'Sutra model requests and Sutra action tool only',defaultModel:chat.get('defaultModel',''),defaultsReady,reason,lastRoute,label,explanation,routing:routing?{...routing}:null,compaction:lastCompaction,pending:context.workspaceState.get('sutra.pendingOrchestration')||null};
+    return {enabled:enabled(),arming,armingStep,selecting,armed:!!armed&&enabled(),working:allocationPending||running||live,session:armed?.session,scope:'Sutra model requests and Sutra action tool only',defaultModel:chat.get('defaultModel',''),defaultsReady,reason,lastRoute,label,explanation,routing:routing?{...routing}:null,compaction:lastCompaction,pending:context.workspaceState.get('sutra.pendingOrchestration')||null};
   }
   function publish(){deps.onStatus(status());}
   function disarm(why='Disarmed by user. Task and budget retained.'){accessEpoch++;armed=undefined;tickets.clear();completed.clear();activeCancel?.cancel();reason=why;publish();}
@@ -117,11 +118,11 @@ function install(vscode,context,deps){
     const saved=context.workspaceState.get(pendingKey);
     // Finishing a conversational turn must not erase another saved review.
     if(!terminal||saved?.flow_id===flow.flow_id)
-      await context.workspaceState.update(pendingKey,terminal?undefined:{...flow,workspace:deps.workspace(),conversation:undefined,routing_step:undefined,child:undefined,data:undefined,mapping:undefined});
+      await context.workspaceState.update(pendingKey,terminal?undefined:{...flow,workspace:deps.workspace(),conversation:undefined,routing_step:undefined,child:undefined,data:undefined,mapping:undefined,allocation_proposal:undefined,allocation_amendment:undefined});
     publish();
   }
   async function recoverSaved(discard=false){
-    if(running||routing?.active||deps.isBusy())throw new Error('Stop the active request and wait for cleanup before changing the saved workflow.');
+    if(allocationPending||running||routing?.active||deps.isBusy())throw new Error('Stop the active request and wait for cleanup before changing the saved workflow.');
     const pending=context.workspaceState.get(pendingKey);
     if(!pending||pending.workspace!==deps.workspace()){void vscode.window.showInformationMessage('No saved workflow in this workspace.');return;}
     if(discard){
@@ -138,6 +139,27 @@ function install(vscode,context,deps){
       void vscode.window.showInformationMessage(current.recovery?current.recovery.message+' Send continue in Sutra chat to choose recovery.':'Resume selected. Send continue with a Sutra model to resume the saved request with its original context and remaining budget. Other messages remain separate.');
     }
   }
+  async function increaseAllocation(){
+    if(allocationPending||running||routing?.active||deps.isBusy())throw new Error('Wait for the current Sutra operation before changing allocation.');
+    const pending=context.workspaceState.get(pendingKey),workspace=deps.workspace();
+    if(!pending||pending.workspace!==workspace)throw new Error('No saved workflow in this workspace.');
+    allocationPending=true;publish();
+    try{
+      const current=await deps.request({op:'orchestrate',event:'inspect',flow_id:pending.flow_id});
+      const preview=await deps.request({op:'orchestrate',event:'allocation_preview',flow_id:current.flow_id,cursor:current.cursor});
+      const p=preview.allocation_proposal;
+      const labels={tokens:'Model budget units',calls:'Model calls',operations:'Repository operations',source_bytes:'Source bytes',seconds:'Execution seconds'};
+      const fmt=x=>Number(x).toLocaleString(undefined,{maximumFractionDigits:1});
+      const rows=Object.entries(p.additions).map(([key,add])=>labels[key]+': '+fmt(p.before[key])+' + '+fmt(add)+' = '+fmt(p.after[key])+' total. Spent '+fmt(p.used[key])+'; '+fmt(p.remaining_after[key])+' remains.');
+      const yes=await vscode.window.showWarningMessage('Increase this task’s allocation?',{modal:true,detail:
+        p.goal+'\n\n'+rows.join('\n')+'\n\nThis adds capacity; it does not reset spending. Context, constraints and permissions are retained. Model context and memory limits still apply. Approval does not start a model call. Continue the saved request afterward.'},'Increase allocation');
+      if(yes!=='Increase allocation')return;
+      if(deps.workspace()!==workspace||running||routing?.active||deps.isBusy())throw new Error('The workspace or request changed. Review a fresh allocation proposal.');
+      const next=await deps.request({op:'orchestrate',event:'allocation_grant',flow_id:preview.flow_id,cursor:preview.cursor,confirmed:true,proposal:p});
+      await rememberFlow(next);
+      void vscode.window.showInformationMessage('Allocation increased (version '+next.allocation_amendment.version+'). Spending and permissions are unchanged. Send continue in this chat; model and memory checks still apply.');
+    }finally{allocationPending=false;publish();}
+  }
   let activityProgress;
   async function flowEvent(flow,event,tier,token,extra={}){
     const models=['inspect','pending','cancel'].includes(event)?undefined:await deps.configureModels(false,token);
@@ -153,6 +175,8 @@ function install(vscode,context,deps){
       const stage={CLASSIFYING:'Conversation routing',MAPPING:'Source mapping',CHILDREN:'Child review',SYNTHESIS:'Workspace synthesis',CODING:'Workspace coding'}[stop.resume_phase]||'Workflow';
       details.unshift('Host resource check · '+stage+' paused. This is host status, not a model response.');
     }
+    const allocationStop=['context_budget','task_budget','budget_stopped'].includes(stop.status)||stop.status==='memory_fault'&&stop.memory_fault?.code==='capacity';
+    if(allocationStop)details.unshift('Host allocation check paused the workflow before the next model call. No reasoning stream was generated for that call.');
     const coverage=Number.isInteger(stop.mapped_files)&&Number.isInteger(stop.source_files)?` Mapped ${stop.mapped_files} of ${stop.source_files} source files.`:'';
     if(stop.recovery)details.push('Runtime memory recovery: '+(stop.recovery.error||stop.recovery.action?.replaceAll('_',' ')||'observed')+'. Task allocation is unchanged.');
     if(stop.memory_fault)details.push('Memory recovery: '+stop.memory_fault.recovery.replaceAll('_',' ')+'. Exact saved pages and task grants are retained.');
@@ -160,7 +184,7 @@ function install(vscode,context,deps){
     audit.stage='paused';audit.message=reason;publish();
     const guidance=stop.status==='resource_wait'
       ? 'Check both **System pressure** and the **Last model allocation** in Sutra Monitor. Healthy system pressure alone does not mean the selected model fits. After resources recover, or after selecting a smaller configured model, use **Resume** and send **continue** here. Resume checks a fresh measurement and model allocation before dispatch. Sutra will not automatically retry this stop.'
-      : 'Resolve the reported cause, then use **Resume** in Sutra Monitor and send **continue** here.';
+      : allocationStop?'Choose **Increase allocation…** in Sutra Monitor to review and confirm additional task capacity, then send **continue** here. This preserves all spending and does not override model or hardware limits.':'Resolve the reported cause, then use **Resume** in Sutra Monitor and send **continue** here.';
     const title=stop.resume_phase==='CLASSIFYING'?'Sutra paused the request.':'Sutra paused the review.';
     progress.report(new vscode.LanguageModelTextPart('**'+title+'**'+coverage+'\n\n'+reason+'\n\n'+(stop.failure_count>failures.length?`${stop.failure_count-failures.length} more file failures are recorded in the review details.\n\n`:'')+'The request, context, permissions and consumed budget are saved. '+guidance+' Resume keeps the remaining allocation; it does not reset a limit. Use **Discard** to abandon this request.'));
   }
@@ -212,7 +236,7 @@ function install(vscode,context,deps){
     }).catch(error=>vscode.window.showErrorMessage(error.message));
   }
   async function trackRequest(model,progress,token,invoke){
-    if(routing?.active||running||deps.isBusy())throw new Error('A Sutra request is running. Wait before switching models.');
+    if(allocationPending||routing?.active||running||deps.isBusy())throw new Error('A Sutra request is running. Wait before switching models.');
     const audit={id:crypto.randomUUID(),model:model.id,startedAt:new Date().toISOString(),active:true,stage:'received'};
     routing=audit;publish();deps.onRoute?.({...audit});
     try{
@@ -449,6 +473,7 @@ function install(vscode,context,deps){
   context.subscriptions.push(changed,vscode.lm.registerLanguageModelChatProvider('karma',provider),vscode.lm.registerTool(ACTION,tool),
     vscode.commands.registerCommand('karma.useNativeChat',()=>useNativeChat()),
     vscode.commands.registerCommand('karma.resumeWorkflow',()=>recoverSaved()),vscode.commands.registerCommand('karma.discardWorkflow',()=>recoverSaved(true)),
+    vscode.commands.registerCommand('karma.increaseAllocation',()=>increaseAllocation().catch(error=>vscode.window.showErrorMessage(error.message))),
     vscode.commands.registerCommand('karma.armNative',()=>beginArm()),vscode.commands.registerCommand('karma.disarmNative',()=>disarm()),
     vscode.commands.registerCommand('karma.toggleNative',async()=>{disarm('Native chat setting changed.');await vscode.workspace.getConfiguration('karma').update('nativeEnabled',!enabled(),vscode.ConfigurationTarget.Global);changed.fire();publish();}));
   const listener=vscode.workspace.onDidChangeConfiguration?.(e=>{if(e.affectsConfiguration('karma.nativeEnabled')){disarm('Native chat setting changed.');changed.fire();}else if(e.affectsConfiguration('karma.models'))changed.fire();if(e.affectsConfiguration('chat'))publish();});if(listener)context.subscriptions.push(listener);

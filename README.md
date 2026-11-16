@@ -1,4 +1,10 @@
-# Sutra 0.30.0 — task-facing model packets and measured budget settlement
+# Sutra 0.31.0 — explicit task allocation recovery
+
+When a saved review pauses because its task/context allocation is too small, open Sutra Monitor and choose Increase allocation… (or run Sutra: Increase Task Allocation). Review the added capacity and new totals in the confirmation dialog. Approval preserves the original task, constraints, context and all consumed spending; send continue in the same chat afterward. If an extension update requires Restart review, accept that separate recovery choice to read source afresh.
+
+Allocation approval does not start inference, grant file permissions, enable reasoning, or override hardware/model capacity. The model cannot raise its own budget. Monitor shows spent/total amounts and the amendment version.
+
+See [allocation recovery and protocol boundaries](docs/allocation-recovery.md).
 
 The local model receives a versioned task-facing packet: the request, relevant requirements, fresh evidence, available action choices and Smriti memory. Governance identities, resource decisions, budget records and constraint echoes remain in the host. The gateway binds the exact projected packet to its dispatch permit and attaches host metadata only after checking the raw model response. Host-bound metadata is explicitly labelled; it is not a model acknowledgement or proof of compliance.
 
