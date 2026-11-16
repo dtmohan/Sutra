@@ -8,6 +8,7 @@ Choose the route from the current request and conversation:
 - workspace: answering requires inspecting the actual project, including explaining its architecture, onboarding a teammate, drawing source-backed diagrams, finding implementation details, reviewing, editing or testing. A request phrased as a question or an explanation still needs this route when project evidence is required.
 When answering depends on project files that are not supplied, choose workspace and briefly announce the source review. Missing repository evidence calls for this handoff, not a request to paste files or manually choose components. Never substitute a generic or hypothetical architecture for the user's actual project. Do not claim to have inspected source before the host does so.
 For a requested code change include workspace_request with operation=edit; for running tests use operation=test. Include the paths the user named, or [] when unspecified. These fields request work; the host handles any required permission dialog. A read-only handoff may omit workspace_request.
+Available optional tools: ruff (Python lint diagnostics) and pyright (Python type diagnostics). To install or use one, choose workspace and include workspace_request={"operation":"capability","capability":"ruff" or "pyright","capability_action":"install" or "check","paths":[requested Python paths]}. Use [] to check authorized Python files. The host handles availability and approval; never claim the tool ran before receiving its result. Do not request these tools for greetings or unrelated tasks. Browser testing and arbitrary package installation are not available.
 For missing earlier conversation evidence, request memory TOC IDs in TOP-LEVEL page_requests with escalation_reason=missing_context. If the evidence is neither in memory nor obtainable from the workspace, ask a specific question in answer and context_question. Missing context is not a reason to request a larger model. Use reasoning_capacity only when the supplied evidence is sufficient but you cannot solve the task; otherwise none.
 When choosing workspace, include a concise task_observation commitment before the host starts work: your understanding, 1–6 concrete deliverables with observable done_when criteria, and any assumptions. Preserve the user's full ask; this interpretation never changes constraints or grants authority. Omit task_observation for greetings, capability questions and ordinary conversation.
 Return one JSON object following RESPONSE_FORMAT. Put the complete, readable Markdown response in answer, including requested code or result blocks. summary is a brief memory note, never a continuation of the answer. Omit unused optional fields entirely; their requirements apply only when included.
@@ -21,6 +22,7 @@ def messages(system, payload, output_schema):
         'recent_turns', 'retrieved_turns', 'toc') if memory and key in memory}
     workspace = payload.get('workspace_context')
     context = {'memory': view or None, 'diagram_reference': payload.get('diagram_reference'),
+        'tool_evidence': payload.get('tool_evidence'),
         'workspace_task': {k: workspace[k] for k in ('goal', 'constraints')} if workspace else None,
         'workspace_handoff': {'available': True, 'same_chat': True,
                               'reads_source_after_host_authorization': True}}
@@ -61,6 +63,7 @@ def response_format(schema):
         'For "Change app.py", include {"operation":"edit","paths":["app.py"]}. '
         'For "Run tests/test_app.py", include {"operation":"test","paths":["tests/test_app.py"]}. '
         'Never substitute read for edit/test or omit this field for those requests. Paths are advisory, up to 8 paths of 240 characters; [] means unspecified scope.',
+        'For Python lint/type checks or tool installation, workspace_request uses operation=capability, capability=ruff|pyright, capability_action=check|install, paths=[]. Installation paths must be empty.',
         'facts: up to 8 exact quotations from the current user message, only if useful to remember.',
         'diagram: null for ordinary replies and workspace handoffs. A conceptual graphic stays in conversation.',
         'Example: "Draw a conceptual flow Sensor -> Display" uses intent=conversation and this diagram:',

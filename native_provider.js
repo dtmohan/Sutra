@@ -419,6 +419,11 @@ function install(vscode,context,deps){
           }
           if(['QUARANTINED','CANCELLING','EXECUTING_ACTION'].includes(flow.state))throw new Error('Sutra workflow '+flow.state+'. Saved request retained. Inspect Sutra Monitor, then choose Resume or Discard.');
           let event='step',extra={};
+          if(flow.state==='NEED_TOOL_APPROVAL'&&!flow.capability_settled){
+            const authorization=await deps.approveCapability(flow.capability_proposal,activeCancel.token);
+            if(!authorization||armed!==a){audit.stage='permission_declined';progress.report(new vscode.LanguageModelTextPart('Tool permission was not granted. The saved request can be resumed or discarded.'));return;}
+            event='capability_grant';extra={authorization};
+          }
           if(flow.state==='NEED_PERMISSION'){
             const grant=await approvePermission(flow.permission,activeCancel.token);
             if(!grant||armed!==a){audit.stage='permission_declined';progress.report(new vscode.LanguageModelTextPart('Permission was not granted. No edit or test ran.'));return;}
@@ -431,6 +436,7 @@ function install(vscode,context,deps){
           if(flow.progress)progress.report(new vscode.LanguageModelTextPart('Host workflow · '+flow.progress+'\n\n'));
           if(flow.child)recordUsage(flow.child.result);
         }
+        if(flow.capability_result){audit.stage='tool_finished';progress.report(new vscode.LanguageModelTextPart(deps.capabilityReport(flow.capability_result)));return;}
         data=flow.data;
         if(!data){progress.report(new vscode.LanguageModelTextPart(flow.state==='AWAITING_ACTION'?'The saved proposal is awaiting action confirmation. Ask for a fresh proposal if its confirmation is no longer available.':'This workflow has finished. Send a new request to continue.'));return;}
         if(armed!==a||!enabled()||activeCancel.token.isCancellationRequested)throw new Error('Native request disarmed or cancelled. Proposal withheld.');

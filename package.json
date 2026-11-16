@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Local orchestration with observe-only task commitments and completion assessments.",
-  "version": "0.32.0",
+  "version": "0.33.0",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -152,6 +152,14 @@
       {
         "command": "karma.increaseAllocation",
         "title": "Sutra: Increase Task Allocation"
+      },
+      {
+        "command": "karma.manageTools",
+        "title": "Sutra: Manage Tools"
+      },
+      {
+        "command": "karma.configureTools",
+        "title": "Sutra: Configure Tool Policy"
       }
     ],
     "configuration": {
@@ -250,6 +258,48 @@
           "default": "shared",
           "scope": "application",
           "description": "Ollama ownership for runtime memory recovery. Shared never explicitly unloads a model. Exclusive authorizes bounded release of a matching idle model after a completed Sutra call; choose only when no other app or extension uses this Ollama server."
+        },
+        "karma.tools.mode": {
+          "type": "string",
+          "enum": [
+            "disabled",
+            "ask",
+            "preapproved"
+          ],
+          "default": "ask",
+          "scope": "resource",
+          "description": "Optional tool policy. Preapproved settings require explicit user approval for this workspace and registry version."
+        },
+        "karma.tools.preapproved": {
+          "type": "object",
+          "default": {},
+          "scope": "resource",
+          "additionalProperties": false,
+          "properties": {
+            "ruff": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "install",
+                  "check"
+                ]
+              },
+              "uniqueItems": true
+            },
+            "pyright": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "install",
+                  "check"
+                ]
+              },
+              "uniqueItems": true
+            }
+          },
+          "description": "Operations to preapprove per tool, e.g. ruff: [install, check]. Sutra asks before trusting a new or changed workspace policy."
         }
       }
     },
@@ -504,6 +554,19 @@
           "required": [
             "ticket"
           ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "karma_capabilities",
+        "toolReferenceName": "sutraCapabilities",
+        "displayName": "List Sutra capabilities",
+        "userDescription": "List pinned optional tools and installation state.",
+        "modelDescription": "Discover Sutra capability IDs and versions. This tool cannot install software or grant permissions. Request installation or checking in Sutra chat; the host asks for approval or checks an approved workspace policy.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
           "additionalProperties": false
         }
       }

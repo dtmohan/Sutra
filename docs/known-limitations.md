@@ -152,3 +152,12 @@ The reported capability-to-architecture sequence now reaches the governed source
 - Sparse source or an exhausted task allocation still limits the report. A brief, evidence-limited report is preferable to invented coverage. Reviewers can remove unsupported claims or withhold publication.
 
 The first live 0.29.1 run completed but manual review found unsupported claims that the same qwen3:4b model also approved. The final prompts clarify unresolved-call counts and distinguish task permissions from project behavior. This is a prompt improvement, not a deterministic semantic verifier; same-weight review may repeat the writer's mistakes.
+
+## Optional tool capabilities (0.33.0)
+
+- The initial registry contains Ruff and Pyright only. There is no arbitrary shell, package manager, MCP server, browser runner or general dependency installer.
+- Actual execution requires the macOS sandbox. Package mappings exist for macOS/Linux/Windows architectures, but Linux/Windows execution is blocked and has not been validated on native hosts.
+- Diagnostics cover only the approved Python snapshot, bounded by the task source allocation and page size. Missing project modules or disabled project configuration can affect results. Pyright uses bundled stubs and a fixed Python 3.9 analysis target; no workspace interpreter or plugins are loaded. This is not a substitute for the project's configured CI.
+- Installation approval authorizes only the pinned registry download into Sutra storage. It does not enable task-wide networking, dependency changes or network access by the installed tool.
+- Historical diagnostics retain source hashes and are labelled as historical when passed to another model. They are not silently treated as fresh after source changes. A new check rereads and revalidates source.
+- Tool output is capped at 64 KiB, checks at 30 seconds and installations reserve 120 seconds. Observed elapsed time is charged; a killed operation retains its full reservation. Interrupted installation copies are quarantined on explicit repair and count toward storage usage.

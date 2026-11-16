@@ -1,0 +1,73 @@
+{
+  "format": 1,
+  "tools": {
+    "ruff": {
+      "version": "0.17.5",
+      "description": "Python lint diagnostics on approved source snapshots; no fixes or project config.",
+      "artifacts": {
+        "darwin-arm64": {
+          "url": "https://files.pythonhosted.org/packages/dc/4b/8b10f6c9d0a18413301ae8dd2af9d180a81bb738b1b731d944a37404c523/ruff-0.17.5-py3-none-macosx_11_0_arm64.whl",
+          "integrity": "sha256-bw23SFCPBKBOP768xjalyLO9didPjtKPSXxE11wuotc=",
+          "format": "zip",
+          "max_download_bytes": 9504737,
+          "max_expanded_bytes": 64000000,
+          "entry": "ruff-0.17.5.data/scripts/ruff"
+        },
+        "darwin-x86_64": {
+          "url": "https://files.pythonhosted.org/packages/d1/72/8ed970f3361f7c8d3f8e1b3b1af27cf086bc4b3a6b62ec20e21a1aaaaff5/ruff-0.17.5-py3-none-macosx_10_12_x86_64.whl",
+          "integrity": "sha256-ty+8Iy4yi9u5zd308a7c1hvRqmTXX8ASEUtK3QvX8ms=",
+          "format": "zip",
+          "max_download_bytes": 10250018,
+          "max_expanded_bytes": 64000000,
+          "entry": "ruff-0.17.5.data/scripts/ruff"
+        },
+        "linux-x86_64": {
+          "url": "https://files.pythonhosted.org/packages/f2/8a/1e29c0c3785ae7e5cd0d54ee8717a08867ef71545796340be4c653c57e24/ruff-0.17.5-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+          "integrity": "sha256-QMqK+qwwm0GlsuCeTnvrH4JIJrk8JWl8TXT1czJPuk4=",
+          "format": "zip",
+          "max_download_bytes": 10613231,
+          "max_expanded_bytes": 64000000,
+          "entry": "ruff-0.17.5.data/scripts/ruff"
+        },
+        "linux-arm64": {
+          "url": "https://files.pythonhosted.org/packages/b7/ea/1b3afa3943239dede7a0755ea139bdb51879f0f3f96f92894081d5c7d2e5/ruff-0.17.5-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl",
+          "integrity": "sha256-b2p7E47fnMQCynNqWdlSXm12blOVdgty5+FG5iUayWM=",
+          "format": "zip",
+          "max_download_bytes": 10168006,
+          "max_expanded_bytes": 64000000,
+          "entry": "ruff-0.17.5.data/scripts/ruff"
+        },
+        "windows-x86_64": {
+          "url": "https://files.pythonhosted.org/packages/ec/8c/e4db9ae1e0ee233c04df007ab6d0d42f799ae9abd95d352b6092ee7bc4bf/ruff-0.17.5-py3-none-win_amd64.whl",
+          "integrity": "sha256-qkFdV8JEKZJ5kB13Zgf+4994McKnQ1Qz+/rN6GMsZVA=",
+          "format": "zip",
+          "max_download_bytes": 10275454,
+          "max_expanded_bytes": 64000000,
+          "entry": "ruff-0.17.5.data/scripts/ruff.exe"
+        },
+        "windows-arm64": {
+          "url": "https://files.pythonhosted.org/packages/e6/65/a1648bc1550e7683bf7bf1e2ce2485c9f8535cbca6cca9ec7b73cc12fb8e/ruff-0.17.5-py3-none-win_arm64.whl",
+          "integrity": "sha256-ZKb9ZoozbflZxSKZHeM+njyL5GOvwMmsjwKfnRnvdW4=",
+          "format": "zip",
+          "max_download_bytes": 9849020,
+          "max_expanded_bytes": 64000000,
+          "entry": "ruff-0.17.5.data/scripts/ruff.exe"
+        }
+      }
+    },
+    "pyright": {
+      "version": "1.1.414",
+      "description": "Python type diagnostics on approved source snapshots; isolated host config.",
+      "artifacts": {
+        "any": {
+          "url": "https://registry.npmjs.org/pyright/-/pyright-1.1.414.tgz",
+          "integrity": "sha512-FPZZb51jepDX4eP7TEYDeNFtmE3WgwkkEcJpvH3/QmUSsj0EAy3LXu+xB4T/FWDejtsXlCfFr/rbWFjwuwuXww==",
+          "format": "tar",
+          "max_download_bytes": 16000000,
+          "max_expanded_bytes": 64000000,
+          "entry": "package/index.js"
+        }
+      }
+    }
+  }
+}

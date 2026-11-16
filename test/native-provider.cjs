@@ -83,6 +83,28 @@ function setup(saved={}){
  assert(body.includes('Review details and source citations'));assert(body.includes('10 freshly mapped files'));
  assert(!body.includes('protocol invocation'));assert(!body.includes('Remaining:'));
  checks.push('structured workspace report retains Markdown spacing, opens verified diagram, and moves raw IDs into review details');
+ for(const settled of [false,true]){
+  const cap=setup();await cap.arm();let approvals=0,grants=0;
+  const prior=cap.deps.request;
+  cap.deps.approveCapability=async p=>{approvals++;return {kind:'user',proposal_id:p.id};};
+  cap.deps.capabilityReport=()=> 'Ruff diagnostics: unused import in code.py';
+  cap.deps.request=async(m,t)=>{
+   if(m.op==='orchestrate'&&m.flow_id&&((settled&&m.event==='step'&&grants===1)||m.event==='capability_grant')){
+    assert.equal(m.tier,'high');if(!settled)assert.equal(m.authorization.proposal_id,'tool-p1');
+    grants++;return {flow_id:m.flow_id,state:'DONE',cursor:'4',binding:m.binding,capability_result:{result:{status:'finished'}}};
+   }
+   const out=await prior(m,t);
+   if(m.op==='orchestrate'&&out.state==='CODING'){
+    grants=1;return {...out,state:'NEED_TOOL_APPROVAL',capability_proposal:{id:'tool-p1'},capability_settled:settled};
+   }
+   return out;
+  };
+  const result=await cap.send('high');
+  assert.equal(approvals,settled?0:1);assert.equal(grants,2);
+  assert(result.some(p=>p.value?.includes('Ruff diagnostics')));
+  assert(!cap.calls.some(c=>c.op==='native_execute'));
+ }
+ checks.push('native chat renders governed tool receipts and resumes settled tool work without a second approval or execution');
  const diagramState={},diagramCommands={},diagramMessages=[];
  const diagramVscode={Uri:{file:p=>({toString:()=>p})},ViewColumn:{Beside:2},window:{showErrorMessage:m=>{throw Error(m);},createWebviewPanel:()=>({webview:{cspSource:'fixture',asWebviewUri:u=>u,onDidReceiveMessage:f=>diagramMessages.push(f)}})},commands:{registerCommand:(n,f)=>{diagramCommands[n]=f;return disposable();}}};
  const diagramContext={extensionPath:require('node:path').join(__dirname,'..'),subscriptions:[],workspaceState:{get:k=>diagramState[k],update:async(k,v)=>{diagramState[k]=structuredClone(v);}}};

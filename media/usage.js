@@ -203,6 +203,7 @@ function renderActivity(calls){
 window.addEventListener('message',({data:m})=>{if(m.type!=='usage')return;renderReasoningPreference(m.reasoningPreference);renderActivity(m.activity||[]);el('reasoning-error').textContent=m.activityError||'';el('reasoning-error').hidden=!m.activityError;snapshot=m.snapshot;routing=m.routing;native=m.native;error=m.error;for(const key of ['model','stage'])fillOptions(key);if(!snapshot){for(const key of ['input','output','calls','unknown'])el(key).textContent='—';for(const key of ['input','output'])el(key+'-note').textContent='Waiting for measurements';el('scope').textContent='This workspace · waiting for recorded calls…';el('visuals').hidden=true;el('details').hidden=true;el('empty').hidden=true;el('window').textContent='';}render();});
 // Expire live readings even if the host/reader stops delivering messages.
 el('resume-workflow').onclick=()=>vscode.postMessage({type:'resume'});el('discard-workflow').onclick=()=>vscode.postMessage({type:'discard'});
+el('manage-tools').onclick=()=>vscode.postMessage({type:'tools'});el('tool-policy').onclick=()=>vscode.postMessage({type:'tool_policy'});
 el('increase-allocation').onclick=()=>vscode.postMessage({type:'increase_allocation'});
 setInterval(()=>{if(!document.hidden)renderMonitor();},1000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)renderMonitor();});

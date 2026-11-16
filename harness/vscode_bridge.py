@@ -255,6 +255,17 @@ def handle(root,workspace,request):
             return catalog(ollama)
         s=InvocationLedger(root/'state.sqlite')
         try:
+            if request.get('op') in ('capability_list','capability_preview','capability_execute'):
+                import capabilities
+                meta=json.loads(metadata.read_text()) if metadata.exists() else {}
+                if request['op']=='capability_list':return capabilities.list_tools(s,root)
+                from native_runtime import binding
+                sid=binding(s,meta,request)
+                if not request.get('armed'):raise InvalidUpdate('Arm workspace access before requesting tools')
+                reconcile(s,workspace)
+                if request['op']=='capability_preview':
+                    return capabilities.preview(s,sid,workspace,root,request['capability'],request['action'],request.get('paths',[]))
+                return capabilities.execute(s,sid,workspace,root,request['proposal_id'],request.get('authorization'))
             if request.get('op')=='orchestrate':
                 from orchestration_flow import handle as orchestrate
                 from storage_policy import prune,require_space

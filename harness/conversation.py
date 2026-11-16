@@ -92,11 +92,14 @@ def schema(p):
                 'context_question': {'type': 'string', 'minLength': 1, 'maxLength': 500},
                 'page_requests': {'type': 'array', 'maxItems': 4 if available else 0, 'items': dict(type='string', **({'enum': available} if available else {}))},
                 'facts': {'type': 'array', 'maxItems': 8, 'items': {'type': 'string', 'enum': quotations}},
-                'workspace_request': obj({'operation': {'type': 'string', 'enum': ['read', 'edit', 'test']},
+                'workspace_request': obj({'operation': {'type': 'string', 'enum': ['read', 'edit', 'test', 'capability']},
+                    'capability': {'type':'string','enum':['ruff','pyright']},
+                    'capability_action': {'type':'string','enum':['install','check']},
                     'paths': {'type': 'array', 'maxItems': 8, 'items': {'type': 'string', 'minLength': 1, 'maxLength': 240}}}),
                 'diagram': visuals.diagram_schema()})
     # Older providers/fixtures may omit advisory fields. Absence grants nothing.
     fmt['required'] = [k for k in fmt['required'] if k not in ('facts', 'workspace_request', 'context_question')]
+    fmt['properties']['workspace_request']['required']=['operation','paths']
     from task_observations import add_schema
     return add_schema(fmt, 'commitment')
 
@@ -215,7 +218,12 @@ def check_delivery(p, proposal):
     if not answer or len(re.findall(r'^\s*```[^\n]*$', answer, re.M)) % 2:
         raise InvalidUpdate('Complete the answer and close every fenced code block; summary cannot finish the answer.')
     pages = proposal.get('page_requests', [])
-    if (proposal.get('workspace_request', {}).get('operation') in ('edit', 'test')
+    work=proposal.get('workspace_request', {})
+    if work.get('operation')=='capability' and not all(k in work for k in ('capability','capability_action')):
+        raise InvalidUpdate('Capability requests require capability and capability_action')
+    if work.get('operation')!='capability' and any(k in work for k in ('capability','capability_action')):
+        raise InvalidUpdate('Capability fields require a capability operation')
+    if (proposal.get('workspace_request', {}).get('operation') in ('edit', 'test', 'capability')
             and proposal['intent'] != 'workspace'):
         raise InvalidUpdate('An edit/test workspace_request needs intent=workspace for host handoff; omit it for conversation.')
     if len(pages) != len(set(pages)):
@@ -288,6 +296,8 @@ def _answer_step(s,meta,root,request,provider=None):
          'pages': [], 'memory': None, 'route': route,'routing_state':routing_state,
          'requested_memory_pages':routing_state['requested_pages']}
     p['diagram_reference'] = visuals.reference(s, sid, parent, prompt)
+    from capabilities import context as tool_context
+    p['tool_evidence']=tool_context(s,meta.get('active'))
     p['context_binding'] = binding(p)
     real = provider is None
     if real:

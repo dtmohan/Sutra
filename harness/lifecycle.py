@@ -42,6 +42,8 @@ def reconcile(s, workspace):
     import host_actions as actions
     repo.initialize(s);actions.initialize(s)
     events=[]
+    from capabilities import recover as recover_capabilities
+    events.extend({'kind':'capability','id':r['operation_id'],'status':'interrupted'} for r in recover_capabilities(s))
     pending=s.db.execute('SELECT o.record_json,o.digest FROM repository_ops o LEFT JOIN repository_receipts r ON r.operation_id=o.id WHERE r.id IS NULL ORDER BY o.rowid').fetchall()
     for raw,digest in pending:
         if sha('repository-op-v1:'+raw)!=digest:raise InvalidUpdate('Interrupted repository commitment corrupted')

@@ -33,6 +33,8 @@ function install(vscode,context,deps){
       .replace('SCRIPT_URI',current.webview.asWebviewUri(vscode.Uri.file(path.join(media.fsPath,'usage.js'))).toString());
     current.webview.onDidReceiveMessage(message=>{
       if(message?.type==='ready'){ready=true;publish();void refresh();}
+      else if(message?.type==='tools')void vscode.commands.executeCommand('karma.manageTools');
+      else if(message?.type==='tool_policy')void vscode.commands.executeCommand('karma.configureTools');
       else if(message?.type==='refresh')void refresh();
       else if(message?.type==='resume')void vscode.commands.executeCommand('karma.resumeWorkflow');
       else if(message?.type==='discard')void vscode.commands.executeCommand('karma.discardWorkflow');

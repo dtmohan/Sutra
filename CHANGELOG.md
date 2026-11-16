@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.33.0
+
+- Add a release-owned capability registry, pinned Ruff/Pyright installation and sandboxed static checks from native chat or Manage Tools. Never accept model-provided commands, package names or URLs.
+- Add separate install/check approvals and workspace preapproval policies authenticated by user confirmation. Scope, task, policy, registry and source changes invalidate pending grants.
+- Centralize tool transitions in orchestration; reserve operations, time and source bytes through the unchanged STP kernel. Retain charges on failure and interruption.
+- Persist tool receipts and Smriti diagnostic pages across model switches; reconcile completed effects without replay and quarantine orphan installations on newly approved repair.
+- Add Monitor controls and escaped diagnostic reports. Execution is currently macOS-only; portable package mappings do not imply a validated cross-platform sandbox.
+
 ## 0.32.0
 
 - Split architecture claim reviews into immutable, allocation-sized pages with host-generated source evidence IDs. Cover every relevant claim/source pair; withhold publication until all pages pass and omit contradicted or unsupported claims.

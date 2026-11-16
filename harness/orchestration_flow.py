@@ -28,6 +28,12 @@ def pending_flows(s,workspace,exclude=None):
 
 def response(s,fid,**extra):
     n,data=info(s,fid);history=m.events(s,fid)
+    if m.state(s,fid)=='NEED_TOOL_APPROVAL':
+        import capabilities
+        p=data.get('capability_proposal')
+        extra.setdefault('capability_proposal',p)
+        extra['capability_settled']=bool(p and capabilities.completed(s,p['id']))
+    if m.state(s,fid)=='DONE' and data.get('capability_result'):extra.setdefault('capability_result',data['capability_result'])
     from task_observations import summary
     outcome = extra.get('data', {}).get('result')
     observations = summary(s, data.get('conversation_id'), data.get('invocation_id'),
@@ -121,6 +127,12 @@ def handle(s,meta,workspace,root,req,providers=None):
     req.pop('_created_flow_id',None)
     try:
         return _handle(s,meta,workspace,root,req,providers)
+    except (BudgetStop,m.OrchestrationStop) as exc:
+        fid=req.get('flow_id')
+        if not fid or m.state(s,fid) not in ('WORKSPACE','NEED_TOOL_APPROVAL'):raise
+        phase=m.state(s,fid)
+        move(s,fid,'PAUSED','CONTEXT_STOPPED',workflow_stop={'status':'task_budget','stage':phase,'error':str(exc),'automatic_retry':False})
+        return response(s,fid)
     except (PageFault, ContextBudgetExceeded) as exc:
         fid=req.get('_created_flow_id') or req.get('flow_id')
         if not fid:raise
@@ -145,9 +157,9 @@ def handle(s,meta,workspace,root,req,providers=None):
             fid=pending[0]
         _,data=info(s,fid);phase=m.state(s,fid)
         target=(data.get('workflow_stop') or {}).get('resume_phase') if phase=='PAUSED' else phase
-        if target not in ('CLASSIFYING','MAPPING','CHILDREN','SYNTHESIS','CODING'):raise
+        if target not in ('CLASSIFYING','MAPPING','CHILDREN','SYNTHESIS','CODING','WORKSPACE','NEED_TOOL_APPROVAL'):raise
         from resource_routing import propose
-        fallback=propose(s,fid,data,req,exc.state,target)
+        fallback=propose(s,fid,data,req,exc.state,target) if target not in ('WORKSPACE','NEED_TOOL_APPROVAL') else None
         if fallback:
             with s.db:
                 m.transition(s,fid,target,'RESOURCE_MODEL_FALLBACK',
@@ -214,6 +226,7 @@ def _handle(s,meta,workspace,root,req,providers=None):
         if f['workspace']!=str(workspace):raise InvalidUpdate('Workflow belongs to another workspace')
         if event=='inspect':
             extra={'prompt':f['prompt']}
+            if m.state(s,fid)=='NEED_TOOL_APPROVAL':extra['capability_proposal']=d.get('capability_proposal')
             if m.state(s,fid)=='NEED_PERMISSION' and not recovery(s,fid):extra.update(permission=permission(s,meta['active'],d['permission']),bound_task=identity(s,meta['active']))
             return response(s,fid,**extra)
         if req.get('cursor')!=response(s,fid)['cursor']:raise InvalidUpdate('Workflow event is stale or replayed')
@@ -340,7 +353,28 @@ def _handle(s,meta,workspace,root,req,providers=None):
         return response(s,fid)
     if d.get('binding')!=identity(s,meta.get('active')) or req.get('binding')!=d['binding']:raise InvalidUpdate('Workflow task, calibration or permissions changed')
     parent=m.checked(s,d['root_node']);sid=parent['session']
+    if phase=='NEED_TOOL_APPROVAL':
+        import capabilities
+        p=d['capability_proposal']
+        receipt=capabilities.completed(s,p['id'])
+        if receipt:
+            capabilities.materialize(s,receipt,receipt['receipt'])
+        else:
+            if event!='capability_grant':raise InvalidUpdate('Tool approval required')
+            receipt=capabilities.execute(s,sid,workspace,root,p['id'],req.get('authorization'))
+        if receipt['result']['status']=='installed' and d['permission'].get('capability_action')=='check':
+            move(s,fid,'WORKSPACE','TOOL_INSTALLED',capability_proposal=None)
+            return response(s,fid,progress='Approved tool installed; preparing its separate source-check permission.',capability_result=receipt)
+        move(s,fid,'DONE','CAPABILITY_FINISHED',capability_result=receipt)
+        return response(s,fid,capability_result=receipt)
     if phase=='WORKSPACE':
+        if d['permission'].get('operation')=='capability':
+            import capabilities
+            wanted=d['permission'];name=wanted['capability'];action=wanted['capability_action']
+            if action=='check' and not capabilities.installed(s,root,name):action='install'
+            p=capabilities.preview(s,sid,workspace,root,name,action,wanted['paths'] if action=='check' else [])
+            move(s,fid,'NEED_TOOL_APPROVAL','TOOL_PROPOSED',capability_proposal=p)
+            return response(s,fid,capability_proposal=p)
         c=s.snapshot(sid)['constraints']
         move(s,fid,'CODING' if c.get('native_task') else 'MAPPING','WORK_SELECTED')
         return response(s,fid)

@@ -17,6 +17,8 @@ def usage(s,session):
  used={k:0 for k in limits};digest=s.origin(session)['contract_hash']
  from native_access import carry_usage
  used.update(carry_usage(s,session,digest))
+ from capabilities import usage as capability_usage
+ for key,value in capability_usage(s,session,digest).items():used[key]+=value
  if s.db.execute("SELECT 1 FROM sqlite_master WHERE name='repository_ops'").fetchone():
   for raw,elapsed in s.db.execute("SELECT o.record_json,json_extract(r.record_json,'$.elapsed_seconds') FROM repository_ops o LEFT JOIN repository_receipts r ON r.operation_id=o.id WHERE o.session=?",(session,)):
    op=json.loads(raw)

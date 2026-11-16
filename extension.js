@@ -19,6 +19,7 @@ function activate(context) {
   const nativeProvider=require('./native_provider');
   const diagramView=require('./diagram_view');
   const usageView=require('./usage_view');
+  const capabilityUI=require('./capabilities');
   const output = vscode.window.createOutputChannel('Sutra');
   let nativeController, usage, panel, panelReady=false, panelSection, busy = false, sequence = false, telemetry, telemetryDir, dashboardTimer, dashboardInFlight=false, stopAuto=false, chatCancellation;
   let lastReview;
@@ -32,7 +33,7 @@ function activate(context) {
   }
   const processes = new Set();
   let dashboardWorker;
-  function runtimeEnvironment(){return {SUTRA_RUNTIME_DIR:path.join(context.globalStorageUri.fsPath,"runtime-memory"),SUTRA_MEMORY_OWNERSHIP:vscode.workspace.getConfiguration("karma").get("memoryOwnership","shared")};}
+  function runtimeEnvironment(){return {SUTRA_CAPABILITIES_MODE:vscode.workspace.getConfiguration("karma").get("tools.mode","ask"),SUTRA_RUNTIME_DIR:path.join(context.globalStorageUri.fsPath,"runtime-memory"),SUTRA_MEMORY_OWNERSHIP:vscode.workspace.getConfiguration("karma").get("memoryOwnership","shared")};}
   const workspace = () => {
     if (!vscode.workspace.isTrusted) throw new Error('Sutra requires a trusted workspace.');
     const folder = vscode.workspace.workspaceFolders?.[0];
@@ -114,7 +115,7 @@ function activate(context) {
     const diagnostic=message?.op==='dashboard';
     if(diagnostic)return requestDashboard();
     if ((busy || ((sequence || nativeController?.status().working) && !internal)) && !diagnostic) throw new Error('A Sutra request is running. Switch models after it finishes.');
-    if (!['orchestrate','conversation_read','conversation','native_permissions','native_work','native_preview','native_execute','chat_answer','calibration_register','calibration_list','calibration_bind','calibration_revoke','calibration_evaluate','models','state','new','save','switch','review','work','preview','execute','dashboard','quarantine','review_new','architecture','repository_tool','api_build','api_verify','static_build','static_explain','auto_new','auto_step','auto_report'].includes(message?.op)) throw new Error('Unknown Sutra request.');
+    if (!['capability_list','capability_preview','capability_execute','orchestrate','conversation_read','conversation','native_permissions','native_work','native_preview','native_execute','chat_answer','calibration_register','calibration_list','calibration_bind','calibration_revoke','calibration_evaluate','models','state','new','save','switch','review','work','preview','execute','dashboard','quarantine','review_new','architecture','repository_tool','api_build','api_verify','static_build','static_explain','auto_new','auto_step','auto_report'].includes(message?.op)) throw new Error('Unknown Sutra request.');
     if((['native_work','chat_answer','static_build','static_explain','auto_step','auto_report'].includes(message.op)||(message.op==='orchestrate'&&!['start','inspect','pending','cancel'].includes(message.event)))&&hasDirtyFiles())throw new Error('Save or discard unsaved workspace buffers before mapping current source.');
     if(['execute','native_execute'].includes(message.op) && hasDirtyFiles())throw new Error('Save or discard unsaved workspace buffers before applying an edit or running tests.');
     const cwd = workspace(), stateDir = storage();
@@ -513,7 +514,11 @@ function activate(context) {
   const diagrams=diagramView.install(vscode,context,id=>request({op:'conversation_read',invocation_id:id}));
   usage=usageView.install(vscode,context,{refresh:refreshDashboard,storage,activityChanged:uri=>previewChanges.fire(uri)});
   dashboardTimer=setInterval(refreshDashboard,2000);
+  const toolController=capabilityUI.controller(vscode,context,{workspace,armed:()=>!!nativeController?.status().armed,
+    request:(m,t)=>request(m,t,true),async showResult(r){const uri=vscode.Uri.parse('karma-preview:/tools/'+r.operation_id+'/Diagnostics.md');previewDocuments.set(uri.toString(),capabilityUI.report(r));await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));}});
+  context.subscriptions.push(vscode.commands.registerCommand('karma.manageTools',()=>toolController.manage().catch(e=>vscode.window.showErrorMessage(e.message))),vscode.commands.registerCommand('karma.configureTools',()=>toolController.configure().catch(e=>vscode.window.showErrorMessage(e.message))));
   const externalTools={
+    karma_capabilities:async()=>request({op:'capability_list'}),
     karma_auto_review:async(input,token)=>request({op:'auto_step',explain:input.explain!==false},token),
     karma_review:async(input,token)=>runReview(input.prompt,input.steps??1,token,input.mode??'explore'),
     karma_source_map:async(input,token)=>request({op:'static_build',files:input.files,offset:input.offset??0},token),
@@ -529,6 +534,7 @@ function activate(context) {
   }));
   if(vscode.lm.registerLanguageModelChatProvider){
     nativeController=nativeProvider.install(vscode,context,{request:(m,t,a)=>request(m,t,true,a),workspace,isBusy:()=>busy||sequence,
+      approveCapability:(p,t)=>toolController.approve(p,t),capabilityReport:capabilityUI.report,
       activityLink:event=>usage?.activityLink(event),modelSettings,configureModels:(force,t)=>configureModels(force,t,true),simpleChat,publishReview,
       async presentReview(data){await diagrams.openReview(data);},
       async presentConversation(data){if(data.result.accepted_output.diagram)await diagrams.open(data);},
