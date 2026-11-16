@@ -74,9 +74,8 @@ def thinking_control(info, preference):
     if preference == 'model-default':
         return None
     if preference == 'adaptive':
-        # Workspace workers retain model default. The tool-free conversation
-        # router binds its own capability-aware adaptive choice to its receipt.
-        return None
+        from reasoning_policy import capabilities, make
+        return make(capabilities(info), preference)['requested']
     if preference != 'on':
         raise ValueError('Unknown thinking preference')
     if True in values:

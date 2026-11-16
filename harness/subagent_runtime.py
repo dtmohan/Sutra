@@ -31,6 +31,8 @@ def memory(s,p,budget,materialize=False):
     return cm.working_set(s,row[0],iid,p['request'],budget,base,SYSTEM,schema,extra_bytes=budget.context_limit//16)
 
 def request_check(s,sid,p):
+    from review_reasoning import check
+    check(p)
     from conversation import check_workspace_handoff
     n=machine.node(s,p['branch']['id'])
     if machine.packet(n)!=p['branch'] or n['kind']!='branch' or n['session']!=sid or n['binding']!=machine.binding(s,sid):raise InvalidUpdate('Child lineage or contract changed')
@@ -88,6 +90,8 @@ def run(s,meta,workspace,root,nid,models,tier='auto',provider=None):
            'snapshot_receipts':receipts,'sites':[c['id'] for c in graph['calls'][:4]],'excerpt_bytes':max(64,min(65536,provider.budget.context_limit//3)),'map_bytes':max(512,min(65536,provider.budget.context_limit//3)),'route':route,
            'memory_budget':vars(provider.budget).copy()}
         p['constraint_echo']=constraint_rows(p['contract'])
+        from review_reasoning import bind, repair
+        bind(provider, p)
         if n['context'].get('conversation_id'):
             from conversation import workspace_handoff
             p['conversation_handoff']=workspace_handoff(s,sid,n['context']['conversation_id'],p['request'])
@@ -101,6 +105,7 @@ def run(s,meta,workspace,root,nid,models,tier='auto',provider=None):
                 if p['excerpt_bytes']==64 and p['map_bytes']==512:raise
                 p['excerpt_bytes']=max(64,p['excerpt_bytes']*4//5);p['map_bytes']=max(512,p['map_bytes']*4//5)
         rid=s.begin_run(sid,p['request'],[],None,max_calls=3,max_repairs=2)
+        output_repaired = False
         for attempt in range(3):
             s.reserve(rid,'ATTEMPT',{'attempt':attempt})
             if real:
@@ -112,11 +117,15 @@ def run(s,meta,workspace,root,nid,models,tier='auto',provider=None):
             if out['admission']['admitted']:
                 s.event(rid,'ALLOW',{'invocation_id':out['invocation_id']});machine.complete(s,nid,out['invocation_id']);break
             s.event(rid,'NACK',{'errors':out['admission']['errors']})
-            if attempt==2 or out.get('blocked'):
+            recovery = repair(out, p, output_repaired, attempt < 2)
+            if attempt==2 or (out.get('blocked') and recovery is None):
                 s.event(rid,'FIN',{'reason':'child_repair_exhausted'})
                 with s.db:machine.transition(s,nid,'QUARANTINED','CHILD_REJECTED',{'invocation_id':out['invocation_id']})
                 break
-            s.event(rid,'BRIDGE',{'reason':'bounded_child_repair'});p['repair']={'errors':[e[:140] for e in out['admission']['errors'][:2]]}
+            request_check(s,sid,p)
+            s.event(rid,'BRIDGE',{'reason':'bounded_output_repair' if recovery else 'bounded_child_repair'})
+            p['repair'] = recovery or {'errors':[e[:140] for e in out['admission']['errors'][:2]]}
+            output_repaired = output_repaired or recovery is not None
         out.pop('record',None);out.pop('model_proposal',None)
         return {'result':out,'route':route,'branch_id':nid}
 

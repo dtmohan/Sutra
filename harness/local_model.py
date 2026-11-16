@@ -3,6 +3,9 @@ import http.client,json,pathlib,time
 from paging import Budget
 from legacy_model import EXTRACTOR, PATCH_SCHEMA, source_units, resolve_operations
 
+class OutputLimitExceeded(RuntimeError):
+    """A completed transport reported exhaustion, not a usable final answer."""
+
 class LocalModel:
     def __init__(self, log_dir, port=11435, model='qwen3:4b', health=None, budget=Budget(), thinking=False):
         self.log_dir=pathlib.Path(log_dir); self.log_dir.mkdir(parents=True,exist_ok=True)
@@ -76,7 +79,10 @@ class LocalModel:
                     record['response']=response
                     break
             if response is None: raise RuntimeError('Incomplete generation: stream ended without final usage')
-            if not response.get('done') or response.get('done_reason')=='length': raise RuntimeError('Incomplete generation')
+            if response.get('done_reason')=='length':
+                raise OutputLimitExceeded('Incomplete generation: output allowance exhausted before a complete answer; '
+                                          'reasoning and answer share the output allowance')
+            if not response.get('done'): raise RuntimeError('Incomplete generation')
             if response.get('prompt_eval_count',0)+self.budget.response_reserve>body['options']['num_ctx']:
                 raise RuntimeError('Actual prompt exceeds admitted context budget')
             answer=json.loads(response['message']['content']); record['answer']=answer; record['ok']=True

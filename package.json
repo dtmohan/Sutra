@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Local orchestration with observe-only task commitments and completion assessments.",
-  "version": "0.29.0",
+  "version": "0.29.1",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -218,13 +218,13 @@
             "model-default"
           ],
           "enumDescriptions": [
-            "Select supported effort for explicit reasoning, numeric planning, code analysis and fenced structured results; keep routine chat fast. Page context before reasoning retries and model switches. Workspace workers use model default.",
+            "Select supported effort for conversation routing. Workspace calls start at the lowest known control; bounded report retries use existing allocations. Page context before conversation reasoning retries and model switches.",
             "Request thinking off. Models that require it may still emit reasoning.",
             "Enable reasoning at the lowest advertised positive level.",
             "Use each installed model\u2019s default reasoning setting."
           ],
           "default": "adaptive",
-          "description": "Local-model reasoning. Adaptive applies to conversation and intent routing; explicit Off, On and Model default choices are preserved. All reasoning and answers share the existing token, call and time allocations."
+          "description": "Local-model reasoning. Adaptive applies to routing and workspace generation. Explicit Off, On and Model default choices are preserved. Reasoning and answers share the existing token, call and time allocations."
         },
         "karma.logitSensor": {
           "type": "string",

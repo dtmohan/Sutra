@@ -123,7 +123,7 @@ class ReportReviewTests(unittest.TestCase):
         reviewer=LocalFixture(self.storage/'calls',model='live-fixture')
         reviewer.payloads=[];reviewer.fault=None;reviewer.budget=Fake.budget
         observed=identity(reviewer.model,'weights','manifest')
-        with patch('model_identity.observe',return_value=observed),patch('monitoring.require_resources',return_value={'profile':'injected-test-provider'}):
+        with patch('model_identity.observe',return_value=observed),patch('monitoring.require_resources',return_value={'profile':'injected-test-provider'}), patch('vscode_bridge.ollama',return_value={}):
             out=self.review(reviewer=reviewer)
         self.assertTrue(out['result']['admission']['admitted'],out)
         self.assertEqual(out['report_review']['independence']['reviewer_identity'],observed)

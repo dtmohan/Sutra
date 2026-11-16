@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.29.1
+
+- Apply capability-aware Adaptive controls to workspace generation; bind architecture, child and report-review controls to receipts and recheck them before dispatch.
+- Shorten review instructions, state character units, and scale detail to source evidence instead of requiring a long report.
+- Distinguish exhausted output allowance from interrupted transport. Keep partial generations quarantined and all usage charged; permit one compact retry only within existing review attempts and budgets.
+- Retain explicit reasoning preferences, source freshness, permissions, reviewer checks, and model-switch context. Preserve compatible 0.29.0 conversation data without accepting old executable proposals.
+- Keep the canonical STP kernel unchanged.
+
 ## 0.29.0
 
 - Estimate additional memory for a loaded model by deducting only reusable weights with matching name, manifest, backend, unexpired residency and sufficient context. Retain the full KV/workspace estimate, calibration margin, fresh OS pressure checks and 4 GiB reserve. Recheck installed identity and residency before dispatch.

@@ -346,6 +346,7 @@ class InvocationGateway:
         finally: ledger.close()
         permit = {'hash': envelope['request_hash'], 'used': False}
         token = _permit.set(permit); error = None; proposal = None; record = None;started=time.monotonic()
+        output_limit = False
         from model_activity import scope
         try:
             with scope(envelope) as activity:
@@ -353,6 +354,8 @@ class InvocationGateway:
                 if isinstance(self.provider,LocalModel) and observe(name)!=identity:
                     raise InvalidUpdate('Model identity changed during inference')
         except Exception as exc:
+            from local_model import OutputLimitExceeded
+            output_limit = isinstance(exc, OutputLimitExceeded)
             error = type(exc).__name__ + ': ' + str(exc)
             record = getattr(exc, 'call_record', None) or record or {'call_id': call_id, 'ok': False, 'error': error}
         finally: _permit.reset(token)
@@ -364,6 +367,7 @@ class InvocationGateway:
             activity.finish(result['admission']['admitted'], measured(record))
             result['token_usage'] = history(ledger.db, run_id=self.run_id)
             if error: result['blocked'] = error
+            if output_limit: result['failure_kind'] = 'output_limit'
             result['record'] = record
             return result
         finally: ledger.close()

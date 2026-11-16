@@ -1,0 +1,183 @@
+import copy
+import json
+import unittest
+from unittest.mock import patch
+
+from context_manager import InvalidUpdate
+from local_model import OutputLimitExceeded
+from model_activity import thinking_control
+from reasoning_policy import check_provider
+from review_reasoning import bind, repair
+from review_budget import usage
+from paging import PageFault
+import chat_runtime as chat
+import test_chat as fixture
+from test_chat import Fake
+
+
+class Exhausted(Fake):
+    context_metadata = {'thinking': {'values': [False, True], 'default': True}}
+
+    def __init__(self, failures=1, error=OutputLimitExceeded, change=None):
+        super().__init__()
+        self.failures, self.error, self.change = failures, error, change
+
+    def call(self, cid, system, p, schema):
+        answer, record = super().call(cid, system, p, schema)
+        if len(self.payloads) <= self.failures:
+            if self.change: self.change()
+            exc = self.error('Incomplete generation: output allowance exhausted')
+            exc.call_record = {'call_id': cid, 'ok': False,
+                               'response': {'done': True, 'done_reason': 'length',
+                                            'prompt_eval_count': 400,
+                                            'eval_count': self.budget.response_reserve}}
+            raise exc
+        return answer, record
+
+
+class ControlsTests(unittest.TestCase):
+    def test_supported_adaptive_defaults_and_user_overrides(self):
+        for values, expected in [([True], False), (['low', 'medium'], False),
+                                  ([], None), (['unfamiliar'], None)]:
+            info = {'thinking': {'values': values}}
+            self.assertIs(thinking_control(info, 'adaptive'), expected)
+        self.assertTrue(thinking_control({'thinking': {'values': [True]}}, 'on'))
+        self.assertIsNone(thinking_control({}, 'model-default'))
+
+    def test_receipt_plan_binds_transport_and_fresh_capabilities(self):
+        model = Exhausted(); p = {}
+        with patch.dict('os.environ', SUTRA_THINKING='adaptive'): bind(model, p)
+        check_provider(model, p)
+        model.thinking = True
+        with self.assertRaises(InvalidUpdate): check_provider(model, p)
+        model.thinking = False
+        model.context_metadata = {'thinking': {'values': ['low', 'high']}}
+        with self.assertRaises(InvalidUpdate): check_provider(model, p)
+
+    def test_repair_cannot_create_attempts_or_override_explicit_controls(self):
+        model = Exhausted(); result = {'failure_kind': 'output_limit'}
+        for preference in ('off', 'on', 'model-default'):
+            p = {}
+            with patch.dict('os.environ', SUTRA_THINKING=preference): bind(model, p)
+            self.assertIsNone(repair(result, p, False, True))
+        with patch.dict('os.environ', SUTRA_THINKING='adaptive'): bind(model, p)
+        self.assertIsNone(repair(result, p, False, False))
+        self.assertIsNone(repair(result, p, True, True))
+        self.assertIsNone(repair({'blocked': 'output_limit'}, p, False, True))
+        self.assertTrue(all(len(e) <= 140 for e in repair(result, p, False, True)['errors']))
+
+
+class ReviewRecoveryTests(unittest.TestCase):
+    setUp = fixture.ChatTests.setUp
+    tearDown = fixture.ChatTests.tearDown
+    ask = fixture.ChatTests.ask
+
+    def test_recovery_then_model_switch_retains_pins_and_charges_failure(self):
+        before = usage(self.s, self.sid)
+        model = Exhausted()
+        with patch.dict('os.environ', SUTRA_THINKING='adaptive'):
+            out = self.ask(provider=model)
+        self.assertTrue(out['result']['admission']['admitted'], out)
+        self.assertEqual(len(model.payloads), 2)
+        first, second = model.payloads
+        self.assertEqual({k: v for k, v in second.items() if k != 'repair'}, first)
+        self.assertIs(first['reasoning']['requested'], False)
+        failed = self.s.db.execute("SELECT invocation_id FROM invocation_receipts WHERE json_extract(record_json,'$.status')='quarantined'").fetchone()[0]
+        with self.assertRaises((InvalidUpdate, PageFault)): self.s.load_result(self.sid, failed)
+        calls = out['result']['token_usage']['calls']
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(next(c for c in calls if c['status']=='quarantined')['output_tokens'], model.budget.response_reserve)
+        after = usage(self.s, self.sid)
+        self.assertEqual(after['used']['calls'], before['used']['calls'] + 2)
+        charge = self.s.db.execute('SELECT SUM(json_extract(record_json,\'$.charge\') + json_extract(record_json,\'$.budget_profile.response_reserve\')) FROM invocations WHERE run_id=?',
+                                  (calls[0]['run_id'],)).fetchone()[0]
+        self.assertEqual(after['used']['tokens'] - before['used']['tokens'], charge)
+        other = Fake('fixture-large')
+        switched = self.ask('Continue the source explanation.', tier='high', provider=other)
+        self.assertTrue(switched['result']['admission']['admitted'])
+        p = other.payloads[0]
+        self.assertEqual(p['contract'], first['contract'])
+        self.assertEqual(p['constraint_echo'], first['constraint_echo'])
+        self.assertEqual(p['handoff']['invocation_id'], out['result']['invocation_id'])
+        self.assertGreater(usage(self.s, self.sid)['used']['tokens'], after['used']['tokens'])
+        self.assertTrue(self.s.verify_invocations(self.sid))
+
+    def test_two_exhaustions_stop_without_publishing_or_third_call(self):
+        model = Exhausted(failures=3)
+        with patch.dict('os.environ', SUTRA_THINKING='adaptive'): out = self.ask(provider=model)
+        self.assertFalse(out['result']['admission']['admitted'])
+        self.assertEqual(len(model.payloads), 2)
+        self.assertFalse(self.meta.get('chat', {}).get('checkpoint'))
+        self.assertEqual(out['result']['failure_kind'], 'output_limit')
+
+    def test_transport_errors_and_explicit_thinking_do_not_retry(self):
+        for model, preference in [(Exhausted(error=RuntimeError), 'adaptive'), (Exhausted(), 'on')]:
+            with patch.dict('os.environ', SUTRA_THINKING=preference): out = self.ask(provider=model)
+            self.assertFalse(out['result']['admission']['admitted'])
+            self.assertEqual(len(model.payloads), 1)
+
+    def test_changed_source_after_exhaustion_stops_recovery(self):
+        model = Exhausted(change=lambda: (self.ws/'entry.py').write_text('def changed(): return 2\n'))
+        with patch.dict('os.environ', SUTRA_THINKING='adaptive'): out = self.ask(provider=model)
+        self.assertFalse(out['result']['admission']['admitted'])
+        self.assertEqual(len(model.payloads), 1)
+
+    def test_final_allocated_attempt_cannot_spawn_recovery(self):
+        fit = chat.fit_packet
+        def one(*args): return fit(*args)[0], 1
+        model = Exhausted()
+        with patch('chat_runtime.fit_packet', side_effect=one), patch.dict('os.environ', SUTRA_THINKING='adaptive'):
+            out = self.ask(provider=model)
+        self.assertFalse(out['result']['admission']['admitted'])
+        self.assertEqual(len(model.payloads), 1)
+
+    def test_independent_report_check_can_recover_without_publishing_partial_claims(self):
+        reviewer = Exhausted()
+        with patch.dict('os.environ', SUTRA_THINKING='adaptive'):
+            out = chat.answer(self.s, self.meta, self.ws, self.storage,
+                {'prompt': 'Explain the architecture.', 'models': fixture.MODELS, 'tier': 'low'},
+                provider=Fake(), review_provider=reviewer)
+        self.assertTrue(out['result']['admission']['admitted'], out)
+        self.assertEqual(len(reviewer.payloads), 2)
+        self.assertEqual(reviewer.payloads[0]['contract'], reviewer.payloads[1]['contract'])
+        self.assertTrue(out['report_markdown'])
+        self.assertTrue(self.s.verify_invocations(self.sid))
+
+
+import test_orchestration as orchestration_fixture
+import orchestration as machine
+
+
+class BranchRecoveryTests(unittest.TestCase):
+    setUp = orchestration_fixture.OrchestrationTests.setUp
+    tearDown = orchestration_fixture.OrchestrationTests.tearDown
+    provider = orchestration_fixture.OrchestrationTests.provider
+    step = orchestration_fixture.OrchestrationTests.step
+    until = orchestration_fixture.OrchestrationTests.until
+    children = orchestration_fixture.OrchestrationTests.children
+
+    def test_child_recovery_then_model_switch_preserves_parent_memory_and_budget(self):
+        out = self.children()
+        cid = out['children'][0]['id']
+        parent = machine.node(self.s, cid)['parent_id']
+        before = machine.spent(self.s, parent)
+        original = self.provider
+        class Branch(Exhausted):
+            def call(self, cid, system, p, schema):
+                result, record = super().call(cid, system, p, schema)
+                result['branch_id'] = p['branch']['id']
+                return result, record
+        child = Branch(); child.model = orchestration_fixture.MODELS[self.tier]
+        self.provider = lambda stage: child if stage == 'subagent' else original(stage)
+        with patch.dict('os.environ', SUTRA_THINKING='adaptive'): out = self.step(out)
+        self.assertEqual(machine.state(self.s, cid), 'DONE')
+        self.assertEqual(len(child.payloads), 2)
+        first, second = child.payloads
+        self.assertEqual(first, {k: v for k, v in second.items() if k != 'repair'})
+        self.assertIn('CED724', json.dumps(first))
+        spent = machine.spent(self.s, parent)
+        self.assertGreater(spent['tokens'], before['tokens'])
+        self.provider = original; self.tier = 'high'
+        final = self.until('DONE', out)
+        self.assertTrue(final['data']['result']['admission']['admitted'])
+        self.assertGreater(machine.spent(self.s, parent)['tokens'], spent['tokens'])

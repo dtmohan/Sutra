@@ -110,7 +110,7 @@
 
 ## Adaptive reasoning
 
-- Adaptive currently applies to conversation and intent routing. Workspace workers and independent reviewers use their model-default reasoning; source-informed worker tier selection is unchanged.
+- Adaptive applies to conversation routing and workspace generation. Workspace calls start at the lowest known control; report writers, child reviewers and independent report checkers bind that choice to receipts. This does not establish answer quality or guarantee that a backend disables reasoning. Source-informed tier selection is unchanged.
 - The escalation signal is a fallible model assessment. More deliberation is not a correctness guarantee, and a request can stop at an incorrect direct answer without asking for help.
 - Ollama's `think=false` request may fall back to a model's lowest available level. If thinking-on is advertised, the generic false request can be followed by true, but backend fallback may make them computationally equivalent. Metadata does not prove the backend's actual computation. Unknown level names are not ordered automatically.
 - Each supported retry consumes the existing call, time and output allocation. Increasing `num_predict` alone is not used as a reasoning control. A long thought stream can still exhaust the combined reasoning/answer output reserve and be withheld.
@@ -127,4 +127,12 @@
 
 ## 0.26.1 live routing validation
 
-The reported capability-to-architecture sequence now reaches the governed source workflow. This does not guarantee that a subsequent architecture report finishes. In the isolated one-file test, the MLX worker exhausted a roughly 2K-token output share; a MoE replacement produced a draft after one formatting repair, but its smaller independent reviewer also exhausted its combined reasoning/output share. Both publication failures remained withheld. Context, read-only permissions and consumed budget survived the model switch. Adaptive still applies to the conversation router; workspace workers/reviewers retain model-default reasoning. Their output allocation and reasoning policy need separate tuning.
+The reported capability-to-architecture sequence now reaches the governed source workflow. This does not guarantee that a subsequent architecture report finishes. In the isolated one-file test, the MLX worker exhausted a roughly 2K-token output share; a MoE replacement produced a draft after one formatting repair, but its smaller independent reviewer also exhausted its combined reasoning/output share. Both publication failures remained withheld. Context, read-only permissions and consumed budget survived the model switch. That experiment predates 0.29.1, which adds adaptive workspace controls and a bounded compact-output repair. Evidence, output and task allocations can still be insufficient; those stops remain enforced.
+
+## Bounded review output (0.29.1)
+
+- Only a typed output-exhaustion error can trigger the compact-output repair. Missing stream completion, network errors and resource waits cannot trigger it.
+- A repair needs an existing attempt and all task, context, source and resource checks. It does not increase the output reserve, drop constraints or refund the failed call. At most one output-limit repair occurs in a review run; user-selected On/default modes do not get this automatic retry.
+- Sparse source or an exhausted task allocation still limits the report. A brief, evidence-limited report is preferable to invented coverage. Reviewers can remove unsupported claims or withhold publication.
+
+The first live 0.29.1 run completed but manual review found unsupported claims that the same qwen3:4b model also approved. The final prompts clarify unresolved-call counts and distinguish task permissions from project behavior. This is a prompt improvement, not a deterministic semantic verifier; same-weight review may repeat the writer's mistakes.
