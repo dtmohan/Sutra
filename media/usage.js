@@ -98,6 +98,8 @@ function renderMonitor(){
  }
  const c=d.context;
  el('context-packet').textContent=c?'Last workspace packet: '+T.number(c.conservative_input_charge)+' input charge + '+T.number(c.output_reserve)+' output reserve / '+T.number(c.limit)+' context allocation. Measured input: '+T.number(c.actual_prompt_tokens)+' tokens.':'No workspace model packet recorded. Conversation history and workspace task allocations are separate.';
+ if(c?.model_packet){const p=c.model_packet;el('context-packet').textContent+=' Model-facing prompt: '+T.number(p.prompt_utf8_bytes)+' UTF-8 bytes; schema allowance: '+T.number(p.schema_allowance)+'; template allowance: '+T.number(p.template_allowance)+'. Host governance records are excluded.';}
+ if(c?.accounting_settlement){const a=c.accounting_settlement;el('context-packet').textContent+=' Task charge: '+T.number(a.used_tokens)+' ('+(a.basis==='runtime_measured'?'completed runtime counts':'reservation retained')+'). Unused reservation released: '+T.number(a.released_unused_reservation)+'.';}
  el('kernel-identity').textContent=d.kernel?'Kernel: '+d.kernel.name+' · SHA-256 '+d.kernel.sha256+' · check order '+(d.kernel.order||[]).join(' → '):'Kernel identity not available.';
  const memory=routing?.memoryUsed===true?' · Smriti memory restored':routing?.memoryUsed===false?' · new conversation':'';
  el('native-request').textContent=routing?'Last Sutra request: '+(routing.model||'model pending')+' · '+(routing.stage||'received')+memory+'. Workspace tools '+(native?.armed?'armed':'unarmed')+'.':'No Sutra request observed in this window. Selected chat routing is unverified.';
@@ -170,7 +172,7 @@ function render(){
  for(const g of totals){const line=node('div',undefined,'stage'),heading=node('div',undefined,'heading');heading.append(node('span',T.stage(g.stage)),node('span',T.metric(g,'input_tokens')+' in / '+T.metric(g,'output_tokens')+' out'));line.append(heading);
   for(const [key,cls] of [['input_tokens','in'],['output_tokens','out']]){const p=node('progress',undefined,cls);p.max=stageMax;p.value=g[key]||0;p.setAttribute('aria-label',T.stage(g.stage)+' '+key+': '+T.metric(g,key));line.append(p);}el('stages').append(line);
  }
- el('rows').replaceChildren();for(const c of rows){const tr=node('tr');const values=[new Date(c.created_at*1000).toLocaleString(),c.model+' / '+T.stage(c.stage),c.status==='accepted'?'Accepted':c.status==='quarantined'?'Withheld':'Pending / interrupted',T.number(c.input_tokens),T.number(c.output_tokens),T.number(c.conservative_input_charge)+' / '+T.number(c.output_reserve)];
+ el('rows').replaceChildren();for(const c of rows){const tr=node('tr');const values=[new Date(c.created_at*1000).toLocaleString(),c.model+' / '+T.stage(c.stage),c.status==='accepted'?'Accepted':c.status==='quarantined'?'Withheld':'Pending / interrupted',T.number(c.input_tokens),T.number(c.output_tokens),T.number(c.conservative_input_charge)+' / '+T.number(c.output_reserve),c.accounting_settlement?T.number(c.accounting_settlement.used_tokens)+' ('+(c.accounting_settlement.basis==='runtime_measured'?'measured':'reserved')+')':'Original reservation'];
   values.forEach((value,i)=>tr.append(node('td',value,i>=3?'num':undefined)));tr.title='Invocation '+c.invocation_id;el('rows').append(tr);
  }
 }

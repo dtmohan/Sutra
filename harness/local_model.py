@@ -7,6 +7,7 @@ class OutputLimitExceeded(RuntimeError):
     """A completed transport reported exhaustion, not a usable final answer."""
 
 class LocalModel:
+    model_interface = 1
     def __init__(self, log_dir, port=11435, model='qwen3:4b', health=None, budget=Budget(), thinking=False):
         self.log_dir=pathlib.Path(log_dir); self.log_dir.mkdir(parents=True,exist_ok=True)
         self.port=port; self.model=model; self.health=health; self.budget=budget; self.thinking=thinking
@@ -17,7 +18,14 @@ class LocalModel:
         return host_schema
     def call(self, call_id, system, payload, schema):
         from invocation_gateway import consume_dispatch
-        consume_dispatch(call_id, self.model, system, payload, schema)
+        from model_packet import build
+        try:
+            packet = build(system, payload, schema)
+        except (KeyError, TypeError, ValueError):
+            from invocation_gateway import check_dispatch
+            check_dispatch(call_id, self.model, system, payload, schema)
+            raise
+        consume_dispatch(call_id, self.model, system, payload, schema, packet=packet)
         from reasoning_policy import check_provider
         check_provider(self, payload)
         charge=self.budget.check(system,payload,schema)
@@ -25,8 +33,8 @@ class LocalModel:
             if self.health.problem(): raise RuntimeError(self.health.problem())
             self.health.phase=call_id
         from decoder_schema import for_decoder
-        wire_schema = for_decoder(self.output_schema(payload, schema), getattr(self, 'decoder_compatibility', None))
-        body={'model':self.model,'messages':self.messages(system,payload),
+        wire_schema = for_decoder(packet['schema'] if packet else self.output_schema(payload, schema), getattr(self, 'decoder_compatibility', None))
+        body={'model':self.model,'messages':packet['messages'] if packet else self.messages(system,payload),
               'stream':True,'think':self.thinking,'format':wire_schema,'keep_alive':getattr(self,'keep_alive','5m'),
               'options':{'num_ctx':getattr(self,'runtime_context_tokens',self.budget.context_limit),'num_predict':self.budget.response_reserve,'temperature':0,'seed':42}}
         sensor=None

@@ -57,8 +57,8 @@ def check_capability_claims(proposal):
 
 class ConversationModel(LocalModel):
     def messages(self, system, payload):
-        from conversation_prompt import messages
-        return messages(system, payload, self.output_schema(payload, schema(payload)))
+        from model_packet import build
+        return build(system, payload, schema(payload))['messages']
 
     def output_schema(self, payload, host_schema):
         return model_schema(payload, host_schema)

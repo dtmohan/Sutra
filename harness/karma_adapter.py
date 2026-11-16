@@ -27,7 +27,7 @@ class KarmaAdapter:
         result=self.frame('task-allocations-v1',self.boundary.k*max(fractions.values()),self.boundary.sigma_clause*sigma)
         return dict(result,used=dict(used),limits=dict(limits),reserved_next=dict(cost),
             limiting_dimension=max(limits,key=lambda k:used[k]/limits[k]) if sigma>=1 else max(fractions,key=fractions.get),
-            token_policy='conservative input charge plus output reserve; failed calls also consume allocation')
+            token_policy='reserve model-packet input plus output; new completed calls settle to runtime counts; missing counts and historical calls retain reservations')
     def storage(self,used_bytes,limit_bytes,reserved_bytes=0):
         for key,value in (('used_bytes',used_bytes),('limit_bytes',limit_bytes),('reserved_bytes',reserved_bytes)):
             if type(value) is not int or value<0:raise ValueError(key+' must be a nonnegative integer')

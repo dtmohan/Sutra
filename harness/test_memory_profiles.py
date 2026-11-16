@@ -164,6 +164,7 @@ class MemoryProfilesTests(unittest.TestCase):
             sid=open_session(s,REQUEST);before=s.snapshot(sid)
             payload={'contract':contract(s,sid),'request':REQUEST,'fixture':'1 2 3','model':'large'}
             provider=LocalModel(self.root/'calls',11434,'large',budget=Budget(8192,128))
+            provider.model_interface=None  # This test stubs the historical transport.
             provider.memory_weights=8*GIB;provider.context_metadata=self.meta
             provider.memory_profile=self.p
             def call(cid,system,payload,schema):

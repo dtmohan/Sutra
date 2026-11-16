@@ -24,6 +24,15 @@ monitor.orchestration.nodes[0].resource_fallback={from_model:'large',model:'smal
  await page.setContent(html());const send=data=>page.evaluate(d=>window.dispatchEvent(new MessageEvent('message',{data:d})),{type:'usage',...data,snapshot:data.snapshot?{...data.snapshot,updatedAt:data.aged?data.snapshot.updatedAt:new Date().toISOString()}:undefined});
  assert.deepEqual(await page.evaluate(()=>sent),[{type:'ready'}]);assert.equal(await page.locator('#input').textContent(),'—');
  await send({snapshot,reasoningPreference:'model-default'});
+ const accounting={basis:'runtime_measured',reserved_tokens:11048,used_tokens:1396,released_unused_reservation:9652,overrun_tokens:0};
+ await send({snapshot:{...snapshot,calls:[{...calls[0],accounting_settlement:accounting},...calls.slice(1)],monitor:{...monitor,context:{...monitor.context,model_packet:{prompt_utf8_bytes:2400,schema_allowance:344,template_allowance:256},accounting_settlement:accounting}}}});
+ assert((await page.locator('#rows').textContent()).includes('1,396 (measured)'));
+ assert((await page.locator('#rows').textContent()).includes('Original reservation'));
+ assert((await page.locator('#context-packet').textContent()).includes('2,400 UTF-8 bytes'));
+ assert((await page.locator('#context-packet').textContent()).includes('Unused reservation released: 9,652'));
+ await page.screenshot({path:path.join(out,'Model-packet-accounting.png'),fullPage:true});
+ await send({snapshot,reasoningPreference:'model-default'});
+
  assert.equal(await page.locator('#reasoning-preference').textContent(),'Reasoning setting: Model default');
  assert((await page.locator('#memory-summary').textContent()).includes('3 evictions · 2 refaults'));
  assert((await page.locator('#memory-events').textContent()).includes('refresh source and dependents'));

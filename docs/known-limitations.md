@@ -1,5 +1,17 @@
 # Known limitations
 
+- Model-packet admission remains a conservative UTF-8 byte estimate for the
+  tested Qwen tokenizer family, with schema and template allowances. It is not
+  an exact tokenizer or a guarantee for every model/backend. Settlement uses
+  backend-reported completed counts; missing counts retain the reservation.
+  Old charges are never retroactively reduced. A previously exhausted task may
+  still need an explicit new allocation; this update does not replenish it.
+- Host-bound task IDs, constraints and non-certifying completion flags are
+  provenance, not model acknowledgements. Semantic requirements remain in the
+  task-facing prompt, but compliance and answer correctness are not thereby
+  proved. Schema/citation validation and a model reviewer remain fallible
+  evidence about prose quality.
+
 - MLX calibration measures sampled process-tree physical footprint during cold
   synthetic text prefill, not a proven worst-case GPU allocation. Larger output,
   multimodal work, unseen shapes and external clients can change memory use.

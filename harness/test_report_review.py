@@ -119,6 +119,7 @@ class ReportReviewTests(unittest.TestCase):
     def test_supplied_local_reviewer_binds_observed_identity(self):
         from local_model import LocalModel
         class LocalFixture(LocalModel):
+            model_interface = None
             call=Fake.call
         reviewer=LocalFixture(self.storage/'calls',model='live-fixture')
         reviewer.payloads=[];reviewer.fault=None;reviewer.budget=Fake.budget

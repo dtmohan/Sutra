@@ -36,10 +36,13 @@ class Budget:
     template_reserve: int = 256
 
     def charge(self, system, payload, schema):
-        # Conservative UTF-8 byte upper bound for the tested Qwen byte-level BPE.
-        # Include schema bytes even though Ollama may use them only as a grammar.
-        # Not an exact tokenizer; other tokenizer families need their own adapter.
-        return sum(len(s.encode('utf-8')) for s in (system,canonical(payload),canonical(schema))) + self.template_reserve
+        # Charge the same task-facing packet used by the local transport. Full
+        # governance records remain in the ledger, outside the model context.
+        from model_packet import build, descriptor
+        packet = build(system, payload, schema)
+        if packet is not None:
+            return descriptor(packet, self.template_reserve)['input_reservation']
+        return sum(len(s.encode('utf-8')) for s in (system, canonical(payload), canonical(schema))) + self.template_reserve
 
     def check(self, system, payload, schema):
         charge=self.charge(system,payload,schema)

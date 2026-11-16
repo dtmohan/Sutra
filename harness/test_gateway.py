@@ -112,6 +112,7 @@ class GatewayTests(unittest.TestCase):
     def test_model_retag_during_call_withholds_output_and_keeps_usage(self):
         from model_identity import unknown
         class LiveFixture(LocalModel):
+            model_interface = None
             def call(self,cid,system,p,fmt):
                 consume_dispatch(cid,self.model,system,p,fmt)
                 return {'read_pages':['src/policy.py'],'browse':[]},{'response':{'prompt_eval_count':90,'eval_count':30}}

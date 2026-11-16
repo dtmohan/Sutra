@@ -73,9 +73,8 @@ def context_budget(provider, s, sid, slots=2, expand_output=True):
     if available == float('inf'):
         available = budget.context_limit * slots
     limit = min(budget.context_limit, int(available // slots))
-    # A structured architecture report also carries the full constraint echo and
-    # source citations. Reserve output within the same per-call/task allocation.
-    reserve = max(budget.response_reserve, min(8192, limit // 3)) if expand_output else budget.response_reserve
+    # A structured architecture report needs room for source citations. Reserve output within the same per-call/task allocation.
+    reserve = max(budget.response_reserve, min(8192, limit // 3)) if expand_output else min(budget.response_reserve, max(512, limit // 4))
     if limit <= reserve + 1024:
         # Do not invent extra allocation. The normal budget checks stop dispatch.
         limit = max(1, limit)

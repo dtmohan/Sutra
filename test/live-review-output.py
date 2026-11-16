@@ -27,6 +27,8 @@ import chat_runtime
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--task-tokens', type=int, default=250000)
+    parser.add_argument('--auto-allocation', action='store_true')
     args = parser.parse_args()
     out = args.output.resolve(); out.mkdir(parents=True, exist_ok=False)
     state = out/'state'; state.mkdir()
@@ -41,6 +43,7 @@ def main():
             except (ValueError, OSError): pass
     threading.Thread(target=collect, daemon=True).start()
     report = {'passed': False, 'model': 'qwen3:4b', 'context_limit': 20701, 'output_reserve': 4096,
+              'task_tokens': args.task_tokens, 'auto_allocation': args.auto_allocation,
               'scope': 'six actual Sutra modules; isolated new task, not original conversation replay'}
     ledger = None
     try:
@@ -49,7 +52,7 @@ def main():
             time.sleep(.1)
         roots = ['extension.js', 'harness/chat_runtime.py', 'harness/invocation_gateway.py',
                  'harness/orchestration_flow.py', 'harness/runtime_memory.py', 'harness/stp_canonical/kernel.py']
-        start = handle(state, ROOT, {'op': 'auto_new', 'goal': 'Review this workspace and explain its architecture. Keep the STP kernel unchanged. No edits, tests or network.', 'roots': roots})
+        start = handle(state, ROOT, {'op': 'auto_new', 'goal': 'Review this workspace and explain its architecture. Keep the STP kernel unchanged. No edits, tests or network.', 'roots': roots, 'review_tokens': args.task_tokens})
         meta = json.loads((state/'workspace.json').read_text())
         ledger = InvocationLedger(state/'state.sqlite')
         for _ in range(12):
@@ -69,7 +72,7 @@ def main():
         result = chat_runtime.answer(ledger, meta, ROOT, state,
                     {'prompt': 'Give me a high-level overview first, then we can dig into each block later.',
                      'models': dict.fromkeys(['low', 'mid', 'high'], 'qwen3:4b'), 'tier': 'low'},
-                    provider=writer, review_provider=reviewer)
+                    provider=None if args.auto_allocation else writer, review_provider=None if args.auto_allocation else reviewer)
         report.update(seconds=time.monotonic()-started, result=result,
                       before=before, after=usage(ledger, meta['active']))
         assert result['result']['admission']['admitted'], result['result']['admission']

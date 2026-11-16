@@ -1,4 +1,4 @@
-"""Host-observed token accounting. Never used to grant protocol authority.
+"""Host-observed token usage. Completed counts can settle a prior reservation.
 
 Ollama counts describe whole model calls, including structured output. They do
 not attribute tokens to individual prompt components or visible answer text.
@@ -60,6 +60,8 @@ def history(db, run_id=None, limit=250):
                       'source': usage.get('source', 'unavailable'),
                       'conservative_input_charge': env['charge'],
                       'output_reserve': budget.get('response_reserve'),
-                      'context_limit': budget.get('context_limit')})
+                      'context_limit': budget.get('context_limit'),
+                      'model_packet': env.get('model_interface'),
+                      'accounting_settlement': receipt.get('accounting_settlement')})
     return {'calls': calls, 'totals': summarize(calls), 'total_calls': total,
             'limit': None if run_id else limit}

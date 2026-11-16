@@ -22,12 +22,14 @@ def usage(s,session):
    op=json.loads(raw)
    if op['contract_hash']!=digest:continue
    used['operations']+=1;cost=op.get('task_cost',{});used['source_bytes']+=cost.get('source_bytes',0);used['seconds']+=elapsed if elapsed is not None else cost.get('seconds',20)
- for raw,elapsed,payload in s.db.execute("SELECT i.record_json,json_extract(r.record_json,'$.elapsed_seconds'),d.payload_json FROM invocations i LEFT JOIN invocation_receipts r ON r.invocation_id=i.id JOIN deliveries d ON d.id=i.delivery_id WHERE i.session=?",(session,)):
+ for raw,receipt_raw,payload in s.db.execute("SELECT i.record_json,r.record_json,d.payload_json FROM invocations i LEFT JOIN invocation_receipts r ON r.invocation_id=i.id JOIN deliveries d ON d.id=i.delivery_id WHERE i.session=?",(session,)):
   inv=json.loads(raw)
   if inv['contract_hash']!=digest:continue
   if c.get('native_task'):
    used['operations']+=1;used['source_bytes']+=sum(len(p.get('text','').encode()) for p in json.loads(payload).get('pages',[]))
-  used['calls']+=1;used['tokens']+=inv['charge']+inv['budget_profile']['response_reserve'];used['seconds']+=elapsed if elapsed is not None else 150
+  from budget_accounting import used as settled_tokens
+  receipt=json.loads(receipt_raw) if receipt_raw else {}
+  used['calls']+=1;used['tokens']+=settled_tokens(inv,receipt);used['seconds']+=receipt.get('elapsed_seconds',150)
  return {'limits':limits,'used':used}
 
 def decision(s,session,cost=None):

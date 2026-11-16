@@ -16,6 +16,7 @@ LEGACY_POLICIES = {'2319f693bfd23c67bda96909572c6a5646d1a299497aa3ab9c23fc990721
                    'd71f0acf70b42a1d0cb1332c1413bfb85b90156d5820d590cdb19b41ea79ce04'}
 # Recomputed from the released VSIX policy manifests; never from an untrusted receipt.
 RELEASE_POLICIES = {
+    '0.29.1': 'ff6f2bc1010a19e838769bcf12bab350ec6dcca9758b58a1748ffaf1cf62c5dd',
     '0.29.0': '96d83eb67c17de6feb928b3b8f153aea2eb7b20472a82ed30650021720f9a698',
     '0.28.0': '421b3ed70f505a32b5a1a33ee97d284a935e92e6a3efde5eed1fef72f2d7a736',
     '0.28.1': '421b3ed70f505a32b5a1a33ee97d284a935e92e6a3efde5eed1fef72f2d7a736',
@@ -173,9 +174,12 @@ def working_set(s, sid, parent, request, budget, base, system, schema_for, extra
         page = s.read_page(sid, 'conversation:' + row['id'])
         value = {'id': row['id'], 'page': page.key, 'version': page.version,
                  'hash': page.content_hash, 'user': row['user'], 'assistant_unverified': row['assistant']}
+        directory = memory['toc']
+        memory['toc'] = [item for item in directory if item['id'] != row['id']]
         memory[field].append(value)
         if not fits():
             memory[field].pop()
+            memory['toc'] = directory
             return False
         selected.add(row['id'])
         return True
@@ -196,6 +200,15 @@ def working_set(s, sid, parent, request, budget, base, system, schema_for, extra
         # Latest turn, all pins and explicitly requested pages above stay intact.
         mandatory = dict(base, memory=memory, repair={'errors': ['x' * 140] * 2})
         memory_ceiling = budget.charge(system, mandatory, schema_for(mandatory)) + max(0, extra_bytes)
+    # Keep page-miss addresses before optional transcript pages consume the room.
+    # Mandatory latest/pinned/requested context above is never displaced.
+    for row in rows:
+        if row['id'] in selected or any(item['id'] == row['id'] for item in memory['toc']):
+            continue
+        item = {'id': row['id'], 'subject': row['user'][:120], 'keywords': sorted(set(WORDS.findall(row['user'].lower())) - STOP)[:12]}
+        memory['toc'].append(item)
+        if not fits():
+            memory['toc'].pop()
     # Allocate half of remaining memory room to a contiguous recent window, then
     # use the rest for relevant older pages and a compact directory.
     reserve_probe = dict(base, memory=memory)
@@ -224,7 +237,7 @@ def working_set(s, sid, parent, request, budget, base, system, schema_for, extra
         if overlap:
             add(row, 'retrieved_turns')
     for row in ranked:
-        if row['id'] in selected:
+        if row['id'] in selected or any(item['id'] == row['id'] for item in memory['toc']):
             continue
         item = {'id': row['id'], 'subject': row['user'][:120], 'keywords': sorted(set(WORDS.findall(row['user'].lower())) - STOP)[:12]}
         memory['toc'].append(item)

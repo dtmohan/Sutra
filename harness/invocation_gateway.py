@@ -21,11 +21,19 @@ def request_hash(call_id, model, system, payload, schema):
     return sha(canonical([call_id, model, system, payload, schema]))
 
 
-def consume_dispatch(call_id, model, system, payload, schema):
+def check_dispatch(call_id, model, system, payload, schema):
+    permit = _permit.get()
+    if not permit or permit['used'] or permit['hash'] != request_hash(call_id, model, system, payload, schema):
+        raise InvalidUpdate('Model transport requires an unused, matching invocation-gateway permit')
+
+
+def consume_dispatch(call_id, model, system, payload, schema, packet=None):
     permit = _permit.get()
     digest = request_hash(call_id, model, system, payload, schema)
     if not permit or permit['used'] or permit['hash'] != digest:
         raise InvalidUpdate('Model transport requires an unused, matching invocation-gateway permit')
+    if permit.get('packet_hash') and (packet is None or sha(canonical(packet)) != permit['packet_hash']):
+        raise InvalidUpdate('Model-facing packet differs from committed dispatch')
     permit['used'] = True
 
 
@@ -47,7 +55,7 @@ class InvocationLedger(GovernedContext):
                 self.db.execute(f"CREATE TRIGGER IF NOT EXISTS immutable_{table}_{op} BEFORE {op} ON {table} BEGIN SELECT RAISE(ABORT,'immutable invocation record'); END")
         self.db.commit()
 
-    def register(self, run_id, call_id, role, payload, system, schema, delivery_id, model, charge, budget=None, resource=None, model_identity=None):
+    def register(self, run_id, call_id, role, payload, system, schema, delivery_id, model, charge, budget=None, resource=None, model_identity=None, model_interface=None):
         expected_system, expected_schema = expected_request(role, payload)
         if system != expected_system or schema != expected_schema:
             raise InvalidUpdate('Role system/schema mismatch')
@@ -56,6 +64,14 @@ class InvocationLedger(GovernedContext):
                     'system_hash': sha(system), 'schema': schema, 'payload_hash': sha(canonical(payload)),
                     'request_hash': request_hash(call_id, model, system, payload, schema),
                     'model_identity': model_identity, 'charge': charge, 'budget_profile':budget or {'context_limit':8192,'response_reserve':1024,'template_reserve':256}, 'created_at': time.time()}
+        if model_interface is not None:
+            from model_packet import build, descriptor
+            packet = build(system, payload, schema)
+            if packet is None or model_interface != descriptor(packet, envelope['budget_profile']['template_reserve']):
+                raise InvalidUpdate('Model interface does not match committed request')
+            if model_interface['role'] != role or charge != model_interface['input_reservation']:
+                raise InvalidUpdate('Model packet charge or role changed')
+            envelope['model_interface'] = model_interface
         with self.db:
             self.db.execute('BEGIN IMMEDIATE')
             run = self.run(run_id); session = run['session']; config = run['config']
@@ -140,7 +156,7 @@ class InvocationLedger(GovernedContext):
             self._audit('INVOCATION_DISPATCH', {'id': envelope['id'], 'hash': digest})
         return envelope
 
-    def finalize(self, envelope, payload, proposal, transport_error=None, elapsed_seconds=None, token_usage=None):
+    def finalize(self, envelope, payload, proposal, transport_error=None, elapsed_seconds=None, token_usage=None, accounting_settlement=None):
         session = envelope['session']; rid = envelope['delivery_id']
         model_proposal = copy.deepcopy(proposal)
         from task_observations import split, capture
@@ -164,7 +180,10 @@ class InvocationLedger(GovernedContext):
                 for p in payload.get('pages', []):
                     page = self.read_page(session, p['id'], p['version'])
                     if page.content_hash != p['hash']: raise PageFault('Delivered page changed')
-                if envelope['role'] == 'conversation' and payload.get('response_contract') == 2:
+                if envelope.get('model_interface'):
+                    from model_packet import bind_output
+                    proposal, host_fields = bind_output(envelope['role'], payload, envelope['schema'], proposal)
+                elif envelope['role'] == 'conversation' and payload.get('response_contract') == 2:
                     from conversation import bind_output
                     proposal = bind_output(payload, proposal)
                     host_fields = {'context_binding': payload['context_binding']}
@@ -193,8 +212,13 @@ class InvocationLedger(GovernedContext):
                 receipt['task_observation'] = observation
             if observation_fields:
                 receipt['observation_fields'] = observation_fields
-            if observation_fields or (envelope['role'] == 'conversation' and payload.get('response_contract') == 2):
+            if envelope.get('model_interface') or observation_fields or (envelope['role'] == 'conversation' and payload.get('response_contract') == 2):
                 receipt.update(model_response_hash=sha(canonical(model_proposal)), host_fields=host_fields)
+            if envelope.get('model_interface'):
+                from budget_accounting import used
+                receipt['accounting_settlement'] = accounting_settlement
+                used(envelope, receipt)
+                receipt['host_fields_authority'] = 'host_binding_not_model_acknowledgement'
             raw = canonical(receipt); digest = sha('invocation-receipt-v1:' + raw)
             self.db.execute('INSERT INTO invocation_receipts VALUES(?,?,?,?,?)', (session,seq+1,envelope['id'],digest,raw))
             self._audit('INVOCATION_RECEIPT', {'id': digest, 'record': receipt})
@@ -289,7 +313,11 @@ class InvocationLedger(GovernedContext):
                 fields = r.get('host_fields', {})
                 if fields:
                     delivered = json.loads(self.db.execute('SELECT payload_json FROM deliveries WHERE id=?', (env[2],)).fetchone()[0])
-                    if fields != {'context_binding': delivered['context_binding']} or r['role'] != 'conversation': return False
+                    envelope = json.loads(env[0])
+                    if envelope.get('model_interface'):
+                        from model_packet import host_fields
+                        if fields != host_fields(r['role'], delivered, envelope['schema']): return False
+                    elif r['role'] != 'conversation' or fields != {'context_binding': delivered['context_binding']}: return False
                     if not isinstance(original, dict) or any(original.get(k) != v for k, v in fields.items()): return False
                     for key in fields: original.pop(key)
                 observed = r.get('observation_fields', {})
@@ -298,6 +326,10 @@ class InvocationLedger(GovernedContext):
                     if r['role'] not in ROLES or set(observed) != {FIELD} or not isinstance(original, dict) or FIELD in original: return False
                     original.update(observed)
                 if sha(canonical(original)) != r['model_response_hash']: return False
+            if json.loads(env[0]).get('model_interface'):
+                from budget_accounting import used
+                try: used(json.loads(env[0]), r)
+                except (InvalidUpdate, KeyError, TypeError): return False
             payload = self.db.execute('SELECT payload_hash FROM deliveries WHERE id=?', (env[2],)).fetchone()
             if not payload or payload[0] != r['payload_hash']: return False
             previous = digest
@@ -342,9 +374,12 @@ class InvocationGateway:
             expected=getattr(self.provider,'expected_identity',None)
             if expected is not None and identity!=expected: raise InvalidUpdate('Selected model identity changed before dispatch')
             self.provider.dispatch_identity=identity
-            envelope = ledger.register(self.run_id, call_id, role, payload, system, schema, delivery_id, name, charge, budget={'context_limit':self.provider.budget.context_limit,'response_reserve':self.provider.budget.response_reserve,'template_reserve':self.provider.budget.template_reserve},resource=resource,model_identity=identity)
+            from model_packet import build, descriptor
+            packet = build(system, payload, schema) if getattr(self.provider, 'model_interface', None) == 1 else None
+            interface = descriptor(packet, self.provider.budget.template_reserve) if packet else None
+            envelope = ledger.register(self.run_id, call_id, role, payload, system, schema, delivery_id, name, charge, budget={'context_limit':self.provider.budget.context_limit,'response_reserve':self.provider.budget.response_reserve,'template_reserve':self.provider.budget.template_reserve},resource=resource,model_identity=identity,model_interface=interface)
         finally: ledger.close()
-        permit = {'hash': envelope['request_hash'], 'used': False}
+        permit = {'hash': envelope['request_hash'], 'used': False, 'packet_hash': (envelope.get('model_interface') or {}).get('packet_hash')}
         token = _permit.set(permit); error = None; proposal = None; record = None;started=time.monotonic()
         output_limit = False
         from model_activity import scope
@@ -363,7 +398,8 @@ class InvocationGateway:
         try:
             if not error: ledger.confirm_delivery(delivery_id)
             from token_usage import measured, history
-            result = ledger.finalize(envelope, payload, proposal, error,time.monotonic()-started, measured(record))
+            from budget_accounting import settlement
+            result = ledger.finalize(envelope, payload, proposal, error,time.monotonic()-started, measured(record), settlement(envelope, record))
             activity.finish(result['admission']['admitted'], measured(record))
             result['token_usage'] = history(ledger.db, run_id=self.run_id)
             if error: result['blocked'] = error

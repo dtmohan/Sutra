@@ -243,10 +243,18 @@ def admit(s,sid,kind,resource_id,cost,paths=(),role=None,payload=None,model=None
 def settle(s,owner,receipt,elapsed=None):
     if not owner:return
     if s.db.execute('SELECT 1 FROM orchestration_settlements WHERE charge_id=?',(owner['charge_id'],)).fetchone():return
-    row=s.db.execute('SELECT cost_json,node_id FROM orchestration_charges WHERE id=?',(owner['charge_id'],)).fetchone()
+    row=s.db.execute('SELECT cost_json,node_id,kind,resource_id FROM orchestration_charges WHERE id=?',(owner['charge_id'],)).fetchone()
     if not row or row[1]!=owner['node_id']:raise InvalidUpdate('Invalid orchestration settlement')
     cost=json.loads(row[0])
     if elapsed is not None and 'seconds' in cost:cost['seconds']=max(0,elapsed)
+    if row[2] == 'model':
+        call = s.db.execute('SELECT i.record_json,r.record_json FROM invocations i JOIN invocation_receipts r ON r.invocation_id=i.id WHERE i.id=? AND r.id=?', (row[3], receipt)).fetchone()
+        if call:
+            from budget_accounting import used
+            envelope, evidence = (json.loads(raw) for raw in call)
+            if envelope.get('orchestration') != owner:
+                raise InvalidUpdate('Invocation settlement owner changed')
+            cost['tokens'] = used(envelope, evidence)
     r={'charge_id':owner['charge_id'],'receipt':receipt,'used':cost};raw=canonical(r)
     s.db.execute('INSERT INTO orchestration_settlements VALUES(?,?,?)',(owner['charge_id'],raw,sha('orchestration-settlement-v1:'+raw)))
     pending=s.db.execute('SELECT COUNT(*) FROM orchestration_charges c LEFT JOIN orchestration_settlements r ON r.charge_id=c.id WHERE c.node_id=? AND r.charge_id IS NULL',(owner['node_id'],)).fetchone()[0]

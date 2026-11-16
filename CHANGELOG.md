@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.30.0
+
+- Separate task-facing model packets from the complete committed host envelope; bind both at the gateway and validate raw output before attaching host identity, constraints and non-certifying completion metadata.
+- Account for projected messages, schema allowance, template allowance and reserved output separately. Settle new completed calls against runtime counts across task and child/ancestor budgets; retain historical and interrupted reservations.
+- Preserve latest turns, user pins, requested pages and semantic requirements; reserve TOC addresses before optional older transcript pages.
+- Show settled task charges and packet allowances in Sutra Monitor. Keep source, role, action and permission checks, compatible conversation retention, and the canonical STP kernel unchanged.
+
 ## 0.29.1
 
 - Apply capability-aware Adaptive controls to workspace generation; bind architecture, child and report-review controls to receipts and recheck them before dispatch.

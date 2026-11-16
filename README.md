@@ -1,3 +1,9 @@
+# Sutra 0.30.0 — task-facing model packets and measured budget settlement
+
+The local model receives a versioned task-facing packet: the request, relevant requirements, fresh evidence, available action choices and Smriti memory. Governance identities, resource decisions, budget records and constraint echoes remain in the host. The gateway binds the exact projected packet to its dispatch permit and attaches host metadata only after checking the raw model response. Host-bound metadata is explicitly labelled; it is not a model acknowledgement or proof of compliance.
+
+Every new call reserves its conservative model-input charge and output allowance before dispatch. Completed backend counts settle the task and ancestor charge, including failed or withheld generations. Only unused reservation is released; missing measurements, interruptions and historical calls retain their original reservation. See [model boundary and accounting](docs/model-boundary.md) and [validation](docs/validation-0.30.0.md). The STP kernel remains byte-for-byte unchanged.
+
 # Sutra 0.29.1 — bounded review output and adaptive reasoning
 
 Adaptive now starts workspace generation at the lowest known reasoning control. Architecture writers, child reviewers and report checkers record that choice and recheck capabilities before dispatch. Report prompts scale detail to supplied evidence, with explicit character limits. A truncated answer stays quarantined; at most one shorter regeneration can use an already allocated review attempt. Every attempt remains charged. Explicit On and Model default preferences remain unchanged. See [validation](docs/validation-0.29.1.md).

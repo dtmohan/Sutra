@@ -127,7 +127,9 @@ def dashboard(root):
             data['api_reviews']=[{'id':r['id'],'candidate_id':r['candidate_id'],'reviewer_id':r['reviewer_id'],'decision':r['decision']} for r in rows]
         if data['context'] and last:
             receipt=db.execute('SELECT record_json FROM invocation_receipts WHERE invocation_id=?',(env['id'],)).fetchone()
-            tokens=json.loads(receipt[0]).get('token_usage',{}) if receipt else {}
+            recorded=json.loads(receipt[0]) if receipt else {}
+            tokens=recorded.get('token_usage',{})
+            data['context'].update(model_packet=env.get('model_interface'),accounting_settlement=recorded.get('accounting_settlement'))
             data['context'].update(output_reserve=env.get('budget_profile',{}).get('response_reserve',1024),limit=env.get('budget_profile',{}).get('context_limit',8192),actual_prompt_tokens=tokens.get('input_tokens'),output_tokens=tokens.get('output_tokens'))
         data['adapter_health']='busy' if any(r['state'] not in ('ALLOW','FIN','RESOURCE_WAIT') for r in data['runs'][:1]) else 'idle'
         if data.get('repository_pending'):data['adapter_health']='repository operation pending; inspection required'

@@ -1,4 +1,11 @@
-Sutra 0.29.1 — bounded review output and adaptive reasoning
+Sutra 0.30.0 — task-facing model packets and measured budget settlement
+
+Models receive the task, relevant requirements, fresh evidence and Smriti context. Host governance records and constraint echoes stay in the gateway ledger. Model-proposed actions still require host validation and the existing permissions; source freshness and the STP kernel are unchanged.
+
+New calls reserve the serialized model-facing input plus output before dispatch, then settle to completed runtime input/output counts. Failed completed calls still spend their measured usage; interrupted or unmeasured calls retain the full reservation. Historical charges are unchanged. Sutra Monitor distinguishes the model packet allowance from the settled task charge.
+
+Recent turns, pinned statements and requested pages stay mandatory. TOC addresses are packed before optional older dialogue so the model can ask for a missing page. Old executable proposals remain stale after a policy update; compatible conversation data can be restored.
+
 
 Output-limit failures now explain that reasoning and answer share the output allowance. A truncated answer remains quarantined. Adaptive reports can make one compact retry only within already allocated attempts and remaining task resources; failed calls remain charged. Reports scale detail to available evidence instead of targeting a fixed word count. Explicit On and Model default choices remain unchanged.
 
