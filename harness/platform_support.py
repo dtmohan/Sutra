@@ -43,7 +43,12 @@ def windows_read(workspace,name,limit):
    handles.append(h);info=Info()
    if not getinfo(h,ctypes.byref(info)):raise OSError('Cannot inspect source handle')
    if info.attributes&0x400 or bool(info.attributes&0x10)!=directory:raise InvalidUpdate('Reparse points and non-regular source paths are rejected')
-   if not directory and (info.links!=1 or info.size_hi or info.size_lo>limit):raise InvalidUpdate('Only regular, unlinked code files up to 64 KB are supported')
+   if not directory:
+    if info.links!=1:raise InvalidUpdate('Only regular, unlinked code files are supported')
+    size=(info.size_hi << 32) | info.size_lo
+    if size>limit:
+     from repository_tools import SourceReadLimitExceeded
+     raise SourceReadLimitExceeded(f'Source {name} needs {size} bytes; remaining page allocation is {limit} bytes')
   fd=msvcrt.open_osfhandle(handles[-1],os.O_RDONLY|os.O_BINARY);handles.pop()
   with os.fdopen(fd,'rb') as stream:
    before=os.fstat(stream.fileno());raw=stream.read(limit+1);after=os.fstat(stream.fileno())

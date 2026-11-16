@@ -126,6 +126,29 @@ def permission(s,sid,requested):
     return {'operation':operation,'paths':list(dict.fromkeys((c['allowed_paths'] if c.get('native_task') else [])+paths)),
             'read_scope':roots,'goal':s.snapshot(sid)['goal']} if needed else None
 
+def budget_pause(s, meta, root, req, fid, phase, stop, kind='CONTEXT_STOPPED', **details):
+    """Record the failed gate, then consider a separately admitted reserve draw."""
+    move(s, fid, 'PAUSED', kind, workflow_stop=stop, **details)
+    save(root, meta)
+    if not req.get('armed'):
+        return response(s, fid)
+
+    from workspace_allocation import try_amend
+    outcome = try_amend(s, fid, meta)
+    if not outcome:
+        return response(s, fid)
+    if outcome['status'] != 'amended':
+        stop = dict(stop, automatic_allocation=outcome)
+        move(s, fid, 'PAUSED', 'WORKSPACE_RESERVE_STOPPED', workflow_stop=stop)
+        return response(s, fid)
+
+    amendment = outcome['amendment']
+    dimension = outcome['dimension']
+    move(s, fid, phase, 'WORKSPACE_RESERVE_RESUMED', workflow_stop=None, mapping_stop=None)
+    return response(s, fid, allocation_amendment=amendment,
+                    progress='Sutra added '+dimension.replace('_', ' ')+' from the workspace reserve. Continuing with prior spending retained.')
+
+
 def handle(s,meta,workspace,root,req,providers=None):
     """Translate measured resource stops at the shared orchestration boundary."""
     from monitoring import ResourceWait
@@ -137,8 +160,9 @@ def handle(s,meta,workspace,root,req,providers=None):
         fid=req.get('flow_id')
         if not fid or m.state(s,fid) not in ('BINDING','WORKSPACE','NEED_TOOL_APPROVAL','MAPPING','BRANCHING','CHILDREN'):raise
         phase=m.state(s,fid)
-        move(s,fid,'PAUSED','CONTEXT_STOPPED',workflow_stop={'status':'task_budget','stage':phase,'error':str(exc),'automatic_retry':False})
-        return response(s,fid)
+        return budget_pause(s, meta, root, req, fid, phase, {
+            'status': 'task_budget', 'stage': phase, 'error': str(exc),
+            'frame': exc.frame, 'automatic_retry': False})
     except (PageFault, ContextBudgetExceeded) as exc:
         fid=req.get('_created_flow_id') or req.get('flow_id')
         if not fid:raise
@@ -416,6 +440,10 @@ def _handle(s,meta,workspace,root,req,providers=None):
                   'failures':[{'path':p,'error':str(e)[:500]} for p,e in sorted(failures.items())[:5]],
                   'mapped_files':detail.get('mapped_files'),'source_files':detail.get('source_files'),
                   'budget':detail.get('stop_frame') or detail.get('budget')}
+            if status == 'budget_stopped' and detail.get('stop_frame'):
+                stop['frame'] = detail['stop_frame']
+                return budget_pause(s, meta, root, req, fid, 'MAPPING', stop, kind='MAPPING_STOPPED',
+                                    reason=status, mapping_stop=stop)
             move(s,fid,'PAUSED','MAPPING_STOPPED',reason=status,mapping_stop=stop,workflow_stop=stop)
         return response(s,fid,progress='Fresh source mapping: '+str(status),mapping=out)
     if phase=='BRANCHING':
@@ -452,11 +480,17 @@ def _handle(s,meta,workspace,root,req,providers=None):
         except (ContextBudgetExceeded, m.OrchestrationStop, BudgetStop) as exc:
             observe_fault(s,sid,exc)
             import review_budget
+            allocation = getattr(exc, 'details', None)
             stop={'status':'context_budget' if isinstance(exc,ContextBudgetExceeded) else 'task_budget','stage':phase,'error':str(exc),
-                  'allocation':getattr(exc,'details',None),'budget':review_budget.usage(s,sid)}
-            move(s,fid,'PAUSED','CONTEXT_STOPPED',workflow_stop=stop)
-            save(root,meta)
-            return response(s,fid)
+                  'allocation':allocation,'budget':review_budget.usage(s,sid)}
+            if isinstance(exc, (m.OrchestrationStop, BudgetStop)):
+                stop['frame'] = exc.frame
+            if allocation and allocation.get('task_allocation_need'):
+                stop['allocation_need'] = allocation['task_allocation_need']
+            elif isinstance(exc, ContextBudgetExceeded) and allocation:
+                stop['automatic_allocation'] = {'status': 'model_context',
+                    'reason': 'The host could not show that more task allocation would fit this packet in the selected model.'}
+            return budget_pause(s, meta, root, req, fid, phase, stop)
         save(root,meta)
         action=(out['result'].get('accepted_output') or {}).get('action',{}).get('kind')
         awaiting=phase=='CODING' and action in ('edit','run_tests')

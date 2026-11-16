@@ -4,12 +4,14 @@ const {EventEmitter}=require('node:events');
 const root=path.resolve(__dirname,'..'),tmp=fs.mkdtempSync(path.join(os.tmpdir(),'karma-host-test-'));
 const views=new Map(),statusItems=[],commands=new Map(),tools=new Map(),participants=new Map(),intervals=[],timers=[],prompts=[],requests=[],changes=[],panelMessages=[];
 const tierModels={low:'fixture-small',mid:'fixture-mid',high:'fixture-large'};
-const runtimeUpdates=[];
-let provider,panel,holdDashboard=false,pendingDashboard,bridgeCount=0,dashboardSpawns=0;
+const runtimeUpdates=[],bridgeAllocations=[];
+const repoAllocation={source_bytes:1024000000};
+let userAllocation,provider,panel,holdDashboard=false,pendingDashboard,bridgeCount=0,dashboardSpawns=0;
 let state={contract:{contract_hash:'fixture-contract',contract:{constraints:{}}},calibration:{binding:{hash:'fixture-calibration'}},session:'fixture',model:'fixture-model',report:'architecture v1',api:{report:'API v1'}};
 const disposable=()=>({dispose(){}}),uri=value=>({scheme:'file',fsPath:value,toString(){return value;}});
 class Emitter{event=(cb)=>{this.cb=cb;return disposable();};fire(value){changes.push(value.toString());this.cb?.(value);}dispose(){}}
-function spawn(exe,args){
+function spawn(exe,args,options){
+ if(args.some(arg=>arg.endsWith('vscode_bridge.py')))bridgeAllocations.push(options.env.SUTRA_WORKSPACE_ALLOCATION);
  const streaming=args.includes('--dashboard-stream');if(streaming)dashboardSpawns++;
  const child=new EventEmitter();child.stdout=new EventEmitter();child.stderr=new EventEmitter();child.stdin=new EventEmitter();child.kill=()=>true;
  child.stdin.end=child.stdin.write=raw=>{const req=streaming?{op:'dashboard'}:JSON.parse(raw);requests.push(req);bridgeCount++;
@@ -23,7 +25,7 @@ const vscode={
  EventEmitter:Emitter,Uri:{file:uri,parse:uri},StatusBarAlignment:{Right:1},ViewColumn:{One:1},
  env:{appRoot:'/must/not/load/internal/typescript'},
  MarkdownString:class{constructor(value){this.value=value;}},ConfigurationTarget:{Global:1},chat:{createChatParticipant(id,handler){participants.set(id,handler);return disposable();}},
- workspace:{onDidChangeConfiguration:()=>disposable(),isTrusted:true,workspaceFolders:[{uri:uri(tmp)}],textDocuments:[],getConfiguration(){return {get(k,d){return k==='models'?tierModels:d;},async update(k,v){if(k==='models')throw Error('Existing model choices must not be overwritten by discovery');runtimeUpdates.push([k,v]);}};},
+ workspace:{onDidChangeConfiguration:()=>disposable(),isTrusted:true,workspaceFolders:[{uri:uri(tmp)}],textDocuments:[],getConfiguration(){return {get(k,d){return k==='models'?tierModels:k==='workspaceAllocation'?repoAllocation:d;},inspect(k){return k==='workspaceAllocation'?{globalValue:userAllocation,workspaceValue:repoAllocation}:undefined;},async update(k,v){if(k==='models')throw Error('Existing model choices must not be overwritten by discovery');runtimeUpdates.push([k,v]);}};},
   registerTextDocumentContentProvider(s,p){provider=p;return disposable();},async openTextDocument(u){return {uri:u};},fs:{writeFile:async()=>{}}},
  commands:{registerCommand(n,f){commands.set(n,f);return disposable();},async executeCommand(n,...a){return commands.get(n)?.(...a);}},
  window:{createOutputChannel(){return {appendLine(){},dispose(){}};},registerWebviewViewProvider(id,provider){views.set(id,provider);return disposable();},createStatusBarItem(){const item={show(){},dispose(){}};statusItems.push(item);return item;},
@@ -34,11 +36,24 @@ const vscode={
 const moduleFixture={exports:{}};
 const context={module:moduleFixture,exports:moduleFixture.exports,require:n=>n==='vscode'?vscode:n==='node:child_process'?{spawn}:n==='./model_activity'?require('../model_activity'):n==='./media/token_usage'?require('../media/token_usage'):n==='./usage_view'?require('../usage_view'):n==='./diagram_view'?require('../diagram_view'):n==='./model_selection'?require('../model_selection'):n==='./capabilities'?require('../capabilities'):n==='./native_provider'?require('../native_provider'):require(n),process,Buffer,console,queueMicrotask,structuredClone,
  setInterval:fn=>{intervals.push(fn);return fn;},clearInterval(){},setTimeout:(fn,ms)=>{timers.push({fn,ms});return fn;},clearTimeout(){}};
+context.process={...process,env:{...process.env,SUTRA_WORKSPACE_ALLOCATION:'{"tokens":999999}'}};
 vm.runInNewContext(fs.readFileSync(path.join(root,'extension.js'),'utf8'),context,{filename:'extension.js'});
 const subscriptions=[];
 (async()=>{
  const api=moduleFixture.exports.activate({subscriptions,extensionPath:root,globalStorageUri:uri(tmp),extension:{packageJSON:{version:'0.18.0'}}});
  assert.deepEqual(Object.keys(api).sort(),['getRoutingStatus','getState','open','version']);assert(Object.isFrozen(api));const beforeRouting=requests.length;assert.equal(api.getRoutingStatus(),null);assert.equal(requests.length,beforeRouting);
+ await api.getState();
+ assert.deepEqual(JSON.parse(bridgeAllocations.at(-1)),{},'Repository and inherited environment cannot supply workspace ceilings');
+ userAllocation={tokens:300000,source_bytes:10000000,byFolder:{[tmp]:{source_bytes:20000000,enabled:false},[tmp+'-other']:{calls:1000000}}};
+ await api.getState();
+ assert.deepEqual(JSON.parse(bridgeAllocations.at(-1)),{tokens:300000,source_bytes:20000000,enabled:false},'Only the active folder override applies');
+ userAllocation={source_bytes:12000000,byFolder:{[tmp]:{enabled:true},[tmp+'-other']:{source_bytes:20000000}}};
+ await api.getState();
+ assert.deepEqual(JSON.parse(bridgeAllocations.at(-1)),{source_bytes:12000000,enabled:true});
+ userAllocation={byFolder:{[tmp]:true}};
+ await api.getState();
+ assert.equal(JSON.parse(bridgeAllocations.at(-1)),null,'An invalid matching folder override must fail closed');
+ userAllocation=undefined;
  for(const name of ['karma.reviewCodebase','karma.automaticReview','karma.newChatReview']){
   const before=requests.length;await commands.get(name)({goal:'agent supplied scope',roots:['..'],run:false});
   assert.equal(requests.length,before);assert(prompts.length>0);

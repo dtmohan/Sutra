@@ -33,7 +33,26 @@ function activate(context) {
   }
   const processes = new Set();
   let dashboardWorker;
-  function runtimeEnvironment(){return {SUTRA_CAPABILITIES_MODE:vscode.workspace.getConfiguration("karma").get("tools.mode","ask"),SUTRA_RUNTIME_DIR:path.join(context.globalStorageUri.fsPath,"runtime-memory"),SUTRA_MEMORY_OWNERSHIP:vscode.workspace.getConfiguration("karma").get("memoryOwnership","shared")};}
+  function runtimeEnvironment(cwd) {
+    const config = vscode.workspace.getConfiguration('karma');
+    // Only user settings can authorize automatic grants. A repository setting
+    // or a model tool payload cannot set or widen these limits.
+    const userAllocation = config.inspect?.('workspaceAllocation')?.globalValue;
+    const configured = userAllocation === undefined ? {} : userAllocation;
+    const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+    let workspaceAllocation = configured;
+    if (isObject(configured)) {
+      const {byFolder = {}, ...limits} = configured;
+      const overrides = isObject(byFolder) && Object.hasOwn(byFolder, cwd) ? byFolder[cwd] : {};
+      workspaceAllocation = isObject(byFolder) && isObject(overrides) ? {...limits, ...overrides} : null;
+    }
+    return {
+      SUTRA_CAPABILITIES_MODE: config.get('tools.mode', 'ask'),
+      SUTRA_RUNTIME_DIR: path.join(context.globalStorageUri.fsPath, 'runtime-memory'),
+      SUTRA_MEMORY_OWNERSHIP: config.get('memoryOwnership', 'shared'),
+      SUTRA_WORKSPACE_ALLOCATION: JSON.stringify(workspaceAllocation)
+    };
+  }
   const workspace = () => {
     if (!vscode.workspace.isTrusted) throw new Error('Sutra requires a trusted workspace.');
     const folder = vscode.workspace.workspaceFolders?.[0];
@@ -81,7 +100,7 @@ function activate(context) {
     if(!dashboardWorker){
       const config=vscode.workspace.getConfiguration('karma'),python=config.get('pythonPath','')||(process.platform==='win32'?'python':'python3');
       const child=spawn(python,['-B',path.join(context.extensionPath,'harness','vscode_bridge.py'),'--workspace',cwd,'--storage',directory,'--dashboard-stream'],
-        {cwd,stdio:['pipe','pipe','pipe'],env:{...process.env,...runtimeEnvironment(),KARMA_STORAGE_LIMIT_MIB:String(config.get('storageLimitMiB',512))}});
+        {cwd,stdio:['pipe','pipe','pipe'],env:{...process.env,...runtimeEnvironment(cwd),KARMA_STORAGE_LIMIT_MIB:String(config.get('storageLimitMiB',512))}});
       const worker={child,directory,buffer:'',pending:null};dashboardWorker=worker;processes.add(child);
       const fail=error=>{if(worker.pending){clearTimeout(worker.pending.timer);worker.pending.reject(error);worker.pending=null;}if(dashboardWorker===worker)dashboardWorker=undefined;};
       child.on('error',fail);child.on('close',()=>{processes.delete(child);fail(new Error('Dashboard worker stopped; the next refresh will restart it.'));});
@@ -126,7 +145,7 @@ function activate(context) {
       return await new Promise((resolve,reject) => {
         const python = vscode.workspace.getConfiguration('karma').get('pythonPath','')||(process.platform==='win32'?'python':'python3');
         const child = spawn(python,['-B',path.join(context.extensionPath,'harness','vscode_bridge.py'),
-          '--workspace',cwd,'--storage',stateDir],{cwd,stdio:['pipe','pipe','pipe'],env:{...process.env,...runtimeEnvironment(),KARMA_STORAGE_LIMIT_MIB:String(vscode.workspace.getConfiguration('karma').get('storageLimitMiB',512)),SUTRA_LOGIT_SENSOR:({'off':'','numbers':'1','tokens':'tokens'})[vscode.workspace.getConfiguration('karma').get('logitSensor','off')]||'',SUTRA_ACTIVITY:"1",SUTRA_THINKING:vscode.workspace.getConfiguration('karma').get('thinking','adaptive'),KARMA_NODE:process.execPath,KARMA_TYPESCRIPT:path.join(context.extensionPath,'vendor','typescript','typescript.js')}});
+          '--workspace',cwd,'--storage',stateDir],{cwd,stdio:['pipe','pipe','pipe'],env:{...process.env,...runtimeEnvironment(cwd),KARMA_STORAGE_LIMIT_MIB:String(vscode.workspace.getConfiguration('karma').get('storageLimitMiB',512)),SUTRA_LOGIT_SENSOR:({'off':'','numbers':'1','tokens':'tokens'})[vscode.workspace.getConfiguration('karma').get('logitSensor','off')]||'',SUTRA_ACTIVITY:"1",SUTRA_THINKING:vscode.workspace.getConfiguration('karma').get('thinking','adaptive'),KARMA_NODE:process.execPath,KARMA_TYPESCRIPT:path.join(context.extensionPath,'vendor','typescript','typescript.js')}});
         processes.add(child); let stdout='',stderr='';
         const events=require('./model_activity').decoder(e=>{usage?.activity(e);onActivity?.(e);},s=>{stderr=(stderr+s).slice(-10000);});
         let stopReason,killTimer;const cancel=reason=>{if(stopReason)return;stopReason=reason;child.kill('SIGTERM');killTimer=setTimeout(()=>child.kill('SIGKILL'),10000);};

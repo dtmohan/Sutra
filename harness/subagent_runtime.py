@@ -20,7 +20,7 @@ def schema(p):
     result['required'].append('branch_id')
     return result
 
-def memory(s,p,budget,materialize=False):
+def memory(s,p,budget,materialize=False,mandatory_only=False):
     iid=machine.node(s,p['branch']['id'])['context'].get('conversation_id')
     if not iid:return None
     import conversation_memory as cm
@@ -28,7 +28,7 @@ def memory(s,p,budget,materialize=False):
     if not row:raise InvalidUpdate('Missing parent conversation')
     if materialize:cm.materialize(s,row[0],cm.history(s,row[0],iid))
     base={k:v for k,v in p.items() if k not in ('memory','repair')}
-    return cm.working_set(s,row[0],iid,p['request'],budget,base,SYSTEM,schema,extra_bytes=budget.context_limit//16)
+    return cm.working_set(s,row[0],iid,p['request'],budget,base,SYSTEM,schema,extra_bytes=0 if mandatory_only else budget.context_limit//16)
 
 def request_check(s,sid,p):
     from review_reasoning import check
@@ -78,23 +78,41 @@ def run(s,meta,workspace,root,nid,models,tier='auto',provider=None):
         output=s.load_result(sid,env['id']);machine.complete(s,nid,env['id'])
         return {'result':{'invocation_id':env['id'],'admission':{'admitted':True,'errors':[]},'accepted_output':output},'route':{'model':env['model']},'branch_id':nid,'recovered':True}
     with machine.scope(nid):
-        receipts=runtime.build_partition(s,meta,workspace,root,n['files'],real=real)
-        data=runtime.load_partition(s,sid,workspace,receipts,nid);graph=data['graph']
-        signals={'source_files':len(n['context']['versions']),'selected_files':len(n['files']),'unresolved_calls':sum(c['target'] is None for c in graph['calls'])}
-        route=KarmaAdapter().route(n['context']['request'],models,tier,signals)
+        request = {'prompt': n['context']['request'],
+                   'conversation_id': n['context'].get('conversation_id'),
+                   'orchestration_parent': n['parent_id']}
+        signals = {'source_files': len(n['context']['versions']),
+                   'selected_files': len(n['files']), 'unresolved_calls': 0}
+        adapter = KarmaAdapter()
+        route = adapter.route(request['prompt'], models, tier, signals)
         if real:
             from api_runtime import provider_for
-            provider=provider_for(root,route['model'],review=True);context.context_budget(provider,s,sid);provider.keep_alive=0
-        if provider.model!=route['model']:raise InvalidUpdate('Child provider differs from routed model')
-        p={'contract':s.pinned(sid),'branch':machine.packet(n),'workspace':str(workspace),'request':n['context']['request'],'source_paths':n['files'],'pages':[],
-           'snapshot_receipts':receipts,'sites':[c['id'] for c in graph['calls'][:4]],'excerpt_bytes':max(64,min(65536,provider.budget.context_limit//3)),'map_bytes':max(512,min(65536,provider.budget.context_limit//3)),'route':route,
-           'memory_budget':vars(provider.budget).copy()}
-        p['constraint_echo']=constraint_rows(p['contract'])
+            provider = provider_for(root, route['model'], review=True)
+            context.context_budget(provider, s, sid)
+            provider.keep_alive = 0
+        if provider.model != route['model']:
+            raise InvalidUpdate('Child provider differs from routed model')
+        p = {'contract': s.pinned(sid), 'branch': machine.packet(n), 'workspace': str(workspace),
+             'request': request['prompt'], 'pages': [], 'memory_budget': vars(provider.budget).copy()}
+        p['constraint_echo'] = constraint_rows(p['contract'])
         from review_reasoning import bind, repair
         bind(provider, p)
-        if n['context'].get('conversation_id'):
+        if request['conversation_id']:
             from conversation import workspace_handoff
-            p['conversation_handoff']=workspace_handoff(s,sid,n['context']['conversation_id'],p['request'])
+            p['conversation_handoff'] = workspace_handoff(s, sid, request['conversation_id'], p['request'])
+        probe = dict(p, excerpts={})
+        probe['memory'] = memory(s, probe, provider.budget, materialize=True, mandatory_only=True)
+        provider.budget.check(SYSTEM, dict(probe, repair={'errors': ['x'*140]*2}), schema(probe))
+        from review_source_receipts import acquire
+        receipts, data, _ = acquire(s, meta, workspace, root, request, n['files'], real=real, purpose='child_review')
+        graph = data['graph']
+        signals['unresolved_calls'] = sum(c['target'] is None for c in graph['calls'])
+        route = adapter.route(request['prompt'], models, tier, signals)
+        if provider.model != route['model']:
+            raise InvalidUpdate('Child route changed after source preparation')
+        p.update(snapshot_receipts=receipts, route=route,
+                 excerpt_bytes=max(64, min(65536, provider.budget.context_limit//3)),
+                 map_bytes=max(512, min(65536, provider.budget.context_limit//3)))
         while True:
             p['excerpts']=chat.excerpts(data['sources'],context.query(p),p['excerpt_bytes'],data['graph']);p['source_paths']=sorted(p['excerpts'])
             context.evidence(p,data);p['facts']=chat.facts(graph,p['sites'])

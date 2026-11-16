@@ -191,12 +191,29 @@ function install(vscode,context,deps){
     return {operation:descriptor.operation,paths,test_paths};
   }
   const pendingKey='sutra.pendingOrchestration';
+  const allocationReasons={
+    workspace_limit:'The workspace’s automatic allocation ceiling cannot cover the next step.',
+    policy_disabled:'Automatic allocation is disabled or unavailable in this workspace.',
+    retry_limit:'Sutra reached its automatic allocation retry limit for this task.',
+    no_progress:'The previous increase did not unblock this step.',
+    already_amended:'This stop already received an automatic increase.',
+    pending_execution:'Unfinished work must settle before Sutra can expand the allocation.',
+    another_budget_dimension:'Another allocation limit still blocks the next step.',
+    task_binding:'The saved task binding does not permit an automatic increase.'
+  };
+  function allocationMessage(automatic){
+    if(!automatic)return undefined;
+    return automatic.message||
+      (Object.hasOwn(allocationReasons,automatic.reason)?allocationReasons[automatic.reason]:automatic.reason);
+  }
   async function rememberFlow(flow){
     const terminal=flow.state==='DONE'||flow.state==='CANCELLED';
     const saved=context.workspaceState.get(pendingKey);
+    const automatic=flow.stop?.automatic_allocation;
+    const stop=automatic?{...flow.stop,automatic_allocation:{...automatic,message:allocationMessage(automatic)}}:flow.stop;
     // Finishing a conversational turn must not erase another saved review.
     if(!terminal||saved?.flow_id===flow.flow_id)
-      await context.workspaceState.update(pendingKey,terminal?undefined:{...flow,workspace:deps.workspace(),conversation:undefined,routing_step:undefined,child:undefined,data:undefined,mapping:undefined,allocation_proposal:undefined,allocation_amendment:undefined});
+      await context.workspaceState.update(pendingKey,terminal?undefined:{...flow,stop,workspace:deps.workspace(),conversation:undefined,routing_step:undefined,child:undefined,data:undefined,mapping:undefined,allocation_proposal:undefined,allocation_amendment:undefined});
     publish();
   }
   async function recoverSaved(discard=false){
@@ -253,6 +270,11 @@ function install(vscode,context,deps){
       armed:!!access,binding,models,tier,...extra},token,activityProgress);
     await rememberFlow(next);return next;
   }
+  function showHostProgress(flow, progress){
+    if(flow.progress){
+      progress.report(new vscode.LanguageModelTextPart('Host workflow · '+flow.progress+'\n\n'));
+    }
+  }
   function showPause(flow,audit,progress){
     const stop=flow.stop||{},failures=stop.failures||[];
     const details=[stop.error,...failures.map(f=>f.path+': '+f.error)].filter(Boolean);
@@ -265,11 +287,19 @@ function install(vscode,context,deps){
     const coverage=Number.isInteger(stop.mapped_files)&&Number.isInteger(stop.source_files)?` Mapped ${stop.mapped_files} of ${stop.source_files} source files.`:'';
     if(stop.recovery)details.push('Runtime memory recovery: '+(stop.recovery.error||stop.recovery.action?.replaceAll('_',' ')||'observed')+'. Task allocation is unchanged.');
     if(stop.memory_fault)details.push('Memory recovery: '+stop.memory_fault.recovery.replaceAll('_',' ')+'. Exact saved pages and task grants are retained.');
+    const automatic=stop.automatic_allocation;
+    const autoMessage=allocationMessage(automatic);
+    if(autoMessage&&!details.includes(autoMessage))details.push(autoMessage);
     const reason=details.length?details.join('\n'):(stop.status||'Inspect Sutra Monitor for details.');
     audit.stage='paused';audit.message=reason;publish();
-    const guidance=stop.status==='resource_wait'
-      ? 'Check both **System pressure** and the **Last model allocation** in Sutra Monitor. Healthy system pressure alone does not mean the selected model fits. After resources recover, or after selecting a smaller configured model, use **Resume** and send **continue** here. Resume checks a fresh measurement and model allocation before dispatch. Sutra will not automatically retry this stop.'
-      : allocationStop?'Choose **Increase allocation…** in Sutra Monitor to review and confirm additional task capacity, then send **continue** here. This preserves all spending and does not override model or hardware limits.':'Resolve the reported cause, then use **Resume** in Sutra Monitor and send **continue** here.';
+    let guidance='Resolve the reported cause, then use **Resume** in Sutra Monitor and send **continue** here.';
+    if(stop.status==='resource_wait'){
+      guidance='Check both **System pressure** and the **Last model allocation** in Sutra Monitor. Healthy system pressure alone does not mean the selected model fits. After resources recover, or after selecting a smaller configured model, use **Resume** and send **continue** here. Resume checks a fresh measurement and model allocation before dispatch. Sutra will not automatically retry this stop.';
+    }else if(automatic?.status==='model_context'){
+      guidance='Select a model with a larger context window, then send **continue** here.';
+    }else if(allocationStop){
+      guidance='Choose **Increase allocation…** in Sutra Monitor to review and confirm additional task capacity, then send **continue** here. This preserves all spending and does not override model or hardware limits.';
+    }
     const title=stop.resume_phase==='CLASSIFYING'?'Sutra paused the request.':'Sutra paused the review.';
     progress.report(new vscode.LanguageModelTextPart('**'+title+'**'+coverage+'\n\n'+reason+'\n\n'+(stop.failure_count>failures.length?`${stop.failure_count-failures.length} more file failures are recorded in the review details.\n\n`:'')+'The request, context, permissions and consumed budget are saved. '+guidance+' Resume keeps the remaining allocation; it does not reset a limit. Use **Discard** to abandon this request.'));
   }
@@ -511,9 +541,15 @@ function install(vscode,context,deps){
           if(!matchesTask(current,actionBinding))
             throw new Error('Task or calibration changed after the action. Its receipt is retained.');
         }
-        if(restartReview)flow=await flowEvent(flow,'restart_review',tier,activeCancel.token);
+        if(restartReview){
+          flow=await flowEvent(flow,'restart_review',tier,activeCancel.token);
+          showHostProgress(flow,progress);
+        }
         if(!flow)flow=await flowEvent(null,'start_existing',tier,activeCancel.token,{prompt,conversation_id:conversationId});
-        if(flow.state==='PAUSED')flow=await flowEvent(flow,'resume',tier,activeCancel.token);
+        if(flow.state==='PAUSED'){
+          flow=await flowEvent(flow,'resume',tier,activeCancel.token);
+          showHostProgress(flow,progress);
+        }
         while(!['DONE','AWAITING_ACTION'].includes(flow.state)){
           assertCurrent(a,activeCancel.token);
           if(flow.recovery){audit.stage='recovery_required';audit.message=flow.recovery.message;publish();progress.report(new vscode.LanguageModelTextPart(flow.recovery.message+'\n\nSend **continue** to review the recovery options.'));return;}
@@ -543,7 +579,7 @@ function install(vscode,context,deps){
           const bound=flow.binding||flow.bound_task;
           if(bound)audit.session=bound.session;
           audit.orchestration={flowId:flow.flow_id,state:flow.state,children:flow.children};publish();
-          if(flow.progress)progress.report(new vscode.LanguageModelTextPart('Host workflow · '+flow.progress+'\n\n'));
+          showHostProgress(flow,progress);
           if(flow.child)recordUsage(flow.child.result);
         }
         assertCurrent(a,activeCancel.token);

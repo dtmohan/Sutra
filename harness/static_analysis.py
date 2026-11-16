@@ -1,9 +1,12 @@
 from lifecycle import timeout as operation_timeout
 """Fresh, governed snapshots; deterministic graphs are independent of model prose."""
-import json,os,subprocess,time
+import json,os,platform,subprocess,time
 from pathlib import Path
 from context_manager import InvalidUpdate,canonical,sha
 import repository_tools as repo
+
+class StaticSourceChanged(InvalidUpdate):
+ """The committed source version differs from the current scoped file."""
 
 def analyze(texts,item_budget=1024):
  if type(item_budget) is not int or not 1<=item_budget<=16384:raise InvalidUpdate('Invalid parser work-unit allocation')
@@ -21,7 +24,7 @@ def analyze(texts,item_budget=1024):
   diagnostic_count+=data['diagnostic_count']
   toolchain={'typescript':data['compiler'],'typescript_sha256':sha(Path(compiler).read_bytes().decode()),'library_hashes':data['library_hashes'],'options':data['compiler_options']}
  if py:
-  import api_extract,api_facts,platform
+  import api_extract,api_facts
   parsed={};binding_count=0;node_count=len(nodes);call_count=len(calls)
   for p,t in py.items():
    d=api_extract.extract(p,t,item_budget=item_budget);parsed[p]=d;binding_count+=len(d['bindings']);node_count+=len(d['symbols']);call_count+=len(d['calls'])
@@ -51,8 +54,14 @@ def load(s,session,workspace,receipt):
  if not row or row['operation']['kind']!='static_map' or row['result']['status']!='ok':raise InvalidUpdate('Static snapshot receipt absent or stale')
  for p,h in row['result']['versions'].items():
   repo.request_check(s,session,'read',p)
-  if sha(repo.read_bytes(workspace,p,limit=row['result'].get('read_limit',repo.MAX_FILE)).decode())!=h:raise InvalidUpdate('Static snapshot source changed')
+  try:
+   current=repo.read_bytes(workspace,p,limit=row['result'].get('read_limit',repo.MAX_FILE))
+  except repo.SourceReadLimitExceeded as exc:
+   raise StaticSourceChanged('Static snapshot source grew: '+p) from exc
+  if sha(current.decode())!=h:raise StaticSourceChanged('Static snapshot source changed: '+p)
  chain=row['result']['graph']['toolchain']
+ if 'python' in chain and platform.python_version()!=chain['python']:
+  raise InvalidUpdate('Static Python compiler version changed')
  if 'typescript' in chain:
   compiler=Path(os.environ.get('KARMA_TYPESCRIPT','missing-compiler'))
   if not compiler.is_file() or sha(compiler.read_bytes().decode())!=chain['typescript_sha256']:raise InvalidUpdate('Static compiler version changed')

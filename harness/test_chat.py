@@ -162,6 +162,10 @@ class ChatTests(unittest.TestCase):
             with self.assertRaises(review_context.ReviewContextExceeded) as stopped:
                 chat.fit_packet(self.s,self.sid,p,data,model,True)
         self.assertEqual(stopped.exception.details['available_tokens'],6000)
+        need = stopped.exception.details['task_allocation_need']
+        self.assertEqual(need['dimension'], 'tokens')
+        self.assertLessEqual(need['required_context'], need['model_context'])
+        self.assertEqual(need['minimum'], need['slots'] * need['required_context'] - 6000)
         self.assertIn('65,536',str(stopped.exception))
         self.assertEqual(review_budget.usage(self.s,self.sid),before)
 

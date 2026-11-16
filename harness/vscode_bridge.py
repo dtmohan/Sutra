@@ -371,7 +371,15 @@ def _handle(root,workspace,request):
                 'tests_allowed':False,'max_tools':request.get('max_tools',12),'output_format':'architecture with diagram'}}
             if op=='auto_new':
                 from review_budget import DEFAULTS
-                data['constraints'].update(auto_review=True,**{key:request.get(key,value) for key,value in DEFAULTS.items()})
+                from workspace_allocation import policy
+                working = dict(DEFAULTS)
+                ceilings = policy()
+                if ceilings:
+                    caps = {'max_tools': ceilings['operations'], 'review_calls': ceilings['calls'],
+                            'review_tokens': ceilings['tokens'], 'review_seconds': ceilings['seconds'],
+                            'review_source_kib': max(1, ceilings['source_bytes'] // 1024)}
+                    working.update({key: min(working[key], value) for key, value in caps.items()})
+                data['constraints'].update(auto_review=True,**{key:request.get(key,value) for key,value in working.items()})
                 meta['auto']={'pages':[],'failures':{},'status':'ready'}
             save_contract(s,meta['active'],data,workspace)
             # Persist identity before the first interruptible repository action.

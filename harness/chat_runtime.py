@@ -82,7 +82,7 @@ def facts(graph,sites):
                 'meaning':'No call sites were found in this snapshot. Declarations are a bounded sample; source excerpts support explanation, not runtime proof.'}
     return analysis.compact(graph,sites)
 
-def conversation_pages(s,p,budget,materialize=False):
+def conversation_pages(s,p,budget,materialize=False,mandatory_only=False):
     iid=(p.get('conversation_handoff') or {}).get('invocation_id')
     if not iid:return None
     import conversation_memory as cm
@@ -90,7 +90,7 @@ def conversation_pages(s,p,budget,materialize=False):
     if not row:raise InvalidUpdate('Missing parent conversation receipt')
     if materialize:cm.materialize(s,row[0],cm.history(s,row[0],iid))
     base={k:v for k,v in p.items() if k not in ('memory','repair')}
-    return cm.working_set(s,row[0],iid,p['request'],budget,base,SYSTEM,schema,extra_bytes=budget.context_limit//16)
+    return cm.working_set(s,row[0],iid,p['request'],budget,base,SYSTEM,schema,extra_bytes=0 if mandatory_only else budget.context_limit//16)
 
 def request_check(s,sid,p):
     from review_reasoning import check
@@ -139,6 +139,32 @@ def validate(s,sid,p,proposal):
     report.validate(p, proposal)
     return {'admission':{'admitted':True,'errors':[],'semantic_correctness_verified':False},'checks':['schema','contract','calibration_binding','fresh_source','route_commitment','citations','handoff'],'provisional':True}
 
+def context_failure(s, packet, provider, allocation, cause):
+    """Attribute a context stop to the task only if the same minimum fits the model."""
+    failure = context.ReviewContextExceeded(allocation, provider.budget, cause)
+    from model_context import allocation as installed_allocation
+    installed, _ = installed_allocation(provider.context_metadata)
+    if installed.context_limit <= provider.budget.context_limit:
+        return failure
+    reserve = min(installed.response_reserve, max(512, installed.context_limit // 4))
+    model_budget = Budget(installed.context_limit, reserve, installed.template_reserve)
+    probe = dict(packet)
+    try:
+        probe['memory'] = conversation_pages(s, probe, model_budget, mandatory_only=True)
+        charged = model_budget.check(SYSTEM, dict(probe, repair={'errors': ['x'*140]*2}), schema(probe))
+    except ContextBudgetExceeded:
+        return failure
+    required = charged + reserve
+    slots = allocation['attempt_slots_reserved']
+    extra = slots * required - allocation['available_tokens']
+    if extra > 0:
+        failure.details['task_allocation_need'] = {
+            'dimension': 'tokens', 'minimum': extra, 'required_context': required,
+            'model_context': model_budget.context_limit, 'slots': slots,
+        }
+    return failure
+
+
 def fit_packet(s, sid, p, data, provider, real):
     """Keep required context; release optional repair shares before refusing.
 
@@ -168,64 +194,153 @@ def fit_packet(s, sid, p, data, provider, real):
             except ContextBudgetExceeded as exc:
                 if p['excerpt_bytes'] == 64 and p['map_bytes'] == 512:
                     if not real: raise
-                    failure = context.ReviewContextExceeded(allocation, provider.budget, exc)
+                    if not expand:
+                        failure = context_failure(s, p, provider, allocation, exc)
                     break
                 p['excerpt_bytes'] = max(64, p['excerpt_bytes']*4//5)
                 p['map_bytes'] = max(512, p['map_bytes']*4//5)
     raise failure
 
 
+def preflight(s, sid, packet, provider, real):
+    """Check the lower bound for real model input before opening source files.
+
+    Use the same packet, grammar and template charge as dispatch, with empty
+    citation choices as the lower bound. Full fit still checks actual evidence.
+    """
+    allocation = None
+    if real:
+        structured = report.requested(packet)
+        allocation = context.context_budget(provider, s, sid, slots=2 if structured else 1, expand_output=False)
+        if structured:
+            allocation.update(reviewer_slots_reserved=1, repair_slots_reserved=0)
+    probe = dict(packet, excerpts={})
+    try:
+        probe['memory'] = conversation_pages(s, probe, provider.budget, materialize=True, mandatory_only=True)
+        provider.budget.check(SYSTEM, dict(probe, repair={'errors': ['x'*140]*2}), schema(probe))
+    except ContextBudgetExceeded as exc:
+        if allocation is None:
+            raise
+        raise context_failure(s, probe, provider, allocation, exc) from exc
+
+
+def mapped_candidates(s, meta, workspace):
+    """Use receipt-backed names for planning, even if their contents changed."""
+    import repository_tools as repo
+    sid = meta['active']
+    catalog = set(repo.catalog(s, sid))
+    inventory = repo.inventory(Path(workspace), s.snapshot(sid)['constraints']['allowed_paths'], automatic=True)
+    paths = set()
+    for page in meta.get('auto', {}).get('pages', ()):
+        if page.get('superseded'):
+            continue
+        try:
+            row = repo.record_by_id(s, sid, page['receipt'])
+        except repo.RepositoryReceiptStale:
+            # A confirmed policy restart may retain historical map entries.
+            continue
+        result = row['result']
+        if (row['operation']['kind'] != 'static_map' or result['status'] != 'ok' or
+                result['versions'] != page['versions'] or set(result['versions']) != set(page['files'])):
+            raise InvalidUpdate('Mapped source names differ from their receipt')
+        paths.update(result['versions'])
+    available = paths.intersection(catalog, inventory)
+    if not any(Path(path).suffix in auto.CODE for path in available):
+        raise InvalidUpdate('No supported mapped source remains in scope. Refresh the source map before continuing.')
+    return available, sum(Path(path).suffix in auto.CODE for path in inventory)
+
+
 def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
     sid=meta['active'];prompt=request.get('prompt','');models=request.get('models');mode=request.get('tier','auto')
-    # Validate user configuration before any source operation or inference.
-    KarmaAdapter().route(prompt,models,mode,{'source_files':0,'selected_files':0,'unresolved_calls':0})
-    st=auto.status(s,meta,workspace);pages,_=auto.current_pages(s,meta,workspace)
-    if not pages:raise InvalidUpdate('No supported source mapped yet. Resume the review or inspect the dashboard.')
+    adapter = KarmaAdapter()
+    def route(sources, selected, unresolved=0):
+        return adapter.route(prompt, models, mode, {
+            'source_files': sources, 'selected_files': selected, 'unresolved_calls': unresolved})
+    route(0, 0)  # Validate user configuration without touching source.
     import orchestration as machine
-    files=auto.ranked({name for page in pages for name in page['files']},s.pinned(sid)['goal']+' '+prompt)
-    owner=machine.ACTIVE.get() or machine.task(s,sid)['id']
+    owner = machine.ACTIVE.get() or machine.task(s, sid)['id']
     s.db.commit()
-    from source_paging import select
-    files=context.ordered_sources(dict.fromkeys(files),None,s.pinned(sid)['goal']+' '+prompt)
-    files,page_plan=select(s,sid,workspace,files,'workspace_synthesis')
-    receipts=runtime.build_partition(s,meta,workspace,root,files,real=provider is None)
-    data=runtime.load_partition(s,sid,workspace,receipts,owner);graph=data['graph']
-    signals={'source_files':st['source_files'],'selected_files':len(files),'unresolved_calls':sum(c['target'] is None for c in graph['calls'])}
-    choice=KarmaAdapter().route(prompt,models,mode,signals)
-    if provider is not None and provider.model!=choice['model']:raise InvalidUpdate('Provider does not match routed model')
-    record={'session':sid,'contract_hash':s.origin(sid)['contract_hash'],'request_hash':sha(prompt),'snapshot_receipt':receipts[0],'snapshot_receipts':receipts,'snapshot_owner':owner,'choice':choice,
-            'coverage':dict({k:st[k] for k in ('mapped_files','source_files','pending_files','semantic_review_complete')},
-                            fresh_selected_files=len(files),deferred_files=len(page_plan['omitted']))}
-    with s.db:s._audit('CHAT_ROUTE',record)
-    route={'record':record,'receipt':s.db.execute('SELECT event_hash FROM page_audit ORDER BY seq DESC LIMIT 1').fetchone()[0]}
-    p={'_request_nonce':uuid.uuid4().hex,'contract':s.pinned(sid),'workspace':str(workspace),'request':prompt,'pages':[],
-       'snapshot_receipt':receipts[0],'snapshot_receipts':receipts,'snapshot_owner':owner,'sites':[],'excerpt_bytes':4096,'map_bytes':4096,'route':route,'handoff':None}
+    p = {'_request_nonce': uuid.uuid4().hex, 'contract': s.pinned(sid), 'workspace': str(workspace),
+         'request': prompt, 'pages': [], 'snapshot_owner': owner, 'handoff': None}
     if request.get('conversation_id'):
         from conversation import workspace_handoff
-        p['conversation_handoff']=workspace_handoff(s,sid,request['conversation_id'],prompt)
-    p['constraint_echo']=constraint_rows(p['contract'])
-    if request.get('child_results'):
-        from subagent_runtime import joined_results
-        p['orchestration_parent']=request['orchestration_parent']
-        p['child_results']=joined_results(s,sid,request['orchestration_parent'],request['child_results'],prompt)
-    p['source_page_coverage']={'selected_files':len(files),'deferred_files':len(page_plan['omitted']),
-                             'meaning':'This response uses selected fresh source pages. Deferred files are not semantically reviewed.'}
+        p['conversation_handoff'] = workspace_handoff(s, sid, request['conversation_id'], prompt)
+    p['constraint_echo'] = constraint_rows(p['contract'])
+    real = provider is None
+    prepared = {}
+    def prepare(model):
+        if model in prepared:
+            return
+        if real:
+            from api_runtime import provider_for
+            selected = provider_for(root, model, review=True)
+            selected.keep_alive = 0
+        else:
+            selected = provider
+            if selected.model != model:
+                raise InvalidUpdate('Provider does not match routed model')
+        preflight(s, sid, p, selected, real)
+        prepared[model] = selected
 
-    old=meta.get('chat',{}).get('checkpoint')
-    if old:
-        try:
-            prior=s.load_result(sid,old)
-            if meta['chat'].get('reviewer_id'):
-                from report_review import published
-                prior,_=published(s,sid,old,meta['chat']['reviewer_id'])
-            env=json.loads(s.db.execute('SELECT record_json FROM invocations WHERE id=?',(old,)).fetchone()[0])
-            p['handoff']=compact(prior,old,env['model'])
-            if meta['chat'].get('reviewer_id'):p['handoff']['reviewer_id']=meta['chat']['reviewer_id']
-        except (PageFault,InvalidUpdate):pass
-    real=provider is None
-    if real:
-        from api_runtime import provider_for
-        provider=provider_for(root,choice['model'],review=True);provider.keep_alive=0
+    def load_prior_context():
+        if request.get('child_results'):
+            from subagent_runtime import joined_results
+            p['orchestration_parent'] = request['orchestration_parent']
+            p['child_results'] = joined_results(s,sid,request['orchestration_parent'],request['child_results'],prompt)
+        old=meta.get('chat',{}).get('checkpoint')
+        if old:
+            try:
+                prior=s.load_result(sid,old)
+                if meta['chat'].get('reviewer_id'):
+                    from report_review import published
+                    prior,_=published(s,sid,old,meta['chat']['reviewer_id'])
+                env=json.loads(s.db.execute('SELECT record_json FROM invocations WHERE id=?',(old,)).fetchone()[0])
+                p['handoff']=compact(prior,old,env['model'])
+                if meta['chat'].get('reviewer_id'):p['handoff']['reviewer_id']=meta['chat']['reviewer_id']
+            except (PageFault,InvalidUpdate):pass
+
+    prior_loaded = False
+    def before_read(names):
+        nonlocal prior_loaded
+        model = route(source_count, len(names))['model']
+        prepare(model)
+        if not prior_loaded:
+            # Earlier reports and joined children require fresh source checks.
+            # Only consult them after the protected turn passed preflight.
+            load_prior_context()
+            prior_loaded = True
+            if p['handoff'] or p.get('child_results'):
+                preflight(s, sid, p, prepared[model], real)
+
+    # An explicit tier, or an Auto route that is identical for both a small and
+    # a broad page, can fail before source selection as well as before reading.
+    small, broad = route(1, 1)['model'], route(4, 4)['model']
+    if small == broad:
+        prepare(small)
+    candidates, source_count = mapped_candidates(s, meta, workspace)
+    files = context.ordered_sources(candidates, None, context.query(p))
+    from review_source_receipts import acquire
+    receipts, data, page_plan = acquire(
+        s, meta, workspace, root, request, files, real=real,
+        before_read=before_read)
+    files = page_plan['selected']
+    graph = data['graph']
+    st = auto.status(s, meta, workspace)
+    choice = route(st['source_files'], len(files), sum(c['target'] is None for c in graph['calls']))
+    prepare(choice['model'])
+    provider = prepared[choice['model']]
+    record = {'session': sid, 'contract_hash': p['contract']['contract_hash'], 'request_hash': sha(prompt),
+              'snapshot_receipt': receipts[0], 'snapshot_receipts': receipts, 'snapshot_owner': page_plan['snapshot_owner'],
+              'choice': choice,
+              'coverage': dict({k: st[k] for k in ('mapped_files','source_files','pending_files','semantic_review_complete')},
+                               fresh_selected_files=len(files), deferred_files=len(page_plan['omitted']))}
+    with s.db:
+        s._audit('CHAT_ROUTE', record)
+    route_receipt = s.db.execute('SELECT event_hash FROM page_audit ORDER BY seq DESC LIMIT 1').fetchone()[0]
+    p.update(snapshot_receipt=receipts[0], snapshot_receipts=receipts, snapshot_owner=page_plan['snapshot_owner'],
+             sites=[], excerpt_bytes=4096, map_bytes=4096, route={'record': record, 'receipt': route_receipt},
+             source_page_coverage={'selected_files': len(files), 'deferred_files': len(page_plan['omitted']),
+                 'meaning': 'This response uses selected fresh source pages. Deferred files are not semantically reviewed.'})
     import report_review
     resumed = report_review.pending_candidate(s, sid, p)
     if resumed:
@@ -235,7 +350,7 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
                'admission': {'admitted': True, 'errors': [], 'semantic_correctness_verified': False},
                'token_usage': {'calls': [], 'totals': summarize([]), 'total_calls': 0, 'limit': None}}
         # Publication and reviewer checks use the original fresh candidate packet.
-        # New mapping work remains charged; accepted draft/pages are not replayed.
+        # Accepted draft and reviewer pages are not replayed.
         _, _, p = report_review.candidate(s, sid, checkpoint)
     else:
         from review_reasoning import bind, repair
@@ -263,6 +378,7 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
             s.event(run,'BRIDGE',{'reason':'bounded_output_repair' if recovery else 'bounded_chat_repair'})
             p['repair'] = recovery or {'errors':[e[:140] for e in out['admission']['errors'][:2]]}
             output_repaired = output_repaired or recovery is not None
+    from review_budget import BudgetStop
     publication=None
     if out['admission']['admitted']:
         checkpoint=out['invocation_id']; reviewer_id=None
@@ -281,6 +397,8 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
                 out['accepted_output'],publication=report_review.published(s,sid,checkpoint,reviewer_id)
                 out['publication']=publication
             except (InvalidUpdate,PageFault,ContextBudgetExceeded) as exc:
+                if machine.ACTIVE.get() and isinstance(exc, (machine.OrchestrationStop, BudgetStop)):
+                    raise
                 out['admission']={'admitted':False,'errors':['Architecture report not published: '+str(exc)],'semantic_correctness_verified':False}
                 out['accepted_output']=None
         if out['admission']['admitted']:

@@ -8,6 +8,7 @@ import repository_tools as repo
 import static_analysis as analysis
 import static_runtime as runtime
 import review_budget as budget
+from orchestration import OrchestrationStop
 
 CODE={'.py','.js','.jsx','.ts','.tsx'}
 
@@ -148,7 +149,7 @@ def step(s,meta,workspace,root,request,provider=None):
   # A parser work-unit overflow bridges to a smaller page, not task completion.
   while primary:
    try:row=runtime.build(s,meta,workspace,root,files,real=provider is None);break
-   except budget.BudgetStop:raise
+   except (budget.BudgetStop, OrchestrationStop):raise
    except InvalidUpdate as exc:
     if 'RESOURCE_WAIT' in str(exc):raise
     with s.db:s._audit('AUTO_PAGE_SPLIT',{'session':meta['active'],'files':files,'reason':str(exc)})
@@ -183,6 +184,8 @@ def step(s,meta,workspace,root,request,provider=None):
  except budget.BudgetStop as exc:
   a['status']='budget_stopped';a['stop_frame']=exc.frame
   with s.db:s._audit('AUTO_BUDGET_STOP',{'session':meta['active'],'kernel':exc.frame})
+ except OrchestrationStop:
+  raise
  except ResourceWait as exc:
   a['status']='resource_wait';a['error']=str(exc);a['resource_stop']=exc.state
  except (InvalidUpdate,PageFault) as exc:

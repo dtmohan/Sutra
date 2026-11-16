@@ -382,6 +382,52 @@ function setup(saved={}){
   checks.push('allocation preview requires explicit modal acceptance, ignores command arguments, preserves chat and does not dispatch a model');
  }
 
+ {
+  const automatic=setup();automatic.kind('report');await automatic.arm();
+  const request=automatic.deps.request;
+  let savedStop,resumed=false;
+  automatic.deps.request=async(m,t)=>{
+   if(savedStop&&m.op==='orchestrate'&&m.event==='inspect')return savedStop;
+   if(savedStop&&m.op==='orchestrate'&&m.event==='resume'){
+    assert.equal(m.tier,'high');
+    assert.deepEqual(m.binding,savedStop.binding);
+    resumed=true;
+    return {...savedStop,state:'CODING',stop:null,allocation_version:1,allocation_amendment:{version:1},
+      progress:'Sutra added source capacity within the workspace limits.'};
+   }
+   const result=await request(m,t);
+   if(!resumed&&m.op==='orchestrate'&&result.state==='CODING'){
+    savedStop={...result,state:'PAUSED',stop:{status:'task_budget',stage:'SYNTHESIS',error:'Source allocation exhausted.',
+      automatic_allocation:{status:'denied',reason:'workspace_limit'}}};
+    return savedStop;
+   }
+   return result;
+  };
+  assert((await automatic.send('low')).some(p=>p.value?.includes('automatic allocation ceiling')));
+  assert.equal(automatic.controller.status().pending.stop.automatic_allocation.reason,'workspace_limit');
+  assert(automatic.controller.status().pending.stop.automatic_allocation.message.includes('automatic allocation ceiling'));
+  automatic.v.window.showWarningMessage=async()=>{throw Error('Automatic allocation must not ask for manual confirmation');};
+  const reply=await automatic.send('high',[{role:1,content:[new Text('continue')]}]);
+  assert(reply.some(p=>p.value?.includes('Sutra added source capacity within the workspace limits')));
+  assert.equal(automatic.calls.filter(c=>c.op==='native_work').at(-1).tier,'high');
+  assert.equal(automatic.controller.status().pending,null);
+  checks.push('automatic allocation progress on resume stays in the same model-switch request without a confirmation');
+ }
+ {
+  const limited=setup();limited.kind('report');await limited.arm();
+  const request=limited.deps.request;
+  limited.deps.request=async(m,t)=>{
+   const result=await request(m,t);
+   return m.op==='orchestrate'&&result.state==='CODING'?{...result,state:'PAUSED',stop:{
+    status:'context_budget',error:'Required context cannot fit.',automatic_allocation:{
+     status:'model_context',reason:'The selected model has reached its context limit.'}}}:result;
+  };
+  const reply=await limited.send();
+  assert(reply.some(p=>p.value?.includes('Select a model with a larger context window')));
+  assert(!reply.some(p=>p.value?.includes('Increase allocation')));
+  checks.push('a model context limit suggests switching models without offering an allocation increase');
+ }
+
  const pressured=setup();pressured.kind('report');await pressured.arm();const pressuredRequest=pressured.deps.request;
  pressured.deps.request=async(m,t)=>{const r=await pressuredRequest(m,t);return m.op==='orchestrate'&&r.state==='CODING'?{...r,state:'PAUSED',stop:{status:'resource_wait',resume_phase:'CODING',error:'RESOURCE_WAIT: OS thermal pressure: serious; kernel: BRIDGE'}}:r;};
  const pressureReply=await pressured.send();

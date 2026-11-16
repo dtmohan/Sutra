@@ -3,6 +3,7 @@
 This only selects optional source pages. Contracts, pinned memory, permissions
 and spent work are never reduced or refunded. Every actual read is re-admitted.
 """
+from math import ceil
 from pathlib import Path
 from context_manager import InvalidUpdate
 import orchestration as m
@@ -35,7 +36,12 @@ def select(s, sid, workspace, files, purpose, reserve_fraction=0):
         # Report the smallest useful next page to the normal kernel gate.
         code = [p for p in files if p not in configs]
         needed = size + min((sizes[p] for p in code), default=1)
-        cost = {'operations': 1, 'source_bytes': needed, 'seconds': 20}
+        # The page has to fit both the per-page cap and the fraction of the
+        # remaining allowance available to this stage.
+        if needed > page_cap:
+            raise InvalidUpdate('No complete source file fits the per-page allocation')
+        measured = max(needed + 1, ceil(needed / (1 - reserve_fraction)))
+        cost = {'operations': 1, 'source_bytes': measured, 'seconds': 20}
         owner = m.ACTIVE.get() or m.task(s, sid)['id']
         m.allowed(m.gates(s, owner, cost))
         raise InvalidUpdate('No complete source file fits the source-page allocation')

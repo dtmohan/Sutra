@@ -140,6 +140,9 @@ monitor.orchestration.nodes[0].resource_fallback={from_model:'large',model:'smal
  await page.screenshot({path:path.join(out,'Allocation-recovery.png'),fullPage:true});
  await send({snapshot,native:{pending:{state:'PAUSED',stop:{status:'resource_wait'}}}});
  assert(!(await page.locator('#increase-allocation').isVisible()));
+ await send({snapshot,native:{pending:{state:'PAUSED',stop:{status:'context_budget',error:'The packet does not fit.',automatic_allocation:{status:'model_context',reason:'The selected model has reached its context limit.'}}}}});
+ assert((await page.locator('#recovery-status').textContent()).includes('selected model has reached its context limit'));
+ assert(!(await page.locator('#increase-allocation').isVisible()));
 
  for(const code of ['BRIDGE','FIN','COMPOUND_FIN']){await send({snapshot:{...snapshot,monitor:{...monitor,hardware:{...monitor.hardware,decision:code,admitted:false}}}});assert.equal(await page.locator('#resource').textContent(),'System pressure: '+code);}
  await send({snapshot:{...snapshot,monitor:{...monitor,hardware:{...monitor.hardware,available:false,reason:'No collector'}}}});assert.equal(await page.locator('#cpu-temp').textContent(),'—');assert.equal(await page.locator('#cpu-load').textContent(),'—');

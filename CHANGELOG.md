@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.37.0
+
+- Give read-only native reviews an automatic workspace reserve. A measured shortfall can authorize a versioned increase within the applicable user-owned ceiling.
+- Keep the same review and constraints when renewing its bounded execution. Reuse still-current source receipts from that review’s settled predecessor.
+- Distinguish task token shortfalls from model context limits. Keep hardware, tool, and permission gates in the normal dispatch path.
+
+## 0.36.0
+
+- Check protected model context before reading source for synthesis and child reviews. Check the complete source-bearing packet again before model dispatch.
+- Reuse settled source receipts on the same execution after scoped content and toolchain verification. File changes require fresh charged analysis, and incomplete preparations remain historical.
+- Test a saved review across reloads and model switches, with no duplicate source charge or allocation increase. Test changed content even when file size and modification time are preserved.
+
 ## 0.35.0
 
 - Save workspace permissions for Sutra native chat and its tools. Choose Read only or Workspace agent once per trusted workspace and revoke access from Sutra settings.

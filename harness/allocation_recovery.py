@@ -1,4 +1,4 @@
-"""Explicit host allocation amendments; proposals never grant themselves.
+"""Host allocation amendments; proposals never grant themselves.
 
 The task contract and usage ledger stay immutable. A confirmed amendment adds
 capacity in a separately versioned, hash-chained record. No model permissions,
@@ -33,11 +33,15 @@ def effective(s, sid, base):
         p = r['proposal']
         if (number != version + 1 or r['version'] != number or r['previous'] != previous
                 or sha('allocation-amendment-v1:' + raw) != digest
-                or r['authority'] != 'host_user_confirmation'
+                or r['authority'] not in ('host_user_confirmation', 'host_workspace_policy')
                 or p['session'] != sid or p['binding']['contract_hash'] != origin
                 or p['before'] != limits or p['version'] != version
                 or p['proposal_id'] != proposal_hash(p)):
             raise InvalidUpdate('Allocation amendment chain is corrupt')
+        if r['authority'] == 'host_workspace_policy':
+            from workspace_allocation import verified_evidence
+            if not verified_evidence(r):
+                raise InvalidUpdate('Workspace allocation admission evidence is corrupt')
         after = increased(limits, p['additions'])
         if p['after'] != after:
             raise InvalidUpdate('Allocation amendment totals differ')
@@ -115,9 +119,44 @@ def preview(s, fid, meta, additions=None):
     return p
 
 
+def _append(s, fid, expected, workspace_policy=None):
+    """Persist a freshly admitted host proposal inside its write transaction."""
+    import orchestration as m
+    from execution_sessions import renew_after_grant
+    from review_budget import allocations
+
+    if expected['allocation_gate']['decision'] != 'ALLOW':
+        raise InvalidUpdate('Increased allocation still cannot admit the task')
+    base = allocations(s.snapshot(expected['session'])['constraints'])
+    _, version, previous = effective(s, expected['session'], base)
+    authority = 'host_user_confirmation' if workspace_policy is None else 'host_workspace_policy'
+    record = {'version': version + 1, 'previous': previous, 'authority': authority,
+              'proposal': expected, 'at': time.time()}
+    if workspace_policy is not None:
+        from workspace_allocation import verified_evidence
+        record['workspace_policy'] = workspace_policy
+        if not verified_evidence(record):
+            raise InvalidUpdate('Workspace policy cannot authorize the proposed allocation')
+    raw = canonical(record)
+    digest = sha('allocation-amendment-v1:' + raw)
+    s.db.execute('INSERT INTO allocation_amendments VALUES(?,?,?,?,?)',
+                 (expected['session'], expected['binding']['contract_hash'], version + 1, raw, digest))
+    renew_after_grant(s, fid)
+    m.transition(s, fid, 'PAUSED', 'ALLOCATION_INCREASED',
+                 {'allocation_receipt': digest, 'allocation_version': version + 1,
+                  'allocation_authority': authority}, expected['allocation_gate'])
+    s._audit('ALLOCATION_INCREASED', {'session': expected['session'], 'receipt': digest,
+                                     'version': version + 1, 'proposal_id': expected['proposal_id'],
+                                     'authority': authority})
+    result = {'receipt': digest, 'version': version + 1, 'limits': expected['after'], 'used': expected['used']}
+    if workspace_policy is not None:
+        result.update(authority=authority, dimension=workspace_policy['dimension'],
+                      additions=expected['additions'], workspace_limit=workspace_policy['ceilings'])
+    return result
+
+
 def grant(s, fid, meta, proposed):
     """Called only by the private host UI after an explicit confirmation."""
-    import orchestration as m
     if not isinstance(proposed, dict):
         raise InvalidUpdate('A reviewed allocation proposal is required')
     with s.db:
@@ -125,20 +164,4 @@ def grant(s, fid, meta, proposed):
         expected = preview(s, fid, meta, proposed.get('additions'))
         if proposed != expected:
             raise InvalidUpdate('Allocation proposal is stale or changed; review a fresh proposal')
-        if expected['allocation_gate']['decision'] != 'ALLOW':
-            raise InvalidUpdate('Increased allocation still cannot admit the task')
-        from review_budget import allocations
-        base = allocations(s.snapshot(expected['session'])['constraints'])
-        _, version, previous = effective(s, expected['session'], base)
-        record = {'version': version + 1, 'previous': previous,
-                  'authority': 'host_user_confirmation', 'proposal': expected, 'at': time.time()}
-        raw = canonical(record); digest = sha('allocation-amendment-v1:' + raw)
-        s.db.execute('INSERT INTO allocation_amendments VALUES(?,?,?,?,?)',
-                     (expected['session'], expected['binding']['contract_hash'], version + 1, raw, digest))
-        from execution_sessions import renew_after_grant
-        renew_after_grant(s, fid)
-        m.transition(s, fid, 'PAUSED', 'ALLOCATION_INCREASED',
-                     {'allocation_receipt': digest, 'allocation_version': version + 1}, expected['allocation_gate'])
-        s._audit('ALLOCATION_INCREASED', {'session': expected['session'], 'receipt': digest,
-                                         'version': version + 1, 'proposal_id': expected['proposal_id']})
-    return {'receipt': digest, 'version': version + 1, 'limits': expected['after'], 'used': expected['used']}
+        return _append(s, fid, expected)

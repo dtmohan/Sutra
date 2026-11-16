@@ -9,6 +9,13 @@ EXTENSIONS={'.py','.js','.ts','.tsx','.jsx','.json','.md','.txt','.toml','.yaml'
 EXCLUDE={'node_modules','vendor','dist','build','__pycache__','venv','target','coverage','secrets.json','secrets.yaml','credentials.json'}
 MAX_FILES=128;MAX_FILE=64000
 
+class SourceReadLimitExceeded(InvalidUpdate):
+ """A regular source file exceeds its current scoped byte allocation."""
+
+class RepositoryReceiptStale(InvalidUpdate):
+ """An intact repository receipt was made under another contract or policy."""
+
+
 def initialize(s):
  s.db.executescript('''CREATE TABLE IF NOT EXISTS repository_ops(id TEXT PRIMARY KEY,session TEXT,request_id TEXT UNIQUE,record_json TEXT,digest TEXT);
  CREATE TABLE IF NOT EXISTS repository_receipts(id TEXT PRIMARY KEY,session TEXT,seq INTEGER,operation_id TEXT UNIQUE,record_json TEXT,UNIQUE(session,seq));''')
@@ -51,7 +58,7 @@ def read_bytes(workspace,name,limit=MAX_FILE):
    before=os.fstat(stream.fileno())
    if not stat.S_ISREG(before.st_mode):raise InvalidUpdate('Source is not a regular file: '+name)
    if before.st_nlink!=1:raise InvalidUpdate('Source has multiple hard links: '+name)
-   if before.st_size>limit:raise InvalidUpdate(f'Source {name} needs {before.st_size} bytes; remaining page allocation is {limit} bytes')
+   if before.st_size>limit:raise SourceReadLimitExceeded(f'Source {name} needs {before.st_size} bytes; remaining page allocation is {limit} bytes')
    raw=stream.read(limit+1);after=os.fstat(stream.fileno())
    if len(raw)>limit or (before.st_mtime_ns,before.st_size)!=(after.st_mtime_ns,after.st_size):raise InvalidUpdate('File changed while reading')
   if b'\0' in raw:raise InvalidUpdate('Binary file rejected')
@@ -253,7 +260,7 @@ def record_by_id(s,session,rid):
  if not row:raise InvalidUpdate('Repository receipt absent')
  raw,digest,receipt=row;op=json.loads(raw);r=json.loads(receipt);origin=s.origin(session)
  if sha('repository-op-v1:'+raw)!=digest or sha('repository-receipt-v1:'+receipt)!=rid or r['operation_hash']!=digest or r['operation_id']!=op['id']:raise InvalidUpdate('Repository receipt corrupted')
- if op['contract_hash']!=origin['contract_hash'] or op['logic_hash']!=s.logic_hash:raise InvalidUpdate('Repository receipt stale')
+ if op['contract_hash']!=origin['contract_hash'] or op['logic_hash']!=s.logic_hash:raise RepositoryReceiptStale('Repository receipt stale')
  return {'id':rid,'operation':op,'result':r['result']}
 
 def evidence(s,session,workspace):

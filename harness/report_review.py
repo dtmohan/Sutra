@@ -250,7 +250,8 @@ def pending_candidate(s, sid, payload):
         try:
             draft, _, source = candidate(s, sid, plan['candidate_id'])
             if any(source.get(k) != payload.get(k) for k in
-                   ('request', 'contract', 'workspace', 'conversation_handoff', 'child_results', 'orchestration_parent')):
+                   ('request', 'contract', 'workspace', 'conversation_handoff', 'child_results', 'orchestration_parent',
+                    'snapshot_owner')):
                 continue
             if len(page_receipts(s, sid, plan)) == len(plan['pages']): continue
             return plan['candidate_id'], draft

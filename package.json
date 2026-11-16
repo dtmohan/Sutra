@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Local orchestration with observe-only task commitments and completion assessments.",
-  "version": "0.35.0",
+  "version": "0.37.0",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -184,6 +184,87 @@
           "maximum": 8192,
           "scope": "machine",
           "description": "Workspace history allocation in MiB. New work stops near the limit; immutable evidence is retained. Diagnostic traces and settled action snapshots are pruned separately."
+        },
+        "karma.workspaceAllocation": {
+          "type": "object",
+          "default": {},
+          "scope": "application",
+          "additionalProperties": false,
+          "description": "Per-task cumulative ceilings for automatic allocation recovery. Set only in User Settings. Repository settings cannot grant capacity. These ceilings limit automatic increases and preserve prior spending.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Enable automatic allocation recovery. The default is enabled."
+            },
+            "source_bytes": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 1024000000,
+              "description": "Total source bytes per task. Default ceiling is 128 MiB (134217728 bytes)."
+            },
+            "operations": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000,
+              "description": "Total repository operations per task. Default ceiling is 2000."
+            },
+            "calls": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000,
+              "description": "Total model calls per task. Default ceiling is 80."
+            },
+            "tokens": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000,
+              "description": "Total model budget units per task. Default ceiling is 500000."
+            },
+            "seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000,
+              "description": "Total execution seconds per task. Default ceiling is 3600."
+            },
+            "byFolder": {
+              "type": "object",
+              "description": "Optional overrides keyed by the exact absolute path of the first workspace folder. Each entry overrides only the provided fields.",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "source_bytes": {
+                    "type": "integer",
+                    "minimum": 1024,
+                    "maximum": 1024000000
+                  },
+                  "operations": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000000
+                  },
+                  "calls": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000000
+                  },
+                  "tokens": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000000
+                  },
+                  "seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000000
+                  }
+                }
+              }
+            }
+          }
         },
         "karma.models": {
           "type": "object",
