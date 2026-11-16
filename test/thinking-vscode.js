@@ -5,24 +5,30 @@ exports.run=async context=>{
  const save=()=>fs.writeFileSync(file,JSON.stringify(report,null,2));
  try{
   report.thinkingPartAvailable=typeof vscode.LanguageModelThinkingPart==='function';assert(report.thinkingPartAvailable);
-  const {install}=require('../native_provider');let n=0;
+  const {install}=require('../native_provider');let n=0,quiet=true;
   const models={low:'fixture-small',mid:'fixture-mid',high:'fixture-large'};
   install(vscode,context,{workspace:()=>vscode.workspace.workspaceFolders[0].uri.fsPath,isBusy:()=>false,configureModels:async()=>models,modelSettings:()=>models,onStatus:()=>{},activityLink:e=>'karma-preview:/activity/'+'a'.repeat(24)+'/'+e.id+'/Reasoning.txt',
    request:async(m,t,emit)=>{
     if(m.op==='orchestrate'&&m.event==='pending')return {state:'DONE',flow_id:null};
     if(m.op==='orchestrate'&&m.event==='start'){
-     let id;for(const role of ['conversation','subagent','chat_reviewer']){
+     let id;for(const role of quiet?['conversation']:['conversation','subagent','chat_reviewer']){
      id=String(++n).padStart(32,'0');
      emit({kind:'start',id,role,model:models[m.tier],node_id:'fixture-child-'+n});
-     emit({kind:'thinking',id,text:'Sutra reasoning display fixture: compare the observed source relationships. This is unverified commentary.\n'});
+     emit({kind:'control',id,requested:false});
+     if(!quiet)emit({kind:'thinking',id,text:'Sutra reasoning display fixture: compare the observed source relationships. This is unverified commentary.\n'});
      await new Promise(r=>setTimeout(r,700));
-     emit({kind:'finish',id,status:'accepted',usage:{input_tokens:30,output_tokens:40}});
+     emit({kind:'finish',id,status:'accepted',thinking_chars:quiet?0:140,usage:{input_tokens:30,output_tokens:40}});
      }
      return {flow_id:id,state:'DONE',conversation:{route:{model:models[m.tier]},result:{invocation_id:id,admission:{admitted:true},accepted_output:{answer:'Fixture accepted answer '+n+'.',summary:'fixture',intent:'conversation'}}}};
     }
     throw Error('Unexpected '+JSON.stringify(m));
    }});
   const discovered=await vscode.lm.selectChatModels({vendor:'karma'});assert.equal(discovered.length,4);
+  const quietResponse=await discovered.find(m=>m.name==='Sutra Low').sendRequest([vscode.LanguageModelChatMessage.User('Hello fixture')],{},new vscode.CancellationTokenSource().token);
+  const quietParts=[];for await(const part of quietResponse.stream)quietParts.push(part);
+  assert.equal(quietParts.filter(p=>p instanceof vscode.LanguageModelThinkingPart).length,0);
+  assert(quietParts.some(p=>p instanceof vscode.LanguageModelTextPart&&p.value.includes('No separate reasoning text received.')));
+  report.metadataOnlyCall={thinkingParts:0,explicitAbsence:true};quiet=false;
   report.streams=[];
   for(const name of ['Sutra Low','Sutra High']){
    const model=discovered.find(m=>m.name===name);assert(model);

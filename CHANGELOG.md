@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.29.0
+
+- Estimate additional memory for a loaded model by deducting only reusable weights with matching name, manifest, backend, unexpired residency and sufficient context. Retain the full KV/workspace estimate, calibration margin, fresh OS pressure checks and 4 GiB reserve. Recheck installed identity and residency before dispatch.
+- Let Auto workspace workflows try a strictly smaller configured model after a capacity refusal before inference. The central state machine records each selection, consults the unchanged STP kernel and remaining allocations, and bounds fallback to two switches. Explicit model choices, system pressure stops and interrupted inference are not bypassed.
+- Rebuild fresh source/context packets for the replacement model. Retain original requests, pinned constraints, permissions, completed child results and spent budgets across fallback, reload and model switches. Report reviewer identity requirements remain unchanged.
+- Show the cold estimate, reusable weights and fallback decision in Sutra Monitor. Include the 0.28.1 model-reasoning/host-status display fixes. Preserve compatible 0.28.x conversation data; policy-bound workspace tasks use the existing explicit restart path without refunds.
+- Keep the canonical STP kernel byte-for-byte unchanged.
+
+## 0.28.1
+
+- Create native thinking blocks only when a model actually returns reasoning text. Metadata-only calls show call details and the requested reasoning control without a misleading "Finished thinking" block.
+- Label source mapping, workflow progress and resource pauses as host status. A memory-blocked review does not create a fictitious workspace reasoning stream.
+- Preserve reported reasoning-character counts in diagnostic history and distinguish absent text, unavailable text and interrupted calls. Parent and child reasoning remain separate across model switches and reloads.
+- Keep the STP kernel, policy hash, memory admission, context, permissions and budget rules unchanged.
+
 ## 0.28.0
 
 - Share typed memory faults, dependency-safe eviction and retention rules across page/evidence stores, conversation recovery and disposable diagnostics.

@@ -333,6 +333,47 @@ function setup(saved={}){
  assert(pressureReply.some(p=>p.value?.includes('Last model allocation')));assert(pressureReply.some(p=>p.value?.includes('will not automatically retry')));
  assert.equal(pressured.controller.status().routing.stage,'paused');assert(!pressured.calls.some(c=>c.op==='native_work'));
  checks.push('thermal/resource waits produce normal chat pauses with recovery guidance and no workspace dispatch');
+ {
+  const fallback=setup();fallback.kind('report');await fallback.arm();
+  const original=fallback.deps.request;let selected=false;
+  fallback.deps.request=async(m,t,emit)=>{
+   const out=await original(m,t,emit);
+   if(m.op==='orchestrate'&&out.state==='CODING'&&!selected){
+    selected=true;return {...out,resource_fallback:{from_model:'large',model:'small',tier:'low'},
+     progress:'Memory admission blocked large. Auto will try small with fresh paging and the same task, permissions and remaining budget.'};
+   }
+   return out;
+  };
+  const reply=await fallback.send('auto');
+  assert(reply.some(p=>p.value?.includes('Host workflow · Memory admission blocked large. Auto will try small')));
+  assert.equal(fallback.calls.filter(c=>c.op==='native_work').length,1);
+  assert.equal(fallback.calls.find(c=>c.op==='native_work').contract_hash,'contract-1');
+  assert(!reply.some(p=>p.value?.includes('Sutra paused')));
+  checks.push('host fallback progress continues the same native request with its binding, without a pause or duplicate worker call');
+ }
+ {
+  const routed=setup();routed.kind('report');
+  class Thinking{constructor(value,id,metadata){Object.assign(this,{value,id,metadata});}}
+  routed.v.LanguageModelThinkingPart=Thinking;
+  const real=routed.deps.request;
+  routed.deps.activityLink=e=>'karma-preview:/activity/'+ 'a'.repeat(24)+'/'+e.id+'/Reasoning.txt';
+  routed.deps.request=async(m,t,emit)=>{
+   if(m.op==='orchestrate'&&m.event==='start'){
+    const id='1'.repeat(32);emit({kind:'start',id,role:'conversation',model:'small'});
+    emit({kind:'control',id,requested:false});emit({kind:'finish',id,status:'accepted',thinking_chars:0,usage:{input_tokens:2740,output_tokens:212}});
+   }
+   const out=await real(m,t);
+   return m.op==='orchestrate'&&out.state==='CODING'?{...out,state:'PAUSED',progress:'Fresh source mapping: structural_pass_complete',stop:{status:'resource_wait',resume_phase:'SYNTHESIS',error:'RESOURCE_WAIT: Selected model does not fit'}}:out;
+  };
+  const reply=await routed.send('low',[{role:1,content:[new Text('Give a high-level workspace overview')]}]);
+  assert.equal(reply.filter(p=>p instanceof Thinking).length,0);
+  assert.equal(reply.filter(p=>p instanceof Text&&p.value.includes('/Reasoning.txt')).length,1);
+  assert(reply.some(p=>p.value?.includes('No separate reasoning text received.')));
+  assert(reply.some(p=>p.value?.includes('Host workflow · Fresh source mapping')));
+  assert(reply.some(p=>p.value?.includes('Host resource check · Workspace synthesis paused')));
+  assert(!routed.calls.some(c=>c.op==='native_work'));
+  checks.push('router without reasoning followed by workspace memory pause shows one call, no phantom thinking, and explicit host stages');
+ }
  const cooling=setup();let blockedResource=true,resourceFlow;
  const normalCooling=cooling.deps.request;
  cooling.deps.request=async(m,t)=>{

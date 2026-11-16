@@ -3,6 +3,7 @@ const crypto=require('node:crypto'),path=require('node:path');
 const tokens=require('./media/token_usage');
 const {NativeMemory,isCompaction}=require('./native_memory');
 const hostTokens=require('./host_tokens');
+const {chatActivity}=require('./model_activity');
 const ACTION='karma_native_action';
 const MODEL_IDS={auto:'karma-auto',low:'karma-low',mid:'karma-mid',high:'karma-high'};
 const CHAT_DEFAULTS={'defaultModel':MODEL_IDS.auto,'editor.preferCopilotHarness':false,'defaultToCopilotHarness':false,'editor.localAgent.enabled':true};
@@ -148,6 +149,10 @@ function install(vscode,context,deps){
   function showPause(flow,audit,progress){
     const stop=flow.stop||{},failures=stop.failures||[];
     const details=[stop.error,...failures.map(f=>f.path+': '+f.error)].filter(Boolean);
+    if(stop.status==='resource_wait'){
+      const stage={CLASSIFYING:'Conversation routing',MAPPING:'Source mapping',CHILDREN:'Child review',SYNTHESIS:'Workspace synthesis',CODING:'Workspace coding'}[stop.resume_phase]||'Workflow';
+      details.unshift('Host resource check · '+stage+' paused. This is host status, not a model response.');
+    }
     const coverage=Number.isInteger(stop.mapped_files)&&Number.isInteger(stop.source_files)?` Mapped ${stop.mapped_files} of ${stop.source_files} source files.`:'';
     if(stop.recovery)details.push('Runtime memory recovery: '+(stop.recovery.error||stop.recovery.action?.replaceAll('_',' ')||'observed')+'. Task allocation is unchanged.');
     if(stop.memory_fault)details.push('Memory recovery: '+stop.memory_fault.recovery.replaceAll('_',' ')+'. Exact saved pages and task grants are retained.');
@@ -284,23 +289,10 @@ function install(vscode,context,deps){
       const recordUsage=result=>{responseUsage=tokens.merge(responseUsage,result?.token_usage);audit.token_usage=responseUsage;};
       running=true;activeCancel=new vscode.CancellationTokenSource();const cancellation=token.onCancellationRequested(()=>activeCancel?.cancel());publish();
       const activityToken=activeCancel.token;let activityOpen=true;
+      const renderActivity=chatActivity(vscode,progress,deps.activityLink);
       activityProgress=e=>{
         if(!activityOpen||activityToken.isCancellationRequested)return;
-        const label=e.role==='report_reviewer'?'Architecture claim review':e.role==='subagent'?'Child review':e.role==='chat_reviewer'?'Workspace review':e.role==='conversation'?'Conversation / routing':'Model call';
-        if(e.kind==='start'){
-          const uri=deps.activityLink?.(e);
-          if(uri)progress.report(new vscode.LanguageModelTextPart(`\n\n[${label} · reasoning details](${uri})\n\n`));
-        }
-        // Optional host capability: no proposed-API flags required. Older hosts
-        // retain the same diagnostic stream in Sutra Monitor.
-        if(typeof vscode.LanguageModelThinkingPart!=='function')return;
-        let text='';
-        if(e.kind==='start')text=label+' · '+e.model+' · '+e.role+'\n'+(e.node_id?'Task '+e.node_id+'\n':'')+'Unverified local-model reasoning.\n';
-        else if(e.kind==='thinking')text=e.text;
-        else if(e.kind==='control')text='Reasoning control: '+(e.requested===null?'model default':e.requested===false?'off requested':e.requested===true?'on requested':e.requested)+'.\n';
-        else if(e.kind==='finish')text='\nProtocol: '+(e.status==='accepted'?'checks passed; task completion and answer correctness are not verified':e.status)+' · '+(e.usage?.input_tokens??'?')+' input / '+(e.usage?.output_tokens??'?')+' output tokens (reasoning included).'+(e.display_truncated?' Display shortened; full generation still charged.':'')+'\n';
-        if(text)progress.report(new vscode.LanguageModelThinkingPart(text,e.id));
-        if(e.kind==='finish')progress.report(new vscode.LanguageModelThinkingPart('',e.id,{vscode_reasoning_done:true}));
+        renderActivity(e);
       };
       try{
         let data,flow,restartReview=false,resuming=false;
@@ -412,7 +404,7 @@ function install(vscode,context,deps){
           const bound=flow.binding||flow.bound_task;
           if(bound){a.binding=bound;a.session=bound.session;audit.session=a.session;}
           audit.orchestration={flowId:flow.flow_id,state:flow.state,children:flow.children};publish();
-          if(flow.progress)progress.report(new vscode.LanguageModelTextPart(flow.progress+'\n\n'));
+          if(flow.progress)progress.report(new vscode.LanguageModelTextPart('Host workflow · '+flow.progress+'\n\n'));
           if(flow.child)recordUsage(flow.child.result);
         }
         data=flow.data;

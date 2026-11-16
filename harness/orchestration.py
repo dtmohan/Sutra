@@ -283,12 +283,15 @@ def overview(db,sid=None):
         n=json.loads(raw);last=db.execute('SELECT record_json FROM orchestration_events WHERE node_id=? ORDER BY seq DESC LIMIT 1',(nid,)).fetchone();e=json.loads(last[0]) if last else {}
         dispatch=db.execute("SELECT record_json FROM orchestration_events WHERE node_id=? AND json_extract(record_json,'$.kind') IN ('DISPATCH','FORK') ORDER BY seq DESC LIMIT 1",(nid,)).fetchone()
         last_dispatch=json.loads(dispatch[0]) if dispatch else {}
+        fallback=db.execute("SELECT record_json FROM orchestration_events WHERE node_id=? AND json_extract(record_json,'$.kind')='RESOURCE_MODEL_FALLBACK' ORDER BY seq DESC LIMIT 1",(nid,)).fetchone()
+        resource_fallback=json.loads(fallback[0])['data']['resource_fallback'] if fallback else None
         used={k:0 for k in n.get('limits',{})}
         for cost,settled in db.execute('SELECT c.cost_json,r.record_json FROM orchestration_charges c LEFT JOIN orchestration_settlements r ON c.id=r.charge_id WHERE c.node_id=?',(nid,)):
             for k,v in (json.loads(settled)['used'] if settled else json.loads(cost)).items():used[k]=used.get(k,0)+v
         result.append({'id':nid,'parent':n['parent_id'],'kind':n['kind'],'state':e.get('to',n['initial_state']),
                        'objective':n.get('objective',n.get('goal','')),'kernel':last_dispatch.get('kernel'),'limits':n.get('limits'),
                        'permissions':n.get('permissions'),'context_hash':n.get('context_hash'),'last_event':e.get('kind'),
+                       'resource_fallback':resource_fallback,
                        'stop':(e.get('data',{}).get('workflow_stop') or e.get('data',{}).get('mapping_stop')) if e.get('to')=='PAUSED' else None,
                        'model':last_dispatch.get('data',{}).get('model'),'used':used,'files':n.get('files',[])})
     return {'nodes':result,'execution':'serial local dispatch','kernel':'unchanged STP','scope':'latest 40 orchestration nodes'}

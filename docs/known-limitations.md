@@ -3,8 +3,12 @@
 - MLX calibration measures sampled process-tree physical footprint during cold
   synthetic text prefill, not a proven worst-case GPU allocation. Larger output,
   multimodal work, unseen shapes and external clients can change memory use.
-  Estimates use the next larger measured workload plus a 25%/1 GiB margin and
-  no residency credit. Context beyond measured coverage requires paging or a
+  Estimates use the next larger measured workload plus a 25%/1 GiB margin.
+  Exact, unexpired resident identity and sufficient context permit a credit
+  capped by model-file and reported resident weight size (also VRAM for MLX).
+  This estimates weight reuse, not newly available RAM; the full calibrated
+  margin and workspace envelope remain. Unmatched inventory uses cold estimates.
+  Context beyond measured coverage requires paging or a
   new calibration; the runtime never extrapolates from smaller observations.
 - Profiles are bound to exact model/metadata, backend binary/libraries, hardware,
   OS build and server epoch. Restarting Ollama invalidates them because server
@@ -16,6 +20,13 @@
   Other Ollama clients and separate profiles are not coordinated. Shared mode
   never sends a separate unload request. Exclusive ownership is a user assertion
   about the server, not something the running-model API can verify.
+- Auto capacity fallback applies to workspace children, synthesis and coding,
+  after a typed refusal before inference. It can try only strictly smaller
+  configured tiers, at most twice per saved workflow. It does not override
+  explicit tier choices, OS pressure, stale identity or interrupted inference.
+  A smaller worker may still lack context capacity or fail quality checks.
+  Independent report reviewers still require their own resource admission;
+  fallback does not relax reviewer identity or turn withheld work into success.
 - Resource recovery releases at most one confirmed idle owned model and observes
   stability for up to three seconds. It does not automatically retry inference.
   Interrupted model activity stays uncertain until observed absent; no caller is

@@ -27,6 +27,7 @@ def provider_for(root,model,review=False,model_class=LocalModel):
  control=thinking_control(info,os.environ.get('SUTRA_THINKING','adaptive'))
  provider=model_class(root/'calls',11434,model,budget=Budget(response_reserve=2048 if review else 1024),thinking=control)
  provider.context_metadata=info
+ provider.manifest_digest=next(x['digest'] for x in tags if x['name']==model)
  from decoder_schema import profile
  runtime_version=None
  if (info.get('details')or{}).get('runner')=='mlx':

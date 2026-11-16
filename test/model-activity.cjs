@@ -10,7 +10,7 @@ for(const b of unicode)d.write(Buffer.from([b]));
 send({kind:'thinking',id:'a',seq:2,text:'duplicate'});
 send({kind:'thinking',id:'a',seq:3,model:'forged',node_id:'parent',text:'next'});
 send({kind:'grant',id:'a',seq:4});
-send({kind:'finish',id:'a',seq:5,status:'accepted',usage:{input_tokens:20,output_tokens:30}});
+send({kind:'finish',id:'a',seq:5,status:'accepted',thinking_chars:14,usage:{input_tokens:20,output_tokens:30}});
 send({kind:'thinking',id:'a',seq:6,text:'late'});
 send({kind:'start',id:'b',seq:1,model:'large',role:'subagent',node_id:'child-2'});d.close();
 assert.equal(events.length,6);assert.equal(events[1].text,'🧵 reasoning');
@@ -18,10 +18,42 @@ assert.equal(events[2].model,'small');assert.equal(events[2].node_id,'child-1');
 assert.equal(events.at(-1).status,'interrupted');assert.equal(events.at(-1).usage.output_tokens,null);
 const log=new ActivityLog();events.forEach(e=>log.accept(e));
 assert.equal(log.calls.length,2);assert.equal(log.calls[0].text,'🧵 reasoningnext');assert.equal(log.calls[1].model,'large');
+assert.equal(log.calls[0].thinking_chars,14);
 for(let i=0;i<20;i++)log.accept({kind:'start',id:String(i)});
 assert.equal(log.calls.length,12);log.clear();assert.equal(log.calls.length,0);
 const oversized=decoder(()=>assert.fail('oversized frame accepted'),()=>{});oversized.write(Buffer.from('SUTRA_EVENT '+ 'x'.repeat(70000)+'\n'));oversized.end();
 console.log('PASS bounded activity framing, Unicode, identity, sequence, interruption, model switching and retention');
+
+// Metadata-only calls must never create a VS Code "Finished thinking" block.
+{
+ const {chatActivity}=require('../model_activity');
+ class Text{constructor(value){this.value=value;}}
+ class Thinking{constructor(value,id,metadata){Object.assign(this,{value,id,metadata});}}
+ const parts=[],v={LanguageModelTextPart:Text,LanguageModelThinkingPart:Thinking};
+ const emit=chatActivity(v,{report:p=>parts.push(p)},e=>'karma-preview:/'+e.id);
+ emit({kind:'start',id:'router',model:'small',role:'conversation'});
+ emit({kind:'control',id:'router',requested:false});
+ emit({kind:'finish',id:'router',status:'accepted',thinking_chars:0});
+ assert.equal(parts.filter(p=>p instanceof Thinking).length,0);
+ assert(parts.some(p=>p.value.includes('call details')));
+ assert(parts.some(p=>p.value.includes('No separate reasoning text received.')&&p.value.includes('off requested')));
+ // Finish and late chunks cannot reopen the same call or fabricate reasoning.
+ const count=parts.length;emit({kind:'thinking',id:'router',text:'late'});emit({kind:'finish',id:'router'});assert.equal(parts.length,count);
+ emit({kind:'start',id:'missing',model:'large',role:'subagent'});
+ emit({kind:'finish',id:'missing',status:'withheld',thinking_chars:20});
+ assert(parts.some(p=>p.value.includes('reported but no text was received')));
+ emit({kind:'start',id:'interrupted',model:'large',role:'subagent'});
+ emit({kind:'finish',id:'interrupted',status:'interrupted'});
+ assert(parts.some(p=>p.value.includes('before interruption')));
+ assert.equal(parts.filter(p=>p instanceof Thinking).length,0);
+ delete v.LanguageModelThinkingPart;
+ emit({kind:'start',id:'old-host',model:'large',role:'subagent'});
+ emit({kind:'thinking',id:'old-host',text:'PRIVATE DIAGNOSTIC'});
+ emit({kind:'finish',id:'old-host',status:'accepted'});
+ assert(parts.some(p=>p.value.includes('details are available in Sutra Monitor')));
+ assert(!parts.some(p=>p.value.includes('PRIVATE DIAGNOSTIC')));
+ console.log('PASS reasoning UI requires emitted text; absent, missing, interrupted and old-host streams are distinguished');
+}
 
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {ActivityArchive,activityUri,parseActivityUri}=require('../model_activity');
@@ -37,6 +69,16 @@ try{
  const restored=new ActivityArchive(dir);
  assert.equal(restored.calls.length,3);assert.equal(restored.calls[1].model,'large');assert.equal(restored.calls[1].status,'withheld');
  assert(restored.document(id(2)).includes('Unverified subagent'));assert(!restored.document(id(2)).includes('Unverified conversation'));
+ archive.accept({kind:'start',id:id(40),role:'conversation',model:'small'});
+ archive.accept({kind:'control',id:id(40),requested:false});
+ archive.accept({kind:'finish',id:id(40),status:'accepted',thinking_chars:0});
+ const noThought=new ActivityArchive(dir);
+ assert(noThought.document(id(40)).includes('Reasoning characters reported: 0'));
+ assert(noThought.document(id(40)).includes('Reasoning control: off requested'));
+ assert(noThought.document(id(40)).includes('No separate reasoning text received.'));
+ archive.accept({kind:'start',id:id(41),role:'subagent',model:'large'});
+ archive.accept({kind:'finish',id:id(41),status:'withheld',thinking_chars:25});
+ assert(new ActivityArchive(dir).document(id(41)).includes('its text is unavailable'));
  const uri=activityUri(dir,id(2));assert.deepEqual(parseActivityUri(uri),{workspace:key,id:id(2)});
  for(const u of [uri+'/../secret',uri+'?path=/secret','karma-preview:/activity/../Reasoning.txt'])assert.equal(parseActivityUri(u),null);
  assert.equal(activityUri(dir,'../secret'),null);

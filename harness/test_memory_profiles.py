@@ -41,13 +41,49 @@ class MemoryProfilesTests(unittest.TestCase):
         p=copy.deepcopy(self.p);p.pop('sha256');p['points'][1]['observed_increment_bytes']=9*GIB;p=mp.seal(p)
         self.assertGreaterEqual(mp.estimate(p,8192,8*GIB)['bytes'],low['bytes'])
 
-    def test_file_weights_are_floor_and_resident_cache_not_credited(self):
+    def resident(self,**extra):
+        return dict({'name':'large','digest':'a'*64,'runner':'mlx','context_length':65536,
+                     'size':18*GIB,'size_vram':18*GIB,'expires_at':'9999-01-01T00:00:00Z'},**extra)
+
+    def test_file_weights_are_floor_and_only_matched_weights_credited(self):
         value=mp.estimate(self.p,4096,18*GIB);self.assertEqual(value['bytes'],22.5*GIB)
-        row={'name':'large','context_length':65536,'size':18*GIB}
+        row=self.resident()
         cold=rm.estimate('large',self.meta,8*GIB,[],4096,self.hw,self.p)
         warm=rm.estimate('large',self.meta,8*GIB,[row],4096,self.hw,self.p)
-        self.assertEqual(cold['estimated_increment_bytes'],warm['estimated_increment_bytes'])
-        self.assertIn('no resident credit',warm['estimate_scope'])
+        self.assertEqual(warm['resident_weight_credit_bytes'],8*GIB)
+        self.assertEqual(cold['estimated_increment_bytes']-8*GIB,warm['estimated_increment_bytes'])
+        self.assertEqual(cold['calibration']['margin_bytes'],warm['calibration']['margin_bytes'])
+        self.assertEqual(cold['available_bytes'],warm['available_bytes'])
+        self.assertFalse(warm['peak_memory_verified'])
+        self.assertEqual(warm['system_reserve_bytes'],4*GIB)
+
+    def test_resident_credit_fails_closed_on_identity_expiry_context_or_size_gaps(self):
+        changes=[{'name':'alias'},{'digest':'b'*64},{'runner':'unknown'},{'context_length':2048},
+                 {'expires_at':'2000-01-01T00:00:00Z'},{'expires_at':None},{'size':None},{'size_vram':0}]
+        for changed in changes:
+            with self.subTest(changed=changed):
+                p=rm.estimate('large',self.meta,8*GIB,[self.resident(**changed)],4096,self.hw,self.p)
+                self.assertEqual(p['resident_weight_credit_bytes'],0)
+                self.assertEqual(p['estimated_increment_bytes'],p['cold_estimate_bytes'])
+        p=rm.estimate('large',self.meta,8*GIB,[self.resident(size_vram=2*GIB)],4096,self.hw,self.p)
+        self.assertEqual(p['resident_weight_credit_bytes'],2*GIB)
+
+    def test_resident_disappearing_between_planning_and_dispatch_blocks_without_inference(self):
+        p=LocalModel(self.root,11434,'large',budget=Budget(4096,128))
+        tight=dict(self.hw,sample={'free_bytes':10*GIB,'inactive_bytes':0})
+        with patch.dict(os.environ,{'SUTRA_RUNTIME_DIR':str(self.root)}),patch('monitoring.require_resources',return_value=tight),patch.object(rm,'running',side_effect=[[self.resident()],[]]),patch.object(rm,'profile_for',return_value=(self.p,'exact_identity_match')):
+            rm.configure(p,self.root,self.meta,8*GIB)
+            with self.assertRaises(ResourceWait) as raised:
+                with rm.dispatch(p,self.root,'lost','system',{},{}):self.fail('Model must not run')
+        detail=raised.exception.state['runtime']
+        self.assertEqual(detail['kind'],'model_capacity');self.assertFalse(detail['inference_started'])
+        self.assertEqual(detail['plan']['resident_weight_credit_bytes'],0)
+
+    def test_dispatch_rejects_changed_installed_digest(self):
+        p=LocalModel(self.root,11434,'large',budget=Budget(4096,128));p.memory_weights=8*GIB;p.manifest_digest='a'*64
+        with patch.dict(os.environ,{'SUTRA_RUNTIME_DIR':str(self.root)}),patch('monitoring.require_resources',return_value=self.hw),patch.object(rm,'running',return_value=[self.resident()]),patch.object(rm,'api',return_value={'models':[{'name':'large','digest':'b'*64,'size':8*GIB}]}):
+            with self.assertRaisesRegex(ResourceWait,'Installed model changed'):
+                with rm.dispatch(p,self.root,'changed','system',{},{}):self.fail('Model must not run')
 
     def test_context_changes_adapter_decision_without_changing_kernel(self):
         low=rm.estimate('large',self.meta,8*GIB,[],4096,self.hw,self.p)

@@ -4,6 +4,56 @@ const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypt
 const retention=require('./harness/memory-policy.json').diagnostics;
 const MAX_BYTES=retention.reasoning_bytes,MAX_AGE=retention.max_age_seconds*1000;
 const KINDS=new Set(['start','control','thinking','finish']);
+function callLabel(role){
+  return {report_reviewer:'Architecture claim review',subagent:'Child review',chat_reviewer:'Workspace review',conversation:'Conversation / routing'}[role]||'Model call';
+}
+function controlLabel(requested){
+  return requested===undefined?'not reported':requested===null?'model default':requested===false?'off requested':requested===true?'on requested':String(requested);
+}
+// A call starting (or finishing) does not establish that it emitted reasoning.
+// Keep metadata out of VS Code's thinking UI until actual reasoning arrives.
+function chatActivity(vscode,progress,activityLink){
+  const calls=new Map();
+  const text=value=>progress.report(new vscode.LanguageModelTextPart(value));
+  return e=>{
+    if(e.kind==='start'){
+      if(calls.has(e.id))return;
+      calls.set(e.id,{...e,opened:false,done:false});
+      const uri=activityLink?.(e),label=callLabel(e.role)+' · '+e.model+' · call details';
+      if(uri)text(`\n\n[${label}](${uri})\n\n`);
+      return;
+    }
+    const c=calls.get(e.id);if(!c||c.done)return;
+    if(e.kind==='control'){c.requested=e.requested;return;}
+    const canThink=typeof vscode.LanguageModelThinkingPart==='function';
+    if(e.kind==='thinking'&&typeof e.text==='string'&&e.text.trim())c.received=true;
+    if(e.kind==='thinking'&&typeof e.text==='string'&&canThink){
+      if(!c.opened){
+        if(!e.text.trim())return;
+        c.opened=true;
+        const header=callLabel(c.role)+' · '+c.model+' · '+c.role+'\n'+(c.node_id?'Task '+c.node_id+'\n':'')+
+          'Unverified local-model reasoning.\nReasoning control: '+controlLabel(c.requested)+'.\n';
+        progress.report(new vscode.LanguageModelThinkingPart(header,e.id));
+      }
+      progress.report(new vscode.LanguageModelThinkingPart(e.text,e.id));
+    }
+    if(e.kind!=='finish')return;
+    c.done=true;
+    const status=e.status==='accepted'?'checks passed; task completion and answer correctness are not verified':e.status;
+    const shortened=e.display_truncated?' Display shortened; full generation still charged.':'';
+    if(c.opened){
+      progress.report(new vscode.LanguageModelThinkingPart('\nProtocol: '+status+' · '+(e.usage?.input_tokens??'?')+
+        ' input / '+(e.usage?.output_tokens??'?')+' output tokens (reasoning included).'+shortened+'\n',e.id));
+      progress.report(new vscode.LanguageModelThinkingPart('',e.id,{vscode_reasoning_done:true}));
+    }else{
+      const reasoning=e.thinking_chars>0||c.received
+        ? (canThink?'Reasoning was reported but no text was received for inline display.':'Reasoning details are available in Sutra Monitor.')
+        : e.status==='interrupted'?'No separate reasoning text was received before interruption.':'No separate reasoning text received.';
+      text('\n\n'+callLabel(c.role)+' · '+c.model+' · '+(e.status==='accepted'?'call finished':e.status)+'. '+reasoning+
+        ' Reasoning control: '+controlLabel(c.requested)+'.'+shortened+'\n\n');
+    }
+  };
+}
 // Only the private bridge transport uses this decoder. Events never become tools,
 // conversation memory, grants or ledger receipts.
 function decoder(onEvent,onStderr){
@@ -27,6 +77,7 @@ function decoder(onEvent,onStderr){
     if(e.kind==='control')event.requested=(typeof e.requested==='string'||typeof e.requested==='boolean'||e.requested===null)?e.requested:null;
     if(e.kind==='finish'){
       state.done=true;event.status=e.status==='accepted'?'accepted':'withheld';event.display_truncated=!!e.display_truncated;
+      event.thinking_chars=Number.isSafeInteger(e.thinking_chars)&&e.thinking_chars>=0?e.thinking_chars:null;
       event.usage={};for(const k of ['input_tokens','output_tokens'])event.usage[k]=Number.isSafeInteger(e.usage?.[k])&&e.usage[k]>=0?e.usage[k]:null;
     }
     try{onEvent(event);}catch{/* Diagnostics cannot abort governed work. */}
@@ -52,7 +103,7 @@ class ActivityLog{
       const c=this.calls.find(x=>x.id===e.id);if(!c)return;
       if(e.kind==='thinking')c.text=(c.text+e.text).slice(0,retention.reasoning_chars);
       if(e.kind==='control')c.requested=e.requested;
-      if(e.kind==='finish')Object.assign(c,{status:e.status,usage:e.usage,display_truncated:e.display_truncated,finishedAt:Date.now()});
+      if(e.kind==='finish')Object.assign(c,{status:e.status,usage:e.usage,thinking_chars:e.thinking_chars,display_truncated:e.display_truncated,finishedAt:Date.now()});
     }
   }
   clear(){this.calls=[];}
@@ -106,15 +157,17 @@ class ActivityArchive extends ActivityLog{
   document(id){
     this.prune();const c=this.calls.find(c=>c.id===id);
     if(!c)return 'Sutra reasoning details\n\nThis call is unavailable or outside the retained history (12 calls, 7 days, 1 MiB). Earlier versions did not save reasoning.\n';
-    return ['Sutra reasoning details — unverified model commentary',
+    return ['Sutra model call details — reasoning is unverified model commentary',
       'This is diagnostic text, not an accepted answer, task memory or protocol evidence.',
       '',`Invocation: ${c.id}`,`Model: ${c.model}`,`Stage: ${c.role}`,`Task: ${c.node_id||'not recorded'}`,
       `Status: ${c.status}${c.interruptedOnReload?' (window closed before completion was observed)':''}`,
       'Protocol admission does not verify task completion or answer correctness.',
-      `Reasoning control requested: ${c.requested===null?'model default':c.requested}`,
+      `Reasoning control: ${controlLabel(c.requested)}`,
+      `Reasoning characters reported: ${c.thinking_chars??'not recorded'}`,
       `Tokens: ${c.usage?.input_tokens??'?'} input / ${c.usage?.output_tokens??'?'} output (includes reasoning)`,
       c.display_truncated?'Display shortened at 16,000 characters; generation remains charged.':'',
-      '', '--- Model commentary (plain text) ---', '',c.text||'No separate reasoning was emitted.', ''].join('\n');
+      '', '--- Model commentary (plain text) ---', '',c.text||(c.status==='generating'?'No separate reasoning text received yet.':
+        c.thinking_chars>0?'Reasoning was reported but its text is unavailable in this archive.':'No separate reasoning text received.'), ''].join('\n');
   }
 }
 function cleanCall(c){
@@ -123,7 +176,8 @@ function cleanCall(c){
   return {id:c.id,model:c.model.slice(0,160),role:c.role.slice(0,80),node_id:typeof c.node_id==='string'?c.node_id.slice(0,128):null,
     text:typeof c.text==='string'?c.text.slice(0,retention.reasoning_chars):'',status:['generating','accepted','withheld','interrupted'].includes(c.status)?c.status:'interrupted',
     startedAt:c.startedAt,updatedAt:Number.isFinite(c.updatedAt)?c.updatedAt:c.startedAt,finishedAt:Number.isFinite(c.finishedAt)?c.finishedAt:undefined,
-    requested:typeof c.requested==='string'?c.requested.slice(0,80):typeof c.requested==='boolean'?c.requested:null,
+    requested:typeof c.requested==='string'?c.requested.slice(0,80):typeof c.requested==='boolean'?c.requested:c.requested===null?null:undefined,
+    thinking_chars:number(c.thinking_chars),
     usage:c.usage?{input_tokens:number(c.usage.input_tokens),output_tokens:number(c.usage.output_tokens)}:undefined,
     display_truncated:!!c.display_truncated,interruptedOnReload:!!c.interruptedOnReload};
 }
@@ -135,4 +189,4 @@ function parseActivityUri(uri){
   const match=String(uri).match(/^karma-preview:\/activity\/([a-f0-9]{24})\/([a-f0-9]{32})\/Reasoning\.txt$/);
   return match?{workspace:match[1],id:match[2]}:null;
 }
-module.exports={decoder,ActivityLog,ActivityArchive,activityUri,parseActivityUri};
+module.exports={decoder,ActivityLog,ActivityArchive,activityUri,parseActivityUri,chatActivity};

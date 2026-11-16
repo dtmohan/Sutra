@@ -24,8 +24,8 @@ class RuntimeMemoryTests(unittest.TestCase):
         self.env.start()
         self.healthy={'available':True,'admitted':True,'decision':'ALLOW','sample':{'wall_time':1,'free_bytes':20*rm.GIB,'inactive_bytes':0}}
         self.blocked=dict(self.healthy,admitted=False,decision='BRIDGE',reason='memory pressure')
-        self.row={'name':'large','digest':'weights1','size':10*rm.GIB,'context_length':65536}
-        self.metadata={'details':{'format':'gguf'},'model_info':{'general.architecture':'llama','llama.context_length':65536,'llama.block_count':32,'llama.attention.head_count_kv':8,'llama.embedding_length':4096,'llama.attention.head_count':32}}
+        self.row={'name':'large','digest':'weights1','size':10*rm.GIB,'context_length':65536,'runner':'ggml','expires_at':'9999-01-01T00:00:00Z'}
+        self.metadata={'details':{'format':'gguf','runner':'ggml'},'model_info':{'general.architecture':'llama','llama.context_length':65536,'llama.block_count':32,'llama.attention.head_count_kv':8,'llama.embedding_length':4096,'llama.attention.head_count':32}}
     def tearDown(self):
         self.env.stop();self.tmp.cleanup()
     def provider(self):
@@ -67,8 +67,9 @@ class RuntimeMemoryTests(unittest.TestCase):
         self.assertIn('unknown',p['estimate_scope'])
 
     def test_resident_same_model_is_not_charged_full_weights_twice(self):
-        p=rm.estimate('large',self.metadata,10*rm.GIB,[self.row],8192,self.healthy)
-        self.assertEqual(p['estimated_increment_bytes'],0)
+        p=rm.estimate('large',self.metadata,10*rm.GIB,[self.row],8192,self.healthy,manifest_digest='weights1')
+        self.assertEqual(p['resident_weight_credit_bytes'],10*rm.GIB)
+        self.assertEqual(p['estimated_increment_bytes'],8192*rm.kv_bytes_per_token(self.metadata))
         p=rm.estimate('other-alias',self.metadata,10*rm.GIB,[self.row],8192,self.healthy)
         self.assertGreaterEqual(p['estimated_increment_bytes'],10*rm.GIB)
 

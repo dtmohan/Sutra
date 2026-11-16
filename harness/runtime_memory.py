@@ -5,6 +5,7 @@ is a user setting, not something /api/ps can establish. Estimates are planning
 signals, not a proof of backend peak RAM or semantic sufficiency.
 """
 import contextlib
+from datetime import datetime
 import http.client
 import json
 import math
@@ -63,7 +64,9 @@ def running():
     for r in result:
         if not isinstance(r, dict) or not isinstance(r.get('name'), str) or not isinstance(r.get('digest'), str):
             denied('Model memory identity unavailable')
-        rows.append({k:r.get(k) for k in ('name','digest','size','size_vram','context_length','runner','expires_at')})
+        row={k:r.get(k) for k in ('name','digest','size','size_vram','context_length','runner','expires_at')}
+        row['runner']=row['runner'] or (r.get('details') or {}).get('runner')
+        rows.append(row)
     return rows
 
 
@@ -136,29 +139,55 @@ def kv_bytes_per_token(metadata):
     return layers * kv_heads * (key + value) * 2
 
 
-def estimate(model, metadata, weights, models, context_tokens, hardware, calibration=None):
+def resident_credit(model, metadata, weights, models, context_tokens, digest, now=None):
+    """Estimate reusable weights, never credit KV, workspace, or reclaimable RAM.
+
+    Inventory is read under the dispatch lease again immediately before use.
+    Matching an alias by name alone is insufficient. This remains a planning
+    estimate: external clients can change a shared server after observation.
+    """
+    now=time.time() if now is None else now
+    rows=[r for r in models if r.get('name')==model]
+    if len(rows)!=1:return 0,'No unique resident model'
+    row=rows[0];backend=(metadata.get('details') or {}).get('runner')
+    if not digest or row.get('digest')!=digest:return 0,'Resident manifest does not match installed model'
+    if not backend or row.get('runner')!=backend:return 0,'Resident backend is unverified'
+    try:
+        expiry=datetime.fromisoformat(row['expires_at'].replace('Z','+00:00'))
+        if expiry.tzinfo is None or expiry.timestamp()<=now:return 0,'Resident inventory entry expired'
+    except (KeyError,TypeError,ValueError,AttributeError,OverflowError):return 0,'Resident expiry is unavailable'
+    if not positive(row.get('context_length')) or row['context_length']<context_tokens:
+        return 0,'Requested context exceeds resident context; plan a cold allocation'
+    bounds=[weights,row.get('size')]
+    if backend=='mlx':bounds.append(row.get('size_vram'))
+    if not all(positive(n) for n in bounds):return 0,'Resident size is unavailable'
+    return min(bounds),'Exact resident name, manifest, backend and sufficient context; weights only'
+
+
+def estimate(model, metadata, weights, models, context_tokens, hardware, calibration=None, manifest_digest=None):
     current = next((r for r in models if r['name'] == model), None)
     kv = kv_bytes_per_token(metadata)
-    resident_context = current.get('context_length') if current else 0
-    resident_context = resident_context if positive(resident_context) else 0
-    incremental = (0 if current else weights) + (kv * max(0, context_tokens-resident_context) if kv else 0)
+    cold = weights + (kv * context_tokens if kv else 0)
     calibrated=None
     if calibration:
         from memory_profiles import estimate as calibrated_estimate
         calibrated=calibrated_estimate(calibration,context_tokens,weights)
         if calibrated is None:
             denied('Requested context exceeds measured MLX calibration coverage; re-page or recalibrate.')
-        # A cold footprint includes loading, caches and working buffers. Resident
-        # /api/ps size is not a measurement of reclaimable bytes: take no credit.
-        incremental=calibrated['bytes']
+        cold=calibrated['bytes']
+        manifest_digest=manifest_digest or calibration['identity']['manifest_digest']
+    credit,basis=resident_credit(model,metadata,weights,models,context_tokens,manifest_digest)
+    incremental=max(0,cold-credit)
     sample = hardware.get('sample') or {}
     available = sample.get('available_bytes') if sample.get('profile') == 'portable-memory-v1' else sample.get('free_bytes', 0) + sample.get('inactive_bytes', 0)
     frame = KarmaAdapter().memory_allocation(incremental, available, HEADROOM)
     return dict(frame, model=model, context_tokens=context_tokens, estimated_increment_bytes=incremental,
                 model_file_bytes=weights, kv_bytes_per_token=kv, resident=bool(current),
+                cold_estimate_bytes=cold,resident_weight_credit_bytes=credit,resident_credit_basis=basis,
                 calibration=calibrated,
-                estimate_scope=('measured cold MLX footprint envelope plus margin; no resident credit' if calibrated else
-                                'weights and conventional KV' if kv else 'weights only; KV/backend workspace unknown'),
+                estimate_scope=(('measured MLX footprint envelope plus full margin' if calibrated else
+                                'weights and conventional KV' if kv else 'weights only; KV/backend workspace unknown')+
+                                ('; matched resident weights deducted; KV/workspace still reserved' if credit else '; cold allocation, no resident credit')),
                 peak_memory_verified=False, source='local metadata and fresh Ollama inventory')
 
 
@@ -216,17 +245,19 @@ def configure(provider, root, metadata, weights):
     calibration,status=profile_for(provider,metadata)
     provider.memory_profile=calibration;provider.memory_profile_status=status
     if calibration:high=min(high,calibration['points'][-1]['covered_tokens'])
-    minimum = estimate(provider.model, metadata, weights, models, low, hardware,calibration)
+    digest=getattr(provider,'manifest_digest',None)
+    minimum = estimate(provider.model, metadata, weights, models, low, hardware,calibration,digest)
     if minimum['decision'] != 'ALLOW':
         minimum['calibration_status']=status
         with lease():
             data=read_state();data.update(plan=minimum,resident_models=models)
             note(data,'allocation_paused',model=provider.model,decision=minimum['decision'])
         denied('The selected model requires an estimated %.1f GiB plus %.1f GiB system reserve; %.1f GiB is available.' %
-               (minimum['estimated_increment_bytes']/GIB,HEADROOM/GIB,minimum['available_bytes']/GIB),plan=minimum)
+               (minimum['estimated_increment_bytes']/GIB,HEADROOM/GIB,minimum['available_bytes']/GIB),
+               plan=minimum,kind='model_capacity',stage='configure',inference_started=False)
     while low < high:
         mid = (low + high + 1) // 2
-        if estimate(provider.model, metadata, weights, models, mid, hardware,calibration)['decision'] == 'ALLOW': low = mid
+        if estimate(provider.model, metadata, weights, models, mid, hardware,calibration,digest)['decision'] == 'ALLOW': low = mid
         else: high = mid - 1
     provider.memory_weights = weights
     provider.context_metadata = dict(metadata, _sutra_runtime_cap=low)
@@ -257,8 +288,15 @@ def dispatch(provider, root, call_id, system, payload, schema):
         weights = getattr(provider, 'memory_weights', None)
         if not positive(weights):
             tags = api('/api/tags').get('models', [])
-            weights = next((m.get('size') for m in tags if m.get('name') == provider.model), None)
+            tag = next((m for m in tags if m.get('name') == provider.model), {})
+            weights = tag.get('size')
+            provider.manifest_digest=tag.get('digest')
         if not positive(weights): denied('Installed model size is unavailable at dispatch.')
+        expected_digest=getattr(provider,'manifest_digest',None)
+        if expected_digest:
+            tag=next((m for m in api('/api/tags').get('models',[]) if m.get('name')==provider.model),None)
+            if not tag or tag.get('digest')!=expected_digest or tag.get('size')!=weights:
+                denied('Installed model changed after context selection; retry with fresh metadata.',kind='identity_changed')
         metadata = getattr(provider, 'context_metadata', {})
         if not metadata:
             metadata=api('/api/show',{'model':provider.model})
@@ -267,12 +305,14 @@ def dispatch(provider, root, call_id, system, payload, schema):
         previous=getattr(provider,'memory_profile',None)
         if previous and (not calibration or previous['sha256']!=calibration['sha256']):
             denied('MLX calibration changed after context selection; retry with a fresh allocation.')
-        plan = estimate(provider.model, metadata, weights, models, provider.runtime_context_tokens, hardware,calibration)
+        plan = estimate(provider.model, metadata, weights, models, provider.runtime_context_tokens, hardware,calibration,
+                        getattr(provider,'manifest_digest',None))
         plan['calibration_status']=status
         data.update(plan=plan, resident_models=models)
         if plan['decision'] != 'ALLOW':
             note(data, 'allocation_paused', model=provider.model, decision=plan['decision'])
-            denied('Runtime memory allocation requires recovery before loading this model.', plan=plan)
+            denied('Runtime memory allocation requires recovery before loading this model.', plan=plan,
+                   kind='model_capacity',stage='dispatch',inference_started=False)
         # An active marker surviving process death never grants permission to
         # unload: the server might still be finishing the interrupted request.
         data.update(active={'call_id':call_id,'model':provider.model,'pid':os.getpid()}, owned=None)

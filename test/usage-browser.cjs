@@ -14,6 +14,8 @@ const snapshot={monitor,calls,total_calls:300,limit:250,workspace:'Nadi · examp
 monitor.hardware.sample.compressed_bytes=6*1024**3;monitor.hardware.sample.swap_used_bytes=2*1024**3;
 monitor.runtime_memory={enabled:true,ownership:'shared',inventory_available:true,inventory_at:Date.now()/1000,resident_models:[{name:'small <img src=x>',size:3*1024**3,context_length:8192,runner:'fixture'}],plan:{model:'small',context_tokens:8192,estimated_increment_bytes:3*1024**3,system_reserve_bytes:4*1024**3,decision:'ALLOW',estimate_scope:'weights only; KV/backend workspace unknown'},events:[{event:'recovery',action:'observe_only_shared_server',at:Date.now()/1000}]};
 monitor.runtime_memory.plan.calibration={profile_sha256:'a'.repeat(64),covered_tokens:16384,margin_bytes:1024**3};
+Object.assign(monitor.runtime_memory.plan,{cold_estimate_bytes:6*1024**3,resident_weight_credit_bytes:3*1024**3,resident_credit_basis:'Exact resident identity <img src=x>'});
+monitor.orchestration.nodes[0].resource_fallback={from_model:'large',model:'small <img src=x>'};
 (async()=>{
  fs.mkdirSync(out,{recursive:true});const browser=await chromium.launch({headless:true,...(process.env.KARMA_BROWSER?{executablePath:process.env.KARMA_BROWSER}:{})});
  try{
@@ -54,6 +56,9 @@ monitor.runtime_memory.plan.calibration={profile_sha256:'a'.repeat(64),covered_t
  assert.equal(await page.locator('#cpu-temp').textContent(),'48.2 °C');assert.equal(await page.locator('#gpu-temp').textContent(),'44.6 °C');assert.equal(await page.locator('#cpu-load').textContent(),'20%');assert.equal(await page.locator('#ram').textContent(),'24.5 GiB');assert.equal(await page.locator('#resource').textContent(),'System pressure: ALLOW');assert((await page.locator('#gates').textContent()).includes('BRIDGE'));
  assert.equal(await page.locator('#compressed-memory').textContent(),'6.0 GiB');assert.equal(await page.locator('#swap-memory').textContent(),'2.0 GiB');assert((await page.locator('#memory-policy').textContent()).includes('Shared Ollama'));assert((await page.locator('#resident-models').textContent()).includes('small <img'));assert.equal(await page.locator('#resident-models img').count(),0);assert((await page.locator('#memory-plan').textContent()).includes('8,192 context tokens'));assert((await page.locator('#memory-plan').textContent()).includes('Peak memory is not verified'));assert((await page.locator('#memory-recovery').textContent()).includes('observe only shared server'));assert((await page.locator('#memory-plan').textContent()).includes('MLX calibration aaaaaaaaaaaa'));assert((await page.locator('#memory-plan').textContent()).includes('16,384 tokens'));assert((await page.locator('#memory-plan').textContent()).includes('1.0 GiB uncertainty margin'));
  assert.equal(await page.locator('#model-allocation').textContent(),'Last model allocation: ALLOW');
+ assert((await page.locator('#memory-plan').textContent()).includes('Cold estimate 6.0 GiB · reusable resident weights 3.0 GiB'));
+ assert((await page.locator('#memory-plan').textContent()).includes('This is reuse, not newly freed memory'));
+ assert.equal(await page.locator('#memory-plan img').count(),0);
  await send({snapshot:{...snapshot,monitor:{...monitor,runtime_memory:{...monitor.runtime_memory,plan:{...monitor.runtime_memory.plan,decision:'BRIDGE'}}}}});
  assert.equal(await page.locator('#resource').textContent(),'System pressure: ALLOW');
  assert.equal(await page.locator('#model-allocation').textContent(),'Last model allocation: BRIDGE');
@@ -61,6 +66,11 @@ monitor.runtime_memory.plan.calibration={profile_sha256:'a'.repeat(64),covered_t
  await send({snapshot});
  assert.equal(await page.locator('#flow-nodes .gate').count(),3);assert((await page.locator('#flow-nodes').textContent()).includes('local-assistant:latest'));assert((await page.locator('#flow-nodes').textContent()).includes('read only'));
  await page.locator('#flow-nodes summary').click();await page.locator('#flow-nodes summary').focus();
+ assert((await page.locator('#flow-nodes').textContent()).includes('Auto memory fallback: large → small <img'));
+ assert((await page.locator('#flow-nodes').textContent()).includes('permissions and spent budget are retained'));
+ assert.equal(await page.locator('#flow-nodes img').count(),0);
+ await page.locator('[aria-label="Runtime memory"]').scrollIntoViewIfNeeded();
+ await page.screenshot({path:path.join(out,'Warm-memory-and-fallback.png'),fullPage:true});
  await page.waitForTimeout(1200);assert(await page.locator('#flow-nodes details').evaluate(e=>e.open));assert.equal(await page.evaluate(()=>document.activeElement.tagName),'SUMMARY');
  await send({snapshot:{...snapshot,monitor:{...monitor,orchestration:{...monitor.orchestration,nodes:monitor.orchestration.nodes.map(n=>({...n,state:'READY'}))}}}});
  assert(await page.locator('#flow-nodes details').evaluate(e=>e.open));assert.equal(await page.evaluate(()=>document.activeElement.tagName),'SUMMARY');
@@ -69,10 +79,23 @@ monitor.runtime_memory.plan.calibration={profile_sha256:'a'.repeat(64),covered_t
  const activity=[{id:'parent-1',node_id:'task',role:'conversation',model:'local-large',status:'accepted',text:'Compare the options.',startedAt:Date.now()-3000,finishedAt:Date.now(),usage:{input_tokens:30,output_tokens:40}},
  {id:'child-2',node_id:'child',role:'subagent',model:'local-small',status:'generating',text:'<img src=x onerror=alert(1)> Unverified child reasoning',startedAt:Date.now()}];
  await send({snapshot,activity});assert.equal(await page.locator('#reasoning-calls details').count(),2);
+ const noThought={id:'no-thought',role:'conversation',model:'qwen3:4b',status:'accepted',text:'',thinking_chars:0,requested:false,startedAt:Date.now()-1000,finishedAt:Date.now()};
+ await send({snapshot,activity:[...activity,noThought]});
+ const routerCard=page.locator('[data-id="no-thought"]');
+ assert.equal(await routerCard.locator('pre').textContent(),'No separate reasoning text received.');
+ assert(!(await routerCard.textContent()).includes('yet'));
+ assert((await routerCard.textContent()).includes('off requested'));
+ assert((await routerCard.textContent()).includes('Token counts unavailable for this call'));
+ await send({snapshot,reasoningPreference:'adaptive',activity:[...activity,{...noThought,usage:{input_tokens:2740,output_tokens:212}}]});
+ await routerCard.locator('summary').click();
+ await page.screenshot({path:path.join(out,'Call-without-reasoning.png'),fullPage:true});
+ await send({snapshot,activity:[...activity,{...noThought,thinking_chars:25}]});
+ assert((await routerCard.locator('pre').textContent()).includes('its text is unavailable'));
+ await send({snapshot,activity});
  const child=page.locator('#reasoning-calls details').first();await child.locator('summary').click();await child.locator('summary').focus();
  await send({snapshot,activity:activity.map(c=>c.id==='child-2'?{...c,text:c.text+' updated',status:'withheld',usage:{input_tokens:12,output_tokens:80}}:c)});
  assert(await child.evaluate(e=>e.open));assert.equal(await page.evaluate(()=>document.activeElement.tagName),'SUMMARY');assert.equal(await child.locator('img').count(),0);assert((await child.textContent()).includes('withheld'));assert((await child.textContent()).includes('80 output'));
- await child.getByRole('button',{name:'Open reasoning details'}).click();
+ await child.getByRole('button',{name:'Open call details'}).click();
  assert.deepEqual((await page.evaluate(()=>sent)).at(-1),{type:'activity_details',id:'child-2'});
  await send({snapshot,activity,activityError:'Could not save diagnostic history'});assert((await page.locator('#reasoning-error').textContent()).includes('Could not save'));
  await page.screenshot({path:path.join(out,'Live-child-reasoning.png'),fullPage:true});

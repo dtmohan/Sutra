@@ -88,6 +88,7 @@ function renderMonitor(){
   const box=node('div',undefined,'gate');box.dataset.nodeId=n.id;box.dataset.decision=snapshotFresh?n.kernel?.decision||'':'';
   const title=node('div',(n.kind==='branch'?'Child review':'Request')+' · '+n.state+' · '+n.id.slice(0,8));
   box.append(title,node('div',n.kind==='branch'?n.files.slice(0,3).join(', ')+(n.files.length>3?' · '+(n.files.length-3)+' more files':''):n.objective));
+  if(n.resource_fallback)box.append(node('div','Auto memory fallback: '+n.resource_fallback.from_model+' → '+n.resource_fallback.model+'. Context is repaged; permissions and spent budget are retained.'));
   if(n.stop){const stop=n.stop;box.append(node('div',stop.error||stop.status));for(const f of stop.failures||[])box.append(node('div',f.path+': '+f.error));if(stop.failure_count>(stop.failures||[]).length)box.append(node('small',stop.failure_count+' file failures in total.'));}
   if(n.kind==='branch'&&n.files.length>3){const details=node('details');details.open=opened.has(n.id);details.append(node('summary','Full source scope'),node('div',n.files.join(', ')));box.append(details);}
   if(n.kind==='branch')box.append(node('small',(n.model||'Model pending')+' · '+T.number(n.used?.calls)+' / '+T.number(n.limits?.calls)+' calls · '+T.number(n.used?.tokens)+' / '+T.number(n.limits?.tokens)+' token allocation · read only · last admission '+(n.kernel?.decision||'not dispatched')));
@@ -126,6 +127,7 @@ function renderRuntimeMemory(m,s,hwFresh,snapshotFresh){
  el('memory-plan').textContent=p?'Last runtime plan: '+p.model+' · '+T.number(p.context_tokens)+' context tokens · '+gib(p.estimated_increment_bytes)+' memory reservation · '+gib(p.system_reserve_bytes)+' system reserve. '+p.estimate_scope+'. Peak memory is not verified. This is the last dispatch check, not a live fit guarantee; Resume checks again.':'No runtime allocation recorded yet.';
  if(p?.calibration)el('memory-plan').append(node('div','MLX calibration '+p.calibration.profile_sha256.slice(0,12)+' · measured workload ceiling '+T.number(p.calibration.covered_tokens)+' tokens · '+gib(p.calibration.margin_bytes)+' uncertainty margin.'));
  else if(p?.calibration_status)el('memory-plan').append(node('div',p.calibration_status));
+ if(p&&finite(p.resident_weight_credit_bytes))el('memory-plan').append(node('div','Cold estimate '+gib(p.cold_estimate_bytes)+' · reusable resident weights '+gib(p.resident_weight_credit_bytes)+'. '+p.resident_credit_basis+'. This is reuse, not newly freed memory.'));
  const e=(m?.events||[]).at(-1);
  el('memory-recovery').textContent=e?'Last resource event: '+e.event.replaceAll('_',' ')+(e.action?' · '+e.action.replaceAll('_',' '):'')+(e.status?' · '+e.status.replaceAll('_',' '):'')+' · '+new Date(e.at*1000).toLocaleTimeString():'';
 }
@@ -179,14 +181,15 @@ function renderActivity(calls){
   let card=[...box.children].find(n=>n.dataset.id===c.id);
   if(!card){
    card=node('details',undefined,'reasoning-card');card.dataset.id=c.id;
-   const open=node('button','Open reasoning details');open.onclick=()=>vscode.postMessage({type:'activity_details',id:c.id});
+   const open=node('button','Open call details');open.onclick=()=>vscode.postMessage({type:'activity_details',id:c.id});
    card.append(node('summary'),node('p',undefined,'plot-note'),node('pre'),node('p',undefined,'plot-note'),open);box.prepend(card);
   }
   card.children[0].textContent=(c.role==='report_reviewer'?'Architecture claim review':c.role==='subagent'?'Child review':c.role==='chat_reviewer'?'Workspace review':c.role==='conversation'?'Conversation / routing':'Model call')+' · '+c.model+' · '+c.role+' · '+(c.status==='accepted'?'Protocol checks passed':c.status);
-  card.children[1].textContent='Invocation '+c.id+(c.node_id?' · task '+c.node_id:'')+' · reasoning requested: '+(c.requested===null?'model default':c.requested??'pending');
-  card.children[2].textContent=c.text||'No reasoning emitted yet. The model may have reasoning disabled or may not support a separate thinking stream.';
+  card.children[1].textContent='Invocation '+c.id+(c.node_id?' · task '+c.node_id:'')+' · reasoning control: '+(c.requested===false?'off requested':c.requested===true?'on requested':c.requested===null?'model default':c.requested??'not reported');
+  card.children[2].textContent=c.text||(c.status==='generating'?'No separate reasoning text received yet.':c.thinking_chars>0?
+   'Reasoning was reported but its text is unavailable in this archive.':'No separate reasoning text received.');
   const usage=c.usage,elapsed=((c.finishedAt||Date.now())-c.startedAt)/1000;
-  card.children[3].textContent=(usage?(usage.input_tokens??'?')+' input / '+(usage.output_tokens??'?')+' output tokens':'Token counts available when the call finishes')+' · '+elapsed.toFixed(1)+'s'+(c.display_truncated?' · Display shortened; generation remains charged.':'');
+  card.children[3].textContent=(usage?(usage.input_tokens??'?')+' input / '+(usage.output_tokens??'?')+' output tokens':c.status==='generating'?'Token counts available when the call finishes':'Token counts unavailable for this call')+' · '+elapsed.toFixed(1)+'s'+(c.display_truncated?' · Display shortened; generation remains charged.':'');
  }
  el('reasoning-empty').hidden=calls.length>0;
 }

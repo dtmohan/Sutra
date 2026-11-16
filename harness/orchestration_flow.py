@@ -33,6 +33,7 @@ def response(s,fid,**extra):
         ('awaiting_action' if m.state(s,fid)=='AWAITING_ACTION' else 'admitted' if outcome['admission']['admitted'] else 'withheld') if outcome else data.get('observation_delivery'))
     return dict(task_observations=observations,flow_id=fid,state=m.state(s,fid),cursor=history[-1]['receipt'] if history else None,
                 conversation_id=data.get('conversation_id'),binding=data.get('binding'),
+                resource_fallback=data.get('resource_fallback'),
                 stop=(data.get('workflow_stop') or data.get('mapping_stop')) if m.state(s,fid)=='PAUSED' else None,
                 recovery=recovery(s,fid),
                 children=[{'id':i,'state':m.state(s,i),'files':m.node(s,i)['files']} for i in data.get('children',[])],**extra)
@@ -144,6 +145,15 @@ def handle(s,meta,workspace,root,req,providers=None):
         _,data=info(s,fid);phase=m.state(s,fid)
         target=(data.get('workflow_stop') or {}).get('resume_phase') if phase=='PAUSED' else phase
         if target not in ('CLASSIFYING','MAPPING','CHILDREN','SYNTHESIS','CODING'):raise
+        from resource_routing import propose
+        fallback=propose(s,fid,data,req,exc.state,target)
+        if fallback:
+            with s.db:
+                m.transition(s,fid,target,'RESOURCE_MODEL_FALLBACK',
+                             {'resource_fallback':fallback,'workflow_stop':None},fallback['bounded_switch'])
+            save(root,meta)
+            return response(s,fid,progress='Memory admission blocked '+fallback['from_model']+'. Auto will try '+
+                fallback['model']+' with fresh paging and the same task, permissions and remaining budget.')
         stop={'status':'resource_wait','stage':target,'resume_phase':target,'error':str(exc),
               'measurement':exc.state,'automatic_retry':False}
         # Bounded host recovery never retries inference or changes task grants.
@@ -351,10 +361,11 @@ def _handle(s,meta,workspace,root,req,providers=None):
         return response(s,fid,progress=('Reviewing '+str(len(children))+' source partitions' if children else 'Preparing a bounded overview directly; no child review was allocated'))
     if phase=='CHILDREN':
         from subagent_runtime import run
+        from resource_routing import effective
         pending=[i for i in d['children'] if m.state(s,i)!='DONE']
         if pending:
             if m.state(s,pending[0]) in m.TERMINAL:raise InvalidUpdate('Child is quarantined or cancelled; result cannot be joined')
-            out=run(s,meta,workspace,root,pending[0],models,tier,provider('subagent'))
+            out=run(s,meta,workspace,root,pending[0],models,effective(d,models,tier),provider('subagent'))
             move(s,fid,'CHILDREN','CHILD_FINISHED',last_child=pending[0],last_model=out['route']['model'])
             return response(s,fid,child=out,progress='Child review '+m.state(s,pending[0]))
         if m.state(s,parent['id'])=='READY':
@@ -365,7 +376,8 @@ def _handle(s,meta,workspace,root,req,providers=None):
         move(s,fid,'SYNTHESIS','CHILDREN_JOINED',child_results=ids)
         return response(s,fid)
     if phase in ('SYNTHESIS','CODING'):
-        request={'prompt':prompt,'models':models,'tier':tier,'conversation_id':d['conversation_id'],**d['binding'],'child_results':d.get('child_results',[]),'orchestration_parent':parent['id']}
+        from resource_routing import effective
+        request={'prompt':prompt,'models':models,'tier':effective(d,models,tier),'conversation_id':d['conversation_id'],**d['binding'],'child_results':d.get('child_results',[]),'orchestration_parent':parent['id']}
         try:
             with m.scope(parent['id']):
                 if phase=='CODING':
