@@ -24,9 +24,14 @@ def provider_for(root,model,review=False,model_class=LocalModel):
  if info.get('remote_model') or info.get('remote_host'):raise InvalidUpdate('Remote API models are not allowed')
  import os
  from model_activity import thinking_control
- control=thinking_control(info,os.environ.get('SUTRA_THINKING','off'))
+ control=thinking_control(info,os.environ.get('SUTRA_THINKING','adaptive'))
  provider=model_class(root/'calls',11434,model,budget=Budget(response_reserve=2048 if review else 1024),thinking=control)
  provider.context_metadata=info
+ from decoder_schema import profile
+ runtime_version=None
+ if (info.get('details')or{}).get('runner')=='mlx':
+  runtime_version=ollama('/api/version').get('version')
+ provider.decoder_compatibility=profile(info,runtime_version)
  from runtime_memory import configure
  configure(provider,root,info,next(x.get('size') for x in tags if x['name']==model))
  return provider

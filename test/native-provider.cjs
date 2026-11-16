@@ -282,18 +282,20 @@ function setup(saved={}){
   if(m.event==='pending')return {state:'DONE',flow_id:null};
   const base={flow_id:'routed-flow',cursor:String(++routingStep),children:[]};
   if(routingStep===1)return {...base,state:'CLASSIFYING',routing_step:routingChat('a'.repeat(32),'small',{kind:'page_in'})};
-  if(routingStep===2)return {...base,state:'CLASSIFYING',routing_step:routingChat('b'.repeat(32),'small',{kind:'escalate',tier:'mid'})};
-  return {...base,state:'DONE',conversation:routingChat('c'.repeat(32),'medium',null)};
+  if(routingStep===2)return {...base,state:'CLASSIFYING',routing_step:routingChat('b'.repeat(32),'small',{kind:'reasoning',control:true})};
+  if(routingStep===3)return {...base,state:'CLASSIFYING',routing_step:routingChat('c'.repeat(32),'small',{kind:'escalate',tier:'mid'})};
+  return {...base,state:'DONE',conversation:routingChat('d'.repeat(32),'medium',null)};
  };
  routingFlow.v.window.showWarningMessage=async()=>{throw Error('Conversation escalation must not arm workspace access');};
  const routedParts=await routingFlow.send('auto',[{role:1,content:[new Text('Explain this')]}]);
  const routedText=routedParts.map(p=>p.value||'').join('');
  assert(routedText.includes('Final routed answer'));assert(!routedText.includes('UNPUBLISHED DRAFT'));
  assert(routedText.includes('Loading the requested conversation context'));assert(routedText.includes('remaining budget'));
- assert(routedText.includes('300 in')&&routedText.includes('60 out')&&routedText.includes('3 calls'));
- assert.deepEqual(routingEvents.map(e=>e.event),['pending','start','step','step']);
+ assert(routedText.includes('400 in')&&routedText.includes('80 out')&&routedText.includes('4 calls'));
+ assert(routedText.includes('higher supported reasoning setting on the same model'));
+ assert.deepEqual(routingEvents.map(e=>e.event),['pending','start','step','step','step']);
  assert(!routingFlow.controller.status().armed);assert(!routingFlow.controller.status().pending);
- checks.push('Auto pages context before escalating, withholds intermediate drafts, charges all stages in the footer, and never arms conversation-only work');
+ checks.push('Auto pages context, increases reasoning on the same model, then escalates; withholds drafts, charges all stages, and never arms conversation-only work');
  if(process.platform==='darwin'){
  const named=setup();named.kind('report');named.st.contract.contract.constraints.tests_allowed=false;let selected;
  const previous=named.deps.backendRequest;named.deps.backendRequest=async(m,t)=>{if(m.op==='native_permissions'){selected=m.test_paths;named.st.contract.contract.constraints.tests_allowed=true;return named.st;}const x=await previous(m,t);if(m.op==='conversation')x.result.accepted_output.workspace_request={operation:'test',paths:['checks/foo_test.py','tests/support.py']};return x;};

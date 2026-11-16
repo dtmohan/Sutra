@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.26.0
+
+- Separate the conversation model view from the complete host contract. Models answer the task and request context; the host binds context identity and records both raw-response and admitted-response hashes. Existing permission and budget checks stay in the gateway.
+- Apply a version-scoped structured-decoder adapter for Ollama 0.40.16 MLX: omit string length bounds only in the transport copy, retaining the original strict host schema. Other runtimes retain their native schema.
+- Require actionable top-level page requests, or a specific question when the evidence is outside the memory TOC. Repair missing controls, blank answers and unclosed code fences within the existing retry allocation.
+- Select the first supported positive reasoning effort for explicit reasoning requests, numeric planning/corrections, code analysis and fenced structured results. Routine chat stays on the fast path. Page missing context before further reasoning or Auto model escalation; explicit preferences remain unchanged.
+- Restore data-only conversation memory from 0.25.0 without restoring old executable authority. Keep the canonical STP kernel unchanged.
+- Validate 581 Python tests and 13 release gates, nine live synthetic reasoning checks, cross-model recall, and explicit TOC paging. Preserve failed probes and the paging-grader correction; these checks are not a general semantic-quality guarantee.
+
+## 0.25.0
+
+- Add Adaptive reasoning for the conversation/routing stage: start at the lowest supported effort, page missing context, then try supported higher reasoning controls on the same model before Auto selects another tier. Direct answers and workspace handoffs do not take this retry path.
+- Bind reasoning capabilities, selected control and progression to invocation receipts. Recheck the provider before dispatch. Unknown controls do not gain an invented effort ladder; non-thinking-only models do not receive reasoning retries. The documented generic false request can be followed by advertised positive controls, including sparse true-only metadata, without claiming the backend necessarily changes its computation.
+- Retain original context, requested pages, constraints and consumed allocations across reasoning retries, resource pauses, reloads and model switches. Explicit model tiers stay fixed; explicit Off, On and Model default settings remain unchanged. Every retry consumes the existing call/token/time budget through the unchanged STP kernel.
+- Make Adaptive the default for new settings; workspace workers/reviewers use their model default in this mode. Existing saved reasoning preferences are preserved and can be changed in Settings → Reasoning & runtime.
+- Check optional recent-turn size before filling its memory share, retaining space for older-page retrieval and a budgeted TOC. Latest turn and pinned constraints remain mandatory. Preserve data-only conversation compatibility with 0.24.0.
+- Show separate progress for same-model reasoning and model escalation; all stages remain included in token totals.
+
 ## 0.24.0
 
 - Start new Auto requests with the configured low-tier model, answering simple conversation in one call. Apply workspace breadth routing only after fresh source is supplied.

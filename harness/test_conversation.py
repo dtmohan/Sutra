@@ -22,7 +22,7 @@ class Fake:
     def call(self, cid, system, p, schema):
         consume_dispatch(cid, self.model, system, p, schema)
         self.payloads.append(copy.deepcopy(p))
-        result = {'context_binding': p['context_binding'], 'intent': 'conversation','escalation_reason':'none',
+        result = {'page_requests': [], 'intent': 'conversation','escalation_reason':'none',
                   'diagram': None, 'answer': 'Hello. Let us discuss your idea.',
                   'summary': 'User prefers short answers; project nickname is Marigold.'}
         if self.fault:
@@ -154,7 +154,7 @@ class ConversationTests(unittest.TestCase):
 
     def test_schema_blocks_actions_omissions_wrong_binding_and_bounds_repairs(self):
         faults = [lambda r,p:r.update(action={'kind': 'edit'}),
-                  lambda r,p:r.pop('context_binding'),
+                  lambda r,p:r.pop('page_requests'),
                   lambda r,p:r.update(context_binding='forged'),
                   lambda r,p:r.update(intent='run_tests'),
                   lambda r,p:r.update(summary='x'*(p['memory_allocation']['summary_max_chars']+1))]

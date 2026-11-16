@@ -61,6 +61,11 @@ def write_trace(directory, call_id, record):
              'conservative_input_charge':record.get('conservative_input_charge'),
              'response':{k:response[k] for k in ('model','done','done_reason','load_duration','prompt_eval_count','eval_count','total_duration') if k in response},
              'privacy':'Prompt, source excerpts and response bodies omitted; committed deliveries remain in the ledger'}
+    compatibility = record.get('decoder_compatibility')
+    if isinstance(compatibility, dict):
+        compact['decoder_compatibility'] = {k: compatibility[k] for k in
+            ('policy', 'runner', 'runtime_version') if k in compatibility and
+            (compatibility[k] is None or isinstance(compatibility[k], str) and len(compatibility[k]) <= 128)}
     filename=sha(str(call_id)) if Path(str(call_id)).name!=str(call_id) else str(call_id)
     (directory/(filename+'.json')).write_text(json.dumps(compact,indent=2))
     prune(directory.parent)

@@ -36,6 +36,11 @@ def followup(proposal,p):
         return None  # Ask the user for the missing evidence; a bigger model cannot supply it.
     if reason!='reasoning_capacity':
         return None
+    from reasoning_policy import next_control
+    control=next_control(p.get('reasoning'))
+    if control is not None:
+        return {'kind':'reasoning','control':control,
+                'reason':'The model requested more reasoning. Check a supported higher effort on this model against the remaining allocation.'}
     if p['route']['mode']!='auto':
         return {'kind':'blocked','reason':'The selected model requested escalation. Choose Auto or another tier to continue; explicit model selections stay fixed.'}
     tier=next_tier(p['route'],state['models_tried'])
@@ -71,11 +76,16 @@ def prepare(s,sid,request):
             state['page_passes']+=1
         if route['mode']=='auto':
             old_route=dict(prior['route'],models=dict(route['models']))
-            tier=old_route['tier'] if requested else next_tier(old_route,state['models_tried'])
+            same_model=bool(requested) or step['kind']=='reasoning'
+            tier=old_route['tier'] if same_model else next_tier(old_route,state['models_tried'])
             if tier is None:
                 raise RoutingBlocked('No untried higher-tier model is configured')
             route.update(tier=tier,model=route['models'][tier],
-                         reason='requested context paged before escalation' if requested else 'receipt-backed reasoning escalation')
+                         reason=('requested context paged before escalation' if requested else
+                                 'supported reasoning retry before model escalation' if same_model else
+                                 'receipt-backed model escalation'))
+            if same_model and route['model']!=prior['route']['model']:
+                raise RoutingBlocked('The saved routing tier now names a different model. Restore it or explicitly select a tier; budget is retained.')
         else:
             route['reason']='explicit user override during saved routing'
         route.update(evidence_invocation=previous,assessment_authority='model_unverified')

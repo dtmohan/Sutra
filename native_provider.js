@@ -320,7 +320,7 @@ function install(vscode,context,deps){
             if(flow.routing_step){
               const step=flow.routing_step;recordUsage(step.result);lastRoute=step.route.model;audit.model=lastRoute;
               audit.routingDecision=step.routing_followup;audit.stage='routing';publish();
-              progress.report(new vscode.LanguageModelTextPart((step.routing_followup?.kind==='page_in'?'Loading the requested conversation context before choosing a model.':step.routing_followup?.kind==='escalate'?'Checking the next model tier against the remaining budget and available memory.':flow.progress)+'\n\n'));
+              progress.report(new vscode.LanguageModelTextPart((step.routing_followup?.kind==='page_in'?'Loading the requested conversation context before choosing a model.':step.routing_followup?.kind==='reasoning'?'Checking a higher supported reasoning setting on the same model against the remaining budget.':step.routing_followup?.kind==='escalate'?'Checking the next model tier against the remaining budget and available memory.':flow.progress)+'\n\n'));
             }
             if(flow.state==='PAUSED'){showPause(flow,audit,progress);return;}
             if(flow.state!=='CLASSIFYING')break;

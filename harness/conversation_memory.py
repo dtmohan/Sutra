@@ -16,6 +16,8 @@ LEGACY_POLICIES = {'2319f693bfd23c67bda96909572c6a5646d1a299497aa3ab9c23fc990721
                    'd71f0acf70b42a1d0cb1332c1413bfb85b90156d5820d590cdb19b41ea79ce04'}
 # Recomputed from the released VSIX policy manifests; never from an untrusted receipt.
 RELEASE_POLICIES = {
+    '0.25.0': '76b0ce0cb8bba39c3d9f04a1d0523642ce8497e819001980c6ffe5b5ab8655fb',
+    '0.24.0': '6b50d735e5bac5282de27ab496d70ed4c472e8c7e7750fa4a6d8df5168d8dc6b',
     '0.23.1': '8c2e917101313d03f24e9ae6cd31c08ce607262e22e1f39e7ee1b88cf4f0474e',
     '0.23.0': '1d138f3f860284569ef3b84a9c6bb807343c06bad79c763b0cb3c47a8d3fbb22',
     '0.22.0': 'f01812ee6cb7d05d58a69acfb644e549f000db4608c9f85c7ac7bb5650eea9aa',
@@ -198,6 +200,13 @@ def working_set(s, sid, parent, request, budget, base, system, schema_for, extra
         if budget.charge(system, current, schema_for(current)) >= recent_ceiling:
             break
         if not add(row, 'recent_turns'):
+            break
+        if budget.charge(system, dict(base, memory=memory), schema_for(dict(base, memory=memory))) > recent_ceiling:
+            # Test the candidate, not just the already-packed window. One large
+            # optional turn must not consume the space allocated to retrieval
+            # and the TOC. The latest turn and pinned statements stay mandatory.
+            memory['recent_turns'].pop()
+            selected.remove(row['id'])
             break
     words = set(WORDS.findall(request.lower())) - STOP
     older = [r for r in rows if r['id'] not in selected]

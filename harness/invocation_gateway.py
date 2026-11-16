@@ -142,6 +142,8 @@ class InvocationLedger(GovernedContext):
 
     def finalize(self, envelope, payload, proposal, transport_error=None, elapsed_seconds=None, token_usage=None):
         session = envelope['session']; rid = envelope['delivery_id']
+        model_proposal = copy.deepcopy(proposal)
+        host_fields = {}
         with self.db:
             self.db.execute('BEGIN IMMEDIATE')
             row = self.db.execute('SELECT record_json,digest FROM invocations WHERE id=?', (envelope['id'],)).fetchone()
@@ -160,6 +162,10 @@ class InvocationLedger(GovernedContext):
                 for p in payload.get('pages', []):
                     page = self.read_page(session, p['id'], p['version'])
                     if page.content_hash != p['hash']: raise PageFault('Delivered page changed')
+                if envelope['role'] == 'conversation' and payload.get('response_contract') == 2:
+                    from conversation import bind_output
+                    proposal = bind_output(payload, proposal)
+                    host_fields = {'context_binding': payload['context_binding']}
                 result = validate_result(self, session, envelope['role'], payload, envelope['schema'], proposal, rid)
                 if result['admission']['admitted'] and envelope['role'] == 'parser':
                     self.apply_user_patch(session, 'invocation-' + envelope['id'], payload['CURRENT_USER_MESSAGE'],
@@ -180,6 +186,8 @@ class InvocationLedger(GovernedContext):
                        'admission': result['admission'], 'checks': result['checks'],
                        'status': 'accepted' if admitted else 'quarantined', 'previous_hash': prev,
                        'resulting_contract_hash': self.origin(session, bootstrap=True)['contract_hash']}
+            if envelope['role'] == 'conversation' and payload.get('response_contract') == 2:
+                receipt.update(model_response_hash=sha(canonical(model_proposal)), host_fields=host_fields)
             raw = canonical(receipt); digest = sha('invocation-receipt-v1:' + raw)
             self.db.execute('INSERT INTO invocation_receipts VALUES(?,?,?,?,?)', (session,seq+1,envelope['id'],digest,raw))
             self._audit('INVOCATION_RECEIPT', {'id': digest, 'record': receipt})
@@ -188,7 +196,7 @@ class InvocationLedger(GovernedContext):
         if envelope['role'] == 'parser' and admitted: self.current_contract(session)
         result.update(invocation_id=envelope['id'], invocation_receipt_id=digest,
                       accepted_output=copy.deepcopy(proposal) if admitted else None,
-                      model_proposal=copy.deepcopy(proposal))
+                      model_proposal=model_proposal)
         return result
 
     def quarantine_invocation(self, session, invocation_id, reason):
@@ -267,6 +275,15 @@ class InvocationLedger(GovernedContext):
             if not env or sha('invocation-v1:' + env[0]) != env[1] or r['invocation_hash'] != env[1]: return False
             if n != seq or r['previous_hash'] != previous or sha('invocation-receipt-v1:' + raw) != digest: return False
             if sha(canonical(r['proposal'])) != r['response_hash']: return False
+            if 'model_response_hash' in r:
+                original = copy.deepcopy(r['proposal'])
+                fields = r.get('host_fields', {})
+                if fields:
+                    delivered = json.loads(self.db.execute('SELECT payload_json FROM deliveries WHERE id=?', (env[2],)).fetchone()[0])
+                    if fields != {'context_binding': delivered['context_binding']} or r['role'] != 'conversation': return False
+                    if not isinstance(original, dict) or any(original.get(k) != v for k, v in fields.items()): return False
+                    for key in fields: original.pop(key)
+                if sha(canonical(original)) != r['model_response_hash']: return False
             payload = self.db.execute('SELECT payload_hash FROM deliveries WHERE id=?', (env[2],)).fetchone()
             if not payload or payload[0] != r['payload_hash']: return False
             previous = digest
@@ -281,6 +298,8 @@ class InvocationGateway:
     def invoke(self, role, call_id, system, payload, schema, delivery_id):
         from local_model import LocalModel
         from pathlib import Path
+        from reasoning_policy import check_provider
+        check_provider(self.provider, payload, fresh=isinstance(self.provider, LocalModel))
         if isinstance(self.provider, LocalModel):
             from runtime_memory import dispatch
             with dispatch(self.provider,Path(self.db).parent,call_id,system,payload,schema) as plan:

@@ -73,6 +73,10 @@ def thinking_control(info, preference):
         return False  # Ollama uses its lowest level if disabling is unsupported.
     if preference == 'model-default':
         return None
+    if preference == 'adaptive':
+        # Workspace workers retain model default. The tool-free conversation
+        # router binds its own capability-aware adaptive choice to its receipt.
+        return None
     if preference != 'on':
         raise ValueError('Unknown thinking preference')
     if True in values:

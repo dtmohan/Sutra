@@ -211,7 +211,7 @@ el('refresh-models').onclick=()=>send('refresh_models');
 el('save-model-tiers').onclick=()=>send('save_model_tiers',{models:Object.fromEntries(['low','mid','high'].map(t=>[t,el('tier-'+t).value]))});
 
 window.addEventListener('message',({data:m})=>{
- if(m.type==='runtime-settings'){el('storage-limit').value=m.settings.storageLimitMiB;el('python-path').value=m.settings.pythonPath;el('thinking-mode').value=m.settings.thinking||'off';el('logit-sensor').value=m.settings.logitSensor||'off';el('memory-ownership').value=m.settings.memoryOwnership||'shared';}
+ if(m.type==='runtime-settings'){el('storage-limit').value=m.settings.storageLimitMiB;el('python-path').value=m.settings.pythonPath;el('thinking-mode').value=m.settings.thinking||'adaptive';el('logit-sensor').value=m.settings.logitSensor||'off';el('memory-ownership').value=m.settings.memoryOwnership||'shared';}
  if(m.type==='runtime-saved')el('runtime-save-status').textContent='Runtime settings saved. They apply to subsequent requests.';
 });
 el('save-runtime').onclick=()=>{el('runtime-save-status').textContent='';send('save_runtime_settings',{settings:{storageLimitMiB:Number(el('storage-limit').value),pythonPath:el('python-path').value.trim(),thinking:el('thinking-mode').value,logitSensor:el('logit-sensor').value,memoryOwnership:el('memory-ownership').value}});};

@@ -96,3 +96,20 @@
 - Repeated configured model names are skipped during escalation. Different aliases with the same weights are not deduplicated here; reviewer identity checks remain separate.
 - Requested pages and pinned context must fit the chosen model. Otherwise the request pauses for a larger context/model choice; no mandatory context is discarded. Missing facts require user clarification.
 - Routing drafts consume allocation and remain receipt dependencies, but are not published or saved as ordinary conversation turns. Resume never refunds completed calls.
+
+## Adaptive reasoning
+
+- Adaptive currently applies to conversation and intent routing. Workspace workers and independent reviewers use their model-default reasoning; source-informed worker tier selection is unchanged.
+- The escalation signal is a fallible model assessment. More deliberation is not a correctness guarantee, and a request can stop at an incorrect direct answer without asking for help.
+- Ollama's `think=false` request may fall back to a model's lowest available level. If thinking-on is advertised, the generic false request can be followed by true, but backend fallback may make them computationally equivalent. Metadata does not prove the backend's actual computation. Unknown level names are not ordered automatically.
+- Each supported retry consumes the existing call, time and output allocation. Increasing `num_predict` alone is not used as a reasoning control. A long thought stream can still exhaust the combined reasoning/answer output reserve and be withheld.
+- Existing explicit thinking preferences remain in effect. Select Adaptive to opt in when upgrading an installation with an existing preference. Model capabilities or preference changes during a saved retry cannot silently reset its progression.
+
+- In the 0.25.0 live test, `local-assistant:latest` at `low` effort omitted three requested constraints from its visible answer even though every constraint remained in pinned input; it reported no need for escalation. The switch back to `qwen3:4b` recalled them. Host context preservation and permission enforcement do not prove answer completeness.
+
+## Prompt and decoder boundary (0.26.0)
+
+- The structured-decoder workaround is deliberately limited to Ollama 0.40.16 MLX. Other runtimes need their own validation; host shape and length checks remain strict everywhere.
+- Adaptive initial effort uses current-request keywords and structure, not a semantic classifier. Some easy prompts can receive extra effort and some difficult prompts can stay at the lowest effort. More reasoning can cost more without improving the answer.
+- Blank answers and incomplete code fences are detectable, but an apparently complete and well-formed wrong answer can still be admitted. The kernel governs allocation and permissions; it does not certify semantic correctness.
+- Paging controls must be explicit. Bounded repair can fix malformed requests, but cannot guarantee that a model selects every relevant page or recognizes missing evidence.

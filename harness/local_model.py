@@ -10,15 +10,21 @@ class LocalModel:
     def messages(self, system, payload):
         return [{'role':'system','content':system},
                 {'role':'user','content':json.dumps(payload,sort_keys=True,separators=(',',':'))}]
+    def output_schema(self, payload, host_schema):
+        return host_schema
     def call(self, call_id, system, payload, schema):
         from invocation_gateway import consume_dispatch
         consume_dispatch(call_id, self.model, system, payload, schema)
+        from reasoning_policy import check_provider
+        check_provider(self, payload)
         charge=self.budget.check(system,payload,schema)
         if self.health:
             if self.health.problem(): raise RuntimeError(self.health.problem())
             self.health.phase=call_id
+        from decoder_schema import for_decoder
+        wire_schema = for_decoder(self.output_schema(payload, schema), getattr(self, 'decoder_compatibility', None))
         body={'model':self.model,'messages':self.messages(system,payload),
-              'stream':True,'think':self.thinking,'format':schema,'keep_alive':getattr(self,'keep_alive','5m'),
+              'stream':True,'think':self.thinking,'format':wire_schema,'keep_alive':getattr(self,'keep_alive','5m'),
               'options':{'num_ctx':getattr(self,'runtime_context_tokens',self.budget.context_limit),'num_predict':self.budget.response_reserve,'temperature':0,'seed':42}}
         sensor=None
         try:
@@ -26,7 +32,8 @@ class LocalModel:
             sensor=Sensor(self.log_dir); body.update(sensor.request())
         except Exception:
             sensor=None  # Diagnostics must not prevent an otherwise governed call.
-        record={'call_id':call_id,'request':body,'conservative_input_charge':charge}
+        record={'call_id':call_id,'request':body,'conservative_input_charge':charge,
+                'decoder_compatibility':getattr(self,'decoder_compatibility',None)}
         from lifecycle import timeout
         c=http.client.HTTPConnection('127.0.0.1',self.port,timeout=timeout(150)); started=time.monotonic()
         if self.health: self.health.active=c
@@ -36,7 +43,8 @@ class LocalModel:
             if r.status!=200: raise RuntimeError(f'HTTP {r.status}: {r.read(300).decode(errors="replace")}')
             from model_activity import ACTIVE
             activity=ACTIVE.get()
-            if activity: activity.emit('control', requested=self.thinking)
+            if activity: activity.emit('control', requested=self.thinking,
+                                       policy=payload.get('reasoning'))
             content=[]; reasoning=[]; total=0; response=None
             # Includes both reasoning and structured answer. This transport bound
             # does not replace num_predict or the gateway's reserved token budget.
