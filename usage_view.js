@@ -3,7 +3,22 @@ const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypt
 const tokens=require('./media/token_usage');
 const {ActivityArchive,activityUri,parseActivityUri}=require('./model_activity');
 
-// A read-only view of existing receipts. This surface cannot dispatch models or tools.
+function currentArchitectureStop(runs){
+  const event=runs?.[0]?.recent_events?.at(-1),stop=event?.data?.architecture_stop;
+  if(!stop||typeof stop.message!=='string'||typeof stop.terminal!=='boolean')return undefined;
+  const validCount=value=>Number.isSafeInteger(value)&&value>=0;
+  const budget=stop.repository_budget;
+  return {
+    at:Number.isFinite(event.at)?event.at:undefined,run_id:typeof stop.run_id==='string'?stop.run_id:undefined,
+    message:stop.message.slice(0,1200),terminal:stop.terminal,
+    canRead:stop.reason==='insufficient_evidence'&&!stop.terminal,
+    covered:validCount(stop.covered_files)?stop.covered_files:undefined,
+    required:validCount(stop.required_files)?stop.required_files:undefined,
+    remaining:validCount(budget?.used)&&validCount(budget?.limit)?Math.max(0,budget.limit-budget.used):undefined
+  };
+}
+
+// Diagnostics are read-only. Recovery controls delegate to validating host commands.
 function install(vscode,context,deps){
   let view,ready=false,snapshot,routing,native,error,activity;
   const currentActivity=()=>{
@@ -39,6 +54,11 @@ function install(vscode,context,deps){
       else if(message?.type==='resume')void vscode.commands.executeCommand('karma.resumeWorkflow');
       else if(message?.type==='discard')void vscode.commands.executeCommand('karma.discardWorkflow');
       else if(message?.type==='increase_allocation')void vscode.commands.executeCommand('karma.increaseAllocation');
+      else if(message?.type==='architecture_read_and_retry'){
+        const stop=snapshot?.monitor?.architecture_stop;
+        if(!native?.working&&stop?.canRead&&stop.run_id&&message.run_id===stop.run_id)
+          void vscode.commands.executeCommand('karma.architectureReadAndRetry',stop.run_id);
+      }
       else if(message?.type==='telemetry')void vscode.commands.executeCommand('karma.open');
       else if(message?.type==='reasoning_settings')void vscode.commands.executeCommand('workbench.action.openSettings','karma.thinking');
       else if(message?.type==='activity_details')void openDetails(message.id);
@@ -59,6 +79,7 @@ function install(vscode,context,deps){
       // Monitoring and bounded, unverified task observations only. Observations
       // include the original request; source and executable action payloads stay out.
       for(const key of ['logical_memory','task_observations','runtime_memory','orchestration','hardware','kernel','review_budget','repository','action_budget','storage','context','adapter_health','session','contract'])monitor[key]=data[key];
+      monitor.architecture_stop=currentArchitectureStop(data.runs);
       snapshot={...(data.token_usage||{calls:[],total_calls:0,limit:250}),monitor,workspace,updatedAt:new Date().toISOString()};error=undefined;publish();
     },
     activity(event){
@@ -75,7 +96,7 @@ function install(vscode,context,deps){
     setStatus(value){
       const r=value?.routing;
       routing=r?{active:!!r.active,workspaceAccess:r.workspaceAccess,stage:r.stage,model:r.model,memoryUsed:r.memoryUsed,memorySource:r.memorySource,memoryAllocation:r.memoryAllocation,memoryStatus:r.memoryStatus,modelCapacity:r.modelCapacity,conversationBudget:r.conversationBudget,invocationId:r.invocationId}:undefined;
-      native=value?{enabled:value.enabled,armed:value.armed,label:value.label,compaction:value.compaction,pending:value.pending,working:value.working}:undefined;publish();
+      native=value?{enabled:value.enabled,armed:value.armed,accessProfile:value.accessProfile,label:value.label,compaction:value.compaction,pending:value.pending,working:value.working}:undefined;publish();
     },
     recordResponse(group){if(group?.calls?.length)item.tooltip='Latest completed stage / response: '+tokens.compact(group)+'\nClick for workspace history and per-stage counts.';},
     reset(){snapshot=undefined;routing=undefined;native=undefined;error=undefined;item.tooltip='Open tokens, system telemetry and kernel decisions';publish();}

@@ -296,17 +296,25 @@ function activate(context) {
     });
     participant.iconPath=vscode.Uri.file(path.join(context.extensionPath,'media','karma.svg'));context.subscriptions.push(participant);
   }
-  async function runReview(prompt, steps=1, token, mode='explore') {
+  async function runReview(prompt, steps=1, token, mode='explore', runId) {
     if(!Number.isInteger(steps)||steps<1||steps>4)throw new Error('Choose 1..4 review steps.');
     if(sequence||busy)throw new Error('A Sutra request is running.');
+    const runStep=async mode=>{
+      const data=await request({op:'architecture',mode,prompt,run_id:runId},token,true);
+      publishReview(data);
+      return data;
+    };
     sequence=true;let data;
     try {
       for(let i=0;i<steps;i++) {
-        data=await request({op:'architecture',mode,prompt:i===0?prompt:'Continue the architecture review using the current evidence and remaining work. Read or search if needed; otherwise report with cited findings and a diagram.'},token,true);
-        publishReview(data);
-        if(!data.result.admission.admitted||['report','clarify'].includes(data.result.accepted_output.tool.kind)||data.tool_receipt?.result.status!=='ok')break;
+        data=await runStep(mode);
+        const kind=data.result.accepted_output?.tool.kind;
+        if(!data.result.admission.admitted||kind==='report'||kind==='clarify')return data;
+        if(data.tool_receipt?.result.status!=='ok')break;
       }
-      publishReview(data);return data;
+      // The final exploration step can supply the last excerpt. Give the
+      // host a report step without granting another exploration operation.
+      return mode==='guided'?await runStep('report'):data;
     }finally{sequence=false;panel?.webview.postMessage({type:'busy',value:false});}
   }
   async function runAuto(options={}){
@@ -333,16 +341,25 @@ function activate(context) {
     const data=await request({op:'review_new',goal,roots,max_tools:12});
     await open();panel?.webview.postMessage({type:'state',data});
     if(options?.run===false)return data;
-    return runReview(goal,4);
+    const result=await runReview(goal,4,undefined,'guided');
+    if(result?.result?.accepted_output?.tool.kind==='report'&&result.state.report)await showArchitectureReport(result.state);
+    return result;
   }
-  async function openReport() {
-    const data=await request({op:'state'});
+  async function recoverArchitectureEvidence(runId){
+    const expected=runId??(await request({op:'state'})).architecture_stop?.run_id;
+    if(typeof expected!=='string'||!/^[a-f0-9]{32}$/.test(expected))throw new Error('This review is ready to report or has no pending source read.');
+    const result=await runReview(undefined,1,undefined,'recover_evidence',expected);
+    if(result?.result?.accepted_output?.tool.kind==='report'&&result.state.report)await showArchitectureReport(result.state);
+    return result;
+  }
+  async function showArchitectureReport(data) {
     if(!data.report)throw new Error('No current admitted architecture report. Continue the review first.');
     const uri=vscode.Uri.parse('karma-preview:/'+data.session+'/Architecture.md');
     previewDocuments.set(uri.toString(),data.report);
     const document=await vscode.workspace.openTextDocument(uri);await vscode.window.showTextDocument(document);
     return data.report;
   }
+  async function openReport(){return showArchitectureReport(await request({op:'state'}));}
   async function refresh() {
     const state=await request({op:'state'});
     panel?.webview.postMessage({type:'state',data:state});
@@ -411,6 +428,7 @@ function activate(context) {
         if(message.op==='auto_run'){await runAuto(message);return;}
         if(message.op==='open_auto_report'){await openAutoReport();return;}
         if(message.op==='architecture_run'){await runReview(message.prompt,message.steps,undefined,message.mode||'explore');return;}
+        if(message.op==='architecture_read_and_retry'){await recoverArchitectureEvidence(message.run_id);return;}
         if(message.op==='open_api_report'){await openAPIReport();return;}
         if(message.op==='open_static_report'){await openStaticReport();return;}
         if(message.op==='open_report'){await openReport();return;}
@@ -518,7 +536,10 @@ function activate(context) {
       const uri=await vscode.window.showSaveDialog({defaultUri:vscode.Uri.file(path.join(workspace(),'karma-debug.json')),filters:{JSON:['json']}});
       if(uri)await vscode.workspace.fs.writeFile(uri,Buffer.from(JSON.stringify(data,null,2)+'\n'));}),
     vscode.commands.registerCommand('karma.reviewCodebase',()=>reviewCodebase()),
-    vscode.commands.registerCommand('karma.continueReview',()=>runReview('Continue the architecture review with current evidence and constraints.',1)),
+    vscode.commands.registerCommand('karma.continueReview',()=>runReview('Continue the architecture review with current evidence and constraints.',1,undefined,'guided')),
+    vscode.commands.registerCommand('karma.architectureReadAndRetry',async runId=>{
+      try{await recoverArchitectureEvidence(runId);}catch(error){await vscode.window.showErrorMessage(error.message);}
+    }),
     vscode.commands.registerCommand('karma.openReport',openReport),
     vscode.commands.registerCommand('karma.apiMap',apiMap),
     vscode.commands.registerCommand('karma.openAPIReport',openAPIReport),

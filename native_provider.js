@@ -9,6 +9,9 @@ const ACTION='karma_native_action';
 const THINK_NEXT='sutraThinkingForNextRequest';
 const MODEL_IDS={auto:'karma-auto',low:'karma-low',mid:'karma-mid',high:'karma-high'};
 const CHAT_DEFAULTS={'defaultModel':MODEL_IDS.auto,'editor.preferCopilotHarness':false,'defaultToCopilotHarness':false,'editor.localAgent.enabled':true};
+const MANIFEST=require('./package.json');
+const EXTENSION_ID=MANIFEST.publisher+'.'+MANIFEST.name;
+const RESUME_PROMPT=/^Resume saved Sutra request \[([a-f0-9]{32})\]$/;
 const classifying=flow=>flow?.state==='CLASSIFYING'||flow?.stop?.resume_phase==='CLASSIFYING';
 function latestRequest(vscode,messages){
   const last=messages.at(-1);
@@ -44,7 +47,7 @@ function observationText(observations, final=false){
 }
 function install(vscode,context,deps){
 
-  let allocationPending=false,thinkingForNextRequest=false;
+  let allocationPending=false,thinkingForNextRequest=false,resumeSubmission;
   let armPromise,accessEpoch=0,armingStep='',armed,activeCancel,arming=false,running=false,selecting=false,lastRoute='',routing,reason='Open Sutra chat to talk. Choose workspace permissions on first use.';
   const memory=new NativeMemory(context);let lastCompaction;
   const tickets=new Map(),completed=new Map(),changed=new vscode.EventEmitter();
@@ -219,33 +222,67 @@ function install(vscode,context,deps){
     return automatic.message||
       (Object.hasOwn(allocationReasons,automatic.reason)?allocationReasons[automatic.reason]:automatic.reason);
   }
-  async function rememberFlow(flow,thinkForTurn){
+  const resumeUri=id=>`${vscode.env?.uriScheme||'vscode'}://${EXTENSION_ID}/resume/${id}`;
+  function resumeAction(flow){
+    const pending=context.workspaceState.get(pendingKey);
+    return vscode.window.registerUriHandler&&pending?.flow_id===flow.flow_id&&pending.resumeLink
+      ?'[Resume this request]('+resumeUri(pending.resumeLink)+') or send **continue** in this chat.'
+      :'Send **continue** in this Sutra chat or choose **Resume** in Sutra Monitor.';
+  }
+  async function rememberFlow(flow,thinkForTurn,chatKey){
     const terminal=flow.state==='DONE'||flow.state==='CANCELLED';
     const saved=context.workspaceState.get(pendingKey);
+    const prior=saved?.flow_id===flow.flow_id?saved:undefined;
     const resumeThinking=classifying(flow)&&(thinkForTurn??(saved?.flow_id===flow.flow_id&&saved.resumeThinking===true));
     const automatic=flow.stop?.automatic_allocation;
     const stop=automatic?{...flow.stop,automatic_allocation:{...automatic,message:allocationMessage(automatic)}}:flow.stop;
     // Finishing a conversational turn must not erase another saved review.
     if(!terminal||saved?.flow_id===flow.flow_id)
-      await context.workspaceState.update(pendingKey,terminal?undefined:{...flow,stop,resumeThinking,workspace:deps.workspace(),conversation:undefined,routing_step:undefined,child:undefined,data:undefined,mapping:undefined,claim_review_usage:undefined,allocation_proposal:undefined,allocation_amendment:undefined});
+      await context.workspaceState.update(pendingKey,terminal?undefined:{...flow,stop,resumeThinking,workspace:deps.workspace(),
+        nativeChat:prior?.nativeChat||chatKey,resumeLink:prior?.resumeLink||crypto.randomBytes(16).toString('hex'),
+        conversation:undefined,routing_step:undefined,child:undefined,data:undefined,mapping:undefined,claim_review_usage:undefined,allocation_proposal:undefined,allocation_amendment:undefined});
     publish();
   }
-  async function recoverSaved(discard=false){
+  async function recoverSaved(discard=false,link){
+    if(!discard&&!enabled())throw new Error('Enable Sutra chat before resuming a request.');
     if(allocationPending||running||routing?.active||deps.isBusy())throw new Error('Stop the active request and wait for cleanup before changing the saved workflow.');
     const pending=context.workspaceState.get(pendingKey);
-    if(!pending||pending.workspace!==deps.workspace()){void vscode.window.showInformationMessage('No saved workflow in this workspace.');return;}
+    if(!pending||pending.workspace!==deps.workspace()||link&&pending.resumeLink!==link){
+      void vscode.window.showInformationMessage(link?'This Sutra resume link no longer matches the saved request in this workspace.':'No saved workflow in this workspace.');
+      return;
+    }
+    const sameRequest=()=>deps.workspace()===pending.workspace&&context.workspaceState.get(pendingKey)?.flow_id===pending.flow_id;
     if(discard){
       const yes=await vscode.window.showWarningMessage('Discard the saved Sutra request?',{modal:true,detail:'Consumed budgets, receipts and task permissions are retained. Unused child reservations are released. Executed actions are not undone.'},'Discard request');
       if(yes!=='Discard request')return;
       const current=await deps.request({op:'orchestrate',event:'inspect',flow_id:pending.flow_id});
+      if(!sameRequest()||running||routing?.active)throw new Error('The saved request changed. Review the current request in Sutra Monitor.');
       await rememberFlow(['DONE','CANCELLED'].includes(current.state)?current:await deps.request({op:'orchestrate',event:'cancel',flow_id:current.flow_id,cursor:current.cursor}));
-    }else{
+      return;
+    }
+    if(resumeSubmission?.expires>Date.now())return;
+    const submission={id:crypto.randomBytes(16).toString('hex'),workspace:pending.workspace,
+      flowId:pending.flow_id,expires:Date.now()+30_000};
+    resumeSubmission=submission;
+    try{
       const current=await deps.request({op:'orchestrate',event:'inspect',flow_id:pending.flow_id});
+      if(!sameRequest()||running||routing?.active||deps.isBusy())throw new Error('The saved request changed. Review the current request in Sutra Monitor.');
       await rememberFlow(current);
-
-      // Focus the existing chat without replacing its draft, model, or history.
-      await vscode.commands.executeCommand('workbench.action.chat.open');
-      void vscode.window.showInformationMessage(current.recovery?current.recovery.message+' Send continue in Sutra chat to choose recovery.':'Resume selected. Send continue with a Sutra model to resume the saved request with its original context and remaining budget. Other messages remain separate.');
+      if(['DONE','CANCELLED'].includes(current.state)){
+        resumeSubmission=undefined;
+        void vscode.window.showInformationMessage('This Sutra request has finished.');
+        return;
+      }
+      submission.cursor=current.cursor;
+      // VS Code targets its current chat panel. The provider checks the originating chat
+      // and the inspected cursor before sending any resume event to the host.
+      await vscode.commands.executeCommand('workbench.action.chat.open',{
+        modelSelector:{vendor:'karma',id:MODEL_IDS.auto,family:'karma'},
+        query:`Resume saved Sutra request [${submission.id}]`,preserveInput:true
+      });
+    }catch(error){
+      if(resumeSubmission===submission)resumeSubmission=undefined;
+      throw error;
     }
   }
   async function increaseAllocation(){
@@ -266,11 +303,11 @@ function install(vscode,context,deps){
       if(deps.workspace()!==workspace||running||routing?.active||deps.isBusy())throw new Error('The workspace or request changed. Review a fresh allocation proposal.');
       const next=await deps.request({op:'orchestrate',event:'allocation_grant',flow_id:preview.flow_id,cursor:preview.cursor,confirmed:true,proposal:p});
       await rememberFlow(next);
-      void vscode.window.showInformationMessage('Allocation increased (version '+next.allocation_amendment.version+'). Spending and permissions are unchanged. Send continue in this chat; model and memory checks still apply.');
+      void vscode.window.showInformationMessage('Allocation increased (version '+next.allocation_amendment.version+'). Choose Resume or send continue in your Sutra chat.');
     }finally{allocationPending=false;publish();}
   }
   let activityProgress;
-  async function flowEvent(flow,event,tier,token,extra,thinkForTurn){
+  async function flowEvent(flow,event,tier,token,extra,thinkForTurn,chatKey){
     const access=refreshAccess();
     const models=['inspect','pending','cancel'].includes(event)?undefined:await deps.configureModels(false,token);
     const workspaceStep=['step','resume','grant','capability_grant','restart_review','accept_provenance'].includes(event) && !classifying(flow);
@@ -282,7 +319,7 @@ function install(vscode,context,deps){
     const next=await deps.request({op:'orchestrate',event,flow_id:flow?.flow_id,cursor:flow?.cursor,
       ...(thinkForTurn&&['start','step'].includes(event)?{think_for_turn:true}:{}),
       armed:!!access,binding,models,tier,...extra},token,activityProgress);
-    await rememberFlow(next,event==='pending'?undefined:thinkForTurn);return next;
+    await rememberFlow(next,event==='pending'?undefined:thinkForTurn,event==='pending'?undefined:chatKey);return next;
   }
   function showHostProgress(flow, progress){
     if(flow.progress){
@@ -306,20 +343,20 @@ function install(vscode,context,deps){
     if(autoMessage&&!details.includes(autoMessage))details.push(autoMessage);
     const reason=details.length?details.join('\n'):(stop.status||'Inspect Sutra Monitor for details.');
     audit.stage='paused';audit.message=reason;publish();
-    let guidance='Resolve the reported cause, then use **Resume** in Sutra Monitor and send **continue** here.';
+    let guidance='Resolve the reported cause before resuming.';
     if(stop.status==='resource_wait'){
-      guidance='Check both **System pressure** and the **Last model allocation** in Sutra Monitor. Healthy system pressure alone does not mean the selected model fits. After resources recover, or after selecting a smaller configured model, use **Resume** and send **continue** here. Resume checks a fresh measurement and model allocation before dispatch. Sutra will not automatically retry this stop.';
+      guidance='Check **System pressure** and **Last model allocation** in Sutra Monitor. Resume checks fresh measurements and the model allocation before dispatch.';
     }else if(stop.status==='claim_review_output_limit'){
       const page=Number.isInteger(stop.review_page)&&Number.isInteger(stop.total_pages)
         ? `claim-review page ${stop.review_page} of ${stop.total_pages}` : 'the unfinished claim-review page';
-      guidance='The draft and completed claim-review pages are saved. Use **Resume** in Sutra Monitor, then send **continue** here. Sutra will request thinking off when it retries '+page+'.';
+      guidance='The draft and completed claim-review pages are saved. Sutra will request thinking off when it retries '+page+'.';
     }else if(automatic?.status==='model_context'){
-      guidance='Select a model with a larger context window, then send **continue** here.';
+      guidance='Select a Sutra tier with a larger context window and send **continue** to use that tier.';
     }else if(allocationStop){
-      guidance='Choose **Increase allocation…** in Sutra Monitor to review and confirm additional task capacity, then send **continue** here. This preserves all spending and does not override model or hardware limits.';
+      guidance='Choose **Increase allocation…** in Sutra Monitor to review and confirm additional task capacity.';
     }
     const title=stop.resume_phase==='CLASSIFYING'?'Sutra paused the request.':'Sutra paused the review.';
-    progress.report(new vscode.LanguageModelTextPart('**'+title+'**'+coverage+'\n\n'+reason+'\n\n'+(stop.failure_count>failures.length?`${stop.failure_count-failures.length} more file failures are recorded in the review details.\n\n`:'')+'The request, context, permissions and consumed budget are saved. '+guidance+' Resume keeps the remaining allocation; it does not reset a limit. Use **Discard** to abandon this request.'));
+    progress.report(new vscode.LanguageModelTextPart('**'+title+'**'+coverage+'\n\n'+reason+'\n\n'+(stop.failure_count>failures.length?`${stop.failure_count-failures.length} more file failures are recorded in the review details.\n\n`:'')+'The request, context, permissions and consumed budget are saved. '+guidance+'\n\n'+resumeAction(flow)));
   }
   async function selectNativeChat(){
     if(selecting)throw new Error('Sutra chat selection is already in progress.');
@@ -407,7 +444,7 @@ function install(vscode,context,deps){
     }
   };
   const provider={onDidChangeLanguageModelChatInformation:changed.event,
-    provideLanguageModelChatInformation(){if(!enabled())return [];const models=deps.modelSettings();return ['auto','low','mid','high'].filter(id=>id==='auto'||models[id]).map(id=>({id:MODEL_IDS[id],name:id==='auto'?'Sutra Auto':'Sutra '+id[0].toUpperCase()+id.slice(1),family:'karma',version:require('./package.json').version,maxInputTokens:64000,maxOutputTokens:4096,detail:id==='auto'?'Governed local routing':models[id]||'Configure this tier',tooltip:'Chat normally with saved workspace permissions. Every local call uses the invocation gateway.',capabilities:{toolCalling:true,imageInput:false}}));},
+    provideLanguageModelChatInformation(){if(!enabled())return [];const models=deps.modelSettings();return ['auto','low','mid','high'].filter(id=>id==='auto'||models[id]).map(id=>({id:MODEL_IDS[id],name:id==='auto'?'Sutra Auto':'Sutra '+id[0].toUpperCase()+id.slice(1),family:'karma',version:MANIFEST.version,maxInputTokens:64000,maxOutputTokens:4096,detail:id==='auto'?'Governed local routing':models[id]||'Configure this tier',tooltip:'Chat normally with saved workspace permissions. Every local call uses the invocation gateway.',capabilities:{toolCalling:true,imageInput:false}}));},
     provideTokenCount(model,input,token){if(token?.isCancellationRequested)throw new Error('Token count cancelled.');return hostTokens.count(input);},
     async provideLanguageModelChatResponse(model,messages,options,progress,token){
       if(isCompaction(vscode,messages)){
@@ -450,8 +487,22 @@ function install(vscode,context,deps){
       const recordUsage=result=>{responseUsage=tokens.merge(responseUsage,result?.token_usage);audit.token_usage=responseUsage;};
       running=true;activeCancel=new vscode.CancellationTokenSource();const cancellation=token.onCancellationRequested(()=>activeCancel?.cancel());publish();
       let savedClassifierThinking;
+      const chatKey=memory.chatKey(options);
       const advance=(flow,event,extra)=>flowEvent(flow,event,tier,activeCancel.token,extra,
-        classifying(flow)?savedClassifierThinking??thinkForTurn:thinkForTurn);
+        classifying(flow)?savedClassifierThinking??thinkForTurn:thinkForTurn,chatKey);
+      function resumeUnavailable(message){
+        audit.stage='resume_unavailable';
+        audit.message=message;
+        progress.report(new vscode.LanguageModelTextPart(message));
+      }
+      function sameChat(pending,explicit){
+        if(pending.nativeChat&&chatKey)return pending.nativeChat===chatKey;
+        if(!explicit)return true; // Older saved reviews still accept an intentional exact continue.
+        if(pending.conversation_id&&request.parent===pending.conversation_id&&audit.memorySource==='signed_checkpoint')return true;
+        // The host-generated pause link can bind a conversation without a session ID or receipt.
+        return !!pending.resumeLink&&messages.some(message=>message.role===vscode.LanguageModelChatMessageRole.Assistant&&
+          message.content.some(part=>part instanceof vscode.LanguageModelTextPart&&part.value.includes(resumeUri(pending.resumeLink)+')')));
+      }
       async function allowActionProfile(){
         assertCurrent(a,activeCancel.token);
         if(a.profile==='workspace_agent')return true;
@@ -472,10 +523,29 @@ function install(vscode,context,deps){
         let data,flow,restartReview=false,resuming=false;
         if(!request.results){
           let pending=context.workspaceState.get(pendingKey);
+          const resumeId=prompt.trim().match(RESUME_PROMPT)?.[1];
+          let submission;
+          if(resumeId){
+            submission=resumeSubmission;
+            if(submission?.id===resumeId)resumeSubmission=undefined;
+            if(submission?.id!==resumeId||submission.expires<=Date.now()||submission.workspace!==deps.workspace()||
+              pending?.flow_id!==submission.flowId||pending.workspace!==submission.workspace){
+              resumeUnavailable('This Sutra resume action has expired. Use the current saved request in Sutra Monitor.');
+              return;
+            }
+          }
           if(!pending){const saved=await advance(null,'pending');if(saved.flow_id)pending={...saved,workspace:deps.workspace()};}
-          const resumeRequested=/^(continue|resume|please continue|please resume)[.! ]*$/i.test(prompt.trim());
+          const resumeRequested=!!resumeId||/^(continue|resume|please continue|please resume)[.! ]*$/i.test(prompt.trim());
           if(resumeRequested&&pending?.workspace===deps.workspace()){
+            if(!sameChat(pending,!!submission)){
+              resumeUnavailable('Open the originating Sutra chat and send **continue** there to resume this request.');
+              return;
+            }
             const old=await deps.request({op:'orchestrate',event:'inspect',flow_id:pending.flow_id},activeCancel.token);
+            if(submission&&(old.cursor!==submission.cursor||['DONE','CANCELLED'].includes(old.state))){
+              resumeUnavailable('The saved Sutra request advanced. Choose Resume from the current pause in Sutra Monitor.');
+              return;
+            }
             if(['DONE','CANCELLED'].includes(old.state))await rememberFlow(old);
             else if(old.recovery){
               await rememberFlow(old);
@@ -551,7 +621,7 @@ function install(vscode,context,deps){
             audit.stage='awaiting_workspace_permission';publish();
             progress.report(new vscode.LanguageModelTextPart('Choose **Sutra workspace permissions** to continue this request.\n\n'));
             if(!await beginArm({audit,token:activeCancel.token})){
-              audit.stage='permission_declined';progress.report(new vscode.LanguageModelTextPart('Workspace access was not granted. No new workspace operation was dispatched. You can keep chatting.'));return;
+              audit.stage='permission_declined';progress.report(new vscode.LanguageModelTextPart('Workspace access was not granted. You can keep chatting.\n\n'+resumeAction(flow)));return;
             }
             a=armed;audit.stage='workspace';publish();
             progress.report(new vscode.LanguageModelTextPart('**Workspace permissions saved.** Continuing your request.\n\n'));
@@ -579,7 +649,7 @@ function install(vscode,context,deps){
         }
         while(!['DONE','AWAITING_ACTION'].includes(flow.state)){
           assertCurrent(a,activeCancel.token);
-          if(flow.recovery){audit.stage='recovery_required';audit.message=flow.recovery.message;publish();progress.report(new vscode.LanguageModelTextPart(flow.recovery.message+'\n\nSend **continue** to review the recovery options.'));return;}
+          if(flow.recovery){audit.stage='recovery_required';audit.message=flow.recovery.message;publish();progress.report(new vscode.LanguageModelTextPart(flow.recovery.message+'\n\n'+resumeAction(flow)));return;}
           if(flow.state==='PAUSED'){
             if(flow.stop?.status==='provenance_confirmation'){
               const choice=await vscode.window.showWarningMessage('Use the open source snapshot for this review?',{modal:true,detail:flow.stop.error},'Review open snapshot');
@@ -590,7 +660,7 @@ function install(vscode,context,deps){
                 continue;
               }
               audit.stage='paused';
-              progress.report(new vscode.LanguageModelTextPart('Review paused before source mapping. Open the intended checkout and submit the review there, or send **continue** here to select this snapshot.'));
+              progress.report(new vscode.LanguageModelTextPart('Review paused before source mapping. Resume to choose this snapshot, or open the intended checkout and submit the review there.\n\n'+resumeAction(flow)));
               return;
             }
             showPause(flow,audit,progress);
@@ -601,7 +671,7 @@ function install(vscode,context,deps){
           if(flow.state==='NEED_TOOL_APPROVAL'&&!flow.capability_settled){
             const authorization=await deps.approveCapability(flow.capability_proposal,activeCancel.token);
             assertCurrent(a,activeCancel.token);
-            if(!authorization){audit.stage='permission_declined';progress.report(new vscode.LanguageModelTextPart('Tool permission was not granted. The saved request can be resumed or discarded.'));return;}
+            if(!authorization){audit.stage='permission_declined';progress.report(new vscode.LanguageModelTextPart('Tool permission was not granted.\n\n'+resumeAction(flow)));return;}
             event='capability_grant';extra={authorization};
           }
           if(flow.state==='NEED_PERMISSION'){
@@ -611,7 +681,7 @@ function install(vscode,context,deps){
             }
             const grant=await approvePermission(flow.permission,activeCancel.token);
             assertCurrent(a,activeCancel.token);
-            if(!grant){audit.stage='permission_declined';progress.report(new vscode.LanguageModelTextPart('Permission was not granted. No edit or test ran.'));return;}
+            if(!grant){audit.stage='permission_declined';progress.report(new vscode.LanguageModelTextPart('Permission was not granted. No edit or test ran.\n\n'+resumeAction(flow)));return;}
             event='grant';extra={grant};
           }
           flow=await advance(flow,event,extra);
@@ -672,6 +742,13 @@ function install(vscode,context,deps){
       });
     }
   };
+  if(vscode.window.registerUriHandler)context.subscriptions.push(vscode.window.registerUriHandler({
+    handleUri(uri){
+      const link=uri.path.match(/^\/resume\/([a-f0-9]{32})$/)?.[1];
+      if(link&&uri.authority===EXTENSION_ID&&!uri.query&&!uri.fragment)
+        return recoverSaved(false,link).catch(error=>vscode.window.showErrorMessage(error.message));
+    }
+  }));
   context.subscriptions.push(changed,vscode.lm.registerLanguageModelChatProvider('karma',provider),vscode.lm.registerTool(ACTION,tool),
     vscode.commands.registerCommand('karma.useNativeChat',()=>useNativeChat()),
     vscode.commands.registerCommand('karma.toggleThinkingForNextRequest',toggleNextThinking),

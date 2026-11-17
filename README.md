@@ -1,3 +1,13 @@
+# Sutra 0.38.5 — start in chat and recover reviews where they stop
+
+Use **Sutra: Open Chat (Sutra Auto)** to start in VS Code's native Local Chat. Ask for a review and describe the scope you want. Sutra asks for workspace access when needed, then discovers and reads relevant files.
+
+The advanced architecture review proceeds from inspection to report. If it needs evidence from another file, **Read another file and retry** uses the review's existing scope and remaining budget.
+
+When a native request pauses, choose **Resume this request** in the original chat or **Resume** in Sutra Monitor. Both submit a continuation through Sutra Auto. To resume using a specific model tier, select it and send **continue** in the original chat.
+
+Sutra Monitor shows why a review stopped and which recovery actions are available. The dashboard also improves keyboard navigation, form labels and control contrast.
+
 # Sutra 0.38.4 — verify protocol events and explain review stops
 
 Sutra checks protocol events against their hash-chained audit copies. New events include host timestamps. Architecture preflight stops appear in the review panel and Sutra Monitor.
@@ -130,15 +140,15 @@ experimental local tool, not a guarantee that model answers are correct.
 1. Install the VSIX in VS Code using **Extensions: Install from VSIX**, then reload.
 2. Start Ollama and install the local models you want to use. Python 3.9+ is
    required for the harness.
-3. Run **Sutra: Configure Local Models**. Choose the low, mid and high tiers from
-   installed models.
-4. Run **Sutra: Open Governed Chat (Sutra Auto)**. This saves the compatible Local
+3. Run **Sutra: Open Chat (Sutra Auto)**. This saves the compatible Local
    chat and model selection for new chats. Existing chats retain their selection.
-5. Chat normally. The first request that needs project files offers **Read only** or **Workspace agent** permissions and continues in the same chat after approval. Sutra remembers the choice for this trusted workspace across reloads, updates and model changes. Workspace agent access lets Sutra request file scopes for edits and local tests, then confirm each exact action. Manage or revoke access from **Sutra: Workspace Permissions…** or the dashboard.
+4. Chat normally. The first request that needs project files offers **Read only** or **Workspace agent** permissions and continues in the same chat after approval. Sutra remembers the choice for this trusted workspace across reloads, updates and model changes. Workspace agent access lets Sutra request file scopes for edits and local tests, then confirm each exact action. Manage or revoke access from **Sutra: Workspace Permissions…** or the dashboard.
 
-The native model picker offers **Sutra Auto**, **Sutra Low**, **Sutra Mid** and
-**Sutra High**. The review participant is **@sutra**. The dashboard has Overview,
-Chat, Usage, Settings and Tools views.
+Sutra discovers installed models and fills empty tiers. Use **Sutra: Configure
+Local Models** to change those choices. **Sutra Low**, **Sutra Mid** and
+**Sutra High** are explicit overrides in the native model picker. Open **Sutra
+Monitor** for recovery and diagnostics, or the dashboard's **Tools** for
+advanced review and calibration controls.
 
 ### Governed orchestration
 
@@ -154,8 +164,9 @@ calls receive the full contract and a budgeted Smriti working set. Failed calls
 consume allocation. Model switches and reloads cannot reset that use. Source
 versions and child receipts are checked again before synthesis.
 
-After interruption, choose a Sutra tier and send **continue** to resume the saved
-workflow. Replacing it requires confirmation and releases unused child
+After interruption, choose **Resume this request** in the original chat. To
+choose a different model explicitly, select a Sutra tier and send **continue**
+there. Replacing the saved request requires confirmation and releases unused child
 reservations. The saved task retains its constraints, consumed budget and
 evidence. Saved workspace permissions are checked again when work resumes.
 The monitor shows request/child states, model assignments and allocation use.
@@ -245,4 +256,4 @@ This repository does not grant an open-source license for original project code.
 Bundled third-party components retain their own licenses; see
 [third-party notices](THIRD_PARTY_NOTICES.md).
 
-Current release: **0.25.0**. Auto begins new requests with the configured low tier. Requested conversation pages are loaded before model escalation; stronger models keep the same original request, pinned context, permissions and spent allocation. Explicit tier selections remain fixed. Workspace worker selection follows fresh scoped source retrieval. New messages reach conversation routing even while a review is saved. Greetings do not resume or restart reviews. A new workspace request asks before replacing saved work. Python source mapping uses the page work allocation rather than the small API packet limit. Mapping pauses show their causes and coverage in chat, with file diagnostics in Sutra Monitor. Saved requests have explicit Resume/Discard controls in Sutra Monitor. Resume focuses the existing chat without changing its draft; send **continue** using a Sutra model to resume. Other messages remain separate. Stop retains context, receipts and consumed allocation. A budget-limited resume can pause again; it does not allocate a new budget.
+Sutra Auto begins new requests with the configured low tier. Requested conversation pages are loaded before model escalation; stronger models keep the same original request, pinned context, permissions and spent allocation. Explicit tier selections remain fixed. Workspace worker selection follows fresh scoped source retrieval. New messages reach conversation routing even while a review is saved. Greetings stay conversational. A new workspace request asks before replacing saved work. Mapping pauses show their causes and coverage in chat, with file diagnostics in Sutra Monitor. Resume submits the saved request in the originating chat and keeps its draft. Stop retains context, receipts and consumed allocation. A budget-limited resume can pause again.

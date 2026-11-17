@@ -13,7 +13,7 @@ const {chromium}=require(process.env.KARMA_PLAYWRIGHT||'playwright'),fs=require(
    const panel=page.locator('.part.panel');await panel.waitFor({state:'visible',timeout:15000});
    await panel.getByRole('tab',{name:/Sutra Monitor/i}).waitFor({state:'visible',timeout:15000});
    let frame;for(let j=0;j<100&&!frame;j++){for(const f of page.frames()){if(await f.locator('#scope').count())frame=f;}if(!frame)await new Promise(r=>setTimeout(r,100));}
-   assert(frame,'Usage webview must be present');await frame.getByRole('heading',{name:'Sutra monitor',exact:true}).waitFor();await frame.getByText('No model calls yet',{exact:true}).waitFor({timeout:20000});
+   assert(frame,'Usage webview must be present');await frame.getByRole('heading',{name:'Sutra Monitor',exact:true}).waitFor();await frame.getByText('No model calls yet',{exact:true}).waitFor({timeout:20000});
    await frame.waitForFunction(()=>document.querySelector('#cpu-load').textContent!=='—',{timeout:12000});assert((await frame.locator('#cpu-temp').textContent()).includes('°C'));assert((await frame.locator('#gpu-temp').textContent()).includes('°C'));
    assert.equal(await frame.locator('#input').textContent(),'—');assert.equal(await frame.locator('#calls').textContent(),'0');assert(!(await frame.locator('#error').isVisible()));
    assert(!/View container.*does not exist|property.*is mandatory/i.test(await page.locator('body').innerText()),'Extension contributions must be valid');

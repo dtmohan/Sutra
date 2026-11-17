@@ -1,3 +1,18 @@
+Sutra 0.38.5 — start in chat and recover reviews where they stop
+
+Run Sutra: Open Chat (Sutra Auto) to start in VS Code's native Local Chat.
+Ask for a codebase review there. Sutra asks for workspace access when needed,
+then discovers and reads relevant files.
+
+The advanced architecture review proceeds from inspection to report. Read
+another file and retry recovers a review that needs more evidence using its
+current scope and remaining budget. Sutra Monitor shows the stop and available
+actions. Dashboard tabs, form descriptions and control contrast are improved.
+
+Choose Resume this request in the original chat or Resume in Sutra Monitor to
+continue through Sutra Auto. For a different tier, select it and send continue
+in the original chat.
+
 Sutra 0.38.4 — verify protocol events and explain review stops
 
 Sutra checks protocol events against their hash-chained audit copies. New events include host timestamps. Architecture preflight stops appear in the review panel and Sutra Monitor.
@@ -172,7 +187,11 @@ Runtime checks now cover application code and the unchanged STP kernel before lo
 
 Whole-codebase Python mapping uses the same source-page work allocation as TypeScript, instead of the small API-review packet limit. Pauses show the underlying cause and mapped-file counts in chat; file failures also appear in Sutra Monitor.
 
-Resume or Discard a saved request from Sutra Monitor. Resume selects it for your next message in the existing Sutra chat; it does not submit a prompt or overwrite a draft. Pauses report model capacity separately from the task allocation. Context allocation shortages are saved stops, not retriable provider errors. Resume returns to the stopped stage under the same contract and remaining budget. Interrupted actions are reconciled without replay.
+Resume or Discard a saved request from Sutra Monitor. Resume submits a
+continuation in the originating Sutra chat and retains the draft. Context
+allocation shortages are saved stops. Resume returns to the stopped stage
+under the same contract and remaining budget. Interrupted actions are
+reconciled without replay.
 
 Task form drafts and expanded source lists survive refreshes. Start Ollama, then use Retry model discovery in Settings if setup is unavailable. File scopes persist with the task. Revoking workspace access stops native workspace work. Every edit or test still needs action confirmation.
 
@@ -180,16 +199,18 @@ Task form drafts and expanded source lists survive refreshes. Start Ollama, then
 Previously Karma. Your installed extension ID and saved settings are preserved.
 
 GET STARTED
-Run Sutra: Configure Local Models to select installed Ollama models.
-Run Sutra: Open Governed Chat (Sutra Auto). This saves the compatible Local chat
+Run Sutra: Open Chat (Sutra Auto). This saves the compatible Local chat
 and model for new chats. Existing chats retain their own selected model.
+Sutra discovers installed models and fills empty tiers. Run Sutra: Configure
+Local Models to change those choices.
 Chat normally. The first request that needs project files offers Read only
 or Workspace agent permissions. Approval is saved for the trusted workspace
 and continues the request in the same chat. Workspace agent access lets Sutra
 request file scopes for edits and local tests, then confirm each exact action.
 Use Sutra: Workspace Permissions… to change your choice or Sutra: Revoke
 Workspace Access to remove it.
-The review participant is @sutra. Model tiers are Sutra Auto / Low / Mid / High.
+Sutra Auto routes automatically. The Low, Mid and High entries in the model
+picker are explicit overrides. Open Sutra Monitor for recovery and diagnostics.
 
 ROUTING AND CONTEXT
 The status bar shows workspace access. Check for a Sutra model beneath the
@@ -205,8 +226,9 @@ joins accepted results and prepares actions. Children run sequentially in the
 same chat. Their model calls inherit the full contract, Smriti context and a
 narrower source scope. Parent and child allocations are checked by the unchanged
 STP kernel. Switching models never refreshes spent budgets or grants permissions.
-After an interrupted review, select another Sutra tier and send "continue" to
-resume its saved workflow. Replacing it requires confirmation and releases unused
+After an interruption, choose Resume this request in the original chat. Select
+another Sutra tier and send "continue" there to use that tier. Replacing the saved
+request requires confirmation and releases unused
 child reservations. The saved task retains constraints, consumed budget and
 evidence.
 

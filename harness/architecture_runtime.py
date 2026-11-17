@@ -1,6 +1,6 @@
-"""One governed model step, followed by at most one governed repository tool."""
+"""One governed architecture step with at most one repository operation."""
 import json,uuid
-from context_manager import InvalidUpdate,ContextBudgetExceeded
+from context_manager import InvalidUpdate,ContextBudgetExceeded,canonical,sha
 from invocation_gateway import InvocationGateway
 from paging import PageFault
 from review_role import compact,findings
@@ -32,8 +32,8 @@ def state(s,meta,workspace):
   'contract':s.current_contract(session),'checkpoint':checkpoint,'last_result':proposal if checkpoint else None,'sources':[],
   'api':__import__('api_runtime').state(s,meta,workspace),'static':__import__('static_runtime').state(s,meta,workspace),'warning':warning,'ledger_valid':s.verify_invocations(session,complete=False),'architecture':summary,'architecture_stop':stop,'routing':routing if checkpoint else None,'report':report if checkpoint else None}
 
-def packet_evidence(s,session,workspace,phase):
- available=repo.evidence(s,session,workspace);pins={}
+def packet_evidence(s,session,available,phase):
+ pins={}
  # Select source quotations, not conversation messages or inherited model prose.
  # Older current quotations survive omissions in the latest model's summary.
  for iid,raw in s.db.execute('SELECT invocation_id,record_json FROM invocation_receipts WHERE session=? ORDER BY seq',(session,)):
@@ -63,6 +63,31 @@ def packet_evidence(s,session,workspace,phase):
   chosen=list(by_path.values())
  return [dict(e,text=e['text'].encode()[:700].decode('utf-8','ignore')) for e in chosen]
 
+def recovery_prompt(s,session,stop,expected_run):
+ if not stop or stop['terminal'] or stop['reason']!='insufficient_evidence':
+  raise InvalidUpdate('This review is not waiting for another source read.')
+ if expected_run!=stop['run_id']:
+  raise InvalidUpdate('The saved review changed. Reopen its current details before retrying.')
+ run=s.run(stop['run_id'])
+ if run['session']!=session or run['config']['contract_hash']!=s.origin(session)['contract_hash']:
+  raise InvalidUpdate('Saved architecture request belongs to another task or contract.')
+ data=run['events'][-1]['data']
+ if 'request' not in data:return s.pinned(session)['goal']
+ prompt=data['request']
+ if run['config']['request_hash']!=sha(canonical([prompt,[],None])):
+  raise InvalidUpdate('Saved architecture request failed verification.')
+ return prompt
+
+def recovery_target(s,session,names,available):
+ # Reuse valid receipts. An empty excerpt cannot support a citation, and
+ # another read of the same current version would return the same excerpt.
+ inspected={e['path'] for e in available.values()}
+ options=[name for name in names if name not in inspected]
+ if not options:return None
+ prior=repo.current_records(s,session)
+ return min(options,key=lambda name:sum(row['operation']['kind']=='read'
+            and row['operation']['target']==name for row in prior))
+
 def fit_packet(payload,budget):
  # Preserve the contract and minimum source coverage before model-authored notes.
  while True:
@@ -87,45 +112,76 @@ def fit_packet(payload,budget):
 
 def dispatch(s,meta,workspace,root,request,provider=None):
  st=state(s,meta,workspace);session=st['session'];repo.settings(s,session)
- prompt=request.get('prompt','')
+ mode=request.get('mode','explore')
+ if mode not in ('explore','report','guided','recover_evidence'):raise InvalidUpdate('Unknown architecture mode')
+ previous_stop=st['architecture_stop'] if mode=='recover_evidence' else None
+ prompt=recovery_prompt(s,session,previous_stop,request.get('run_id')) if mode=='recover_evidence' else request.get('prompt','')
  if not isinstance(prompt,str) or not 1<=len(prompt.strip())<=1800:raise InvalidUpdate('Architecture request must be 1..1800 characters')
  prompt=prompt.strip()
  model=request.get('model') or meta.get('model','local-assistant:latest')
- names=repo.catalog(s,session);parent=st['checkpoint']
- phase=request.get('mode','explore')
- if phase not in ('explore','report'):raise InvalidUpdate('Unknown architecture mode')
+ names=st['architecture']['catalog'];parent=st['checkpoint'];real=provider is None
  # Commit the attempt before evidence or capacity preflight. A stopped
  # preflight has a receipt and consumes no model or repository allocation.
  run=s.begin_run(session,prompt,[],None,max_calls=3,max_repairs=2)
  tools=repo.usage(s,session)
- if tools['decision']!='ALLOW':phase='report'
- evidence=packet_evidence(s,session,workspace,phase)
- minimum=min(2,len(names));covered=len({e['path'] for e in evidence})
+ available=repo.evidence(s,session,workspace)
+ minimum=min(2,len(names))
+ covered=len({e['path'] for e in available.values() if e['text'].strip()})
+ phase='explore' if mode in ('explore','guided') else 'report'
+ if tools['decision']!='ALLOW' or (mode=='guided' and covered>=minimum):phase='report'
+ tool=None;no_target=False
+ if mode=='recover_evidence' and covered<minimum and tools['decision']=='ALLOW':
+  target=recovery_target(s,session,names,available)
+  no_target=target is None
+  if target:
+   try:
+    tool=repo.execute(s,session,workspace,root,'read',target=target,request_id=run,resource_check=real)
+   except ResourceWait as exc:
+    s.event(run,'RESOURCE_WAIT',{'reason':str(exc),'measurement':exc.state,'architecture_stop':previous_stop})
+    raise
+   except InvalidUpdate as exc:
+    s.event(run,'FIN',{'reason':'architecture_read_preflight','error':str(exc),'architecture_stop':previous_stop})
+    raise
+   tools=repo.usage(s,session)
+   available=repo.evidence(s,session,workspace)
+   st=state(s,meta,workspace)
+   parent=st['checkpoint']
+ evidence=packet_evidence(s,session,available,phase)
+ covered=len({e['path'] for e in evidence if e['text'].strip()})
  if not names or phase=='report' and covered<minimum:
-  terminal=not names or tools['decision']!='ALLOW'
+  terminal=not names or no_target or tools['decision']!='ALLOW'
   if not names:
    reason='empty_catalog'
    error='This review has no eligible source files. Start a new architecture review with eligible files.'
+   omitted=st['architecture']['excluded']
+   if omitted:
+    examples=', '.join(f'{name} ({cause})' for name,cause in sorted(omitted.items())[:3])
+    error+=f' The catalog excluded {len(omitted)} files or directories, including {examples}.'
   else:
    reason='insufficient_evidence'
    error=f'The architecture report needs current excerpts from {minimum} distinct catalog files. Sutra has {covered}.'
-   if terminal:
+   if tool and tool['result']['status']!='ok':
+    error+=f" {tool['operation']['target']} could not be read. {tool['result']['error']}"
+   if tools['decision']!='ALLOW':
     reason='evidence_budget_exhausted'
     error+=' The repository-operation budget is exhausted. Start a new architecture review to inspect more source.'
+   elif no_target:
+    reason='no_usable_evidence'
+    error+=' The remaining files have no usable excerpts. Start a review with source files that contain code or documentation.'
+   else:error+=' Choose Read another file and retry to inspect one more file in scope.'
   stop={'reason':reason,'terminal':terminal,'run_id':run,'message':error,
         'phase':phase,'covered_files':covered,'required_files':minimum,'repository_budget':tools}
-  s.event(run,'FIN',{'reason':reason,'architecture_stop':stop})
+  s.event(run,'FIN',{'reason':reason,'architecture_stop':stop,'request':prompt})
   return {'result':{'admission':{'admitted':False,'errors':[error],'semantic_correctness_verified':False},
                     'accepted_output':None,'run_id':run,'model':model,
                     'review_stage':'architecture_stopped' if terminal else 'architecture_evidence'},
-          'tool_receipt':None,'routing':None,'state':dict(st,architecture_stop=stop)}
+          'tool_receipt':tool,'routing':None,'state':dict(st,architecture_stop=stop)}
  payload={'phase':phase,'contract':s.pinned(session),'request':prompt,'workspace':str(workspace),'pages':[],
   'derived_from':[parent] if parent else [],'handoff':compact(st['last_result']) if parent else None,
   'repository':{'catalog':names[:20],'total_files':len(names),'budget':tools,
                 'operations_remaining':max(0,tools['limit']-tools['used']),
                 'scope':'committed catalog; source bodies require read/search receipts','last_tool':repo.feedback(s,session)},
   'evidence':evidence}
- real=provider is None
  try:
   if real:
    from api_runtime import provider_for
@@ -135,7 +191,7 @@ def dispatch(s,meta,workspace,root,request,provider=None):
    bind(provider,payload)
   schema=fit_packet(payload,provider.budget)
  except ResourceWait as exc:
-  s.event(run,'RESOURCE_WAIT',{'reason':str(exc),'measurement':exc.state})
+  s.event(run,'RESOURCE_WAIT',{'reason':str(exc),'measurement':exc.state,'architecture_stop':previous_stop})
   raise
  except (InvalidUpdate,ContextBudgetExceeded,PageFault) as exc:
   s.event(run,'FIN',{'reason':'architecture_preflight','error':str(exc)})
@@ -147,7 +203,7 @@ def dispatch(s,meta,workspace,root,request,provider=None):
   if real:
    try:hardware=require_resources(root)
    except ResourceWait as exc:
-    s.event(run,'RESOURCE_WAIT',{'reason':str(exc),'measurement':exc.state});raise
+    s.event(run,'RESOURCE_WAIT',{'reason':str(exc),'measurement':exc.state,'architecture_stop':previous_stop});raise
    with s.db:s._audit('RESOURCE_GATE',{'run_id':run,'measurement':hardware})
   charge=provider.budget.check(role.SYSTEM,payload,schema);delivery=s.prepare_delivery(session,payload,charge)
   last=InvocationGateway(s.path,run,provider).invoke('architect',uuid.uuid4().hex,role.SYSTEM,payload,schema,delivery)
@@ -166,7 +222,6 @@ def dispatch(s,meta,workspace,root,request,provider=None):
    payload['repair']={'errors':[e[:140] for e in last['admission']['errors'][:2]]}
   s.event(run,'BRIDGE',{'reason':'bounded_output_repair' if length_retry else 'bounded_repair','attempt':attempt+1})
  last.pop('record',None);last.pop('model_proposal',None);last.update(model=model,run_id=run)
- tool=None
  if last['admission']['admitted']:
   t=last['accepted_output']['tool']
   if t['kind'] in ('read','search','list'):

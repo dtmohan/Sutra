@@ -81,7 +81,7 @@ sent to another provider; routing proof comes from a request entering Sutra.
 This handoff is an internal Sutra workflow, not a VS Code child chat. It retains
 the current task contract and permissions; it cannot grant unrelated agents
 access. Cancelling the request or disarming while a dialog is open invalidates
-its approval. The separate Open Governed Chat command still opens a new chat.
+its approval. **Sutra: Open Chat (Sutra Auto)** opens a new chat.
 
 Intent classification remains a model judgment. In live testing the 4B model
 sometimes treated a prior temporary inspection deferral or an unbound workspace

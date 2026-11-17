@@ -1,8 +1,8 @@
 {
   "name": "karma-local-harness",
   "displayName": "Sutra",
-  "description": "Local orchestration with observe-only task commitments and completion assessments.",
-  "version": "0.38.4",
+  "description": "Governed local AI chat, codebase reviews, and diagnostics in VS Code.",
+  "version": "0.38.5",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -12,7 +12,8 @@
   ],
   "main": "./extension.js",
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onUri"
   ],
   "capabilities": {
     "untrustedWorkspaces": {
@@ -24,7 +25,7 @@
     "commands": [
       {
         "command": "karma.open",
-        "title": "Sutra: Open Local Harness"
+        "title": "Sutra: Open Dashboard"
       },
       {
         "command": "karma.switchModel",
@@ -36,11 +37,15 @@
       },
       {
         "command": "karma.reviewCodebase",
-        "title": "Sutra: Review Codebase"
+        "title": "Sutra: Review Codebase (Advanced)"
       },
       {
         "command": "karma.continueReview",
         "title": "Sutra: Continue Architecture Review"
+      },
+      {
+        "command": "karma.architectureReadAndRetry",
+        "title": "Sutra: Read Another File and Retry Review"
       },
       {
         "command": "karma.apiMap",
@@ -120,7 +125,7 @@
       },
       {
         "command": "karma.useNativeChat",
-        "title": "Sutra: Open Governed Chat (Sutra Auto)"
+        "title": "Sutra: Open Chat (Sutra Auto)"
       },
       {
         "command": "karma.toggleThinkingForNextRequest",
@@ -741,6 +746,42 @@
     },
     "menus": {
       "commandPalette": [
+        {
+          "command": "karma.openUsage",
+          "when": "false"
+        },
+        {
+          "command": "karma.refreshUsage",
+          "when": "false"
+        },
+        {
+          "command": "karma.continueReview",
+          "when": "false"
+        },
+        {
+          "command": "karma.continueAutomaticReview",
+          "when": "false"
+        },
+        {
+          "command": "karma.openAPIReport",
+          "when": "false"
+        },
+        {
+          "command": "karma.openStaticReport",
+          "when": "false"
+        },
+        {
+          "command": "karma.openAutomaticReport",
+          "when": "false"
+        },
+        {
+          "command": "karma.openReport",
+          "when": "false"
+        },
+        {
+          "command": "karma.architectureReadAndRetry",
+          "when": "false"
+        },
         {
           "command": "karma.cancelThinkingForNextRequest",
           "when": "sutraThinkingForNextRequest"

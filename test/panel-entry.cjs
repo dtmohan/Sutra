@@ -5,7 +5,7 @@ const root=path.resolve(__dirname,'..'),html=fs.readFileSync(path.join(root,'med
 class Element{
  constructor(tag,id=''){this.tagName=tag.toUpperCase();this.id=id;this.children=[];this.value='';this.textContent='';this.disabled=false;this.hidden=false;this.open=false;}
  append(...items){this.children.push(...items);}replaceChildren(...items){this.children=items;}
- setAttribute(){}querySelector(){return null;}scrollIntoView(){this.scrolled=true;}
+ setAttribute(name,value){(this.attributes??={})[name]=value;}querySelector(){return null;}scrollIntoView(){this.scrolled=true;}focus(){this.focused=true;}
 }
 const elements=new Map();for(const match of html.matchAll(/<([a-z0-9]+)\b[^>]*\bid="([^"]+)"/g)){
  assert(!elements.has(match[2]),'Duplicate ID '+match[2]);elements.set(match[2],new Element(match[1],match[2]));
@@ -26,6 +26,7 @@ assert.match(el('model-save-status').textContent,/Click Save/);
 el('save-model-tiers').onclick();assert.equal(sent.at(-1).op,'save_model_tiers');assert.equal(sent.at(-1).models.low,'small');
 receive({type:'models-saved'});assert.match(el('model-save-status').textContent,/saved/);
 receive({type:'show-section',section:'models'});assert(el('tier-config').open&&el('tier-config').scrolled);
+assert.equal(el('nav-settings').attributes['aria-selected'],'true');assert.equal(el('nav-dashboard').tabIndex,-1);assert(el('nav-settings').focused);
 receive({type:'state',data:{session:'legacy-task',model:'large'}});assert.equal(el('workflow-notice').hidden,false);
 el('open-current-task').onclick();assert(el('advanced').open&&el('advanced').scrolled);
 el('chat-prompt').value='Review this codebase';el('chat-tier').value='auto';

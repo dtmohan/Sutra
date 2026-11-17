@@ -18,6 +18,29 @@ const dashboard={token_usage:{calls:usageRows,total_calls:4,limit:250},hardware:
  html=html.replace('<script nonce="test-nonce" src="SCRIPT_URI"></script>','<script nonce="test-nonce">window.sent=[];function acquireVsCodeApi(){return {postMessage:m=>sent.push(m),setState:s=>{},getState:()=>({})}}\n'+js+'</script>');
  await page.setContent(html);const send=data=>page.evaluate(d=>window.dispatchEvent(new MessageEvent('message',{data:d})),data);
  await send({type:'state',data:fixture});await send({type:'tier-settings',models:catalog.suggested_tiers,catalog});await send({type:'runtime-settings',settings:{storageLimitMiB:512,pythonPath:''}});await send({type:'dashboard',data:dashboard});
+ assert.equal(await page.locator('#dashboard-section section').first().locator('h2').textContent(),'Sutra Auto');
+ assert.equal(await page.locator('#resource').getAttribute('role'),null);
+ await page.locator('#nav-dashboard').focus();await page.keyboard.press('ArrowRight');
+ assert(await page.locator('#nav-chat').evaluate(e=>e===document.activeElement&&e.getAttribute('aria-selected')==='true'));
+ await page.keyboard.press('End');
+ assert(await page.locator('#nav-tools').evaluate(e=>e===document.activeElement&&e.tabIndex===0));
+ await page.keyboard.press('Home');
+ await send({type:'show-section',section:'models'});
+ assert(await page.locator('#nav-settings').evaluate(e=>e.getAttribute('aria-selected')==='true'&&e.tabIndex===0));
+ assert.equal(await page.locator('#nav-dashboard').getAttribute('tabindex'),'-1');
+ assert(await page.locator('#tier-config > summary').evaluate(e=>e===document.activeElement));
+ const contrast=await page.evaluate(()=>{
+  const style=id=>getComputedStyle(document.getElementById(id));
+  function luminance(rgb){
+   const channels=rgb.match(/[\d.]+/g).slice(0,3).map(n=>Number(n)/255).map(n=>n<=.04045?n/12.92:((n+.055)/1.055)**2.4);
+   return channels[0]*.2126+channels[1]*.7152+channels[2]*.0722;
+  }
+  function ratio(a,b){const values=[luminance(a),luminance(b)].sort((a,b)=>b-a);return (values[0]+.05)/(values[1]+.05);}
+  const field=style('tier-low'),tab=style('nav-settings'),card=getComputedStyle(document.querySelector('.model-card'));
+  return [ratio(field.borderTopColor,field.backgroundColor),ratio(field.borderTopColor,card.backgroundColor),
+    ratio(tab.borderTopColor,tab.backgroundColor),ratio(tab.borderTopColor,getComputedStyle(document.body).backgroundColor)];
+ });
+ assert(contrast.every(x=>x>=3),'Control boundaries and selected state meet 3:1 in the fallback palette: '+contrast);
  await page.click('#nav-tools');await page.locator('#goal').fill('Unsaved task draft');await page.locator('#paths').fill('src/changed.py');
  await send({type:'state',data:{...fixture,model:'qwen3:4b'}});assert.equal(await page.locator('#goal').inputValue(),'Unsaved task draft');assert.equal(await page.locator('#paths').inputValue(),'src/changed.py');
  assert(await page.locator('#draft-status').isVisible());await page.click('#discard-draft');assert.equal(await page.locator('#goal').inputValue(),fixture.contract.contract.goal);
@@ -28,9 +51,18 @@ const dashboard={token_usage:{calls:usageRows,total_calls:4,limit:250},hardware:
    excluded:{'src/<img src=x>.py':'too_large'}}}});
  assert.equal(await page.locator('#review-note').textContent(),architectureStop.message);
  assert((await page.locator('#review-coverage').textContent()).includes('4/4 operations used · 0 remaining'));
- assert.equal(await page.locator('#catalog-exclusion-summary').textContent(),'Catalog exclusions (1)');
+ assert.equal(await page.locator('#catalog-exclusion-summary').textContent(),'Source exclusions (1)');
  assert.equal(await page.locator('#catalog-exclusion-list').textContent(),'src/<img src=x>.py · too large');
  assert.equal(await page.locator('#catalog-exclusions img').count(),0);
+ assert(await page.locator('#review-read-and-retry').isHidden());
+ const recoverable={reason:'insufficient_evidence',terminal:false,run_id:'current-stop',message:'Find one more file.'};
+ await send({type:'state',data:{...fixture,architecture_stop:recoverable,architecture:{
+  catalog_files:2,inspected_files:['src/retry.py'],budget:{used:2,limit:4,decision:'ALLOW'}
+ }}});
+ await page.click('#review-read-and-retry');
+ assert.deepEqual(await page.evaluate(()=>sent.at(-1)),{op:'architecture_read_and_retry',run_id:'current-stop'});
+ await page.click('#review-auto');
+ assert.equal((await page.evaluate(()=>sent.at(-1))).mode,'guided');
  await send({type:'state',data:fixture});
  await page.click('#nav-settings');await send({type:'tier-settings',models:{low:'',mid:'',high:''}});assert((await page.locator('#model-discovery').textContent()).includes('Start Ollama'));await send({type:'busy',value:false});assert(await page.locator('#save-model-tiers').isDisabled());
  await send({type:'tier-settings',models:catalog.suggested_tiers,catalog});assert(!(await page.locator('#save-model-tiers').isDisabled()));
@@ -82,7 +114,14 @@ const dashboard={token_usage:{calls:usageRows,total_calls:4,limit:250},hardware:
  await page.click('#nav-settings');assert(await page.locator('#tier-low').isVisible());assert(!(await page.locator('#dashboard-section').isVisible()));assert.equal(await page.locator('#settings-section textarea').count(),0);
  assert.equal(await page.locator('#logit-sensor').inputValue(),'off');await page.locator('#logit-sensor').selectOption('numbers');
  assert.equal(await page.locator('#memory-ownership').inputValue(),'shared');await page.locator('#memory-ownership').selectOption('exclusive');
+ await page.locator('#storage-limit').fill('63');const beforeInvalid=await page.evaluate(()=>sent.length);
+ await page.click('#save-runtime');
+ assert.equal(await page.evaluate(()=>sent.length),beforeInvalid);
+ assert.equal(await page.locator('#storage-limit').getAttribute('aria-invalid'),'true');
+ assert.equal(await page.locator('#storage-limit').getAttribute('aria-describedby'),'storage-limit-help storage-limit-error');
+ assert(await page.locator('#storage-limit').evaluate(e=>e===document.activeElement));
  await page.locator('#storage-limit').fill('1024');await page.click('#save-runtime');const save=await page.evaluate(()=>sent.at(-1));assert.equal(save.op,'save_runtime_settings');assert.equal(save.settings.storageLimitMiB,1024);assert.equal(save.settings.logitSensor,'numbers');
+ assert.equal(await page.locator('#storage-limit').getAttribute('aria-invalid'),'false');
  assert.equal(save.settings.memoryOwnership,'exclusive');
  await page.screenshot({path:path.join(out,'Settings.png'),fullPage:true});
  await page.click('#nav-tools');await page.locator('#constraint-timeout').evaluate(e=>e.closest('details').open=true);await page.locator('#constraint-attempts').fill('5');await page.locator('#constraint-timeout').fill('');await page.click('#save');

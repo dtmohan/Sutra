@@ -50,6 +50,12 @@ exports.run=async()=>{
   const configured=vscode.workspace.getConfiguration('karma').get('models');
   assert(['low','mid','high'].every(t=>typeof configured[t]==='string'&&configured[t].length>0));
   report.model_defaults=configured;report.checks.push('installed local model metadata prefills all three tier settings in the isolated profile');
+  const startCommand=extension.packageJSON.contributes.commands.find(command=>command.command==='karma.useNativeChat');
+  assert.equal(startCommand.title,'Sutra: Open Chat (Sutra Auto)');
+  await vscode.commands.executeCommand(startCommand.command);
+  assert.equal(vscode.workspace.getConfiguration('chat').get('defaultModel'),'karma-auto');
+  assert.equal(api.getRoutingStatus().routing,null);
+  report.checks.push('primary Open Chat command opens Local Chat and saves Sutra Auto as the default without sending a prompt');
   if(process.platform==='darwin'&&process.arch==='arm64'){
     const native=JSON.parse((await exec(path.join(extension.extensionPath,'bin','telemetry'),['--once'])).stdout);
     if(native.temperatures.machine==='Mac17,13'){

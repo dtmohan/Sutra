@@ -11,6 +11,8 @@ function setup(saved={}){
  let provider,tool,kind='edit',pick=0,discoveries=0,hold;const commands={},contextKeys={},uiCalls=[],calls=[],statuses=[],routeEvents=[],models={low:'model-a',mid:'model-b',high:'model-c'},cfg={nativeEnabled:true},policies={},overrides={};
  const st={session:'task-1',contract:{contract_hash:'contract-1',contract:{goal:'Fix retry',constraints:{native_task:true,allowed_paths:['src/retry.py'],edits_allowed:true,tests_allowed:true,network_allowed:false}}},calibration:{binding:{hash:'cal-1'}}};
  const v={EventEmitter,CancellationTokenSource:CTS,LanguageModelTextPart:Text,LanguageModelToolCallPart:Call,LanguageModelToolResultPart:Result,LanguageModelToolResult:class{constructor(content){this.content=content;}},LanguageModelChatMessageRole:{User:1,Assistant:2},LanguageModelChatToolMode:{Auto:1,Required:2},ConfigurationTarget:{Global:1},MarkdownString:class{value='';appendText(t){this.value+=t;}appendCodeblock(t){this.value+='\n'+t;}},Uri:{file:p=>({fsPath:p})},workspace:{getConfiguration:()=>({get:(k,d)=>overrides[k]??cfg[k]??d,inspect:k=>({globalValue:cfg[k],policyValue:policies[k]}),update:async(k,x)=>{cfg[k]=x;}}),onDidChangeConfiguration:()=>disposable()},window:{showErrorMessage:async message=>{uiCalls.push(['error',message]);},showInformationMessage:async message=>{uiCalls.push(['notice',message]);},showWarningMessage:async(_m,_o,...labels)=>labels.at(-1),showQuickPick:async choices=>{pick++;return choices[0];}},commands:{getCommands:async()=>['workbench.action.chat.newLocalChat'],executeCommand:async(...args)=>{if(args[0]==='setContext')contextKeys[args[1]]=args[2];else uiCalls.push(args);},registerCommand:(n,f)=>{commands[n]=f;return disposable();}},lm:{selectChatModels:async()=>{discoveries++;return provider.provideLanguageModelChatInformation();},registerLanguageModelChatProvider:(n,p)=>{assert.equal(n,'karma');provider=p;return disposable();},registerTool:(n,t)=>{assert.equal(n,'karma_native_action');tool=t;return disposable();}}};
+ let uriHandler;
+ v.window.registerUriHandler=handler=>{uriHandler=handler;return disposable();};
  const deps={workspace:()=>'/project',authorization:{
   scope:()=>deps.workspace(),read:()=>saved.access,write:record=>{saved.access=structuredClone(record);}
  },isBusy:()=>false,modelSettings:()=>models,configureModels:async()=>models,onStatus:s=>statuses.push(s),onRoute:r=>routeEvents.push(r),publishReview:noop,showDiff:async()=>{},request:async(m,t)=>{
@@ -57,7 +59,7 @@ function setup(saved={}){
  };
  const controller=install(v,{subscriptions:[],workspaceState:{get:k=>saved[k],update:async(k,value)=>{saved[k]=structuredClone(value);}}},deps),token=new CTS();
  const send=async(tier='low',messages=[{role:1,content:[new Text('Fix retry')]}],options={tools:[{name:'karma_native_action'},{name:'run_in_terminal'}]})=>{const parts=[];await provider.provideLanguageModelChatResponse({id:'karma-'+tier},messages,options,{report:p=>parts.push(p)},token.token);return parts;};
- return {flowRequests,statuses,routeEvents,policies,overrides,v,provider,tool,commands,contextKeys,uiCalls,calls,st,controller,cfg,token,send,arm:()=>commands['karma.armNative']({goal:'BYPASS',roots:['/']}),kind:k=>{kind=k;},hold:h=>{hold=h;},picks:()=>pick,discoveries:()=>discoveries,deps};
+ return {flowRequests,statuses,routeEvents,policies,overrides,v,provider,tool,commands,contextKeys,uiCalls,calls,st,controller,cfg,token,send,uriHandler,arm:()=>commands['karma.armNative']({goal:'BYPASS',roots:['/']}),kind:k=>{kind=k;},hold:h=>{hold=h;},picks:()=>pick,discoveries:()=>discoveries,deps};
 }
 (async()=>{
  const checks=[];const h=setup();
@@ -293,17 +295,48 @@ function setup(saved={}){
  const resumedWork=resumed.calls.filter(c=>c.op==='native_work').at(-1);assert.equal(resumedWork.prompt,'Fix retry');assert.equal(resumedWork.tier,'high');assert.equal(resumedWork.contract_hash,'contract-1');
  checks.push('continue resumes the saved workflow with the original prompt and permissions on another model, without reclassifying or replaying history');
  assert(h.flowRequests.some(r=>r.event==='start'));assert(h.flowRequests.some(r=>r.event==='step'));checks.push('native UI sends workflow events; host state selects all workspace work');
+ const originalChat={modelOptions:{_conversationId:'original-chat'}},otherChat={modelOptions:{_conversationId:'other-chat'}};
+ const chatUser=value=>[{role:1,content:[new Text(value)]}];
  const savedCase=setup();savedCase.kind('report');await savedCase.arm();savedCase.hold(()=>{throw Error('stopped fixture');});
- await assert.rejects(savedCase.send(),/stopped/);savedCase.hold(null);
+ await assert.rejects(savedCase.send('low',chatUser('Fix retry'),originalChat),/stopped/);savedCase.hold(null);
  savedCase.v.window.showWarningMessage=async()=>undefined;
  const retained=await savedCase.send('high',[{role:1,content:[new Text('A different request')]}]);
  assert(retained.some(p=>p.value?.includes('Saved request retained')));assert(!savedCase.flowRequests.some(r=>r.event==='cancel'));
  const oldConversationCount=savedCase.calls.filter(c=>c.op==='conversation').length;
- await savedCase.commands['karma.resumeWorkflow']();assert.deepEqual(savedCase.uiCalls.find(c=>c[0]==='workbench.action.chat.open'),['workbench.action.chat.open']);
- await savedCase.send('high',[{role:1,content:[new Text('continue')]}]);
+ await savedCase.commands['karma.resumeWorkflow']();
+ const resumeOpen=()=>savedCase.uiCalls.filter(c=>c[0]==='workbench.action.chat.open').at(-1)[1];
+ const opened=resumeOpen();
+ assert.deepEqual(opened.modelSelector,{vendor:'karma',id:'karma-auto',family:'karma'});
+ assert.equal(opened.preserveInput,true);assert.match(opened.query,/^Resume saved Sutra request \[[a-f0-9]{32}\]$/);
+ await savedCase.commands['karma.resumeWorkflow']();
+ assert.equal(savedCase.uiCalls.filter(c=>c[0]==='workbench.action.chat.open').length,1);
+ const otherReply=await savedCase.send('auto',chatUser(opened.query),otherChat);
+ assert(otherReply.some(p=>p.value?.includes('originating Sutra chat')));
+ assert(!savedCase.calls.some(c=>c.op==='native_work'&&c.tier==='auto'));
+ const manualOther=await savedCase.send('high',chatUser('continue'),otherChat);
+ assert(manualOther.some(p=>p.value?.includes('originating Sutra chat')));
+ await savedCase.commands['karma.resumeWorkflow']();
+ assert.notEqual(resumeOpen().query,opened.query);
+ const replay=await savedCase.send('auto',chatUser(opened.query),originalChat);
+ assert(replay.some(p=>p.value?.includes('expired')));
+ const inspectRequest=savedCase.deps.request;
+ savedCase.deps.request=async(m,t)=>{
+  const result=await inspectRequest(m,t);
+  return m.event==='inspect'?{...result,cursor:'changed-cursor'}:result;
+ };
+ const changedCursor=await savedCase.send('auto',chatUser(resumeOpen().query),originalChat);
+ assert(changedCursor.some(p=>p.value?.includes('saved Sutra request advanced')));
+ savedCase.deps.request=inspectRequest;
+ await savedCase.commands['karma.resumeWorkflow']();
+ savedCase.deps.workspace=()=>'/different-workspace';
+ const otherWorkspace=await savedCase.send('auto',chatUser(resumeOpen().query),originalChat);
+ assert(otherWorkspace.some(p=>p.value?.includes('expired')));
+ savedCase.deps.workspace=()=>'/project';
+ await savedCase.commands['karma.resumeWorkflow']();
+ await savedCase.send('auto',chatUser(resumeOpen().query),originalChat);
  assert.equal(savedCase.calls.filter(c=>c.op==='conversation').length,oldConversationCount);
  assert.equal(savedCase.calls.filter(c=>c.op==='native_work').at(-1).prompt,'Fix retry');
- checks.push('unrelated requests require an explicit recovery choice; Resume retains the original prompt and binding without replacing the chat draft');
+ checks.push('Monitor Resume submits a single-use action through Sutra Auto, preserves the draft, rejects other chats and workspaces and stale cursors, and restores the original request');
  const discarded=setup();discarded.kind('report');await discarded.arm();discarded.hold(()=>{throw Error('stopped fixture');});await assert.rejects(discarded.send(),/stopped/);discarded.hold(null);
  discarded.v.window.showWarningMessage=async()=> 'Discard and use new request';
  await discarded.send('high',[{role:1,content:[new Text('New request')]}]);assert(discarded.flowRequests.some(r=>r.event==='cancel'));
@@ -391,21 +424,28 @@ function setup(saved={}){
   };
   const paused=await review.send();
   const message=paused.map(p=>p.value).join('');
-  for(const label of ['reached its output allowance','draft and completed claim-review pages','**Resume**','**continue**','request thinking off','page 2 of 3','consumed budget','357 in · 8,648 out · 2 calls'])assert(message.includes(label));
+  for(const label of ['reached its output allowance','draft and completed claim-review pages','Resume this request','**continue**','request thinking off','page 2 of 3','consumed budget','357 in · 8,648 out · 2 calls'])assert(message.includes(label));
   assert.equal(review.controller.status().routing.stage,'paused');
   const pending=review.controller.status().pending;
   assert.equal(pending.stop.status,'claim_review_output_limit');
   assert.equal(pending.claim_review_usage,undefined);
   assert.equal(publications,0);
-  await review.commands['karma.resumeWorkflow']();
+  const [,resumeLink]=message.match(/\[Resume this request\]\((vscode:\/\/[^\s)]+)\)/);
+  const uri=new URL(resumeLink);
+  const click=()=>review.uriHandler.handleUri({authority:uri.host,path:uri.pathname,query:uri.search,fragment:uri.hash});
+  await click();
+  const sent=review.uiCalls.find(c=>c[0]==='workbench.action.chat.open')[1];
   assert(!resumed);assert.equal(publications,0);
-  await review.send('high',[{role:1,content:[new Text('continue')]}]);
+  const history={role:2,content:paused};
+  await review.send('auto',[history,...chatUser(sent.query)]);
   assert.equal(resumed.flow_id,pending.flow_id);
   assert.equal(resumed.cursor,pending.cursor);
   assert.deepEqual(resumed.binding,pending.binding);
   assert.equal(review.calls.filter(c=>c.op==='conversation').length,1);
   assert.equal(publications,1);
-  checks.push('claim review output limits preserve the saved draft and resume the same workflow without reclassification');
+  await click();
+  assert.equal(review.uiCalls.filter(c=>c[0]==='workbench.action.chat.open').length,1);
+  checks.push('inline Resume restores claim review draft and exact cursor; completed links cannot submit another request');
  }
  for(const approve of [false,true]){
   const provenance=setup();provenance.kind('report');await provenance.arm();
@@ -518,7 +558,7 @@ function setup(saved={}){
      status:'model_context',reason:'The selected model has reached its context limit.'}}}:result;
   };
   const reply=await limited.send();
-  assert(reply.some(p=>p.value?.includes('Select a model with a larger context window')));
+  assert(reply.some(p=>p.value?.includes('Select a Sutra tier with a larger context window')));
   assert(!reply.some(p=>p.value?.includes('Increase allocation')));
   checks.push('a model context limit suggests switching models without offering an allocation increase');
  }
@@ -526,7 +566,7 @@ function setup(saved={}){
  const pressured=setup();pressured.kind('report');await pressured.arm();const pressuredRequest=pressured.deps.request;
  pressured.deps.request=async(m,t)=>{const r=await pressuredRequest(m,t);return m.op==='orchestrate'&&r.state==='CODING'?{...r,state:'PAUSED',stop:{status:'resource_wait',resume_phase:'CODING',error:'RESOURCE_WAIT: OS thermal pressure: serious; kernel: BRIDGE'}}:r;};
  const pressureReply=await pressured.send();
- assert(pressureReply.some(p=>p.value?.includes('Last model allocation')));assert(pressureReply.some(p=>p.value?.includes('will not automatically retry')));
+ assert(pressureReply.some(p=>p.value?.includes('Last model allocation')));assert(pressureReply.some(p=>p.value?.includes('checks fresh measurements')));
  assert.equal(pressured.controller.status().routing.stage,'paused');assert(!pressured.calls.some(c=>c.op==='native_work'));
  checks.push('thermal/resource waits produce normal chat pauses with recovery guidance and no workspace dispatch');
  {

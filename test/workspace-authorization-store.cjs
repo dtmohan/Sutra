@@ -37,6 +37,7 @@ function windowFor(root, storage) {
   const status = new EventEmitter();
   const vscode = {
     EventEmitter, CancellationTokenSource,
+    window: {},
     workspace: {
       isTrusted: true,
       workspaceFolders: [folder(root)],

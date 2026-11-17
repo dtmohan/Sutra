@@ -1,6 +1,7 @@
 // Render the real docked view with synthetic receipts; no inference or source reads.
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
 const {chromium}=require(process.env.KARMA_PLAYWRIGHT||'playwright');
+const {install}=require('../usage_view');
 const root=path.resolve(__dirname,'..'),out=process.env.KARMA_UI_OUTPUT;
 if(!out)throw Error('Set KARMA_UI_OUTPUT to an artifact directory');
 const now=Date.now()/1000;
@@ -16,6 +17,24 @@ monitor.runtime_memory={enabled:true,ownership:'shared',inventory_available:true
 monitor.runtime_memory.plan.calibration={profile_sha256:'a'.repeat(64),covered_tokens:16384,margin_bytes:1024**3};
 Object.assign(monitor.runtime_memory.plan,{cold_estimate_bytes:6*1024**3,resident_weight_credit_bytes:3*1024**3,resident_credit_basis:'Exact resident identity <img src=x>'});
 monitor.orchestration.nodes[0].resource_fallback={from_model:'large',model:'small <img src=x>'};
+function monitorHost(){
+ let viewProvider,posted,receive;
+ const commands=[],disposable=()=>({dispose(){}});
+ const uri=fsPath=>({fsPath,toString:()=>fsPath});
+ const vscode={
+  Uri:{file:uri},StatusBarAlignment:{Right:1},
+  window:{createStatusBarItem:()=>({show(){}}),registerWebviewViewProvider(_id,provider){viewProvider=provider;}},
+  commands:{registerCommand:disposable,executeCommand(...args){commands.push(args);}},
+  workspace:{getConfiguration:()=>({get:()=> 'adaptive'}),onDidChangeConfiguration:disposable}
+ };
+ const view=install(vscode,{extensionPath:root,subscriptions:[]},{storage(){throw Error('No file-backed archive in this fixture');},refresh(){}});
+ viewProvider.resolveWebviewView({
+  webview:{asWebviewUri:uri=>uri,postMessage:message=>{posted=message;},onDidReceiveMessage(handler){receive=handler;}},
+  onDidChangeVisibility:disposable,onDidDispose:disposable
+ });
+ receive({type:'ready'});
+ return {view,commands,receive,get posted(){return posted;}};
+}
 (async()=>{
  fs.mkdirSync(out,{recursive:true});const browser=await chromium.launch({headless:true,...(process.env.KARMA_BROWSER?{executablePath:process.env.KARMA_BROWSER}:{})});
  try{
@@ -24,9 +43,28 @@ monitor.orchestration.nodes[0].resource_fallback={from_model:'large',model:'smal
  await page.setContent(html());const send=data=>page.evaluate(d=>window.dispatchEvent(new MessageEvent('message',{data:d})),{type:'usage',...data,snapshot:data.snapshot?{...data.snapshot,updatedAt:data.aged?data.snapshot.updatedAt:new Date().toISOString()}:undefined});
  assert.deepEqual(await page.evaluate(()=>sent),[{type:'ready'}]);assert.equal(await page.locator('#input').textContent(),'—');
  await send({snapshot,reasoningPreference:'model-default'});
- await send({snapshot:{...snapshot,monitor:{...monitor,runs:[{recent_events:[{kind:'FIN',at:now,
-   data:{architecture_stop:{terminal:true,message:'Repository budget exhausted. Start a new review.'}}}]}]}}});
+ const host=monitorHost(),id='a'.repeat(32);
+ const dashboard=stop=>({...monitor,token_usage:{calls,total_calls:300,limit:250},runs:[{id,state:'FIN',recent_events:[{kind:'FIN',at:now,
+   data:{architecture_stop:{run_id:id,terminal:false,reason:'insufficient_evidence',message:'More source is needed.',covered_files:1,required_files:2,repository_budget:{used:2,limit:5},source:'PRIVATE SOURCE',...stop}}}]}]});
+ host.view.setStatus({enabled:true,armed:true,accessProfile:'read_only'});
+ host.view.setData(dashboard(),snapshot.workspace);
+ assert(!JSON.stringify(host.posted).includes('PRIVATE SOURCE'));assert(!('runs' in host.posted.snapshot.monitor));
+ await send(host.posted);
+ assert.equal(await page.locator('#workspace-access').textContent(),'Workspace permissions · Read only');
+ assert((await page.locator('#architecture-stops').textContent()).includes('1 of 2 required files inspected. 3 source operations remaining.'));
+ await page.locator('#architecture-read-and-retry').click();
+ const recover=await page.evaluate(()=>sent.at(-1));
+ assert.deepEqual(recover,{type:'architecture_read_and_retry',run_id:id});
+ host.receive({...recover,run_id:'old-run'});assert.deepEqual(host.commands,[]);
+ host.receive(recover);assert.deepEqual(host.commands,[['karma.architectureReadAndRetry',id]]);
+ host.view.setData(dashboard({terminal:true,message:'Repository budget exhausted. Start a new review.'}),snapshot.workspace);
+ await send(host.posted);
  assert((await page.locator('#architecture-stops').textContent()).includes('Architecture review stopped. Repository budget exhausted.'));
+ assert(await page.locator('#architecture-read-and-retry').isHidden());
+ host.receive(recover);assert.equal(host.commands.length,1,'A stale recovery action cannot retry a terminal stop');
+ const newerRun=dashboard();newerRun.runs.unshift({state:'ALLOW',recent_events:[{kind:'ALLOW'}]});
+ host.view.setData(newerRun,snapshot.workspace);await send(host.posted);
+ assert(await page.locator('#saved-review').isHidden());
  const accounting={basis:'runtime_measured',reserved_tokens:11048,used_tokens:1396,released_unused_reservation:9652,overrun_tokens:0};
  await send({snapshot:{...snapshot,calls:[{...calls[0],accounting_settlement:accounting},...calls.slice(1)],monitor:{...monitor,context:{...monitor.context,model_packet:{prompt_utf8_bytes:2400,schema_allowance:344,template_allowance:256},accounting_settlement:accounting}}}});
  assert((await page.locator('#rows').textContent()).includes('1,396 (measured)'));
@@ -35,6 +73,17 @@ monitor.orchestration.nodes[0].resource_fallback={from_model:'large',model:'smal
  assert((await page.locator('#context-packet').textContent()).includes('Unused reservation released: 9,652'));
  await page.screenshot({path:path.join(out,'Model-packet-accounting.png'),fullPage:true});
  await send({snapshot,reasoningPreference:'model-default'});
+ assert.equal(await page.locator('#resource').getAttribute('role'),null);
+ const bar=page.locator('#timeline .call-bar').first();
+ await bar.focus();await send({snapshot,reasoningPreference:'model-default'});
+ assert(await bar.evaluate(e=>e===document.activeElement),'A telemetry refresh preserves keyboard focus in the chart');
+ await page.evaluate(()=>{
+  window.liveUpdates=0;
+  window.liveObserver=new MutationObserver(records=>window.liveUpdates+=records.length);
+  for(const item of document.querySelectorAll('[role="status"]'))window.liveObserver.observe(item,{childList:true,characterData:true,subtree:true});
+ });
+ await send({snapshot,reasoningPreference:'model-default'});
+ assert.equal(await page.evaluate(()=>window.liveUpdates),0,'An unchanged heartbeat leaves live regions untouched');
 
  assert.equal(await page.locator('#reasoning-preference').textContent(),'Reasoning setting: Model default');
  assert((await page.locator('#memory-summary').textContent()).includes('3 evictions · 2 refaults'));

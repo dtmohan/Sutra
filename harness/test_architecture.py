@@ -207,6 +207,48 @@ class ArchitectureTests(unittest.TestCase):
   self.assertEqual(events[-1]['data']['architecture_stop'],stop)
   self.assertTrue(all(type(event['at']) is float for event in events))
   self.assertTrue(self.s.verify_protocol(self.sid))
+ def test_guided_review_switches_to_report_on_fresh_coverage(self):
+  request={'prompt':'Explain the path from submit to publish.','mode':'guided'}
+  for model in (Model(),Model('read','broker.py')):
+   result=runtime.dispatch(self.s,self.meta,self.ws,self.storage,request,model)
+   self.assertTrue(result['result']['admission']['admitted'])
+   self.assertEqual(model.payloads[0]['phase'],'explore')
+  before=repo.usage(self.s,self.sid)
+  final=Model('report','')
+  final.model='fixture-B'
+  result=runtime.dispatch(self.s,self.meta,self.ws,self.storage,request,final)
+  self.assertTrue(result['result']['admission']['admitted'])
+  self.assertIn('## Flow diagram',result['state']['report'])
+  self.assertEqual(final.payloads[0]['phase'],'report')
+  self.assertEqual(final.payloads[0]['request'],request['prompt'])
+  self.assertEqual(final.payloads[0]['contract'],model.payloads[0]['contract'])
+  self.assertEqual(repo.usage(self.s,self.sid),before)
+ def test_retry_reads_one_missing_file_and_reuses_unchanged_source(self):
+  self.tool('read',target='entry.py')
+  old=self.tool('read',target='broker.py')
+  (self.ws/'broker.py').write_text(BROKER.replace('BUFFER_LIMIT = 17','BUFFER_LIMIT = 18'))
+  prompt='Explain the updated source to a new intern.'
+  model=Model('report','')
+  first=runtime.dispatch(self.s,self.meta,self.ws,self.storage,{'prompt':prompt,'mode':'report'},model)
+  stop=first['state']['architecture_stop']
+  before=repo.usage(self.s,self.sid)
+  with self.assertRaisesRegex(InvalidUpdate,'saved review changed'):
+   runtime.dispatch(self.s,self.meta,self.ws,self.storage,{'mode':'recover_evidence','run_id':'stale'},model)
+  self.assertEqual(repo.usage(self.s,self.sid),before)
+  model.model='fixture-B'
+  result=runtime.dispatch(self.s,self.meta,self.ws,self.storage,{'mode':'recover_evidence','run_id':stop['run_id']},model)
+  self.assertEqual(result['tool_receipt']['operation']['actor'],'host_tool')
+  self.assertEqual(result['tool_receipt']['operation']['target'],'broker.py')
+  self.assertEqual(repo.usage(self.s,self.sid)['used'],before['used']+1)
+  self.assertTrue(result['result']['admission']['admitted'])
+  self.assertIsNone(result['state']['architecture_stop'])
+  self.assertEqual(model.payloads[0]['request'],prompt)
+  self.assertEqual(model.payloads[0]['contract'],self.s.pinned(self.sid))
+  available={e['path']:e for e in model.payloads[0]['evidence']}
+  self.assertIn('BUFFER_LIMIT = 18',available['broker.py']['text'])
+  self.assertNotEqual(available['broker.py']['receipt'],old['id'])
+  self.assertEqual(available['entry.py']['receipt'],repo.records(self.s,self.sid)[1]['id'])
+  self.assertTrue(self.s.verify_protocol(self.sid))
  def test_exhausted_reads_with_one_file_close_review_without_extra_charge(self):
   for _ in range(4):self.tool('read',target='entry.py')
   before=repo.usage(self.s,self.sid)
@@ -220,6 +262,9 @@ class ArchitectureTests(unittest.TestCase):
   self.assertEqual(model.payloads,[])
   self.assertEqual(repo.usage(self.s,self.sid),before)
   self.assertEqual(handle(self.storage,self.ws,{'op':'state'})['architecture_stop'],stop)
+  with self.assertRaisesRegex(InvalidUpdate,'not waiting'):
+   runtime.dispatch(self.s,self.meta,self.ws,self.storage,{'mode':'recover_evidence','run_id':stop['run_id']},model)
+  self.assertEqual(repo.usage(self.s,self.sid),before)
  def test_exhausted_reads_with_enough_evidence_can_still_publish_report(self):
   for name in ('entry.py','broker.py','entry.py','entry.py'):self.tool('read',target=name)
   before=repo.usage(self.s,self.sid)
@@ -235,6 +280,7 @@ class ArchitectureTests(unittest.TestCase):
   self.assertEqual(model.payloads,[])
   self.assertEqual(result['result']['review_stage'],'architecture_stopped')
   self.assertEqual(result['state']['architecture_stop']['reason'],'empty_catalog')
+  self.assertIn('oversized.py (too_large)',result['state']['architecture_stop']['message'])
   self.assertEqual(result['state']['architecture']['excluded'],{'oversized.py':'too_large'})
  def test_report_supplies_distinct_fresh_receipts_without_prior_model_citations(self):
   for name in ('entry.py','broker.py'):self.tool('read',target=name)

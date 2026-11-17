@@ -5,9 +5,10 @@ const root=path.resolve(__dirname,'..'),tmp=fs.mkdtempSync(path.join(os.tmpdir()
 const views=new Map(),statusItems=[],commands=new Map(),tools=new Map(),participants=new Map(),intervals=[],timers=[],prompts=[],requests=[],changes=[],panelMessages=[];
 const tierModels={low:'fixture-small',mid:'fixture-mid',high:'fixture-large'};
 const runtimeUpdates=[],bridgeAllocations=[],bridgeThinking=[];
+const inputValues=[],openedDocuments=[];
 const repoAllocation={source_bytes:1024000000};
 let userAllocation,provider,panel,holdDashboard=false,pendingDashboard,bridgeCount=0,dashboardSpawns=0;
-let nativeRequest;
+let nativeRequest,architectureDispatch;
 const nativeProvider={install(_vscode,_context,deps){
  nativeRequest=deps.request;
  return {status:()=>({working:false}),publish(){},dispose(){}};
@@ -23,7 +24,8 @@ function spawn(exe,args,options){
   if(!streaming)bridgeThinking.push(options.env.SUTRA_THINKING);
   const finish=()=>{if(req.op==='auto_new')state={...state,contract:{contract_hash:'fixture-contract',contract:{constraints:{auto_review:true}}},calibration:{binding:{hash:'fixture-calibration'}},session:'new-review',auto:{pending_files:0,mapped_files:2,source_files:2}};
    const data=req.op==='orchestrate'?{flow_id:'fixture-flow',state:'DONE',data:{state,route:{tier:'low',model:tierModels.low},result:{invocation_id:'fixture',admission:{admitted:true},accepted_output:{answer:'Fixture answer',remaining:[]}},coverage:{mapped_files:2,source_files:2},source_files:['a.py']}}:req.op==='models'?{models:Object.values(tierModels).map(name=>({name,eligible:true})),suggested_tiers:tierModels}:req.op==='chat_answer'?{state,route:{tier:'low',model:tierModels.low,reason:'focused request'},result:{invocation_id:'fixture-invocation',admission:{admitted:true},accepted_output:{answer:'Fixture answer',remaining:[]}},coverage:{mapped_files:2,source_files:2},source_files:['a.py']}:req.op==='calibration_list'?{binding:{hash:'fixture',profiles:[]},profiles:[]}:req.op==='dashboard'?{hardware:{available:false,temperatures:{cpu:{available:true,maximum_celsius:42.12},gpu:{available:true,maximum_celsius:40.82}}},runs:[],invocations:{},actions:[]}:state;
-   child.stdout.emit('data',Buffer.from(JSON.stringify({ok:true,data})+'\n'));if(!streaming)child.emit('close',0,null);};
+   const response=req.op==='architecture'&&architectureDispatch?architectureDispatch(req):data;
+   child.stdout.emit('data',Buffer.from(JSON.stringify({ok:true,data:response})+'\n'));if(!streaming)child.emit('close',0,null);};
   if(req.op==='dashboard'&&holdDashboard)pendingDashboard=finish;else queueMicrotask(finish);
  };return child;
 }
@@ -35,7 +37,7 @@ const vscode={
   registerTextDocumentContentProvider(s,p){provider=p;return disposable();},async openTextDocument(u){return {uri:u};},fs:{writeFile:async()=>{}}},
  commands:{registerCommand(n,f){commands.set(n,f);return disposable();},async executeCommand(n,...a){return commands.get(n)?.(...a);}},
  window:{createOutputChannel(){return {appendLine(){},dispose(){}};},registerWebviewViewProvider(id,provider){views.set(id,provider);return disposable();},createStatusBarItem(){const item={show(){},dispose(){}};statusItems.push(item);return item;},
-  async showInputBox(options){prompts.push(options);return undefined;},async showQuickPick(items,options){prompts.push(options);},async showOpenDialog(options){prompts.push(options);},async showTextDocument(){},
+  async showInputBox(options){prompts.push(options);return inputValues.shift();},async showQuickPick(items,options){prompts.push(options);},async showOpenDialog(options){prompts.push(options);},async showTextDocument(document){openedDocuments.push(document.uri.toString());},
   createWebviewPanel(){panel={visible:true,reveal(){},onDidDispose(){return disposable();},webview:{postMessage(m){panelMessages.push(m);},asWebviewUri:u=>u,onDidReceiveMessage(cb){this.receive=cb;return disposable();}}};return panel;}},
  lm:{registerTool(n,t){tools.set(n,t);return disposable();}},LanguageModelToolResult:class{constructor(content){this.content=content;}},LanguageModelTextPart:class{constructor(value){this.value=value;}}
 };
@@ -120,6 +122,24 @@ const subscriptions=[];
  assert.equal(provider.provideTextDocumentContent(uri('karma-preview:/fixture/Reviewed-API-map.md')),'API v2');
  assert(changes.includes('karma-preview:/fixture/Architecture.md'));
  state={...state,report:undefined,api:undefined};await api.getState();assert(provider.provideTextDocumentContent(uri('karma-preview:/fixture/Architecture.md')).includes('withheld'));
+ const reviewRequest='Explain the workspace architecture with citations.';
+ inputValues.push(reviewRequest,'.');
+ architectureDispatch=req=>{
+   if(req.mode==='guided')return {state,result:{admission:{admitted:true},accepted_output:{tool:{kind:'read'}}},tool_receipt:{result:{status:'ok'}}};
+   if(req.mode==='recover_evidence')assert.equal(req.run_id,'a'.repeat(32));
+   state={...state,report:'Reviewed architecture'};
+   return {state,result:{admission:{admitted:true},accepted_output:{tool:{kind:'report'}}}};
+ };
+ const beforeGuided=requests.length;
+ await commands.get('karma.reviewCodebase')();
+ const guidedRequests=requests.slice(beforeGuided).filter(req=>req.op==='architecture');
+ assert.deepEqual(guidedRequests.map(req=>req.mode),['guided','guided','guided','guided','report']);
+ assert(guidedRequests.every(req=>req.prompt===reviewRequest),'The review must carry the original request into report mode');
+ assert.equal(openedDocuments.at(-1),'karma-preview:/fixture/Architecture.md');
+ await panel.webview.receive({op:'architecture_read_and_retry',run_id:'a'.repeat(32)});
+ assert.equal(requests.at(-1).mode,'recover_evidence');
+ assert(!Object.hasOwn(requests.at(-1),'prompt'),'Recovery must use the saved prompt');
+ architectureDispatch=undefined;
  await api.open();await new Promise(setImmediate);
  const dock={visible:true,webview:{asWebviewUri:u=>u,postMessage(m){this.latest=m;},onDidReceiveMessage(cb){this.receive=cb;return disposable();}},onDidChangeVisibility(cb){this.visibility=cb;return disposable();},onDidDispose(cb){this.close=cb;return disposable();}};
  views.get('karma.usage').resolveWebviewView(dock);

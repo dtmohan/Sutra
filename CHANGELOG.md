@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.38.5
+
+- Make native Sutra Auto the primary chat entry and move duplicate palette commands to their corresponding views.
+- Take advanced architecture reviews from fresh inspection to a report. Let a review with insufficient evidence read another in-scope file and retry within its allocation.
+- Resume a paused native request from chat or Sutra Monitor with a saved-request and chat check. Keep the draft, permissions and spending.
+- Show saved review stops and recovery in Sutra Monitor. Improve dashboard keyboard focus, form descriptions, control contrast and live announcements.
+
 ## 0.38.4
 
 - Verify protocol events against their hash-chained audit copies and add host timestamps to new events.
