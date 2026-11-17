@@ -53,7 +53,12 @@ def request_check(s,session,payload):
  check_request(s,session,payload,lambda h:reduce_handoff(h,payload.get('handoff_level',0)));repo.settings(s,session)
  if payload.get('phase') not in ('explore','report'):raise InvalidUpdate('Unknown architecture phase')
  if payload['repository'].get('last_tool')!=repo.feedback(s,session):raise InvalidUpdate('Repository result changed during inference')
- if payload['repository']['budget']!=repo.usage(s,session):raise InvalidUpdate('Repository budget changed during inference')
+ budget=repo.usage(s,session)
+ if payload['repository']['budget']!=budget:raise InvalidUpdate('Repository budget changed during inference')
+ if 'operations_remaining' in payload['repository']:
+  remaining=payload['repository']['operations_remaining']
+  if type(remaining) is not int or remaining!=max(0,budget['limit']-budget['used']):
+   raise InvalidUpdate('Repository operation count differs from the committed budget')
  names=repo.catalog(s,session)
  if payload['repository']['catalog']!=names[:20] or payload['repository']['total_files']!=len(names):raise InvalidUpdate('Repository catalog mismatch')
  repo.validate_evidence(s,session,Path(payload['workspace']),payload['evidence'])

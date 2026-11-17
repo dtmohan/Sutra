@@ -125,6 +125,71 @@ class ArchitectureTests(unittest.TestCase):
  def test_receipt_replay_does_not_consume_slot(self):
   a=self.tool('read',target='entry.py',request_id='id1');b=self.tool('read',target='entry.py',request_id='id1');self.assertEqual(a['id'],b['id']);self.assertTrue(b['replayed']);self.assertEqual(len(repo.records(self.s,self.sid)),2)
   with self.assertRaises(InvalidUpdate):self.tool('read',target='broker.py',request_id='id1')
+  with self.assertRaisesRegex(InvalidUpdate,'changed model invocation'):
+   self.tool('read',target='entry.py',request_id='id1',invocation_id='different-invocation')
+  self.assertEqual(len(repo.records(self.s,self.sid)),2)
+ def test_repository_replay_cannot_cross_tasks(self):
+  self.tool('read',target='entry.py',request_id='task-a-read')
+  second=handle(self.storage,self.ws,{'op':'review_new','goal':'Second review','roots':['.']})['session']
+  with self.assertRaisesRegex(InvalidUpdate,'request ID is already in use'):
+   repo.execute(self.s,second,self.ws,self.storage,'read',target='entry.py',
+                request_id='task-a-read',resource_check=False)
+  self.assertEqual(repo.usage(self.s,second)['used'],1)
+ def test_repository_reservation_rechecks_last_slot_after_another_writer(self):
+  from unittest.mock import patch
+  self.sid=handle(self.storage,self.ws,{'op':'review_new','goal':'Two operation review',
+      'roots':['.'],'max_tools':2})['session']
+
+  def concurrent_read(_root):
+   other=InvocationLedger(self.storage/'state.sqlite')
+   try:
+    receipt=repo.execute(other,self.sid,self.ws,self.storage,'read',target='broker.py',resource_check=False)
+    self.assertEqual(receipt['result']['status'],'ok')
+   finally:
+    other.close()
+   return {'profile':'other writer finished'}
+
+  with patch('repository_tools.require_resources',side_effect=concurrent_read):
+   with self.assertRaisesRegex(InvalidUpdate,'COMPOUND_FIN'):
+    repo.execute(self.s,self.sid,self.ws,self.storage,'read',target='entry.py')
+  self.assertEqual(repo.usage(self.s,self.sid)['used'],2)
+  self.assertEqual([r['operation']['target'] for r in repo.records(self.s,self.sid)],['','broker.py'])
+ def test_repository_reservation_rejects_an_inflight_contract_change(self):
+  from unittest.mock import patch
+  from vscode_bridge import save_contract
+  old=self.s.snapshot(self.sid)['constraints']
+
+  def change_goal(_root):
+   other=InvocationLedger(self.storage/'state.sqlite')
+   try:
+    save_contract(other,self.sid,{'goal':'Changed goal','constraints':old},self.ws)
+   finally:
+    other.close()
+   return {'profile':'other writer finished'}
+
+  with patch('repository_tools.require_resources',side_effect=change_goal):
+   with self.assertRaisesRegex(InvalidUpdate,'contract changed before dispatch'):
+    repo.execute(self.s,self.sid,self.ws,self.storage,'read',target='entry.py')
+  self.assertEqual(len(repo.records(self.s,self.sid)),1)
+ def test_architect_sees_one_operation_after_setup_and_can_search_two_files(self):
+  from architecture_role import SYSTEM,schema,request_check
+  from model_packet import build
+  initial=handle(self.storage,self.ws,{'op':'review_new','goal':'Explain this codebase.',
+      'roots':['.'],'max_tools':2})
+  self.meta=json.loads((self.storage/'workspace.json').read_text());self.sid=initial['session']
+  self.assertEqual(initial['architecture']['budget']['used'],1)
+  model=Model('search','','def ');result=self.step(model)
+  payload=model.payloads[0]
+  packet=json.loads(build(SYSTEM,payload,schema(payload))['messages'][-1]['content'])
+  self.assertEqual(packet['repository']['operations_remaining'],1)
+  self.assertNotIn('budget',packet['repository'])
+  self.assertEqual(repo.usage(self.s,self.sid)['used'],2)
+  self.assertEqual({e['path'] for e in result['tool_receipt']['result']['excerpts']},{'entry.py','broker.py'})
+  final=Model('report','');report=self.step(final)
+  self.assertTrue(report['result']['admission']['admitted'])
+  forged=copy.deepcopy(final.payloads[0]);forged['repository']['operations_remaining']=99
+  with self.assertRaisesRegex(InvalidUpdate,'differs from the committed budget'):
+   request_check(self.s,self.sid,forged)
  def test_forged_evidence_blocked(self):
   self.tool('read',target='entry.py');items=list(repo.evidence(self.s,self.sid,self.ws).values());items[0]['text']='forged'
   with self.assertRaises(InvalidUpdate):repo.validate_evidence(self.s,self.sid,self.ws,items)
@@ -134,6 +199,43 @@ class ArchitectureTests(unittest.TestCase):
   self.assertIn('Sutra has 1',r['result']['admission']['errors'][0])
   self.assertEqual(model.payloads,[])
   self.assertIsNone(r['routing'])
+  stop=r['state']['architecture_stop']
+  self.assertFalse(stop['terminal'])
+  self.assertEqual(stop['reason'],'insufficient_evidence')
+  events=self.s.run(stop['run_id'])['events']
+  self.assertEqual([event['kind'] for event in events],['START','FIN'])
+  self.assertEqual(events[-1]['data']['architecture_stop'],stop)
+  self.assertTrue(all(type(event['at']) is float for event in events))
+  self.assertTrue(self.s.verify_protocol(self.sid))
+ def test_exhausted_reads_with_one_file_close_review_without_extra_charge(self):
+  for _ in range(4):self.tool('read',target='entry.py')
+  before=repo.usage(self.s,self.sid)
+  model=Model();result=self.step(model)
+  self.assertEqual(result['result']['review_stage'],'architecture_stopped')
+  stop=result['state']['architecture_stop']
+  self.assertTrue(stop['terminal'])
+  self.assertEqual(stop['repository_budget'],before)
+  self.assertEqual(stop['reason'],'evidence_budget_exhausted')
+  self.assertIn('Start a new architecture review',stop['message'])
+  self.assertEqual(model.payloads,[])
+  self.assertEqual(repo.usage(self.s,self.sid),before)
+  self.assertEqual(handle(self.storage,self.ws,{'op':'state'})['architecture_stop'],stop)
+ def test_exhausted_reads_with_enough_evidence_can_still_publish_report(self):
+  for name in ('entry.py','broker.py','entry.py','entry.py'):self.tool('read',target=name)
+  before=repo.usage(self.s,self.sid)
+  result=self.step(Model('report',''))
+  self.assertTrue(result['result']['admission']['admitted'])
+  self.assertIsNone(result['state']['architecture_stop'])
+  self.assertEqual(repo.usage(self.s,self.sid),before)
+ def test_catalog_with_only_excluded_files_stops_before_inference(self):
+  (self.ws/'oversized.py').write_text('x'*(repo.MAX_FILE+1))
+  initial=handle(self.storage,self.ws,{'op':'review_new','goal':'Review the selected file.','roots':['oversized.py']})
+  self.meta=json.loads((self.storage/'workspace.json').read_text());self.sid=initial['session']
+  model=Model();result=self.step(model)
+  self.assertEqual(model.payloads,[])
+  self.assertEqual(result['result']['review_stage'],'architecture_stopped')
+  self.assertEqual(result['state']['architecture_stop']['reason'],'empty_catalog')
+  self.assertEqual(result['state']['architecture']['excluded'],{'oversized.py':'too_large'})
  def test_report_supplies_distinct_fresh_receipts_without_prior_model_citations(self):
   for name in ('entry.py','broker.py'):self.tool('read',target=name)
   model=Model('report','');r=self.step(model)

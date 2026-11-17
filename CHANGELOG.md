@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.38.4
+
+- Verify protocol events against their hash-chained audit copies and add host timestamps to new events.
+- Record architecture preflight stops and show catalog exclusions and remaining repository operations.
+- Check the current repository budget and contract during reservation, and bind replays to the original invocation identity.
+- Refresh missing or expired telemetry on demand for headless callers.
+
 ## 0.38.3
 
 - Reuse fresh read receipts from distinct files in architect reports and check evidence coverage before inference.

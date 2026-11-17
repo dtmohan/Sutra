@@ -315,16 +315,22 @@ def run_tests_snapshot(directory,files,target,timeout_ms,root=None):
     command=['/usr/bin/sandbox-exec','-f',str(directory/'sandbox.sb'),str(test_runtime()),'-I','-B',str(runner),str(snapshot),target]
     env={'PATH':str(test_runtime().parent),'HOME':str(scratch),'TMPDIR':str(scratch),'LANG':'en_US.UTF-8'}
     started=time.monotonic();data=bytearray();reason=None
+    deadline=started+timeout_ms/1000
+    next_resource_check=started+1
     proc=subprocess.Popen(command,cwd=snapshot,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,start_new_session=True)
     sel=selectors.DefaultSelector();sel.register(proc.stdout,selectors.EVENT_READ)
     try:
         while sel.get_map():
-            elapsed=time.monotonic()-started
-            if elapsed>timeout_ms/1000:reason='timeout'
-            if root is not None and not resource_state(root)['admitted']:reason='resource_wait'
+            now=time.monotonic()
+            if root is not None and next_resource_check<=now<deadline:
+                health=resource_state(root,refresh=True,max_wait=deadline-now)
+                now=time.monotonic()
+                next_resource_check=now+1
+                if not health['admitted']:reason='resource_wait'
+            if now>=deadline:reason='timeout'
             if reason:
                 os.killpg(proc.pid,signal.SIGKILL);break
-            for key,_ in sel.select(.1):
+            for key,_ in sel.select(min(.1,deadline-now)):
                 chunk=os.read(key.fileobj.fileno(),8192)
                 if not chunk:sel.unregister(key.fileobj);continue
                 data.extend(chunk)

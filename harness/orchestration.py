@@ -11,7 +11,6 @@ import time
 import uuid
 from context_manager import InvalidUpdate, canonical, sha
 from karma_adapter import KarmaAdapter
-from kernel_boundary import frame
 
 ACTIVE = ContextVar('sutra_orchestration_node', default=None)
 TERMINAL = {'DONE', 'CANCELLED', 'QUARANTINED'}
@@ -74,12 +73,11 @@ def transition(s,nid,target,kind,data=None,kernel=None):
     history=events(s,nid);current=history[-1]['to'] if history else node(s,nid)['initial_state']
     if current in TERMINAL or (target!=current and target not in EDGES.get(current,set())):
         raise InvalidUpdate('Orchestration transition forbidden: '+current+' -> '+target)
-    k=kernel or frame('karma','orchestration-transition-v1',0.,0.)
     e={'node_id':nid,'seq':len(history)+1,'from':current,'to':target,'kind':kind,'data':data or {},
-       'kernel':k,'previous':history[-1]['receipt'] if history else 'GENESIS','at':time.time()}
+       'kernel':kernel,'previous':history[-1]['receipt'] if history else 'GENESIS','at':time.time()}
     raw=canonical(e);digest=sha('orchestration-event-v1:'+raw)
     s.db.execute('INSERT INTO orchestration_events VALUES(?,?,?,?)',(nid,e['seq'],raw,digest))
-    s._audit('ORCHESTRATION_TRANSITION',{'node_id':nid,'receipt':digest,'kind':kind,'state':target,'kernel':k})
+    s._audit('ORCHESTRATION_TRANSITION',{'node_id':nid,'receipt':digest,'kind':kind,'state':target,'kernel':kernel,'at':e['at']})
     return dict(e,receipt=digest)
 
 def create(s,kind,session=None,parent=None,**data):

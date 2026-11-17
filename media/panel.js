@@ -121,8 +121,18 @@ window.addEventListener('message',({data:m})=>{
     if(current.static?.model)el('static-model').value=selectedModel;
     const sm=current.static;if(sm?.receipt){el('static-files').value=sm.files.join('\n');el('static-offset').value=sm.offset;el('static-state').textContent=`${sm.status} · ${sm.resolved??'?'} resolved / ${sm.calls??sm.total} calls · ${sm.diagnostics??'?'} diagnostics · ${sm.covered_sites.length} call sites explained · ${sm.explanation_status} · receipt ${sm.receipt}${sm.source_changed?' · source changed; progress reset':''}`;el('static-note').textContent=sm.error||sm.commentary||'Deterministic map ready. No model explanation for this snapshot.';}else{el('static-state').textContent='Start an architecture task, then select explicit source files.';el('static-note').textContent='';}
     const route=current.routing,staticCall=current.static?.invocation_id;el('routing').textContent=route?`Routed through Sutra · task ${route.session} · ${route.model} · invocation ${route.invocation_id} · receipt ${route.receipt_id}`:staticCall?`Routed through Sutra · source-map explanation · ${current.static.model} · invocation ${staticCall}`:'Sutra entry point ready. No current accepted model invocation for this view.';
-    if(current.architecture){const a=current.architecture,k=current.contract.contract.constraints;el('review-goal').value=current.contract.contract.goal;el('review-roots').value=k.allowed_paths.join(',');el('review-budget').value=k.max_tools;el('review-coverage').textContent=`${a.inspected_files.length}/${a.catalog_files} files with inspected excerpts · tools ${a.budget.used}/${a.budget.limit} · ${a.budget.decision}`;el('review-note').textContent=current.report||current.last_result?.summary||'Catalog recorded. Continue to let the model request files and searches.';}else{el('review-coverage').textContent='';el('review-note').textContent='';}
+    if(current.architecture){
+      const a=current.architecture,k=current.contract.contract.constraints;
+      el('review-goal').value=current.contract.contract.goal;el('review-roots').value=k.allowed_paths.join(',');el('review-budget').value=k.max_tools;
+      const remaining=Math.max(0,a.budget.limit-a.budget.used);
+      el('review-coverage').textContent=`${a.inspected_files.length}/${a.catalog_files} files with inspected excerpts · ${a.budget.used}/${a.budget.limit} operations used · ${remaining} remaining · ${a.budget.decision}`;
+      el('review-note').textContent=current.architecture_stop?.message||current.report||current.last_result?.summary||'Catalog recorded. Continue to let the model request files and searches.';
+    }else{el('review-coverage').textContent='';el('review-note').textContent='';}
     const api=current.api;if(api){el('api-state').textContent=`API state: ${api.status} · mapper ${api.candidate_id||'none'} · reviewer ${api.reviewer_id||'none'} · publication receipt ${api.review_id||'none'}`;el('api-note').textContent=api.report||api.error||JSON.stringify(api.decision||api.position||{},null,2);if(api.position){el('api-files').value=api.position.files.join('\n');el('api-offset').value=api.position.offset;}}else{el('api-state').textContent='No API draft for this task.';el('api-note').textContent='';}
+    const exclusions=Object.entries(current.architecture?.excluded||{}).sort(([a],[b])=>a.localeCompare(b));
+    el('catalog-exclusions').hidden=!exclusions.length;
+    el('catalog-exclusion-summary').textContent=`Catalog exclusions (${exclusions.length})`;
+    el('catalog-exclusion-list').textContent=exclusions.map(([name,reason])=>name+' · '+reason.replaceAll('_',' ')).join('\n');
     updateButtons();
     if(current.contract){const c=current.contract.contract,k=c.constraints;el('goal').value=c.goal;el('paths').value=k.allowed_paths.join('\n');
       if(k.review_only){el('review-goal').value=c.goal;el('review-roots').value=k.allowed_paths.join(',');el('review-budget').value=k.max_tools;}
@@ -144,7 +154,7 @@ window.addEventListener('message',({data:m})=>{
     }
   }
   if(m.type==='result'){
-    const r=m.data;lastReceipt=r;el('status').textContent=r.admission.admitted?(r.review_stage==='api_mapper'?'API draft recorded; independent review required':r.review_stage==='api_reviewer'?'Reviewer opinion recorded; check the API publication decision':`Proposal accepted from ${r.model}`):r.review_stage==='architecture_evidence'?'More source evidence needed':'Response withheld after validation';
+    const r=m.data;lastReceipt=r;el('status').textContent=r.admission.admitted?(r.review_stage==='api_mapper'?'API draft recorded; independent review required':r.review_stage==='api_reviewer'?'Reviewer opinion recorded; check the API publication decision':`Proposal accepted from ${r.model}`):r.review_stage==='architecture_stopped'?'Architecture review stopped':r.review_stage==='architecture_evidence'?'More source evidence needed':'Response withheld after validation';
     if(!r.admission.admitted)el('error').textContent=r.admission.errors.join('\n');
   }
   if(m.type==='action'){lastReceipt=m.data;el('action-result').textContent=JSON.stringify(m.data.result,null,2);el('status').textContent='Host action: '+m.data.result.status;el('action-summary').textContent='Last action: '+m.data.result.status;}

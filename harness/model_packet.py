@@ -176,9 +176,14 @@ def build(system, payload, schema):
             body['execution']['recent'] = [select(p, ('kind', 'target', 'status', 'returncode', 'tests', 'current', 'assertions_verified', 'transition', 'output_tail')) for p in ex.get('recent', [])]
         if payload.get('repository'):
             body['repository'] = select(payload['repository'], ('catalog', 'total_files'))
+            if role == 'architect':
+                body['repository'].update(select(payload['repository'], ('operations_remaining',)))
             body['repository']['last_tool'] = select(payload['repository'].get('last_tool'), ('kind', 'target', 'query', 'status', 'matches_or_excerpts', 'truncated', 'error', 'scanned_files', 'next_line', 'next_cursor', 'files')) or None
         if payload.get('repair'): body['repair'] = payload['repair']
         wire_system = system if role == 'review_reader' else SYSTEMS[role]
+        if role == 'architect' and 'operations_remaining' in body.get('repository', {}):
+            wire_system += (' Each read, search or list uses one of repository.operations_remaining.'
+                            ' A report needs current evidence from two distinct catalog files, or the sole file.')
         if role == 'report_reviewer' and payload.get('review_protocol') != 2:
             wire_system = system.replace('Echo the task and constraints exactly. ', '') + ' Host task IDs and constraints are supplied separately; omit them from output.'
         messages_out = [{'role': 'system', 'content': wire_system}, {'role': 'user', 'content': canonical(body)}]

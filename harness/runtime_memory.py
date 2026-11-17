@@ -219,7 +219,7 @@ def fresh_resources(root):
     if time.time()-released>8:return require_resources(root)
     deadline=time.monotonic()+MAX_RECOVERY_SECONDS
     while True:
-        try:state=require_resources(root)
+        try:state=require_resources(root,newer_than=released)
         except ResourceWait as exc:state=exc.state
         stamp=(state.get('sample')or{}).get('wall_time',0)
         if stamp>=released:
@@ -349,7 +349,7 @@ def stable_resources(root):
     deadline = time.monotonic() + MAX_RECOVERY_SECONDS
     previous = None
     while True:
-        state = resource_state(root)
+        state = resource_state(root, refresh=True, newer_than=previous)
         stamp = (state.get('sample') or {}).get('wall_time')
         if not state['admitted']: return state
         if previous is not None and stamp is not None and stamp > previous: return state
@@ -365,7 +365,7 @@ def recover(root, audit=None):
     from monitoring import resource_state, ResourceWait
     if not enabled(): return None
     with lease():
-        data = read_state(); before = resource_state(root)
+        data = read_state(); before = resource_state(root, refresh=True)
         rows = running(); data['resident_models'] = rows
         owned = data.get('owned')
         candidate = next((m for m in rows if owned and m['name']==owned.get('name') and m['digest']==owned.get('digest')), None)

@@ -22,6 +22,16 @@ const dashboard={token_usage:{calls:usageRows,total_calls:4,limit:250},hardware:
  await send({type:'state',data:{...fixture,model:'qwen3:4b'}});assert.equal(await page.locator('#goal').inputValue(),'Unsaved task draft');assert.equal(await page.locator('#paths').inputValue(),'src/changed.py');
  assert(await page.locator('#draft-status').isVisible());await page.click('#discard-draft');assert.equal(await page.locator('#goal').inputValue(),fixture.contract.contract.goal);
  await page.locator('#goal').fill('Saved new goal');await send({type:'draft-saved'});await send({type:'state',data:fixture});assert.equal(await page.locator('#goal').inputValue(),fixture.contract.contract.goal);
+ const architectureStop={terminal:true,message:'The repository-operation budget is exhausted. Start a new architecture review.'};
+ await send({type:'state',data:{...fixture,architecture_stop:architectureStop,architecture:{
+   catalog_files:1,inspected_files:['src/retry.py'],budget:{used:4,limit:4,decision:'COMPOUND_FIN'},
+   excluded:{'src/<img src=x>.py':'too_large'}}}});
+ assert.equal(await page.locator('#review-note').textContent(),architectureStop.message);
+ assert((await page.locator('#review-coverage').textContent()).includes('4/4 operations used · 0 remaining'));
+ assert.equal(await page.locator('#catalog-exclusion-summary').textContent(),'Catalog exclusions (1)');
+ assert.equal(await page.locator('#catalog-exclusion-list').textContent(),'src/<img src=x>.py · too large');
+ assert.equal(await page.locator('#catalog-exclusions img').count(),0);
+ await send({type:'state',data:fixture});
  await page.click('#nav-settings');await send({type:'tier-settings',models:{low:'',mid:'',high:''}});assert((await page.locator('#model-discovery').textContent()).includes('Start Ollama'));await send({type:'busy',value:false});assert(await page.locator('#save-model-tiers').isDisabled());
  await send({type:'tier-settings',models:catalog.suggested_tiers,catalog});assert(!(await page.locator('#save-model-tiers').isDisabled()));
  await send({type:'dashboard',data:{...dashboard,hardware:{...dashboard.hardware,temperatures:{...dashboard.hardware.temperatures,age_seconds:99}}}});assert.equal(await page.locator('#cpu-temperature').textContent(),'—');await send({type:'dashboard',data:dashboard});await page.click('#nav-dashboard');

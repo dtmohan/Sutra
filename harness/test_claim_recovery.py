@@ -75,6 +75,10 @@ class ClaimReviewRecoveryTests(unittest.TestCase):
         self.assertEqual(paused['state'], 'PAUSED', paused.get('stop'))
         self.assertEqual(paused['stop']['status'], 'claim_review_output_limit')
         self.assertEqual(paused['stop']['resume_phase'], 'SYNTHESIS')
+        event = orchestration.events(self.s, paused['flow_id'])[-1]
+        self.assertEqual(event['kind'], 'CLAIM_REVIEW_STOPPED')
+        self.assertIsNone(event['kernel'])
+        self.assertIsInstance(event['at'], float)
         return paused
 
     def test_resume_reuses_draft_and_settled_pages_only_retrying_length_stop(self):

@@ -2,19 +2,69 @@
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
+import platform
+import shutil
 import sqlite3
+import subprocess
+import sys
 import time
 from context_manager import InvalidUpdate
-from karma_adapter import KarmaAdapter
+from karma_adapter import KarmaAdapter, StaleHardwareSample
 
 
-def resource_state(root, now=None):
+def _collect_hardware(max_wait=2):
+    """Use the same installed collectors as the VS Code host in one-shot mode."""
+    harness = Path(__file__).resolve().parent
+    if sys.platform == 'darwin' and platform.machine() == 'arm64':
+        command = [str(harness.parent / 'bin' / 'telemetry'), '--once']
+        collector = 'native-telemetry'
+    else:
+        node = os.environ.get('KARMA_NODE') or shutil.which('node')
+        if not node or not Path(node).is_absolute():
+            raise ValueError('Portable telemetry requires an installed Node executable')
+        command = [node, str(harness / 'telemetry_portable.js'), '--once']
+        collector = 'portable-telemetry'
+    from lifecycle import timeout
+    result = subprocess.run(command, check=True, capture_output=True, encoding='utf-8',
+                            timeout=timeout(min(2, max_wait)), env=dict(os.environ, ELECTRON_RUN_AS_NODE='1'))
+    return json.loads(result.stdout), collector
+
+
+def _unavailable(reason):
+    return {'profile':'hardware-v1','available':False,'decision':None,'admitted':False,'reason':str(reason)}
+
+
+def _on_demand_state(max_wait):
+    try:
+        sample, collector = _collect_hardware(max_wait)
+        return dict(KarmaAdapter().hardware(sample, time.time()),
+                    sample_source='host_on_demand', collector=collector)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        return _unavailable(f'Local telemetry refresh failed: {error}')
+
+
+def resource_state(root, now=None, *, refresh=False, newer_than=None, max_wait=2):
+    """Read observed state. Admission may request a fresh local measurement."""
+    refresh = refresh and now is None
     try:
         sample=json.loads((Path(root)/'telemetry.json').read_text())
-        return KarmaAdapter().hardware(sample,time.time() if now is None else now)
+        state = dict(KarmaAdapter().hardware(sample, time.time() if now is None else now),
+                     sample_source='telemetry_file')
+    except (FileNotFoundError, StaleHardwareSample) as exc:
+        if refresh:
+            fresh = _on_demand_state(max_wait)
+            return fresh if fresh['available'] else _unavailable(f'{exc}. {fresh["reason"]}')
+        return _unavailable(exc)
     except (OSError,ValueError,KeyError,TypeError) as exc:
-        return {'profile':'hardware-v1','available':False,'decision':None,'admitted':False,'reason':str(exc)}
+        return _unavailable(exc)
+    if refresh and state['admitted'] and newer_than is not None and sample['wall_time'] <= newer_than:
+        fresh = _on_demand_state(max_wait)
+        if fresh['available']:return fresh
+        # A streaming collector can still provide the next sample. Recovery
+        # will wait for and verify its timestamp before admitting work.
+    return state
 
 
 class ResourceWait(InvalidUpdate):
@@ -32,8 +82,8 @@ class ResourceWait(InvalidUpdate):
         super().__init__('RESOURCE_WAIT: '+'; '.join(details))
 
 
-def require_resources(root):
-    state=resource_state(root)
+def require_resources(root, *, newer_than=None):
+    state=resource_state(root, refresh=True, newer_than=newer_than)
     if not state['admitted']:raise ResourceWait(state)
     return state
 

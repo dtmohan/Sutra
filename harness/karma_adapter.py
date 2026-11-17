@@ -1,6 +1,11 @@
 """Karma domain: operation/task/storage budgets, hardware, uncertain observations."""
 from kernel_boundary import KernelBoundary,measurement
 
+
+class StaleHardwareSample(ValueError):
+    """A valid admission sample has aged out and needs a new observation."""
+
+
 class KarmaAdapter:
     name='karma'
     def __init__(self,boundary=None):
@@ -36,7 +41,7 @@ class KarmaAdapter:
                     used_bytes=used_bytes,limit_bytes=limit_bytes,reserved_next_bytes=reserved_bytes)
     def hardware(self,sample,now):
         age=measurement(now,'now')-measurement(sample['wall_time'],'wall_time')
-        if not 0<=age<=8:raise ValueError('Hardware sample is stale or future-dated')
+        if age<0:raise ValueError('Hardware sample is future-dated')
         portable=sample.get('profile')=='portable-memory-v1'
         if portable:
             memory=measurement(sample['available_bytes'],'available_bytes',nonnegative=True)
@@ -51,6 +56,7 @@ class KarmaAdapter:
             inactive=measurement(sample['inactive_bytes'],'inactive_bytes',nonnegative=True)
             memory=measurement(free+inactive,'reclaimable memory',nonnegative=True)
             omega=max({0:0.,1:0.,2:2*self.boundary.k,3:3*self.boundary.k}[thermal],{1:0.,2:2*self.boundary.k,4:3*self.boundary.k}[pressure],3*self.boundary.k if memory<4*1024**3 else 0.)
+        if age>8:raise StaleHardwareSample('Hardware sample is stale')
         result=self.frame('portable-memory-v1' if portable else 'hardware-v1',omega,0.)
         result.update(available=True,age_seconds=round(age,2),sample=sample,admitted=result['decision']=='ALLOW',
             reclaimable_estimate_gib=round(memory/1024**3,2),cpu_policy='advisory only',temperature_celsius=None,

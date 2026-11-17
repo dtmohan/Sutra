@@ -134,7 +134,8 @@ def state(s,meta,workspace):
                     'architecture':None,'warning':'Catalog unavailable: '+str(exc)+'. Continue after recovery or allocation review; the contract and used budget are preserved.'}
     if s.snapshot(session)['constraints'].get('auto_review'):
         import auto_review,repository_tools as repo
-        return {'session':session,'workspace':str(workspace),'model':meta.get('model','qwen3.6:35b'),'contract':s.current_contract(session),'sources':[],'checkpoint':None,'last_result':None,'auto':auto_review.status(s,meta,workspace),'architecture':{'catalog_files':len(repo.catalog(s,session)),'catalog':repo.catalog(s,session),'budget':repo.usage(s,session),'inspected_files':[]},'ledger_valid':s.verify_invocations(session,complete=False)}
+        snapshot=repo.catalog_snapshot(s,session)
+        return {'session':session,'workspace':str(workspace),'model':meta.get('model','qwen3.6:35b'),'contract':s.current_contract(session),'sources':[],'checkpoint':None,'last_result':None,'auto':auto_review.status(s,meta,workspace),'architecture':{'catalog_files':len(snapshot['files']),'catalog':snapshot['files'],'excluded':snapshot['excluded'],'budget':repo.usage(s,session),'inspected_files':[]},'ledger_valid':s.verify_invocations(session,complete=False)}
     if s.snapshot(session)['constraints'].get('review_only'):
         from architecture_runtime import state as architecture_state
         import repository_tools as repo

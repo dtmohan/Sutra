@@ -24,6 +24,9 @@ monitor.orchestration.nodes[0].resource_fallback={from_model:'large',model:'smal
  await page.setContent(html());const send=data=>page.evaluate(d=>window.dispatchEvent(new MessageEvent('message',{data:d})),{type:'usage',...data,snapshot:data.snapshot?{...data.snapshot,updatedAt:data.aged?data.snapshot.updatedAt:new Date().toISOString()}:undefined});
  assert.deepEqual(await page.evaluate(()=>sent),[{type:'ready'}]);assert.equal(await page.locator('#input').textContent(),'—');
  await send({snapshot,reasoningPreference:'model-default'});
+ await send({snapshot:{...snapshot,monitor:{...monitor,runs:[{recent_events:[{kind:'FIN',at:now,
+   data:{architecture_stop:{terminal:true,message:'Repository budget exhausted. Start a new review.'}}}]}]}}});
+ assert((await page.locator('#architecture-stops').textContent()).includes('Architecture review stopped. Repository budget exhausted.'));
  const accounting={basis:'runtime_measured',reserved_tokens:11048,used_tokens:1396,released_unused_reservation:9652,overrun_tokens:0};
  await send({snapshot:{...snapshot,calls:[{...calls[0],accounting_settlement:accounting},...calls.slice(1)],monitor:{...monitor,context:{...monitor.context,model_packet:{prompt_utf8_bytes:2400,schema_allowance:344,template_allowance:256},accounting_settlement:accounting}}}});
  assert((await page.locator('#rows').textContent()).includes('1,396 (measured)'));

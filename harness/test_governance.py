@@ -9,7 +9,7 @@ from threading import Barrier
 from unittest.mock import patch
 
 from budget_preflight import host_seed
-from context_manager import Conflict, InvalidUpdate
+from context_manager import Conflict, InvalidUpdate, canonical
 from dag_runtime import run_paged
 from governance import GovernedContext, POLICY_FILES, policy_hash
 from paging import Budget, PageFault
@@ -96,6 +96,68 @@ class GovernanceTests(unittest.TestCase):
                 s.db.execute('DELETE FROM ' + table)
             s.db.rollback()
         s.close()
+
+    def test_protocol_event_mirror_detects_rewrite_omission_and_insertion(self):
+        s = self.store()
+        self.addCleanup(s.close)
+        run = s.begin_run(self.session, 'audit probe', [], None)
+        s.event(run, 'NACK', {'reason': 'original'})
+        s.event(run, 'FIN', {'reason': 'settled'})
+        original = s.run(run)['events'][1]
+        self.assertIsInstance(original['at'], float)
+        self.assertTrue(s.verify_protocol(self.session))
+
+        changed_kind = canonical(dict(original, kind='BRIDGE'))
+        changed_data = canonical(dict(original, data={'reason': 'rewritten'}))
+        changed_time = canonical(dict(original, at=original['at']+1))
+        for trigger, sql, params in (
+                ('UPDATE', 'UPDATE protocol_events SET record_json=? WHERE run_id=? AND seq=2', (changed_kind, run)),
+                ('UPDATE', 'UPDATE protocol_events SET record_json=? WHERE run_id=? AND seq=2', (changed_data, run)),
+                ('UPDATE', 'UPDATE protocol_events SET record_json=? WHERE run_id=? AND seq=2', (changed_time, run)),
+                ('DELETE', 'DELETE FROM protocol_events WHERE run_id=? AND seq=3', (run,)),
+                (None, 'INSERT INTO protocol_events VALUES(?,?,?)', (run, 0, canonical(original)))):
+            with self.subTest(sql=sql, params=params):
+                s.db.execute('BEGIN IMMEDIATE')
+                try:
+                    if trigger:
+                        s.db.execute('DROP TRIGGER immutable_protocol_events_' + trigger)
+                    s.db.execute(sql, params)
+                    self.assertTrue(s.audit_valid())
+                    self.assertFalse(s.verify_protocol(self.session))
+                finally:
+                    s.db.rollback()
+        self.assertTrue(s.verify_protocol(self.session))
+
+    def test_protocol_event_mirror_accepts_historical_events_without_timestamps(self):
+        s = self.store()
+
+        def legacy_event(run_id, kind, data):
+            seq = s.db.execute('SELECT COUNT(*) FROM protocol_events WHERE run_id=?', (run_id,)).fetchone()[0] + 1
+            event = {'kind': kind, 'data': data}
+            s.db.execute('INSERT INTO protocol_events VALUES(?,?,?)', (run_id, seq, canonical(event)))
+            s._audit('PROTOCOL_EVENT', {'run_id': run_id, 'seq': seq, **event})
+
+        try:
+            with patch.object(s, '_event', legacy_event):
+                run = s.begin_run(self.session, 'old audit probe', [], None)
+                s.event(run, 'NACK', {'reason': 'original'})
+        finally:
+            s.close()
+        s = self.store()
+        self.addCleanup(s.close)
+        self.assertTrue(s.verify_protocol(self.session))
+        s.event(run, 'FIN', {'reason': 'settled'})
+        self.assertTrue(s.verify_protocol(self.session))
+        self.assertNotIn('at', s.run(run)['events'][0])
+        self.assertIn('at', s.run(run)['events'][-1])
+
+    def test_protocol_verification_distinguishes_unknown_and_empty_sessions(self):
+        s = self.store()
+        self.addCleanup(s.close)
+        run = s.begin_run(self.session, 'audit probe', [], None)
+        self.assertFalse(s.verify_protocol(run))
+        s.create('empty-session')
+        self.assertTrue(s.verify_protocol('empty-session'))
 
     def test_bounded_repair_uses_fresh_sources_without_replaying_bad_answer(self):
         model = ScriptModel(lambda n, p: proposal('DENY' if n == 1 else 'ALLOW'))

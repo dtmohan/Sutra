@@ -21,5 +21,8 @@ function sample(){
  if(process.platform==='linux')try{const m=fs.readFileSync('/proc/meminfo','utf8').match(/^MemAvailable:\s+(\d+) kB$/m);if(m){available=Number(m[1])*1024;method='proc.MemAvailable';}}catch{}
  return {profile:'portable-memory-v1',platform:process.platform,wall_time:Date.now()/1000,physical_memory_bytes:os.totalmem(),available_bytes:available,cpu_busy_pct:cpu,thermal_state:null,memory_pressure_raw:null,temperature_celsius:null,memory_measurement:method,unavailable:['thermal_state','memory_pressure','temperature_celsius']};
 }
-if(require.main===module){console.log(JSON.stringify(sample()));setInterval(()=>console.log(JSON.stringify(sample())),1000);}
+if(require.main===module){
+ console.log(JSON.stringify(sample()));
+ if(process.argv[2]!=='--once')setInterval(()=>console.log(JSON.stringify(sample())),1000);
+}
 module.exports={sample,darwinAvailable};

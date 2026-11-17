@@ -74,6 +74,14 @@ function renderMonitor(){
   const badge=node('div',undefined,'gate');badge.dataset.decision=known&&fresh?code:'';badge.append(node('span',label),node('b',value));el('gates').append(badge);
   if(frame){const row=node('tr');for(const v of [label,value,...['omega','sigma','k','sigma_clause'].map(key=>finite(frame[key])?Number(frame[key].toPrecision(4)).toString():'—'),frame.profile||'Not reported'])row.append(node('td',v));el('signals').append(row);}
  }
+ const architectStops=el('architecture-stops');architectStops.replaceChildren();
+ for(const run of d.runs||[]){
+  const event=run.recent_events?.find(e=>e.data?.architecture_stop);
+  if(!event)continue;
+  const stop=event.data.architecture_stop;
+  const time=finite(event.at)?new Date(event.at*1000).toLocaleTimeString()+' · ':'';
+  architectStops.append(node('p',time+(stop.terminal?'Architecture review stopped. ':'Architecture report needs evidence. ')+stop.message,'plot-note'));
+ }
  const workflow=d.orchestration,rows=(workflow?.nodes||[]).filter(n=>n.kind!=='task').slice(0,12);
  el('flow-status').textContent=!snapshotFresh?'Awaiting fresh snapshot':rows.length?(workflow.execution||'Recorded workflow'):'No workflow yet';
  const pending=native?.pending, stop=pending?.stop;

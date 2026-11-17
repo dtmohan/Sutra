@@ -2,8 +2,9 @@
 import json,uuid
 from context_manager import InvalidUpdate,ContextBudgetExceeded
 from invocation_gateway import InvocationGateway
+from paging import PageFault
 from review_role import compact,findings
-from monitoring import require_resources
+from monitoring import ResourceWait,require_resources
 from review_reasoning import bind
 import repository_tools as repo
 import architecture_role as role
@@ -22,13 +23,14 @@ def state(s,meta,workspace):
    if proposal.get('tool',{}).get('kind')=='report':
     payload=json.loads(s.db.execute('SELECT payload_json FROM deliveries WHERE id=?',(env['delivery_id'],)).fetchone()[0]);report=role.markdown(proposal,payload['evidence'],routing)
   except (ValueError,InvalidUpdate) as exc:warning='Architecture checkpoint withheld: '+str(exc);checkpoint=None
-  except Exception as exc:
-   from paging import PageFault
-   if not isinstance(exc,PageFault):raise
-   warning='Architecture checkpoint withheld: '+str(exc);checkpoint=None
+  except PageFault as exc:warning='Architecture checkpoint withheld: '+str(exc);checkpoint=None
+ last=s.db.execute("""SELECT record_json FROM protocol_events WHERE run_id=(
+   SELECT id FROM protocol_runs WHERE session=? ORDER BY rowid DESC LIMIT 1)
+   ORDER BY seq DESC LIMIT 1""",(session,)).fetchone()
+ stop=json.loads(last[0])['data'].get('architecture_stop') if last else None
  return {'session':session,'workspace':str(workspace),'model':meta.get('model','local-assistant:latest'),
   'contract':s.current_contract(session),'checkpoint':checkpoint,'last_result':proposal if checkpoint else None,'sources':[],
-  'api':__import__('api_runtime').state(s,meta,workspace),'static':__import__('static_runtime').state(s,meta,workspace),'warning':warning,'ledger_valid':s.verify_invocations(session,complete=False),'architecture':summary,'routing':routing if checkpoint else None,'report':report if checkpoint else None}
+  'api':__import__('api_runtime').state(s,meta,workspace),'static':__import__('static_runtime').state(s,meta,workspace),'warning':warning,'ledger_valid':s.verify_invocations(session,complete=False),'architecture':summary,'architecture_stop':stop,'routing':routing if checkpoint else None,'report':report if checkpoint else None}
 
 def packet_evidence(s,session,workspace,phase):
  available=repo.evidence(s,session,workspace);pins={}
@@ -85,41 +87,67 @@ def fit_packet(payload,budget):
 
 def dispatch(s,meta,workspace,root,request,provider=None):
  st=state(s,meta,workspace);session=st['session'];repo.settings(s,session)
- prompt=request.get('prompt','').strip()
- if not prompt or len(prompt)>1800:raise InvalidUpdate('Architecture request must be 1..1800 characters')
+ prompt=request.get('prompt','')
+ if not isinstance(prompt,str) or not 1<=len(prompt.strip())<=1800:raise InvalidUpdate('Architecture request must be 1..1800 characters')
+ prompt=prompt.strip()
  model=request.get('model') or meta.get('model','local-assistant:latest')
  names=repo.catalog(s,session);parent=st['checkpoint']
  phase=request.get('mode','explore')
  if phase not in ('explore','report'):raise InvalidUpdate('Unknown architecture mode')
+ # Commit the attempt before evidence or capacity preflight. A stopped
+ # preflight has a receipt and consumes no model or repository allocation.
+ run=s.begin_run(session,prompt,[],None,max_calls=3,max_repairs=2)
  tools=repo.usage(s,session)
  if tools['decision']!='ALLOW':phase='report'
  evidence=packet_evidence(s,session,workspace,phase)
  minimum=min(2,len(names));covered=len({e['path'] for e in evidence})
- if phase=='report' and covered<minimum:
-  error=f'The architecture report needs current excerpts from {minimum} distinct catalog files. Sutra has {covered}.'
+ if not names or phase=='report' and covered<minimum:
+  terminal=not names or tools['decision']!='ALLOW'
+  if not names:
+   reason='empty_catalog'
+   error='This review has no eligible source files. Start a new architecture review with eligible files.'
+  else:
+   reason='insufficient_evidence'
+   error=f'The architecture report needs current excerpts from {minimum} distinct catalog files. Sutra has {covered}.'
+   if terminal:
+    reason='evidence_budget_exhausted'
+    error+=' The repository-operation budget is exhausted. Start a new architecture review to inspect more source.'
+  stop={'reason':reason,'terminal':terminal,'run_id':run,'message':error,
+        'phase':phase,'covered_files':covered,'required_files':minimum,'repository_budget':tools}
+  s.event(run,'FIN',{'reason':reason,'architecture_stop':stop})
   return {'result':{'admission':{'admitted':False,'errors':[error],'semantic_correctness_verified':False},
-                    'accepted_output':None,'review_stage':'architecture_evidence','model':model},
-          'tool_receipt':None,'routing':None,'state':st}
+                    'accepted_output':None,'run_id':run,'model':model,
+                    'review_stage':'architecture_stopped' if terminal else 'architecture_evidence'},
+          'tool_receipt':None,'routing':None,'state':dict(st,architecture_stop=stop)}
  payload={'phase':phase,'contract':s.pinned(session),'request':prompt,'workspace':str(workspace),'pages':[],
   'derived_from':[parent] if parent else [],'handoff':compact(st['last_result']) if parent else None,
-  'repository':{'catalog':names[:20],'total_files':len(names),'budget':tools,'scope':'committed catalog; source bodies require read/search receipts','last_tool':repo.feedback(s,session)},
+  'repository':{'catalog':names[:20],'total_files':len(names),'budget':tools,
+                'operations_remaining':max(0,tools['limit']-tools['used']),
+                'scope':'committed catalog; source bodies require read/search receipts','last_tool':repo.feedback(s,session)},
   'evidence':evidence}
  real=provider is None
- if real:
-  from api_runtime import provider_for
-  from review_context import context_budget
-  provider=provider_for(root,model,review=True)
-  context_budget(provider,s,session,slots=3)
-  bind(provider,payload)
- schema=fit_packet(payload,provider.budget)
- run=s.begin_run(session,prompt,[],None,max_calls=3,max_repairs=2);meta['model']=model;last=None
+ try:
+  if real:
+   from api_runtime import provider_for
+   from review_context import context_budget
+   provider=provider_for(root,model,review=True)
+   context_budget(provider,s,session,slots=3)
+   bind(provider,payload)
+  schema=fit_packet(payload,provider.budget)
+ except ResourceWait as exc:
+  s.event(run,'RESOURCE_WAIT',{'reason':str(exc),'measurement':exc.state})
+  raise
+ except (InvalidUpdate,ContextBudgetExceeded,PageFault) as exc:
+  s.event(run,'FIN',{'reason':'architecture_preflight','error':str(exc)})
+  raise
+ meta['model']=model;last=None
  output_repaired=False
  for attempt in range(3):
   s.reserve(run,'ATTEMPT',{'attempt':attempt})
   if real:
    try:hardware=require_resources(root)
-   except InvalidUpdate as exc:
-    s.event(run,'RESOURCE_WAIT',{'reason':str(exc)});raise
+   except ResourceWait as exc:
+    s.event(run,'RESOURCE_WAIT',{'reason':str(exc),'measurement':exc.state});raise
    with s.db:s._audit('RESOURCE_GATE',{'run_id':run,'measurement':hardware})
   charge=provider.budget.check(role.SYSTEM,payload,schema);delivery=s.prepare_delivery(session,payload,charge)
   last=InvocationGateway(s.path,run,provider).invoke('architect',uuid.uuid4().hex,role.SYSTEM,payload,schema,delivery)

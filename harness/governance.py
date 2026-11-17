@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 import time
 import uuid
 
@@ -150,7 +151,7 @@ class GovernedContext(EvidenceContext):
 
     def _event(self, run_id, kind, data):
         seq = self.db.execute('SELECT COUNT(*) FROM protocol_events WHERE run_id=?', (run_id,)).fetchone()[0] + 1
-        event = {'kind': kind, 'data': data}
+        event = {'kind': kind, 'data': data, 'at': time.time()}
         self.db.execute('INSERT INTO protocol_events VALUES(?,?,?)', (run_id, seq, canonical(event)))
         self._audit('PROTOCOL_EVENT', {'run_id': run_id, 'seq': seq, **event})
 
@@ -343,6 +344,21 @@ class GovernedContext(EvidenceContext):
         return checkpoint_id
 
     def verify_protocol(self, session):
+        # The audit chain and its materialized protocol rows must be checked
+        # against the same snapshot, including when a writer is still active.
+        owns_transaction = not self.db.in_transaction
+        try:
+            if owns_transaction:
+                self.db.execute('BEGIN')
+            return self._verify_protocol(session)
+        except (KeyError, TypeError, ValueError, sqlite3.DatabaseError):
+            return False
+        finally:
+            if owns_transaction and self.db.in_transaction:
+                self.db.rollback()
+
+    def _verify_protocol(self, session):
+        if not self.db.execute('SELECT 1 FROM sessions WHERE id=?', (session,)).fetchone(): return False
         if not self.validate_chain(session) or not self.audit_valid(): return False
         for record, digest in self._contract_history(session):
             row = self.db.execute('SELECT record_json,digest FROM contract_epochs WHERE session=? AND epoch=?', (session, record['epoch'])).fetchone()
@@ -354,8 +370,30 @@ class GovernedContext(EvidenceContext):
             delivery = self.db.execute('SELECT payload_hash FROM deliveries WHERE id=? AND session=?', (body['delivery_id'], session)).fetchone()
             if not delivery or delivery[0] != body['payload_hash']: return False
             previous = digest
-        for run_id, in self.db.execute('SELECT id FROM protocol_runs WHERE session=?', (session,)):
-            run = self.run(run_id); config = run['config']; events = run['events']
+        runs = dict(self.db.execute('SELECT id,config_json FROM protocol_runs WHERE session=?', (session,)))
+        mirrored = {}
+        for raw, in self.db.execute("""SELECT payload_json FROM page_audit
+            WHERE event='RUN_COMMIT' AND json_extract(payload_json,'$.session')=?""", (session,)):
+            commit = json.loads(raw)
+            run_id = commit['run_id']
+            if run_id in mirrored or runs.get(run_id) != canonical(commit['config']): return False
+            mirrored[run_id] = []
+        if mirrored.keys() != runs.keys(): return False
+        # PROTOCOL_EVENT already commits each row in page_audit. Reuse that
+        # chain for old and new runs, including older events without a clock.
+        for raw, in self.db.execute("""SELECT a.payload_json FROM page_audit a
+            JOIN protocol_runs r ON r.id=json_extract(a.payload_json,'$.run_id')
+            WHERE a.event='PROTOCOL_EVENT' AND r.session=? ORDER BY a.seq""", (session,)):
+            event = json.loads(raw)
+            events = mirrored[event.pop('run_id')]
+            if event.pop('seq') != len(events) + 1: return False
+            events.append(event)
+        for run_id, raw_config in runs.items():
+            config = json.loads(raw_config)
+            events = mirrored[run_id]
+            rows = list(self.db.execute('SELECT seq,record_json FROM protocol_events WHERE run_id=? ORDER BY seq', (run_id,)))
+            if rows != [(seq, canonical(e)) for seq, e in enumerate(events, 1)]: return False
+            if not events or events[0]['kind'] != 'START': return False
             if sum(e['kind'] == 'DISPATCH' for e in events) > config['max_calls']: return False
             if sum(e['kind'] == 'ATTEMPT' for e in events) > config['max_repairs'] + 1: return False
             terminal = [i for i,e in enumerate(events) if e['kind'] in ('ALLOW','FIN','RESOURCE_WAIT')]
