@@ -14,8 +14,9 @@ import visuals
 import conversation_memory as cm
 import conversation_routing as routing
 
-from conversation_prompt import SYSTEM
-from review_targets import document_review_requested, has_document_text, refers_to_previous_review_target
+from conversation_prompt import DOCUMENT_PERCENT_ERROR, SYSTEM
+from review_targets import (document_review_requested, has_document_text, refers_to_previous_review_target,
+                            refers_to_retained_document)
 
 CONSTRAINTS = dict(DEFAULTS, conversation_only=True, network_allowed=False,
                    dependencies_allowed=False, edits_allowed=False, tests_allowed=False,
@@ -82,24 +83,52 @@ def bind_output(p, proposal):
 
 
 DOCUMENT_EVIDENCE_REF = ('key', 'version', 'digest')
+PERCENT = re.compile(r'(?<![\d.])(\d+(?:\.\d+)?)\s*(?:%|percent\b)', re.IGNORECASE)
 
 
-def document_evidence(s, sid, ref, prompt):
-    if not isinstance(ref, dict) or set(ref) != set(DOCUMENT_EVIDENCE_REF):
+def retained_document_reference(s, sid, parent, *, unique=False):
+    turns = cm.history(s, sid, parent)
+    if unique and len({turn['document_ref']['key'] for turn in turns if 'document_ref' in turn}) != 1:
+        return None
+    for turn in turns:
+        if 'document_ref' in turn:
+            return turn['document_ref']
+        if not refers_to_retained_document(turn['user']):
+            break
+    return None
+
+
+def document_evidence(s, sid, ref, prompt, parent=None):
+    permitted = (set(DOCUMENT_EVIDENCE_REF), {*DOCUMENT_EVIDENCE_REF, 'retained_from'},
+                 {*DOCUMENT_EVIDENCE_REF, 'retained_from', 'selected_by'})
+    if not isinstance(ref, dict) or set(ref) not in permitted:
         raise InvalidUpdate('Invalid document evidence reference')
     key = ref['key']
     match = re.fullmatch(r'document-bridge:([a-f0-9]{32})', key) if isinstance(key, str) else None
     if not match or type(ref['version']) is not int or ref['version'] < 1 or not isinstance(ref['digest'], str):
         raise InvalidUpdate('Invalid document evidence reference')
+    source_prompt = prompt
+    if 'retained_from' in ref:
+        base_ref = {field: ref[field] for field in DOCUMENT_EVIDENCE_REF}
+        if (not parent or parent != ref['retained_from']
+                or retained_document_reference(s, sid, parent) != base_ref):
+            raise InvalidUpdate('Document evidence does not match the retained conversation context')
+        if 'selected_by' in ref:
+            from document_routing import verify_selection
+            verify_selection(s, sid, ref, prompt, parent)
+        elif not refers_to_retained_document(prompt):
+            raise InvalidUpdate('Document evidence does not match the retained conversation context')
+        from orchestration import node
+        source_prompt = node(s, match[1])['prompt']
     try:
         doc = s.document(sid, key)
     except PageFault as exc:
         raise InvalidUpdate('Document evidence is unavailable in this session') from exc
     origin = json.loads(doc['source_json'])
-    expected_source = {'flow_id': match[1], 'request_hash': sha(prompt), 'kind': 'evidence_bridge'}
+    expected_source = {'flow_id': match[1], 'request_hash': sha(source_prompt), 'kind': 'evidence_bridge'}
     if doc['authority'] == 'tool' and origin.get('kind') == 'workspace_document':
         from document_review import verifies
-        valid_source = (origin.get('flow_id') == match[1] and origin.get('request_hash') == sha(prompt)
+        valid_source = (origin.get('flow_id') == match[1] and origin.get('request_hash') == sha(source_prompt)
                         and verifies(s, sid, origin))
     else:
         valid_source = doc['authority'] == 'user' and origin == expected_source
@@ -150,6 +179,10 @@ def schema(p):
                 'diagram': visuals.diagram_schema()})
     # Older providers/fixtures may omit advisory fields. Absence grants nothing.
     fmt['required'] = [k for k in fmt['required'] if k not in ('facts', 'workspace_request', 'context_question')]
+    if p.get('document_offer'):
+        selection = {'type': 'string', 'enum': ['previous_snapshot', 'none']}
+        fmt['properties'] = {'document_request': selection, **fmt['properties']}
+        fmt['required'].insert(0, 'document_request')
     fmt['properties']['workspace_request']['required']=['operation','paths']
     from task_observations import add_schema
     return add_schema(fmt, 'commitment')
@@ -166,14 +199,52 @@ def contract(s, sid):
             'calibration_binding': current(s, sid, usable=True)}
 
 
-def open_session(s, prompt):
+def chat_axis(workspace, chat_key):
+    return sha(canonical(['sutra-conversation-axis-v1', str(workspace), chat_key])) if chat_key else None
+
+
+def legacy_receipt_axis(s, invocation):
+    """Recover the originating axis of a receipt written before axis binding."""
+    if not s.db.execute("SELECT 1 FROM sqlite_master WHERE name='orchestration_events'").fetchone():
+        return None
+    row = s.db.execute("""
+        SELECT node_id, seq FROM orchestration_events
+        WHERE json_extract(record_json,'$.data.conversation_id')=?
+        ORDER BY rowid LIMIT 1
+    """, (invocation,)).fetchone()
+    if not row:
+        return None
+    from orchestration import events, node
+    flow = node(s, row[0])
+    owner = events(s, row[0])[row[1] - 1]
+    if flow['kind'] != 'flow' or owner['data'].get('conversation_id') != invocation:
+        raise InvalidUpdate('Cannot verify the originating Sutra chat')
+    return chat_axis(flow['workspace'], flow.get('chat_key'))
+
+
+def require_chat_axis(s, sid, rows, axis):
+    seed = s.db.execute("""
+        SELECT json_extract(raw_content, '$.conversation_axis') FROM events
+        WHERE session=? AND revision=1 AND kind='conversation_contract' AND json_valid(raw_content)
+    """, (sid,)).fetchone()
+    if seed and seed[0] is not None and seed[0] != axis:
+        raise InvalidUpdate('Conversation belongs to another Sutra chat')
+    for row in rows:
+        owner = row.get('conversation_axis') or legacy_receipt_axis(s, row['id'])
+        if owner != axis:
+            raise InvalidUpdate('Conversation memory belongs to another Sutra chat')
+
+
+def open_session(s, prompt, axis=None):
     sid = 'conversation-' + uuid.uuid4().hex
     s.create(sid)
     values = dict(CONSTRAINTS, task_id=sid, goal='Answer conversation or request a governed workspace handoff; this stage executes no workspace tools.')
     # Fixed host restrictions, recorded honestly as host authority. This does not
     # create/select a workspace task and cannot give the model any permissions.
-    s._append(sid, uuid.uuid4().hex, 'host', 'conversation_contract',
-              canonical({'user_request': prompt, 'host_policy': 'conversation-v1'}),
+    origin = {'user_request': prompt, 'host_policy': 'conversation-v1'}
+    if axis:
+        origin['conversation_axis'] = axis
+    s._append(sid, uuid.uuid4().hex, 'host', 'conversation_contract', canonical(origin),
               [{'key': k, 'value': v} for k, v in values.items()], 0)
     s.current_contract(sid)
     return sid
@@ -199,8 +270,9 @@ def memory(s, sid, iid):
 
 def binding(p):
     fields = [p['contract'], p['workspace_context'], p['routing_capabilities']]
-    if 'document_evidence' in p:
-        fields.append(p['document_evidence'])
+    for key in ('document_evidence', 'document_offer', 'conversation_axis'):
+        if key in p:
+            fields.append(p[key])
     return sha(canonical(fields))
 
 
@@ -231,14 +303,22 @@ def request_check(s, sid, p):
         raise InvalidUpdate('Host routing capabilities changed')
     if p['contract'] != contract(s, sid) or p['pages'] or p['context_binding'] != binding(p):
         raise InvalidUpdate('Conversation contract or context binding mismatch')
+    require_chat_axis(s, sid, cm.history(s, sid, p['routing_state']['parent']), p.get('conversation_axis'))
     if not isinstance(p['request'], str) or not 1 <= len(p['request']) <= 1800 or not p['request'].strip():
         raise InvalidUpdate('Conversation prompt must be 1..1800 characters')
+    if 'document_offer' in p:
+        from document_routing import offer_for_request
+        offer = p['document_offer']
+        if (not isinstance(offer, dict) or 'document_evidence' in p
+                or offer != offer_for_request(s, sid, offer.get('flow_id'), p['request'], p['routing_state']['parent'])):
+            raise InvalidUpdate('Invalid retained document offer')
     if 'document_evidence' in p:
         supplied = p['document_evidence']
         if not isinstance(supplied, dict) or any(key not in supplied for key in DOCUMENT_EVIDENCE_REF):
             raise InvalidUpdate('Invalid document evidence payload')
         ref = {key: supplied[key] for key in DOCUMENT_EVIDENCE_REF}
-        if supplied != document_evidence(s, sid, ref, p['request']):
+        ref.update({key: supplied[key] for key in ('retained_from', 'selected_by') if key in supplied})
+        if supplied != document_evidence(s, sid, ref, p['request'], p['routing_state']['parent']):
             raise InvalidUpdate('Delivered document text differs from its evidence receipt')
     if not re.fullmatch('[a-f0-9]{32}', p['_request_nonce']):
         raise InvalidUpdate('Missing conversation request identity')
@@ -278,6 +358,10 @@ def check_delivery(p, proposal):
     answer = proposal['answer'].strip()
     if not answer or len(re.findall(r'^\s*```[^\n]*$', answer, re.M)) % 2:
         raise InvalidUpdate('Complete the answer and close every fenced code block; summary cannot finish the answer.')
+    if p.get('document_evidence'):
+        text = p['document_evidence']['text']
+        if set(PERCENT.findall(answer)) - set(PERCENT.findall(text)):
+            raise InvalidUpdate(DOCUMENT_PERCENT_ERROR + ' Use placeholders such as [measured improvement].')
     pages = proposal.get('page_requests', [])
     work=proposal.get('workspace_request', {})
     if (proposal['intent']=='document' or supplied_document(p)) and 'workspace_request' in proposal:
@@ -294,6 +378,10 @@ def check_delivery(p, proposal):
     if len(pages) != len(set(pages)):
         raise InvalidUpdate('Request each memory page only once.')
     question = proposal.get('context_question', '').strip()
+    if proposal.get('document_request') == 'previous_snapshot' and (
+            proposal['intent'] != 'document' or not p.get('document_offer') or pages or question
+            or proposal['escalation_reason'] != 'none'):
+        raise InvalidUpdate('Select the offered snapshot with document intent and omit competing context or routing requests.')
     if proposal.get('context_question') is not None and not question:
         raise InvalidUpdate('context_question must ask a specific question.')
     if pages and question:
@@ -316,29 +404,32 @@ def read(s, iid):
             'result': {'token_usage': usage, 'invocation_id': iid, 'admission': {'admitted': True}, 'accepted_output': proposal}}
 
 
-def session_for(s,request):
+def session_for(s,request,*,axis=None):
     prompt=request.get('prompt')
     if not isinstance(prompt,str) or not 1<=len(prompt)<=1800 or not prompt.strip():
         raise InvalidUpdate('Conversation prompt must be 1..1800 characters')
     parent=request.get('parent')
     sid=request.get('conversation_session')
+    rows = []
     if parent:
         if not isinstance(parent,str) or not re.fullmatch('[a-f0-9]{32}',parent):
             raise InvalidUpdate('Invalid conversation receipt reference')
         row=s.db.execute('SELECT session FROM invocations WHERE id=?',(parent,)).fetchone()
         if not row:raise PageFault('Conversation memory unavailable. Start a new chat; workspace task is retained.')
         if sid and sid!=row[0]:raise InvalidUpdate('Conversation session changed during routing')
-        sid=row[0];cm.history(s,sid,parent)
-    if sid:contract(s,sid)
-    return sid or open_session(s,prompt)
+        sid=row[0];rows=cm.history(s,sid,parent)
+    if sid:
+        contract(s,sid)
+        require_chat_axis(s,sid,rows,axis)
+    return sid or open_session(s,prompt,axis)
 
 
-def answer(s,meta,root,request,provider=None):
+def answer(s,meta,root,request,provider=None,*,axis=None):
     request=dict(request)
-    request['conversation_session']=session_for(s,request)
+    request['conversation_session']=session_for(s,request,axis=axis)
     calls=[]
     while True:
-        result=_answer_step(s,meta,root,request,provider)
+        result=_answer_step(s,meta,root,request,provider,axis)
         calls.extend(result['result'].get('token_usage',{}).get('calls',[]))
         from token_usage import summarize
         result['result']['token_usage']={'calls':calls,'totals':summarize(calls),'total_calls':len(calls),'limit':None}
@@ -352,7 +443,7 @@ def answer(s,meta,root,request,provider=None):
         request['routing_continuation']=result['result']['invocation_id']
 
 
-def _answer_step(s,meta,root,request,provider=None):
+def _answer_step(s,meta,root,request,provider,axis):
     prompt=request['prompt'];parent=request.get('parent');sid=request['conversation_session']
     route,routing_state=routing.prepare(s,sid,request)
     p = {'response_contract': 2, '_request_nonce': uuid.uuid4().hex, 'contract': contract(s, sid),
@@ -360,11 +451,16 @@ def _answer_step(s,meta,root,request,provider=None):
          'routing_capabilities': json.loads(canonical(ROUTING_CAPABILITIES)),
          'pages': [], 'memory': None, 'route': route,'routing_state':routing_state,
          'requested_memory_pages':routing_state['requested_pages']}
+    if axis:
+        p['conversation_axis'] = axis
     p['diagram_reference'] = visuals.reference(s, sid, parent, prompt)
     from capabilities import context as tool_context
     p['tool_evidence']=tool_context(s,meta.get('active'))
     if 'document_evidence' in request:
-        p['document_evidence'] = document_evidence(s, sid, request['document_evidence'], prompt)
+        p['document_evidence'] = document_evidence(s, sid, request['document_evidence'], prompt, parent)
+    elif 'document_offer_flow' in request:
+        from document_routing import offer_for_request
+        p['document_offer'] = offer_for_request(s, sid, request['document_offer_flow'], prompt, parent)
     p['context_binding'] = binding(p)
     real = provider is None
     if real:

@@ -1,6 +1,9 @@
 import unittest
 
-from review_targets import DOCUMENT_TEXT_REQUIRED, document_input_notice, document_review_requested, has_document_text
+from review_targets import (
+    DOCUMENT_TEXT_REQUIRED, document_file_target, document_input_notice,
+    document_review_requested, has_document_text,
+)
 
 
 class DocumentTargetTests(unittest.TestCase):
@@ -27,6 +30,46 @@ class DocumentTargetTests(unittest.TestCase):
             with self.subTest(prompt=prompt):
                 self.assertIn(f"this {kind} file", document_input_notice(prompt))
 
+    def test_opinion_requests_with_explicit_file_targets(self):
+        for prompt, path in (
+            ('what is your opinon on this document? - /Users/example/Downloads/remnant.docx',
+             '/Users/example/Downloads/remnant.docx'),
+            ('What’s your opinion of this report? - "drafts/Review draft.docx"', 'drafts/Review draft.docx'),
+            ('Thoughts on this document? - remnant.docx', 'remnant.docx'),
+            ('What do you think of this document?\nReview draft.docx', 'Review draft.docx'),
+            ('Review this resume please.\nPost_Silicon_Resume_ATS (1).docx\nSuggest revisions.',
+             'Post_Silicon_Resume_ATS (1).docx'),
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertTrue(document_review_requested(prompt))
+                self.assertIn("this DOCX file", document_input_notice(prompt))
+                self.assertEqual(document_file_target(prompt), path)
+
+    def test_admitted_document_intent_can_recover_an_explicit_filename(self):
+        prompt = 'Any red flags here? /Users/example/Downloads/remnant.docx'
+        self.assertIsNone(document_file_target(prompt))
+        self.assertEqual(document_file_target(prompt, classified=True), '/Users/example/Downloads/remnant.docx')
+
+    def test_conflicting_or_negated_references_have_no_automatic_target(self):
+        for prompt in (
+            'What is your opinion on this document? /tmp/a.docx or /tmp/b.docx',
+            'What is your opinion on this document? draft.docx or sample.pdf',
+            'Review this resume.\nFirst draft.docx\nSecond draft.docx',
+            'Do not review /tmp/draft.docx.',
+            'Do not open flags.docx.',
+            "What is your opinion on this document? Don't open /tmp/draft.docx.",
+            "Thoughts on this document?\nDon't open Second draft (1).docx",
+            'Review the code without reading /tmp/sample.docx.',
+            'Review Candidate.docx.\nDocument text:\nThis excerpt is already available.',
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertIsNone(document_file_target(prompt))
+                self.assertIsNone(document_file_target(prompt, classified=True))
+
+    def test_negation_of_other_files_preserves_selected_target(self):
+        prompt = "What is your opinion on this document? - /tmp/selected.docx. Don't open /tmp/other.docx."
+        self.assertEqual(document_file_target(prompt), '/tmp/selected.docx')
+
     def test_general_conversation_and_code_targets_are_untouched(self):
         for prompt in (
             'Resume our architecture review.',
@@ -42,6 +85,8 @@ class DocumentTargetTests(unittest.TestCase):
             'Explain how PDF parsing in the repository works.',
             'Review the PDF parser in src/pdf.ts, which uses /tmp/example.pdf as a fixture.',
             'Review src/export.py for how it writes /tmp/example.docx.',
+            'What is your opinion of this document parser? /tmp/example.docx is a fixture.',
+            'What is your opinion on the PDF readers in the repo? /tmp/example.docx is a fixture.',
             'Review report.pdf.ts.',
             'Review what public PDF formats support.',
             'Review this report at https://example.com/report.pdf',
@@ -53,6 +98,7 @@ class DocumentTargetTests(unittest.TestCase):
             with self.subTest(prompt=prompt):
                 self.assertIsNone(document_input_notice(prompt))
                 self.assertFalse(document_review_requested(prompt))
+                self.assertIsNone(document_file_target(prompt))
 
     def test_document_review_without_a_filename_requests_text(self):
         for prompt in (

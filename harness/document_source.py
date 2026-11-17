@@ -58,12 +58,21 @@ def _result(status, sizes=None):
 
 def locate_document(workspace, target):
     """Return eligible name matches and byte sizes using only file metadata."""
-    try:
-        name = _target(target)
-    except InvalidUpdate:
-        return _result('blocked')
     workspace = Path(workspace).resolve()
-    if len(name.parts) > 1:
+    exact = False
+    try:
+        absolute = Path(target) if isinstance(target, str) else None
+        if absolute is not None and absolute.is_absolute():
+            if (target.startswith(('//', '\\\\')) or target not in (str(absolute), absolute.as_posix())
+                    or '..' in absolute.parts):
+                return _result('blocked')
+            # Derive a scope-relative name without resolving the target or following links.
+            target = absolute.relative_to(workspace).as_posix()
+            exact = True
+        name = _target(target)
+    except (InvalidUpdate, ValueError):
+        return _result('blocked')
+    if exact or len(name.parts) > 1:
         try:
             with _directory(workspace, name.parts[:-1]) as folder:
                 metadata = ((folder / name.name).lstat() if os.name == 'nt'

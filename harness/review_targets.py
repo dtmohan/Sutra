@@ -8,28 +8,37 @@ _REVIEW = (
     r"(?:review|read|inspect|examine|analy[sz]e|summari[sz]e|proofread|critique|"
     r"assess|evaluate|look\s+at|comment\s+on)"
 )
-_QUALIFIERS = r"(?:(?:the|this|my|our|your|attached|following)\s+)*"
+_QUALIFIERS = r"(?:(?:the|this|my|our|your|attached|following|same)\s+)*"
 _SUFFIX = r'''\.(?P<kind>docx?|pdf)(?=$|[\s"`',;:!?()\[\]<>]|\.(?=\s|$))'''
 _PATH_PREFIX = r"(?:file://(?:localhost)?/|[a-z]:[/\\]|\\\\|~[/\\]|\.\.?[/\\]|/|[\w.-]+[/\\])"
 # An earlier filename followed by prose must not become part of a later target.
 _PATH = rf'''{_PATH_PREFIX}(?:(?!\.\w+\s)[^\r\n<>"`*?])+?'''
 _QUOTED_NAME = r'''["`](?!(?:https?|ftp)://)[\w~./\\][^\r\n<>"`*?]*?'''
-
-_DIRECT_TARGET = re.compile(
-    rf"\b{_REVIEW}\s+{_QUALIFIERS}(?:(?:file|document|from)\s+)*"
-    rf"(?P<target>(?:{_QUOTED_NAME}|{_PATH}|[\w][\w.-]*){_SUFFIX})",
-    re.IGNORECASE,
-)
-_DOCUMENT_REVIEW = re.compile(
-    rf"\b{_REVIEW}\s+{_QUALIFIERS}"
+_TARGET = rf"(?P<target>(?:{_QUOTED_NAME}|{_PATH}|[\w][\w.-]*){_SUFFIX})"
+_DOCUMENT_SUBJECT = (
+    rf"{_QUALIFIERS}"
     r"(?:file|document|r[eé]sum[eé]|cv|cover\s+letter|draft|report|paper|proposal|pdf|docx?)\b"
     r"(?!\s+(?:api|builder|code|converter|creation|export|extraction|fixture|generation|handling|"
-    r"implementation|integration|library|parser|pipeline|reader|renderer|support|writer)\b)",
+    r"implementation|integration|library|parser|pipeline|reader|renderer|support|writer)s?\b)"
+)
+
+_DIRECT_TARGET = re.compile(
+    rf"\b{_REVIEW}\s+{_QUALIFIERS}(?:(?:file|document|from)\s+)*{_TARGET}",
     re.IGNORECASE,
 )
-_LOCAL_TARGET = re.compile(rf"(?<![\w:./\\])(?P<target>{_PATH}{_SUFFIX})", re.IGNORECASE)
+_DOCUMENT_REVIEW = re.compile(rf"\b{_REVIEW}\s+{_DOCUMENT_SUBJECT}", re.IGNORECASE)
+_NAMED_TARGET = re.compile(rf"(?<![\w:./\\]){_TARGET}", re.IGNORECASE)
 _DOCUMENT_LINE = re.compile(r"""[^\r\n<>"`*?]+?\.docx""", re.IGNORECASE)
 _NEGATED = re.compile(r"\b(?:do\s+not|don['’]t|never|without|instead\s+of)\s+$", re.IGNORECASE)
+_NEGATED_DOCUMENT_ACTION = re.compile(
+    rf"\b(?:do\s+not|don['’]t|never|without)\s+(?:{_REVIEW}|open|access|load|fetch)(?:ing)?\b",
+    re.IGNORECASE,
+)
+_CLAUSE_END = re.compile(r"[?!;]|\.(?=\s|$)")
+_GREETING = re.compile(
+    r"(?:hi|hello|hey)(?:\s+(?:there|sutra))?[.!?]*|good\s+(?:morning|afternoon|evening)[.!?]*",
+    re.IGNORECASE,
+)
 
 DOCUMENT_TEXT_REQUIRED = "Paste the document or the sections you want reviewed under a “Document text:” heading."
 
@@ -50,6 +59,11 @@ _CAREER_REVIEW = re.compile(
     rf"(?:(?:a|the|this|my|your)\s+)*{_CAREER_DOCUMENT}\s+review\b)",
     re.IGNORECASE,
 )
+_OPINION_REVIEW = re.compile(
+    rf"{_REQUEST_CLAUSE}(?:what(?:\s+is|['’]s)\s+your\s+opini?on\s+(?:on|of|about)"
+    rf"|what\s+do\s+you\s+think\s+(?:of|about)|(?:your\s+)?thoughts\s+on)\s+{_DOCUMENT_SUBJECT}",
+    re.IGNORECASE,
+)
 _DOCUMENT_TEXT = re.compile(
     rf"^[ \t]*(?:document|{_CAREER_DOCUMENT})[ \t]+text:[ \t]*(?:\r?\n|$)",
     re.IGNORECASE | re.MULTILINE,
@@ -67,35 +81,63 @@ def refers_to_previous_review_target(prompt: str) -> bool:
     return bool(_REFERENTIAL_REVIEW.fullmatch(prompt))
 
 
-def _named_document_kind(prompt: str) -> Optional[str]:
-    target = _named_document(prompt)
-    return target.group("kind").upper() if target else None
-
-
-def _named_document(prompt: str):
-    target = next(
-        (match for match in _DIRECT_TARGET.finditer(prompt) if not _NEGATED.search(prompt[:match.start()])),
-        None,
+def _named_documents(prompt: str, *, classified=False) -> set:
+    positive_request = bool(_CAREER_REVIEW.search(prompt) or _OPINION_REVIEW.search(prompt)) or any(
+        not _NEGATED.search(prompt[:match.start()])
+        for rule in (_DIRECT_TARGET, _DOCUMENT_REVIEW)
+        for match in rule.finditer(prompt)
     )
-    if target is None and any(
-        not _NEGATED.search(prompt[:match.start()]) for match in _DOCUMENT_REVIEW.finditer(prompt)
-    ):
-        target = _LOCAL_TARGET.search(prompt)
-    return target
+    if not positive_request and (not classified or _NEGATED_DOCUMENT_ACTION.search(prompt)):
+        return set()
+
+    targets = set()
+    for index, line in enumerate(prompt.splitlines()):
+        matches = list(_NAMED_TARGET.finditer(line))
+        bare_line = line.strip().strip('"`').strip()
+        if (index and len(matches) <= 1 and "/" not in bare_line and "\\" not in bare_line
+                and not _NEGATED_DOCUMENT_ACTION.search(line) and _DOCUMENT_LINE.fullmatch(bare_line)):
+            targets.add((bare_line, "DOCX"))
+        else:
+            for match in matches:
+                clause = _CLAUSE_END.split(line[:match.start()])[-1]
+                if not _NEGATED_DOCUMENT_ACTION.search(clause):
+                    targets.add((match["target"].lstrip('"`'), match["kind"].upper()))
+    return targets
 
 
-def document_file_target(prompt: str) -> Optional[str]:
+def document_file_target(prompt: str, *, classified=False) -> Optional[str]:
     """Find an explicitly named DOCX in a document review request."""
     if not isinstance(prompt, str) or has_document_text(prompt):
         return None
-    named = _named_document(prompt)
-    targets = {named.group('target').lstrip('"`')} if named and named.group('kind').lower() == 'docx' else set()
-    if _CAREER_REVIEW.search(prompt) or _DOCUMENT_REVIEW.search(prompt):
-        for line in prompt.splitlines()[1:]:
-            line = line.strip().strip('"`').strip()
-            if _DOCUMENT_LINE.fullmatch(line):
-                targets.add(line)
-    return next(iter(targets)) if len(targets) == 1 else None
+    targets = _named_documents(prompt, classified=classified)
+    if len(targets) == 1:
+        name, kind = next(iter(targets))
+        if kind == 'DOCX':
+            return name
+    return None
+
+
+def may_use_retained_document(prompt: str) -> bool:
+    """A fresh reference or explicit re-read takes precedence over a snapshot."""
+    return bool(isinstance(prompt, str) and not _GREETING.fullmatch(prompt.strip()) and not has_document_text(prompt)
+                and not re.search(r'\.(?:docx?|pdf)\b', prompt, re.IGNORECASE)
+                and not re.search(
+                    rf'\b(?:another|different|new|updated|latest|revised|fresh)\s+'
+                    rf'(?:version\s+of\s+{_QUALIFIERS})?(?:{_DOCUMENT_SUBJECT})'
+                    r'|\b(?:reopen|re-?read|refresh)\b'
+                    rf"|\b(?:do not use|don['’]t use|never use|without using|ignore)\s+"
+                    rf'{_QUALIFIERS}(?:previous|earlier|last|old|saved|approved)\s+(?:document|draft|snapshot|file|{_CAREER_DOCUMENT})\b',
+                    prompt, re.IGNORECASE))
+
+
+def refers_to_retained_document(prompt: str) -> bool:
+    """Recognize continuations that can use an already approved snapshot."""
+    if not may_use_retained_document(prompt):
+        return False
+    return (refers_to_previous_review_target(prompt) or document_review_requested(prompt)
+            or bool(re.search(rf'\b(?:on|from|in|of|for|about|using)\s+(?:the|this|that|same|earlier|previous)\s+'
+                              rf'(?:{_CAREER_DOCUMENT}|document)\b(?![\w-]|\s+(?:parser|reader|converter|export|writer)\b)',
+                              prompt, re.IGNORECASE)))
 
 
 def document_text(prompt: str, *, leading=False) -> Optional[str]:
@@ -118,7 +160,7 @@ def has_document_text(prompt: str) -> bool:
 def document_review_requested(prompt: str) -> bool:
     """Recognize direct requests without treating a resume command as a subject."""
     return isinstance(prompt, str) and bool(
-        _CAREER_REVIEW.search(prompt) or _DOCUMENT_TEXT.search(prompt) or _named_document_kind(prompt)
+        _CAREER_REVIEW.search(prompt) or _OPINION_REVIEW.search(prompt) or _DOCUMENT_TEXT.search(prompt) or _named_documents(prompt)
     )
 
 
@@ -126,9 +168,10 @@ def document_input_notice(prompt: str) -> Optional[str]:
     """Ask for document text when the request has no explicit text body."""
     if not isinstance(prompt, str) or has_document_text(prompt):
         return None
-    kind = _named_document_kind(prompt)
-    if kind:
+    targets = _named_documents(prompt)
+    if len(targets) == 1:
+        _, kind = next(iter(targets))
         return f"Sutra needs the text from this {kind} file. {DOCUMENT_TEXT_REQUIRED}"
-    if _CAREER_REVIEW.search(prompt) or _DOCUMENT_TEXT.search(prompt):
+    if targets or _CAREER_REVIEW.search(prompt) or _OPINION_REVIEW.search(prompt) or _DOCUMENT_TEXT.search(prompt):
         return DOCUMENT_TEXT_REQUIRED
     return None

@@ -8,6 +8,7 @@ import json
 import re
 from context_manager import InvalidUpdate, ContextBudgetExceeded, canonical, sha
 from paging import Budget, PageFault
+from review_targets import document_file_target
 
 # Explicit compatibility for data-only conversations from known released policies.
 # Old executable proposals, workspace checkpoints and permissions remain stale.
@@ -16,6 +17,10 @@ LEGACY_POLICIES = {'2319f693bfd23c67bda96909572c6a5646d1a299497aa3ab9c23fc990721
                    'd71f0acf70b42a1d0cb1332c1413bfb85b90156d5820d590cdb19b41ea79ce04'}
 # Recomputed from the released VSIX policy manifests; never from an untrusted receipt.
 RELEASE_POLICIES = {
+    '0.42.0': 'f7696bff0467330eca914871125ce436c62a08627f01ac1a30a13e1dc0901b10',
+    '0.41.3': '9a85ba0a6d5abfad542069d58783ad16ca94b10d230da81cdef7564bf7c6cfa7',
+    '0.41.2': '2d21a9d2a89ffaf5ee9737eb43b1cda87049743b22a8240e1a8146174d73ff8f',
+    '0.41.1': 'd694db9e14fa9d5b9ef14565a3b395dcf3558dc7172614245bbc1cdc5204894d',
     '0.41.0': '5211363548db63d395d64839b7119cfd806518e4b3e9b587a1b58f93cb4c135a',
     '0.40.1': 'ba7c8a0b03562f0163dd2e3bfc43f5c34bb6cbd3aa113ab0e26fb3dc8280e13c',
     '0.40.0': '5871f7892da65b3a4a247e32d2bf0fe4e8bbc6ffe4c90318d2e20e30c50bc006',
@@ -124,6 +129,10 @@ def history(s, sid, parent):
                        'assistant': proposal['answer'], 'summary': proposal['summary'],
                        'intent': proposal['intent'],
                        'facts': proposal.get('facts', []), 'legacy': r['logic_hash'] != s.logic_hash})
+        if 'document_evidence' in p:
+            result[-1]['document_ref'] = {field: p['document_evidence'][field] for field in ('key', 'version', 'digest')}
+        if 'conversation_axis' in p:
+            result[-1]['conversation_axis'] = p['conversation_axis']
         parent = (p.get('memory') or {}).get('invocation_id')
     return result
 
@@ -154,11 +163,25 @@ def summary_limit(budget):
     return max(128, budget.response_reserve // 2)
 
 
+def document_turns(rows, request, base):
+    """Select prior review turns by their admitted document identity."""
+    document = base.get('document_evidence') or (base.get('document_offer') or {}).get('ref')
+    if not document:
+        return rows
+    if document.get('retained_from'):
+        ref = {field: document[field] for field in ('key', 'version', 'digest')}
+        return [row for row in rows if row.get('document_ref') == ref]
+    if document_file_target(request, classified=True):
+        return []
+    return rows
+
+
 def working_set(s, sid, parent, request, budget, base, system, schema_for, extra_bytes=None):
     base = {k: v for k, v in base.items() if k != 'repair'}
-    rows = history(s, sid, parent)
-    if not rows:
+    lineage = history(s, sid, parent)
+    if not lineage:
         return None
+    rows = document_turns(lineage, request, base)
     pins = []
     for row in reversed(rows):
         quotes = list(row['facts'])
@@ -166,10 +189,10 @@ def working_set(s, sid, parent, request, budget, base, system, schema_for, extra
         quotes += [line for line in row['user'].splitlines() if PIN.search(line)]
         for quote in dict.fromkeys(quotes):
             pins.append({'source': row['id'], 'quote': quote, 'authority': 'user_statement'})
-    memory = {'version': 2, 'invocation_id': parent, 'model': rows[0]['model'],
-              'summary_unverified': rows[0]['summary'], 'pinned_user_statements': pins,
-              'recent_turns': [], 'retrieved_turns': [], 'toc': [], 'stored_turns': len(rows),
-              'omitted_turns': len(rows), 'legacy_data_restored': any(r['legacy'] for r in rows)}
+    memory = {'version': 2, 'invocation_id': parent, 'model': lineage[0]['model'],
+              'summary_unverified': rows[0]['summary'] if rows else '', 'pinned_user_statements': pins,
+              'recent_turns': [], 'retrieved_turns': [], 'toc': [], 'stored_turns': len(lineage),
+              'omitted_turns': len(lineage), 'legacy_data_restored': any(r['legacy'] for r in rows)}
 
     memory_ceiling = None
 
@@ -202,8 +225,8 @@ def working_set(s, sid, parent, request, budget, base, system, schema_for, extra
         selected.add(row['id'])
         return True
 
-    # Keep the immediately previous turn intact; do not silently lose continuity.
-    if not add(rows[0], 'recent_turns'):
+    # Keep the latest in-scope turn intact.
+    if rows and not add(rows[0], 'recent_turns'):
         raise ContextBudgetExceeded('The latest turn and pinned statements cannot fit this model. Choose a larger context; the full turn is still saved.')
     for iid in base.get('requested_memory_pages', []):
         if iid in selected:
@@ -262,7 +285,7 @@ def working_set(s, sid, parent, request, budget, base, system, schema_for, extra
         if not fits():
             memory['toc'].pop()
     memory['recent_turns'].reverse()
-    memory['omitted_turns'] = len(rows) - len(selected)
+    memory['omitted_turns'] = len(lineage) - len(selected)
     memory['retrieval'] = 'Exact recent turns and lexical retrieval from receipt-backed Smriti pages. TOC is budgeted; semantic recall is not guaranteed. Ask using identifying words to page an older topic back in.'
     # Keep metadata in the fit calculation too.
     if not fits():

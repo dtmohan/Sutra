@@ -202,7 +202,8 @@ class EvidenceBridgeWorkflowTests(unittest.TestCase):
                 self.assertEqual(packet['request'], self.workspace_resume_request)
                 self.assertEqual(packet['document_evidence']['text'], self.file_text)
                 self.assertEqual(packet['contract'], contract)
-                self.assertIn('VAL-271', canonical(packet['memory']['pinned_user_statements']))
+                self.assertEqual(packet['memory']['invocation_id'], parent)
+                self.assertFalse(packet['memory']['pinned_user_statements'])
                 result['answer'] = 'Lead with PCIe validation and quantify the 17% triage improvement.'
 
             self.router = review
@@ -249,6 +250,403 @@ class EvidenceBridgeWorkflowTests(unittest.TestCase):
         _, details = orchestration_flow.info(self.ledger, resumed['flow_id'])
         saved = self.ledger.document(details['conversation_session'], details['document_evidence']['key'])
         self.assertEqual(json.loads(saved['source_json'])['path'], second)
+
+    def test_admitted_read_of_a_named_docx_uses_document_approval(self):
+        filename = 'replacement-plan.docx'
+        self.write_resume(filename)
+        self.router = lambda result, _: result.update(intent='workspace', workspace_request={
+            'operation': 'read', 'paths': [filename],
+        })
+        prompt = f'Any red flags here? {filename}'
+        with patch('document_source.read_bytes', side_effect=AssertionError('Read before user approval')):
+            paused = self.request('start', prompt=prompt)
+            self.assert_evidence_bridge(paused, 'document')
+            self.assertEqual(paused['stop']['evidence_bridge']['required'], 'document_file')
+            located = self.request('locate_document', paused)
+            self.assertEqual(located['stop']['document_lookup']['paths'], [filename])
+            self.assertEqual(located['stop']['budget']['used']['operations'], 0)
+
+    def test_workspace_docx_followup_reuses_approved_evidence_across_reload_and_tier(self):
+        parent, sid = self.seed_context()
+        self.write_resume(self.resume_file)
+        paused = self.request('start', prompt=self.workspace_resume_request, parent=parent)
+        located = self.request('locate_document', paused)
+        supplied = self.request('approve_document', located, document_path=self.resume_file, confirmed=True)
+        self.router = lambda result, _: result.update(answer='Initial résumé feedback.')
+        initial = self.request('step', supplied)
+        self.assertEqual(initial['state'], 'DONE')
+        original = self.models[-1].payloads[0]['document_evidence']
+        self.router = lambda result, _: result.update(answer='Please share the résumé text.')
+        with patch('orchestration_flow.retained_chat_document', return_value=None):
+            missed = self.request('start', prompt='Can you do a deeper analysis based on the résumé?',
+                                  parent=initial['conversation_id'])
+            self.assertEqual(missed['state'], 'DONE')
+            self.assertTrue(missed['conversation']['result']['admission']['admitted'])
+            self.assertNotIn('document_evidence', self.models[-1].payloads[0])
+        saved_budget = usage(self.ledger, sid)
+        saved_contract = conversation.contract(self.ledger, sid)
+
+        self.ledger.close()
+        self.ledger = InvocationLedger(self.storage / 'state.sqlite')
+        self.tier = 'high'
+        (self.workspace / self.resume_file).unlink()
+        prompt = 'can you do a deeper analysis on the resume comparing to market requirements [search web if needed]'
+
+        def targeted_review(result, packet):
+            self.assertEqual(packet['request'], prompt)
+            self.assertEqual(packet['contract'], saved_contract)
+            self.assertNotIn('VAL-271', canonical(packet['memory']))
+            self.assertIn('Initial résumé feedback.', [
+                item['assistant_unverified'] for item in packet['memory']['recent_turns']
+            ])
+            for field in ('key', 'version', 'digest', 'text'):
+                self.assertEqual(packet['document_evidence'][field], original[field])
+            self.assertEqual(packet['document_evidence']['text'], self.file_text)
+            self.assertEqual(packet['document_evidence']['retained_from'], expected_parent)
+            result['answer'] = 'Target PCIe validation roles at semiconductor vendors and platform integrators.'
+
+        self.router = targeted_review
+        expected_parent = missed['conversation_id']
+        with patch('document_source.locate_document', side_effect=AssertionError('Document was located again')), \
+                patch('document_source.read_bytes', side_effect=AssertionError('Document was read again')), \
+                patch('repository_tools.execute', side_effect=AssertionError('Follow-up entered repository mapping')):
+            followup = self.request('start', prompt=prompt, parent=expected_parent)
+            if followup['state'] == 'CLASSIFYING':
+                followup = self.request('step', followup)
+
+            self.assertEqual(followup['state'], 'DONE')
+            self.assertEqual(followup['conversation']['session'], sid)
+            self.assertTrue(followup['conversation']['result']['admission']['admitted'],
+                            followup['conversation']['result']['admission']['errors'])
+            self.assertEqual(self.decision(followup, 'EVIDENCE_REPAGED'), 'ALLOW')
+            self.assertIn('PCIe validation roles', followup['conversation']['result']['accepted_output']['answer'])
+
+            prompt = 'What employers and roles should I target based on this résumé?'
+            expected_parent = followup['conversation_id']
+            self.router = lambda result, _: result.update(answer='PCIe appears in 73% of current postings.')
+            rejected = self.request('start', prompt=prompt, parent=expected_parent)
+            self.assertFalse(rejected['conversation']['result']['admission']['admitted'])
+            self.assertEqual(rejected['state'], 'DONE')
+            self.router = targeted_review
+            next_turn = self.request('start', prompt=prompt, parent=expected_parent)
+            if next_turn['state'] == 'CLASSIFYING':
+                next_turn = self.request('step', next_turn)
+
+        self.assertEqual(next_turn['state'], 'DONE')
+        self.assertEqual(next_turn['conversation']['session'], sid)
+        self.assertTrue(next_turn['conversation']['result']['admission']['admitted'],
+                        next_turn['conversation']['result']['admission']['errors'])
+        self.assertEqual(self.models[-1].model, MODELS['high'])
+        packet = self.models[-1].payloads[0]
+        invalid = dict(packet, document_evidence={**packet['document_evidence'], 'retained_from': initial['conversation_id']})
+        invalid['context_binding'] = conversation.binding(invalid)
+        with self.assertRaisesRegex(InvalidUpdate, 'does not match the retained conversation context'):
+            conversation.request_check(self.ledger, sid, invalid)
+        after = usage(self.ledger, sid)
+        self.assertEqual(after['limits'], saved_budget['limits'])
+        self.assertEqual(after['used']['calls'], saved_budget['used']['calls'] + 5)
+        self.assertGreater(after['used']['tokens'], saved_budget['used']['tokens'])
+        for dimension in ('operations', 'source_bytes'):
+            self.assertEqual(after['used'][dimension], saved_budget['used'][dimension])
+        self.assertTrue(self.ledger.verify_invocations(sid))
+
+        self.router = None
+        previous_model_count = len(self.models)
+        fresh = self.request('start', prompt='Please reread this résumé from disk after my edits.',
+                             parent=next_turn['conversation_id'])
+        if fresh['state'] == 'CLASSIFYING':
+            self.request('step', fresh)
+        for model in self.models[previous_model_count:]:
+            for delivered in model.payloads:
+                self.assertNotIn('document_evidence', delivered)
+
+    def test_implicit_followup_repages_an_approved_docx_after_classifying(self):
+        self.write_resume(self.resume_file)
+        paused = self.request('start', prompt=self.workspace_resume_request)
+        located = self.request('locate_document', paused)
+        supplied = self.request('approve_document', located, document_path=self.resume_file, confirmed=True)
+        self.router = lambda result, _: result.update(answer='Initial review complete.')
+        initial = self.request('step', supplied)
+        self.assertEqual(initial['state'], 'DONE')
+        self.assertTrue(initial['conversation']['result']['admission']['admitted'])
+        sid = initial['conversation']['session']
+        parent = initial['conversation_id']
+        prior = self.models[-1].payloads[0]['document_evidence']
+        before = usage(self.ledger, sid)
+        contract = conversation.contract(self.ledger, sid)
+        (self.workspace / self.resume_file).unlink()
+        prompt = 'What would a skeptical board push back on?'
+
+        def classify(result, packet):
+            self.assertEqual(packet['request'], prompt)
+            self.assertEqual(packet['document_offer']['ref']['retained_from'], parent)
+            self.assertNotIn('document_evidence', packet)
+            self.assertNotIn(self.file_text, canonical(packet))
+            wire = canonical(conversation.ConversationModel(self.storage/'calls').messages(conversation.SYSTEM, packet))
+            self.assertIn('previous_snapshot', wire)
+            self.assertNotIn(packet['document_offer']['ref']['digest'], wire)
+            self.assertNotIn(self.file_text, wire)
+            schema = conversation.model_schema(packet, conversation.schema(packet))
+            self.assertIn('document_request', schema['required'])
+            self.assertEqual(schema['properties']['document_request']['enum'], ['previous_snapshot', 'none'])
+            result.update(intent='document', document_request='previous_snapshot')
+
+        def review(result, packet):
+            self.assertEqual(packet['request'], prompt)
+            self.assertEqual(packet['contract'], contract)
+            evidence = packet['document_evidence']
+            for key in ('key', 'version', 'digest', 'text'):
+                self.assertEqual(evidence[key], prior[key])
+            self.assertEqual(evidence['retained_from'], parent)
+            self.assertEqual(evidence['selected_by'], selected)
+            result.update(answer='The board may ask how the triage improvement was measured.')
+
+        with patch('document_source.locate_document', side_effect=AssertionError('Repeated document lookup')), \
+                patch('document_source.read_bytes', side_effect=AssertionError('Repeated source read')), \
+                patch('repository_tools.execute', side_effect=AssertionError('Follow-up entered workspace mapping')):
+            self.router = classify
+            followup = self.request('start', prompt=prompt, parent=parent)
+            self.assertEqual(followup['state'], 'CLASSIFYING')
+            selected = followup['routing_step']['result']['invocation_id']
+            self.assertEqual(self.decision(followup, 'EVIDENCE_REPAGED'), 'ALLOW')
+            self.assertEqual(usage(self.ledger, sid)['used']['calls'], before['used']['calls'] + 1)
+
+            self.ledger.close()
+            self.ledger = InvocationLedger(self.storage / 'state.sqlite')
+            self.tier = 'high'
+            self.router = review
+            finished = self.request('step', followup)
+
+        self.assertEqual(finished['state'], 'DONE')
+        self.assertEqual(finished['conversation']['session'], sid)
+        self.assertTrue(finished['conversation']['result']['admission']['admitted'])
+        self.assertIn('triage improvement', finished['conversation']['result']['accepted_output']['answer'])
+        self.assertEqual(self.models[-1].model, MODELS['high'])
+        delivered = self.models[-1].payloads[0]
+        substituted = dict(delivered, document_evidence={**delivered['document_evidence'], 'selected_by': parent})
+        substituted['context_binding'] = conversation.binding(substituted)
+        with self.assertRaises(InvalidUpdate):
+            conversation.request_check(self.ledger, sid, substituted)
+        after = usage(self.ledger, sid)
+        self.assertEqual(after['limits'], before['limits'])
+        self.assertEqual(after['used']['calls'], before['used']['calls'] + 2)
+        self.assertGreater(after['used']['tokens'], before['used']['tokens'])
+        for dimension in ('operations', 'source_bytes'):
+            self.assertEqual(after['used'][dimension], before['used'][dimension])
+        self.assertTrue(self.ledger.verify_invocations(sid))
+
+        def greet(result, packet):
+            self.assertNotIn('document_offer', packet)
+            self.assertNotIn('document_evidence', packet)
+            result.update(answer='Hello!')
+
+        self.router = greet
+        greeted = self.request('start', prompt='Hello!', parent=finished['conversation_id'])
+        self.assertEqual(greeted['state'], 'DONE')
+        self.assertEqual(greeted['conversation']['result']['accepted_output']['answer'], 'Hello!')
+
+    def test_implicit_document_offer_is_scoped_and_does_not_force_document_routing(self):
+        self.write_resume(self.resume_file)
+        paused = self.request('start', prompt=self.workspace_resume_request)
+        located = self.request('locate_document', paused)
+        supplied = self.request('approve_document', located, document_path=self.resume_file, confirmed=True)
+        self.router = lambda result, _: result.update(answer='Initial review complete.')
+        initial = self.request('step', supplied)
+        parent = initial['conversation_id']
+        self.assertEqual(initial['state'], 'DONE')
+        foreign_start = len(self.models)
+
+        def unrelated_reply(result, packet):
+            self.assertNotIn('document_evidence', packet)
+            self.assertNotIn(self.file_text, canonical(packet))
+            result.update(answer='An independent reply.')
+
+        self.router = unrelated_reply
+        with patch('document_source.read_bytes', side_effect=AssertionError('Unexpected source read')):
+            try:
+                foreign = self.request('start', prompt='What would a skeptical board push back on?',
+                                       parent=parent, chat_key='b' * 64)
+                if foreign['state'] == 'CLASSIFYING':
+                    self.request('step', foreign, chat_key='b' * 64)
+            except InvalidUpdate:
+                pass  # A foreign lineage may be refused before dispatch.
+            for model in self.models[foreign_start:]:
+                for packet in model.payloads:
+                    self.assertFalse(packet.get('document_offer'))
+                    self.assertNotIn('document_evidence', packet)
+                    self.assertNotIn(self.file_text, canonical(packet))
+
+            unrelated = self.request('start', prompt='Explain what a load balancer does.', parent=parent)
+            if unrelated['state'] == 'CLASSIFYING':
+                unrelated = self.request('step', unrelated)
+            self.assertEqual(unrelated['state'], 'DONE')
+            self.assertEqual(unrelated['conversation']['result']['accepted_output']['intent'], 'conversation')
+            self.assertEqual(unrelated['conversation']['result']['accepted_output']['document_request'], 'none')
+
+    def test_multiple_recent_documents_do_not_get_an_implicit_snapshot_offer(self):
+        self.router = lambda result, _: result.update(answer='Initial review complete.')
+        parent = None
+        for name in ('Option-A.docx', 'Option-B.docx'):
+            self.write_resume(name)
+            flow = self.request('start', prompt=f'Review {name}.', parent=parent)
+            flow = self.request('locate_document', flow)
+            flow = self.request('approve_document', flow, document_path=name, confirmed=True)
+            flow = self.request('step', flow)
+            self.assertEqual(flow['state'], 'DONE')
+            parent = flow['conversation_id']
+
+        def clarify(result, packet):
+            self.assertNotIn('document_offer', packet)
+            self.assertNotIn('document_evidence', packet)
+            result.update(intent='document', context_question='Which draft should I use first?')
+
+        self.router = clarify
+        with patch('document_source.read_bytes', side_effect=AssertionError('Ambiguous target read')):
+            flow = self.request('start', prompt='What would you change?', parent=parent)
+        self.assertEqual(flow['state'], 'PAUSED')
+        self.assertEqual(flow['stop']['error'], 'Which draft should I use first?')
+
+    def test_workspace_docx_evidence_does_not_cross_chat_or_document_targets(self):
+        self.write_resume(self.resume_file)
+        paused = self.request('start', prompt=self.workspace_resume_request)
+        located = self.request('locate_document', paused)
+        supplied = self.request('approve_document', located, document_path=self.resume_file, confirmed=True)
+        initial = self.request('step', supplied)
+        parent = initial['conversation_id']
+        self.assertEqual(initial['state'], 'DONE')
+
+        def independent_reply(result, packet):
+            self.assertNotIn('document_evidence', packet)
+            result['answer'] = 'An independent reply.'
+
+        self.router = independent_reply
+        with patch('document_source.read_bytes', side_effect=AssertionError('Unexpected document content read')):
+            unrelated = self.request('start', prompt='How does the résumé parser work in this codebase?', parent=parent)
+            if unrelated['state'] == 'CLASSIFYING':
+                unrelated = self.request('step', unrelated)
+            self.assertEqual(unrelated['state'], 'DONE')
+            self.assertTrue(unrelated['conversation']['result']['admission']['admitted'])
+
+            new_name = 'Other_Candidate.docx'
+            other_doc = self.request('start', prompt=f'Please review {new_name}.', parent=parent)
+            self.assert_evidence_bridge(other_doc, 'document')
+            self.assertEqual(other_doc['stop']['evidence_bridge']['target'], new_name)
+
+            previous_model_count = len(self.models)
+            try:
+                separate_chat = self.request('start', prompt='What roles fit this résumé?', parent=parent,
+                                             chat_key='b' * 64)
+                if separate_chat['state'] == 'CLASSIFYING':
+                    separate_chat = self.request('step', separate_chat, chat_key='b' * 64)
+            except InvalidUpdate:
+                pass  # A foreign lineage may be refused before model dispatch.
+            for model in self.models[previous_model_count:]:
+                for delivered in model.payloads:
+                    self.assertNotIn('document_evidence', delivered)
+
+    def test_named_document_and_its_followup_exclude_the_prior_document_topic(self):
+        self.write_resume(self.resume_file)
+        old_prompt = self.workspace_resume_request + '\nKeep feedback focused on private project RESUME-043.'
+        self.router = lambda result, _: result.update(answer='Prior findings RESUME-054.',
+                                                     summary='Prior summary RESUME-065.')
+        old = self.request('start', prompt=old_prompt)
+        old = self.request('locate_document', old)
+        old = self.request('approve_document', old, document_path=self.resume_file, confirmed=True)
+        old = self.request('step', old)
+        old_receipt, sid = old['conversation_id'], old['conversation']['session']
+        before = usage(self.ledger, sid)
+
+        filename = 'next-paper.docx'
+        body = 'The paper relates trajectory drift to an invariant structure.'
+        raw = docx(word_xml(f'<w:p><w:r><w:t>{body}</w:t></w:r></w:p>'))
+        (self.workspace / filename).write_bytes(raw)
+        prompt = f'What is your opinion on this document? - {self.workspace / filename}'
+
+        def review(result, packet):
+            messages = conversation.ConversationModel(self.storage / 'calls').messages(conversation.SYSTEM, packet)
+            self.assertEqual(json.loads(messages[1]['content'])['document_text'], body)
+            wire = canonical(messages)
+            self.assertNotIn(self.resume_file, wire)
+            for marker in ('RESUME-043', 'RESUME-054', 'RESUME-065'):
+                self.assertNotIn(marker, wire)
+            self.assertEqual(packet['memory']['toc'], [])
+            if packet['document_evidence'].get('retained_from'):
+                self.assertIn('Paper review PAPER-076.', wire)
+            else:
+                self.assertEqual(packet['memory']['invocation_id'], old_receipt)
+                self.assertEqual(packet['memory']['omitted_turns'], 1)
+            result.update(answer='Paper review PAPER-076.')
+
+        self.router = review
+        new = self.request('start', prompt=prompt, parent=old_receipt)
+        new = self.request('locate_document', new)
+        new = self.request('approve_document', new, document_path=filename, confirmed=True)
+        new = self.request('step', new)
+        self.assertTrue(new['conversation']['result']['admission']['admitted'])
+        self.assertEqual(new['conversation']['session'], sid)
+        self.assertEqual(conversation.cm.history(self.ledger, sid, new['conversation_id'])[-1]['id'], old_receipt)
+
+        self.tier = 'high'
+        with patch('document_source.read_bytes', side_effect=AssertionError('Snapshot re-read')):
+            followup = self.request('start', prompt='Review it again.', parent=new['conversation_id'])
+            if followup['state'] == 'CLASSIFYING':
+                followup = self.request('step', followup)
+        self.assertTrue(followup['conversation']['result']['admission']['admitted'])
+        self.assertEqual(followup['conversation']['session'], sid)
+        self.assertEqual(self.models[-1].model, MODELS['high'])
+        after = usage(self.ledger, sid)
+        self.assertEqual(after['used']['operations'], before['used']['operations'] + 1)
+        self.assertEqual(after['used']['source_bytes'], before['used']['source_bytes'] + len(raw))
+        self.assertEqual(after['used']['calls'], before['used']['calls'] + 2)
+        self.assertTrue(self.ledger.verify_invocations(sid))
+
+    def test_absolute_opinion_request_recovers_a_saved_paste_only_bridge(self):
+        self.write_resume(self.resume_file)
+        logical = str(self.workspace / self.resume_file)
+        prompt = f'what is your opinon on this document? - {logical}'
+        self.router = lambda result, _: result.update(intent='document', answer='Need the document.')
+        with patch('orchestration_flow.document_file_target', return_value=None), \
+                patch('orchestration_flow.document_input_notice', return_value=None):
+            old = self.request('start', prompt=prompt)
+        self.assertEqual(old['state'], 'PAUSED')
+        self.assertEqual(old['stop']['evidence_bridge']['required'], 'document_text')
+        sid = old['conversation']['session']
+        before = usage(self.ledger, sid)
+        self.assertEqual(before['used']['calls'], 1)
+        self.ledger.close()
+        self.ledger = InvocationLedger(self.storage / 'state.sqlite')
+
+        with patch('document_source.read_bytes', side_effect=AssertionError('Read before approval')):
+            located = self.request('locate_document', old)
+        self.assertEqual(located['flow_id'], old['flow_id'])
+        self.assertEqual(located['stop']['document_lookup']['paths'], [self.resume_file])
+        self.assertEqual(usage(self.ledger, sid), before)
+        approved = self.request('approve_document', located, document_path=self.resume_file, confirmed=True)
+        self.assertEqual(approved['state'], 'CLASSIFYING')
+        self.router = lambda result, packet: result.update(answer='The supplied evidence supports a review.')
+        done = self.request('step', approved)
+        self.assertTrue(done['conversation']['result']['admission']['admitted'])
+        self.assertEqual(done['conversation']['session'], sid)
+        packet = self.models[-1].payloads[-1]
+        self.assertEqual(packet['request'], prompt)
+        self.assertEqual(packet['document_evidence']['text'], self.file_text)
+        after = usage(self.ledger, sid)
+        self.assertEqual(after['limits'], before['limits'])
+        self.assertEqual(after['used']['calls'], 2)
+        self.assertEqual(after['used']['operations'], 1)
+
+    def test_absolute_opinion_request_needs_no_model_or_read_to_locate(self):
+        self.write_resume(self.resume_file)
+        prompt = f'what is your opinon on this document? - {self.workspace / self.resume_file}'
+        with patch.object(self, 'provider', side_effect=AssertionError('Model call before file approval')), \
+                patch('document_source.read_bytes', side_effect=AssertionError('Read before approval')):
+            paused = self.request('start', prompt=prompt)
+            self.assertEqual(paused['state'], 'PAUSED')
+            self.assertEqual(paused['stop']['evidence_bridge']['required'], 'document_file')
+            located = self.request('locate_document', paused)
+        self.assertEqual(located['stop']['document_lookup']['paths'], [self.resume_file])
+        self.assertEqual(located['stop']['budget']['used']['calls'], 0)
+        self.assertEqual(located['stop']['budget']['used']['source_bytes'], 0)
 
     def test_saved_paste_only_bridge_can_locate_original_workspace_docx(self):
         self.write_resume(self.resume_file)

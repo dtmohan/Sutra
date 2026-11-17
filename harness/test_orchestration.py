@@ -42,6 +42,94 @@ class OrchestrationTests(unittest.TestCase):
             if out['state']==phase:return out
         self.fail('Flow never reached '+phase+': '+str(out))
     def children(self):return self.until('CHILDREN')
+
+    def test_conversation_parent_stays_in_its_chat_across_reload_and_model_switch(self):
+        chat_a, chat_b = 'a' * 64, 'b' * 64
+        fact = 'Remember that Silvercliff uses ticket SC-4581.'
+
+        def provider(stage):
+            self.assertEqual(stage, 'conversation')
+
+            def reply(result, packet):
+                if packet['request'] == fact:
+                    result['facts'] = [fact]
+
+            model = Conversation(MODELS[self.tier], reply)
+            self.models.append((stage, model))
+            return model
+
+        self.provider = provider
+        first = self.step(prompt=fact, chat_key=chat_a, armed=False)
+        self.assertEqual(first['state'], 'DONE')
+        sid = first['conversation']['session']
+        parent = first['conversation_id']
+        original = review_budget.usage(self.s, sid)
+        contract = self.models[-1][1].payloads[0]['contract']
+        self.assertEqual(original['used']['calls'], 1)
+
+        separate = self.step(prompt='What do we have open?', chat_key=chat_b, armed=False)
+        self.assertNotEqual(separate['conversation']['session'], sid)
+        self.assertNotIn('SC-4581', canonical(self.models[-1][1].payloads[0]))
+
+        before_attempt = len(self.models)
+        with self.assertRaisesRegex(InvalidUpdate, 'another Sutra chat'):
+            self.step(prompt='What is my ticket?', chat_key=chat_b, parent=parent, armed=False)
+        self.assertEqual(len(self.models), before_attempt)
+        self.assertEqual(review_budget.usage(self.s, sid), original)
+
+        self.s.close()
+        self.s = InvocationLedger(self.root / 'state.sqlite')
+        self.tier = 'high'
+        followed = self.step(prompt='What is my ticket?', chat_key=chat_a, parent=parent, armed=False)
+        self.assertEqual(followed['state'], 'DONE')
+        self.assertEqual(followed['conversation']['session'], sid)
+        model = self.models[-1][1]
+        self.assertEqual(model.model, MODELS['high'])
+        packet = model.payloads[0]
+        self.assertEqual(packet['memory']['invocation_id'], parent)
+        self.assertIn(fact, [pin['quote'] for pin in packet['memory']['pinned_user_statements']])
+        self.assertEqual(packet['contract'], contract)
+        charged = review_budget.usage(self.s, sid)
+        self.assertEqual(charged['limits'], original['limits'])
+        self.assertEqual(charged['used']['calls'], original['used']['calls'] + 1)
+        self.assertGreater(charged['used']['tokens'], original['used']['tokens'])
+        self.assertEqual(charged['used']['source_bytes'], original['used']['source_bytes'])
+        self.assertTrue(self.s.verify_invocations(sid))
+
+    def test_legacy_receipt_with_foreign_ancestor_cannot_restore_memory(self):
+        chat_a, chat_b = 'a' * 64, 'b' * 64
+
+        def provider(stage):
+            self.assertEqual(stage, 'conversation')
+            model = Conversation(MODELS[self.tier])
+            self.models.append((stage, model))
+            return model
+
+        self.provider = provider
+        # Simulate receipts written before conversation axes were attached.
+        with patch('conversation.chat_axis', return_value=None):
+            first = self.step(prompt='Remember this chat concerns Project Ironlark.', chat_key=chat_a)
+            mixed = self.step(prompt='Continue that discussion.', chat_key=chat_b,
+                              parent=first['conversation_id'])
+        self.assertEqual(first['state'], 'DONE')
+        self.assertEqual(mixed['state'], 'DONE')
+        sid = first['conversation']['session']
+        self.assertEqual(mixed['conversation']['session'], sid)
+        self.assertIn('Ironlark', canonical(self.models[-1][1].payloads[0]['memory']))
+        before = review_budget.usage(self.s, sid)
+        count = len(self.models)
+
+        for chat in (chat_a, chat_b):
+            with self.subTest(chat=chat), self.assertRaisesRegex(InvalidUpdate, 'another Sutra chat'):
+                self.step(prompt='What was the earlier topic?', chat_key=chat, parent=mixed['conversation_id'])
+        self.assertEqual(len(self.models), count)
+        self.assertEqual(review_budget.usage(self.s, sid), before)
+
+        valid = self.step(prompt='What was the earlier topic?', chat_key=chat_a, parent=first['conversation_id'])
+        self.assertEqual(valid['state'], 'DONE')
+        self.assertEqual(valid['conversation']['session'], sid)
+        self.assertIn('Ironlark', canonical(self.models[-1][1].payloads[0]['memory']))
+
     def test_repaired_handoff_still_requires_host_arming_and_retains_limits(self):
         original=self.provider
         def provider(stage):

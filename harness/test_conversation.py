@@ -25,6 +25,8 @@ class Fake:
         result = {'page_requests': [], 'intent': 'conversation','escalation_reason':'none',
                   'diagram': None, 'answer': 'Hello. Let us discuss your idea.',
                   'summary': 'User prefers short answers; project nickname is Marigold.'}
+        if p.get('document_offer'):
+            result['document_request'] = 'none'
         if self.fault:
             self.fault(result, p)
         return result, {'ok': True}
@@ -288,6 +290,16 @@ class ConversationTests(unittest.TestCase):
         altered['context_binding'] = chat.binding(altered)
         with self.assertRaisesRegex(InvalidUpdate, 'differs from its evidence receipt'):
             chat.request_check(self.s, sid, altered)
+
+    def test_document_delivery_rejects_unsupported_numeric_percentages(self):
+        packet = {'request': 'Compare this résumé with typical requirements.',
+                  'document_evidence': {'text': 'Reduced triage time by 17%.'}}
+        proposal = {'intent': 'conversation', 'escalation_reason': 'none',
+                    'answer': 'Describe the documented 17 percent improvement. Add [measured coverage] if available.'}
+        chat.check_delivery(packet, proposal)
+        proposal['answer'] += ' Python appears in 73% of job postings.'
+        with self.assertRaisesRegex(InvalidUpdate, 'percentages absent from the document'):
+            chat.check_delivery(packet, proposal)
 
     def test_changed_or_cross_task_document_evidence_stops_before_model_call(self):
         prompt = 'Review my CV.'

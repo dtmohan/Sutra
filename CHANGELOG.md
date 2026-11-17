@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.42.1
+
+- Bind native conversation memory to its workspace and chat axis. Check the ancestry before restoring a receipt, including receipts saved by earlier releases.
+- Build a fresh model working set for newly approved named documents. Subsequent reviews of the same snapshot can restore turns from that document.
+
+## 0.42.0
+
+- Let the existing classifier request a verified same-chat document snapshot for implicit follow-ups. Resolve the selection against its original request, chat, and conversation receipts.
+- Ask which evidence is needed when the intended target is unclear. Record both classifier and answer calls when paging in an approved source.
+
+## 0.41.3
+
+- Recognize opinion requests with named DOCX files and resolve absolute paths inside the active workspace to scoped read targets.
+- Open file approval when a document is identified after a routing call. Keep the original workflow, spending, and model-call telemetry through approval and resume.
+
+## 0.41.2
+
+- Restore approved document evidence for same-chat follow-ups, including earlier reviews from 0.41.1. Keep the original read receipt and charge only new model calls.
+- Use documented figures or explicit placeholders in résumé examples. Request repair if a review adds numerical percentages absent from the source. Address employer reach through relevant roles, search terms and outreach steps.
+
 ## 0.41.1
 
 - Locate named DOCX files in the active workspace and request a one-time scoped read before extracting their text locally.

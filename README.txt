@@ -1,3 +1,26 @@
+Sutra 0.42.1 — Isolate chat and document context
+
+A native chat restores receipts that belong to its workspace and conversation.
+Approving a new named DOCX starts a document-specific working set. Reviewing
+the same approved snapshot can carry forward its earlier review turns.
+
+Sutra 0.42.0 — Resolve implicit document follow-ups
+
+Follow up in the chat that reviewed a document. The classifier can request
+one eligible approved snapshot using an identifier. Sutra verifies the
+selection, then supplies the snapshot to the answering model.
+
+Sutra 0.41.3 — Resolve absolute DOCX paths in the workspace
+
+An opinion request with an absolute or relative DOCX path inside the workspace
+can open a one-time read approval. Continue a saved request in the same chat to
+recover from an earlier request for pasted text.
+
+Sutra 0.41.2 — Continue an approved document review
+
+Follow up about the same document in its original Sutra chat to reuse the
+approved snapshot. Name a new file to request a separate read.
+
 Sutra 0.41.1 — Review named workspace documents
 
 Name a DOCX in Sutra Auto. Sutra locates it in the active workspace folder

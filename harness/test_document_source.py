@@ -54,6 +54,33 @@ class DocumentSourceTests(unittest.TestCase):
                 with self.assertRaises(InvalidUpdate):
                     document_source.read_document(self.workspace, target)
 
+    def test_absolute_workspace_path_is_exact_and_returns_a_relative_target(self):
+        workspace = self.workspace.resolve()
+        targets = (self.name, 'attachments/' + self.name)
+        for target in targets:
+            self.write(target)
+        with patch('document_source.MAX_SCAN_ENTRIES', 0), \
+                patch('document_source.read_bytes', side_effect=AssertionError('Document opened during lookup')):
+            for target in targets:
+                with self.subTest(target=target):
+                    self.assertEqual(
+                        document_source.locate_document(workspace, str(workspace / target)),
+                        {'status': 'found', 'paths': [target], 'sizes': {target: len(self.raw)}},
+                    )
+            self.assertEqual(document_source.locate_document(
+                workspace, str(workspace / 'missing' / self.name))['status'], 'missing')
+        with self.assertRaises(InvalidUpdate):
+            document_source.read_document(workspace, str(workspace / self.name))
+
+    def test_absolute_lookup_blocks_outside_paths_and_noncanonical_spellings(self):
+        workspace = self.workspace.resolve()
+        outside = workspace.with_name(workspace.name + '-outside')
+        for target in (str(outside / self.name), f'{workspace}/../{workspace.name}/{self.name}',
+                       f'{workspace}/./{self.name}', f'{workspace}//{self.name}'):
+            with self.subTest(target=target), \
+                    patch('document_source._directory', side_effect=AssertionError('Invalid target was probed')):
+                self.assertEqual(document_source.locate_document(workspace, target)['status'], 'blocked')
+
     def test_scan_limit_requires_explicit_relative_target(self):
         target = 'documents/' + self.name
         self.write(target)
@@ -82,11 +109,15 @@ class DocumentSourceTests(unittest.TestCase):
             self.skipTest(f'Symlinks unavailable: {exc}')
         for path in (target, 'redirect/' + self.name):
             self.assertEqual(document_source.locate_document(self.workspace, path)['status'], 'blocked')
+            self.assertEqual(document_source.locate_document(
+                self.workspace, str(self.workspace.resolve() / path))['status'], 'blocked')
             with self.assertRaises(InvalidUpdate):
                 document_source.read_document(self.workspace, path)
         original.unlink()
         os.link(self.workspace / 'real' / self.name, original)
         self.assertEqual(document_source.locate_document(self.workspace, self.name)['status'], 'blocked')
+        self.assertEqual(document_source.locate_document(
+            self.workspace, str(self.workspace.resolve() / target))['status'], 'blocked')
         with self.assertRaisesRegex(InvalidUpdate, 'hard links|unlinked'):
             document_source.read_document(self.workspace, target)
 

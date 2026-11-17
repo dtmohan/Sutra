@@ -501,7 +501,7 @@ function install(vscode,context,deps){
       if(running||deps.isBusy())throw new Error('Another Sutra operation started.');
       if(token.isCancellationRequested)throw new Error('Sutra action cancelled.');
       tickets.delete(options.input.ticket);running=true;activeCancel=new vscode.CancellationTokenSource();const cancel=token.onCancellationRequested(()=>activeCancel?.cancel());publish();
-      try{const access=assertArmed();const data=await deps.request({op:'native_execute',...t.binding,...t.flowScope,invocation_id:t.invocation_id},activeCancel.token);const result={...data.action_receipt,assertions_verified:false};assertCurrent(access,activeCancel.token);completed.set(t.callId,{prompt:t.prompt,conversationId:t.conversationId,result,generation:t.generation,binding:t.binding,thinkForTurn:t.thinkForTurn,flowScope:t.flowScope});if(data.task_stack)await rememberFlow(data,undefined,t.nativeChat,t.flowScope.chat_key);deps.publishReview(data);
+      try{const access=assertArmed();const data=await deps.request({op:'native_execute',...t.binding,...t.flowScope,invocation_id:t.invocation_id},activeCancel.token);const result={...data.action_receipt,assertions_verified:false};assertCurrent(access,activeCancel.token);completed.set(t.callId,{prompt:t.prompt,conversationId:t.conversationId,result,generation:t.generation,binding:t.binding,thinkForTurn:t.thinkForTurn,flowScope:t.flowScope,nativeChat:t.nativeChat});if(data.task_stack)await rememberFlow(data,undefined,t.nativeChat,t.flowScope.chat_key);deps.publishReview(data);
         return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify({receipt:result.id,status:result.result.status,target:t.preview.target,returncode:result.result.returncode,assertions_verified:false,note:'A zero exit status is a process observation, not verified test assertions.'}))]);
       }finally{cancel.dispose();activeCancel.dispose();activeCancel=undefined;running=false;publish();}
     }
@@ -537,9 +537,22 @@ function install(vscode,context,deps){
       }
       if(running||deps.isBusy())throw new Error('A Sutra request is running. Wait before switching models.');
       const request=latestRequest(vscode,messages);
+      const chatKey=memory.chatKey(options);
       if(!request.results){const saved=memory.resolve(vscode,messages,options,request.parent);request.parent=saved.parent;audit.memorySource=saved.source;}
       let prompt=request.prompt,conversationId,actionBinding,actionScope,thinkForTurn=thinkingForNextRequest;
-      if(request.results){assertArmed();if(request.results.length!==1)throw new Error('Unexpected tool results for Sutra.');const known=completed.get(request.results[0].callId);if(!known||known.generation!==armed.generation)throw new Error('Tool result lacks a current Sutra host receipt.');if(!['applied','process_exited_zero','process_failed'].includes(known.result.result.status)){progress.report(new vscode.LanguageModelTextPart('Sutra stopped after '+known.result.result.status+'. Inspect the host action receipt before continuing.'));return;}prompt=known.prompt;conversationId=known.conversationId;actionBinding=known.binding;actionScope=known.flowScope;thinkForTurn=known.thinkForTurn;}
+      if(request.results){
+        assertArmed();
+        if(request.results.length!==1)throw new Error('Unexpected tool results for Sutra.');
+        const known=completed.get(request.results[0].callId);
+        if(!known||known.generation!==armed.generation)throw new Error('Tool result lacks a current Sutra host receipt.');
+        const owner=known.nativeChat||known.flowScope?.chat_key;
+        if(chatKey&&owner&&owner!==chatKey)throw new Error('Tool result belongs to another Sutra chat.');
+        if(!['applied','process_exited_zero','process_failed'].includes(known.result.result.status)){
+          progress.report(new vscode.LanguageModelTextPart('Sutra stopped after '+known.result.result.status+'. Inspect the host action receipt before continuing.'));
+          return;
+        }
+        prompt=known.prompt;conversationId=known.conversationId;actionBinding=known.binding;actionScope=known.flowScope;thinkForTurn=known.thinkForTurn;
+      }
       let a=refreshAccess();
       const tier=Object.keys(MODEL_IDS).find(key=>MODEL_IDS[key]===model.id);
       if(!tier)throw new Error('Unknown Sutra tier');
@@ -548,9 +561,19 @@ function install(vscode,context,deps){
       if(!request.results&&thinkForTurn)void setNextThinking(false);
       let responseUsage={calls:[]},footerId,footerSignature;
       const recordUsage=result=>{responseUsage=tokens.merge(responseUsage,result?.token_usage);audit.token_usage=responseUsage;};
+      function recordConversation(chat){
+        const result=chat.result;
+        recordUsage(result);
+        lastRoute=chat.route.model;
+        Object.assign(audit,{model:lastRoute,memoryUsed:!!(chat.memory_used||audit.memoryUsed),
+          memoryAllocation:chat.memory_allocation,memoryStatus:chat.memory_status,modelCapacity:chat.model_capacity,
+          conversationBudget:chat.budget,invocationId:result.invocation_id,
+          stage:result.admission.admitted?'conversation':'withheld'});
+        publish();
+        return result;
+      }
       running=true;activeCancel=new vscode.CancellationTokenSource();const cancellation=token.onCancellationRequested(()=>activeCancel?.cancel());publish();
       let savedClassifierThinking;
-      const chatKey=memory.chatKey(options);
       const resumeToken=prompt.trim().match(RESUME_PROMPT)?.[1];
       const requestedResume=/^(continue|resume|please continue|please resume)[.! ]*$/i.test(prompt.trim())||!!resumeToken;
       const suppliedKind=!request.results&&(DOCUMENT_EVIDENCE.test(prompt)?'document':WORKSPACE_EVIDENCE.test(prompt.trim())?'workspace':null);
@@ -729,23 +752,36 @@ function install(vscode,context,deps){
                 savedClassifierThinking=pending.resumeThinking===true;
                 if(savedClassifierThinking)thinkForTurn=true;
               }
-              if(conversationId){footerSignature=await rememberMemory(conversationId);footerId=conversationId;}
+              if(conversationId){
+                footerSignature=legacyResume?memory.signature(conversationId):await rememberMemory(conversationId);
+                footerId=conversationId;
+              }
               progress.report(new vscode.LanguageModelTextPart('Resuming the saved Sutra workflow with its context and remaining budget.\n\n'));
             }
           }
           if(!flow)flow=await advance(null,'start',{prompt,parent:request.parent,
             prior_prompt:!chatKey&&!request.parent?request.priorPrompt:undefined});
-          if(documentFilePause(flow))flow=await readDocumentEvidence(flow);
           if(resuming&&flow.state==='PAUSED'&&flow.stop?.resume_phase==='CLASSIFYING'){
             flow=await advance(flow,'resume');
           }
           if(resuming&&flow.state==='CLASSIFYING')flow=await advance(flow,'step');
-          while(flow.routing_step||flow.state==='CLASSIFYING'){
+          let documentLookupAttempted=false;
+          while(flow.routing_step||flow.state==='CLASSIFYING'||(!documentLookupAttempted&&documentFilePause(flow))){
             assertCurrent(a,activeCancel.token);
             if(flow.routing_step){
               const step=flow.routing_step;recordUsage(step.result);lastRoute=step.route.model;audit.model=lastRoute;
               audit.routingDecision=step.routing_followup;audit.stage='routing';publish();
               progress.report(new vscode.LanguageModelTextPart((step.routing_followup?.kind==='page_in'?'Loading the requested conversation context before choosing a model.':step.routing_followup?.kind==='reasoning'?'Checking a higher supported reasoning setting on the same model against the remaining budget.':step.routing_followup?.kind==='escalate'?'Checking the next model tier against the remaining budget and available memory.':flow.progress)+'\n\n'));
+            }
+            if(!documentLookupAttempted&&documentFilePause(flow)){
+              documentLookupAttempted=true;
+              if(flow.conversation){
+                const classified=recordConversation(flow.conversation);
+                footerId=classified.invocation_id;
+                footerSignature=await rememberMemory(footerId);
+              }
+              flow=await readDocumentEvidence(flow);
+              continue;
             }
             if(flow.state==='PAUSED'){showPause(flow,audit,progress);return;}
             if(flow.state!=='CLASSIFYING')break;
@@ -756,7 +792,7 @@ function install(vscode,context,deps){
           const chat=flow.conversation;
           if(chat){
           assertCurrent(a,activeCancel.token);
-          const r=chat.result;recordUsage(r);lastRoute=chat.route.model;audit.model=lastRoute;audit.memoryUsed=!!(chat.memory_used||audit.memoryUsed);audit.memoryAllocation=chat.memory_allocation;audit.memoryStatus=chat.memory_status;audit.modelCapacity=chat.model_capacity;audit.conversationBudget=chat.budget;audit.invocationId=r.invocation_id;audit.stage=r.admission.admitted?'conversation':'withheld';publish();
+          const r=recordConversation(chat);
           if(!r.admission.admitted){progress.report(new vscode.LanguageModelTextPart('Sutra withheld the conversation response: '+r.admission.errors.join('; ')));return;}
           const p=r.accepted_output;
           if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&flow.state==='DONE'&&!flow.deferred_flow_id&&!flow.request_notice)throw new Error('No admitted action is available to satisfy required tool mode.');

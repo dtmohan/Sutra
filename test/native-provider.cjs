@@ -7,6 +7,7 @@ class Text{constructor(value){this.value=value;}}
 class Call{constructor(callId,name,input){Object.assign(this,{callId,name,input});}}
 class Result{constructor(callId,content){Object.assign(this,{callId,content});}}
 class CTS{constructor(){const listeners=[];this.token={isCancellationRequested:false,onCancellationRequested:f=>{listeners.push(f);return disposable();}};this.cancel=()=>{this.token.isCancellationRequested=true;for(const f of listeners)f();};}dispose(){}}
+const lastInvocation=new WeakMap();
 function setup(saved={}){
  let provider,tool,kind='edit',pick=0,discoveries=0,hold;const commands={},contextKeys={},uiCalls=[],calls=[],statuses=[],routeEvents=[],models={low:'model-a',mid:'model-b',high:'model-c'},cfg={nativeEnabled:true},policies={},overrides={};
  const st={session:'task-1',contract:{contract_hash:'contract-1',contract:{goal:'Fix retry',constraints:{native_task:true,allowed_paths:['src/retry.py'],edits_allowed:true,tests_allowed:true,network_allowed:false}}},calibration:{binding:{hash:'cal-1'}}};
@@ -18,7 +19,11 @@ function setup(saved={}){
  },isBusy:()=>false,modelSettings:()=>models,configureModels:async()=>models,onStatus:s=>statuses.push(s),onRoute:r=>routeEvents.push(r),publishReview:noop,showDiff:async()=>{},request:async(m,t)=>{
   calls.push(structuredClone(m));if(m.op==='state')return structuredClone(st);
   if(m.op==='conversation_read')return {result:{invocation_id:m.invocation_id,admission:{admitted:true},accepted_output:{summary:'retained context'}}};
-  if(m.op==='conversation')return {route:{model:models[m.tier]},result:{invocation_id:String(calls.length).padStart(32,'0'),admission:{admitted:true},accepted_output:{answer:'Conversational answer',summary:'compact note',intent:/hello|brainstorm|nickname/i.test(m.prompt)?'conversation':'workspace'}}};
+  if(m.op==='conversation'){
+   const next=Math.max(calls.length,(lastInvocation.get(saved)||0)+1);
+   lastInvocation.set(saved,next);
+   return {route:{model:models[m.tier]},result:{invocation_id:String(next).padStart(32,'0'),admission:{admitted:true},accepted_output:{answer:'Conversational answer',summary:'compact note',intent:/hello|brainstorm|nickname/i.test(m.prompt)?'conversation':'workspace'}}};
+  }
   if(m.op==='native_work'){if(hold)await hold(t);return {route:{model:models[m.tier]},result:{invocation_id:'inv-'+calls.length,admission:{admitted:true},accepted_output:{summary:'proposal',action:{kind},remaining:['Continue']}}};}
   if(m.op==='native_preview')return {target:'src/retry.py',diff:'- old\n+ new'};
   if(m.op==='native_execute')return {action_receipt:{id:'receipt',result:{status:'applied'}}};
@@ -206,7 +211,8 @@ function setup(saved={}){
  const {SUMMARY}=require('../native_memory'),saved={},compacted=setup(saved);
  const first=await compacted.send('low',[{role:1,content:[new Text('Hello, remember my audio chain')]}],{modelOptions:{_conversationId:'chat-a'}});
  const firstId=compacted.controller.status().routing.invocationId,beforeSummary=compacted.calls.filter(c=>c.op==='conversation').length;
- const summary=await compacted.send('low',[{role:1,content:[new Text('Flattened host history: '+first.map(p=>p.value||'').join(''))]},{role:1,content:[new Text(SUMMARY+'\nFocus particularly on recent tools. '+ 'x'.repeat(2000))]}]);
+ const compressed='The following is a compressed version of the preceeding history in the current conversation.';
+ const summary=await compacted.send('low',[{role:1,content:[new Text(compressed+'\n<assistant>'+first.map(p=>p.value||'').join('')+'</assistant>')]},{role:1,content:[new Text(SUMMARY+'\nFocus particularly on recent tools. '+ 'x'.repeat(2000))]}]);
  assert(summary.some(p=>p.value?.includes('KARMA_CONTEXT_V1:'+firstId)));
  assert.equal(compacted.calls.filter(c=>c.op==='conversation').length,beforeSummary);
  assert.equal(compacted.routeEvents.at(-1).stage,'compaction_checkpoint_preserved');
@@ -225,8 +231,39 @@ function setup(saved={}){
  const {NativeMemory}=require('../native_memory'),otherMemory=new NativeMemory({workspaceState:{get:()=>undefined}});
  assert.equal(otherMemory.resolve(compacted.v,[{role:1,content:summary},{role:1,content:[new Text('Hello')]}],{}).parent,undefined);
  const background=setup(),priorBackground=await background.send('low',[{role:1,content:[new Text('Hello')]}]);await background.arm();let resumeWork,workStarted;const workEntered=new Promise(r=>workStarted=r);background.hold(()=>new Promise(r=>{resumeWork=r;workStarted();}));const workRunning=background.send();await workEntered;const activeId=background.controller.status().routing.id;
- const backgroundSummary=await background.send('low',[{role:1,content:priorBackground},{role:1,content:[new Text(SUMMARY)]}]);assert(backgroundSummary.some(p=>p.value?.includes('KARMA_CONTEXT_V1')));assert.equal(background.controller.status().routing.id,activeId);assert(background.controller.status().routing.active);background.commands['karma.disarmNative']();resumeWork();await assert.rejects(workRunning,/cancelled|permission changed/);
+ const backgroundSummary=await background.send('low',[{role:2,content:priorBackground},{role:1,content:[new Text(SUMMARY)]}]);assert(backgroundSummary.some(p=>p.value?.includes('KARMA_CONTEXT_V1')));assert.equal(background.controller.status().routing.id,activeId);assert(background.controller.status().routing.active);background.commands['karma.disarmNative']();resumeWork();await assert.rejects(workRunning,/cancelled|permission changed/);
  checks.push('current user text cannot supply a checkpoint; workspace secrets isolate signatures; background compaction does not race or overwrite active inference state');
+ {
+  const {createHash,createHmac}=require('node:crypto');
+  const chatA={modelOptions:{_conversationId:'resume-chat'}};
+  const chatB={modelOptions:{_conversationId:'paper-chat'}};
+  const sameWorkspace={},windowA=setup(sameWorkspace);
+  const firstReply=await windowA.send('low',[{role:1,content:[new Text('Hello. Remember the résumé review.')] }],chatA);
+  const origin=windowA.controller.status().routing.invocationId;
+  const axis=createHash('sha256').update(chatA.modelOptions._conversationId).digest('hex');
+  const secret=sameWorkspace['karma.nativeMemory.v1'].secret;
+  const oldSig=createHmac('sha256',secret).update('karma-native-context-v1:'+origin).digest('hex');
+  const scopedSig=createHmac('sha256',secret).update('karma-native-context-v2:'+axis+':'+origin).digest('hex');
+  assert(firstReply.some(p=>p.value?.includes('checkpoint='+scopedSig)));
+  const copiedAssistant={role:2,content:firstReply};
+  const oldSummary={role:1,content:[new Text('<conversation-summary>KARMA_CONTEXT_V1:'+origin+':'+oldSig+'</conversation-summary>')]};
+  const unsigned={role:2,content:[new Text('Sutra conversation receipt: '+origin)]};
+  const ask={role:1,content:[new Text('Hello. This is my working paper.') ]};
+  const windowB=setup(sameWorkspace);
+  for(const previous of [copiedAssistant,oldSummary,unsigned]){
+    await windowB.send('high',[previous,ask],chatB);
+    assert.notEqual(windowB.calls.at(-1).parent,origin);
+  }
+  await windowB.send('high',[copiedAssistant,ask],chatA);
+  assert.equal(windowB.calls.at(-1).parent,origin);
+  await windowB.send('high',[oldSummary,ask],chatA);
+  assert.equal(windowB.calls.at(-1).parent,origin);
+  await windowB.send('high',[{role:1,content:[new Text('Copied footer '+firstReply.map(p=>p.value||'').join(''))]},ask],{});
+  assert.equal(windowB.calls.at(-1).parent,undefined);
+  await windowB.send('high',[unsigned,ask],{});
+  assert.equal(windowB.calls.at(-1).parent,undefined);
+  checks.push('signed and legacy memory checkpoints stay on their native chat axis across windows and reloads');
+ }
  const scoped=setup();scoped.st.auto={pending_files:0};scoped.st.contract.contract.constraints={allowed_paths:['.'],edits_allowed:false,tests_allowed:false,network_allowed:false,dependencies_allowed:false};
  const baseRequest=scoped.deps.backendRequest;let allow=false,grants=0;
  scoped.deps.backendRequest=async(m,t)=>{
@@ -654,6 +691,53 @@ function setup(saved={}){
   assert(answer.some(part=>part.value?.includes('quantified validation')));
   assert.equal(fixture.controller.status().pending,null);
   checks.push('a named workspace DOCX requests only file-specific read consent, can resume after declining, and uses the newly selected tier');
+ }
+ {
+  const fixture=setup(),traffic=[],file='remnant.docx',flowId='4'.repeat(32);
+  const chat={modelOptions:{_conversationId:'classified-docx-review'}};
+  const reply=(id,intent,answer)=>({route:{model:'model-a'},result:{
+   invocation_id:id,admission:{admitted:true},accepted_output:{intent,answer},
+   token_usage:{calls:[{invocation_id:id,stage:'conversation',model:'model-a',input_tokens:11,output_tokens:12}]}
+  }});
+  let dialogs=0;
+  fixture.v.window.showWarningMessage=async(_message,options,...buttons)=>{
+   dialogs++;
+   assert(options.detail.startsWith(file+'\n'));
+   assert.deepEqual(buttons,['Read document']);
+   return 'Read document';
+  };
+  let steps=0;
+  const stop={status:'evidence_bridge',resume_phase:'CLASSIFYING',
+   evidence_bridge:{target_kind:'document',required:'document_file',target:'/project/remnant.docx'}};
+  fixture.deps.request=async request=>{
+   traffic.push(request.event);
+   if(request.event==='pending')return {state:'DONE',flow_id:null};
+   if(request.event==='start')return {state:'CLASSIFYING',flow_id:flowId,cursor:'1'};
+   assert.equal(request.flow_id,flowId);
+   assert.equal(request.armed,false);
+   if(request.event==='locate_document'){
+    assert.equal(request.cursor,'2');
+    return {state:'PAUSED',flow_id:flowId,cursor:'3',stop:{...stop,document_lookup:{status:'found',paths:[file]}}};
+   }
+   if(request.event==='approve_document'){
+    assert.equal(request.cursor,'3');
+    assert.equal(request.document_path,file);
+    assert.equal(request.confirmed,true);
+    return {state:'CLASSIFYING',flow_id:flowId,cursor:'4'};
+   }
+   assert.equal(request.event,'step');
+   if(steps++===0)return {state:'PAUSED',flow_id:flowId,cursor:'2',stop,
+    conversation:reply('5'.repeat(32),'document','Unpublished router draft')};
+   assert.equal(request.cursor,'4');
+   return {state:'DONE',flow_id:flowId,cursor:'5',conversation:reply('6'.repeat(32),'conversation','Review of the supplied file.')};
+  };
+  const output=await fixture.send('low',[{role:1,content:[new Text('Thoughts? /project/remnant.docx')]}],chat);
+  assert.deepEqual(traffic,['pending','start','step','locate_document','approve_document','step']);
+  assert.equal(dialogs,1);
+  assert(output.some(part=>part.value?.includes('Review of the supplied file.')));
+  assert(!output.some(part=>part.value?.includes('Unpublished router draft')));
+  assert(output.some(part=>part.value?.includes('2 calls')));
+  checks.push('a document discovered by the model after classification opens one scoped read approval and retains both calls in the footer');
  }
  {
   const workspace=setup(),traffic=[],invocation='b'.repeat(32),flowId='c'.repeat(32);

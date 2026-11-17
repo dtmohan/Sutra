@@ -16,7 +16,7 @@ for(const label of ['Karma','Sutra']){
  assert.equal(memory.resolve(vscode,history,{}).parent,id);
 }
 assert.equal(memory.signature(id),oldSignature);
-assert.equal(memory.resolve(vscode,[{role:1,content:[new Text(`KARMA_CONTEXT_V1:${id}:${oldSignature}`)]},{role:1,content:[new Text('Continue')]}],{}).parent,id);
+assert.equal(memory.resolve(vscode,[{role:1,content:[new Text(`<conversation-summary>KARMA_CONTEXT_V1:${id}:${oldSignature}</conversation-summary>`)]},{role:1,content:[new Text('Continue')]}],{}).parent,id);
 assert.equal(pkg.displayName,'Sutra');
 assert.equal(pkg.name,'karma-local-harness');assert.equal(pkg.publisher,'deepak-local');
 assert.equal(pkg.contributes.chatParticipants[0].name,'sutra');
