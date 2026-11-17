@@ -1,3 +1,7 @@
+# Sutra 0.38.1 — thinking for one chat request
+
+Click the lightbulb in the VS Code Chat toolbar to request thinking for your next Sutra turn. Click the lit bulb to cancel. Sutra shows thinking inline when the local model streams it. Later requests use your saved reasoning setting, which defaults to Adaptive.
+
 # Sutra 0.38.0 — Git provenance and targeted architecture evidence
 
 Architecture reviews record the open checkout's commit, branch and working tree status before reviewing source. Upstream status uses local tracking data and is labeled accordingly. A request for the latest upstream version asks you to confirm the open snapshot or open the intended checkout. Sutra checks the snapshot again before it publishes the report.

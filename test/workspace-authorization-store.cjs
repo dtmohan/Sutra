@@ -43,6 +43,7 @@ function windowFor(root, storage) {
       getConfiguration: () => ({get: (_key, fallback) => fallback}),
     },
     commands: {
+      executeCommand: async () => {},
       registerCommand(name, callback) {
         commands.set(name, callback);
         return disposable();

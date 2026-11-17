@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.38.1
+
+- Add a cancellable lightbulb in native VS Code Chat to request thinking for the next Sutra turn. Later turns use the saved reasoning setting.
+- Preserve the reasoning choice when resuming a saved routing step. Clarify how Adaptive starts workspace reviews and when inline thinking appears.
+
 ## 0.38.0
 
 - Record Git checkout provenance for architecture reviews and ask for confirmation when the request calls for a newer upstream snapshot.

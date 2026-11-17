@@ -32,8 +32,17 @@ For an admitted conversation proposal that needs help:
 Model assessments are unverified proposals. The host selects controls and
 validates receipts, context, permissions, resources and remaining allocation.
 The supplied STP kernel is unchanged. Reasoning is not a correctness score.
-Workspace workers and independent reviewers use model-default reasoning in
-Adaptive mode; this release does not add an effort cascade to every tool role.
+Workspace workers and independent reviewers start at the lowest supported
+effort in Adaptive mode. Evidence selection also uses that effort to leave
+room for its read plan.
+
+To request thinking once, click the lightbulb in the native VS Code Chat
+toolbar or run **Sutra: Think on Next Request**. Click it again to cancel.
+It applies to the next Sutra request in this window, including its workspace
+calls. Later requests use your saved reasoning setting. When the local model
+streams thinking text, Sutra displays it inline.
+If routing has already started on a saved request, Resume keeps that routing
+step's reasoning preference.
 
 ## Supported controls
 

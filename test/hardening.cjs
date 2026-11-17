@@ -4,9 +4,14 @@ const {EventEmitter}=require('node:events');
 const root=path.resolve(__dirname,'..'),tmp=fs.mkdtempSync(path.join(os.tmpdir(),'karma-host-test-'));
 const views=new Map(),statusItems=[],commands=new Map(),tools=new Map(),participants=new Map(),intervals=[],timers=[],prompts=[],requests=[],changes=[],panelMessages=[];
 const tierModels={low:'fixture-small',mid:'fixture-mid',high:'fixture-large'};
-const runtimeUpdates=[],bridgeAllocations=[];
+const runtimeUpdates=[],bridgeAllocations=[],bridgeThinking=[];
 const repoAllocation={source_bytes:1024000000};
 let userAllocation,provider,panel,holdDashboard=false,pendingDashboard,bridgeCount=0,dashboardSpawns=0;
+let nativeRequest;
+const nativeProvider={install(_vscode,_context,deps){
+ nativeRequest=deps.request;
+ return {status:()=>({working:false}),publish(){},dispose(){}};
+}};
 let state={contract:{contract_hash:'fixture-contract',contract:{constraints:{}}},calibration:{binding:{hash:'fixture-calibration'}},session:'fixture',model:'fixture-model',report:'architecture v1',api:{report:'API v1'}};
 const disposable=()=>({dispose(){}}),uri=value=>({scheme:'file',fsPath:value,toString(){return value;}});
 class Emitter{event=(cb)=>{this.cb=cb;return disposable();};fire(value){changes.push(value.toString());this.cb?.(value);}dispose(){}}
@@ -15,6 +20,7 @@ function spawn(exe,args,options){
  const streaming=args.includes('--dashboard-stream');if(streaming)dashboardSpawns++;
  const child=new EventEmitter();child.stdout=new EventEmitter();child.stderr=new EventEmitter();child.stdin=new EventEmitter();child.kill=()=>true;
  child.stdin.end=child.stdin.write=raw=>{const req=streaming?{op:'dashboard'}:JSON.parse(raw);requests.push(req);bridgeCount++;
+  if(!streaming)bridgeThinking.push(options.env.SUTRA_THINKING);
   const finish=()=>{if(req.op==='auto_new')state={...state,contract:{contract_hash:'fixture-contract',contract:{constraints:{auto_review:true}}},calibration:{binding:{hash:'fixture-calibration'}},session:'new-review',auto:{pending_files:0,mapped_files:2,source_files:2}};
    const data=req.op==='orchestrate'?{flow_id:'fixture-flow',state:'DONE',data:{state,route:{tier:'low',model:tierModels.low},result:{invocation_id:'fixture',admission:{admitted:true},accepted_output:{answer:'Fixture answer',remaining:[]}},coverage:{mapped_files:2,source_files:2},source_files:['a.py']}}:req.op==='models'?{models:Object.values(tierModels).map(name=>({name,eligible:true})),suggested_tiers:tierModels}:req.op==='chat_answer'?{state,route:{tier:'low',model:tierModels.low,reason:'focused request'},result:{invocation_id:'fixture-invocation',admission:{admitted:true},accepted_output:{answer:'Fixture answer',remaining:[]}},coverage:{mapped_files:2,source_files:2},source_files:['a.py']}:req.op==='calibration_list'?{binding:{hash:'fixture',profiles:[]},profiles:[]}:req.op==='dashboard'?{hardware:{available:false,temperatures:{cpu:{available:true,maximum_celsius:42.12},gpu:{available:true,maximum_celsius:40.82}}},runs:[],invocations:{},actions:[]}:state;
    child.stdout.emit('data',Buffer.from(JSON.stringify({ok:true,data})+'\n'));if(!streaming)child.emit('close',0,null);};
@@ -34,7 +40,7 @@ const vscode={
  lm:{registerTool(n,t){tools.set(n,t);return disposable();}},LanguageModelToolResult:class{constructor(content){this.content=content;}},LanguageModelTextPart:class{constructor(value){this.value=value;}}
 };
 const moduleFixture={exports:{}};
-const context={module:moduleFixture,exports:moduleFixture.exports,require:n=>n==='vscode'?vscode:n==='node:child_process'?{spawn}:n==='./model_activity'?require('../model_activity'):n==='./media/token_usage'?require('../media/token_usage'):n==='./usage_view'?require('../usage_view'):n==='./diagram_view'?require('../diagram_view'):n==='./model_selection'?require('../model_selection'):n==='./capabilities'?require('../capabilities'):n==='./native_provider'?require('../native_provider'):require(n),process,Buffer,console,queueMicrotask,structuredClone,
+const context={module:moduleFixture,exports:moduleFixture.exports,require:n=>n==='vscode'?vscode:n==='node:child_process'?{spawn}:n==='./model_activity'?require('../model_activity'):n==='./media/token_usage'?require('../media/token_usage'):n==='./usage_view'?require('../usage_view'):n==='./diagram_view'?require('../diagram_view'):n==='./model_selection'?require('../model_selection'):n==='./capabilities'?require('../capabilities'):n==='./native_provider'?nativeProvider:n==='./workspace_authorization'?require('../workspace_authorization'):require(n),process,Buffer,console,queueMicrotask,structuredClone,
  setInterval:fn=>{intervals.push(fn);return fn;},clearInterval(){},setTimeout:(fn,ms)=>{timers.push({fn,ms});return fn;},clearTimeout(){}};
 context.process={...process,env:{...process.env,SUTRA_WORKSPACE_ALLOCATION:'{"tokens":999999}'}};
 vm.runInNewContext(fs.readFileSync(path.join(root,'extension.js'),'utf8'),context,{filename:'extension.js'});
@@ -131,5 +137,21 @@ const subscriptions=[];
  assert.throws(()=>telemetry.darwinAvailable('unavailable'));
  const pkg=JSON.parse(fs.readFileSync(path.join(root,'package.json')));assert(pkg.contributes.commands.some(c=>c.command==='karma.openReport'));
  for(const name of ['importCalibration','selectCalibrations','revokeCalibration','evaluateCalibration'])assert(pkg.contributes.commands.some(c=>c.command==='karma.'+name));
- console.log(JSON.stringify({passed:true,checks:['runtime settings validate before saving and never dispatch or change the task','greeting with legacy task requires no model or state mutation','legacy task yields actionable guidance without duplicate error or model discovery','explicit /new creates a separate review and dispatches','new-review command arguments cannot bypass user goal entry','first-open model picker waits for webview readiness','status renders measured CPU/GPU Celsius','real errors render once','restricted public API','command arguments cannot bypass user input','calibration commands require user selection','no agent calibration mutation tools','agent tool boundary','native @sutra uses private bridge and configured models, never VS Code inference or transcript replay','cancelled native chat never dispatches','model discovery preserves configured choices; command arguments cannot replace them','live report refresh and invalidation','persistent single-flight dashboard','Darwin reclaimable-memory parser','report and calibration commands declared']},null,2));
+ vscode.lm.registerLanguageModelChatProvider=()=>disposable();
+ moduleFixture.exports.activate({subscriptions,extensionPath:root,globalStorageUri:uri(tmp),extension:{packageJSON:{version:'0.18.0'}}});
+ const requestsBeforeOverride=requests.length,updatesBeforeOverride=runtimeUpdates.length;
+ for(const event of ['start','step']){
+  await nativeRequest({op:'orchestrate',event,think_for_turn:true});
+  assert.equal(bridgeThinking.at(-1),'on');
+  assert(!Object.hasOwn(requests.at(-1),'think_for_turn'),'Private transport flag reached the bridge payload');
+ }
+ await nativeRequest({op:'orchestrate',event:'start'});
+ assert.equal(bridgeThinking.at(-1),'adaptive');
+ for(const msg of [{op:'orchestrate',event:'start',think_for_turn:'on'},{op:'orchestrate',event:'pending',think_for_turn:true},{op:'state',think_for_turn:true}])
+  await assert.rejects(nativeRequest(msg),/Invalid Sutra reasoning override/);
+ await panel.webview.receive({op:'orchestrate',event:'start',think_for_turn:true});
+ assert.equal(requests.length,requestsBeforeOverride+3,'Untrusted reasoning overrides dispatched');
+ assert.equal(runtimeUpdates.length,updatesBeforeOverride,'One-request reasoning changed persisted settings');
+ assert(panelMessages.some(m=>m.type==='error'&&m.message.includes('Invalid Sutra reasoning override')));
+ console.log(JSON.stringify({passed:true,checks:['runtime settings validate before saving and never dispatch or change the task','greeting with legacy task requires no model or state mutation','legacy task yields actionable guidance without duplicate error or model discovery','explicit /new creates a separate review and dispatches','new-review command arguments cannot bypass user goal entry','first-open model picker waits for webview readiness','status renders measured CPU/GPU Celsius','real errors render once','restricted public API','command arguments cannot bypass user input','calibration commands require user selection','no agent calibration mutation tools','agent tool boundary','native @sutra uses private bridge and configured models, never VS Code inference or transcript replay','cancelled native chat never dispatches','one-request reasoning stays in the trusted child environment and preserves Adaptive','model discovery preserves configured choices; command arguments cannot replace them','live report refresh and invalidation','persistent single-flight dashboard','Darwin reclaimable-memory parser','report and calibration commands declared']},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>{for(const d of subscriptions)d.dispose?.();fs.rmSync(tmp,{recursive:true,force:true});});

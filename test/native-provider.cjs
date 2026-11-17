@@ -8,9 +8,9 @@ class Call{constructor(callId,name,input){Object.assign(this,{callId,name,input}
 class Result{constructor(callId,content){Object.assign(this,{callId,content});}}
 class CTS{constructor(){const listeners=[];this.token={isCancellationRequested:false,onCancellationRequested:f=>{listeners.push(f);return disposable();}};this.cancel=()=>{this.token.isCancellationRequested=true;for(const f of listeners)f();};}dispose(){}}
 function setup(saved={}){
- let provider,tool,kind='edit',pick=0,discoveries=0,hold;const commands={},uiCalls=[],calls=[],statuses=[],routeEvents=[],models={low:'model-a',mid:'model-b',high:'model-c'},cfg={nativeEnabled:true},policies={},overrides={};
+ let provider,tool,kind='edit',pick=0,discoveries=0,hold;const commands={},contextKeys={},uiCalls=[],calls=[],statuses=[],routeEvents=[],models={low:'model-a',mid:'model-b',high:'model-c'},cfg={nativeEnabled:true},policies={},overrides={};
  const st={session:'task-1',contract:{contract_hash:'contract-1',contract:{goal:'Fix retry',constraints:{native_task:true,allowed_paths:['src/retry.py'],edits_allowed:true,tests_allowed:true,network_allowed:false}}},calibration:{binding:{hash:'cal-1'}}};
- const v={EventEmitter,CancellationTokenSource:CTS,LanguageModelTextPart:Text,LanguageModelToolCallPart:Call,LanguageModelToolResultPart:Result,LanguageModelToolResult:class{constructor(content){this.content=content;}},LanguageModelChatMessageRole:{User:1,Assistant:2},LanguageModelChatToolMode:{Auto:1,Required:2},ConfigurationTarget:{Global:1},MarkdownString:class{value='';appendText(t){this.value+=t;}appendCodeblock(t){this.value+='\n'+t;}},Uri:{file:p=>({fsPath:p})},workspace:{getConfiguration:()=>({get:(k,d)=>overrides[k]??cfg[k]??d,inspect:k=>({globalValue:cfg[k],policyValue:policies[k]}),update:async(k,x)=>{cfg[k]=x;}}),onDidChangeConfiguration:()=>disposable()},window:{showErrorMessage:async message=>{uiCalls.push(['error',message]);},showInformationMessage:async message=>{uiCalls.push(['notice',message]);},showWarningMessage:async(_m,_o,...labels)=>labels.at(-1),showQuickPick:async choices=>{pick++;return choices[0];}},commands:{getCommands:async()=>['workbench.action.chat.newLocalChat'],executeCommand:async(...args)=>{uiCalls.push(args);},registerCommand:(n,f)=>{commands[n]=f;return disposable();}},lm:{selectChatModels:async()=>{discoveries++;return provider.provideLanguageModelChatInformation();},registerLanguageModelChatProvider:(n,p)=>{assert.equal(n,'karma');provider=p;return disposable();},registerTool:(n,t)=>{assert.equal(n,'karma_native_action');tool=t;return disposable();}}};
+ const v={EventEmitter,CancellationTokenSource:CTS,LanguageModelTextPart:Text,LanguageModelToolCallPart:Call,LanguageModelToolResultPart:Result,LanguageModelToolResult:class{constructor(content){this.content=content;}},LanguageModelChatMessageRole:{User:1,Assistant:2},LanguageModelChatToolMode:{Auto:1,Required:2},ConfigurationTarget:{Global:1},MarkdownString:class{value='';appendText(t){this.value+=t;}appendCodeblock(t){this.value+='\n'+t;}},Uri:{file:p=>({fsPath:p})},workspace:{getConfiguration:()=>({get:(k,d)=>overrides[k]??cfg[k]??d,inspect:k=>({globalValue:cfg[k],policyValue:policies[k]}),update:async(k,x)=>{cfg[k]=x;}}),onDidChangeConfiguration:()=>disposable()},window:{showErrorMessage:async message=>{uiCalls.push(['error',message]);},showInformationMessage:async message=>{uiCalls.push(['notice',message]);},showWarningMessage:async(_m,_o,...labels)=>labels.at(-1),showQuickPick:async choices=>{pick++;return choices[0];}},commands:{getCommands:async()=>['workbench.action.chat.newLocalChat'],executeCommand:async(...args)=>{if(args[0]==='setContext')contextKeys[args[1]]=args[2];else uiCalls.push(args);},registerCommand:(n,f)=>{commands[n]=f;return disposable();}},lm:{selectChatModels:async()=>{discoveries++;return provider.provideLanguageModelChatInformation();},registerLanguageModelChatProvider:(n,p)=>{assert.equal(n,'karma');provider=p;return disposable();},registerTool:(n,t)=>{assert.equal(n,'karma_native_action');tool=t;return disposable();}}};
  const deps={workspace:()=>'/project',authorization:{
   scope:()=>deps.workspace(),read:()=>saved.access,write:record=>{saved.access=structuredClone(record);}
  },isBusy:()=>false,modelSettings:()=>models,configureModels:async()=>models,onStatus:s=>statuses.push(s),onRoute:r=>routeEvents.push(r),publishReview:noop,showDiff:async()=>{},request:async(m,t)=>{
@@ -57,7 +57,7 @@ function setup(saved={}){
  };
  const controller=install(v,{subscriptions:[],workspaceState:{get:k=>saved[k],update:async(k,value)=>{saved[k]=structuredClone(value);}}},deps),token=new CTS();
  const send=async(tier='low',messages=[{role:1,content:[new Text('Fix retry')]}],options={tools:[{name:'karma_native_action'},{name:'run_in_terminal'}]})=>{const parts=[];await provider.provideLanguageModelChatResponse({id:'karma-'+tier},messages,options,{report:p=>parts.push(p)},token.token);return parts;};
- return {flowRequests,statuses,routeEvents,policies,overrides,v,provider,tool,commands,uiCalls,calls,st,controller,cfg,token,send,arm:()=>commands['karma.armNative']({goal:'BYPASS',roots:['/']}),kind:k=>{kind=k;},hold:h=>{hold=h;},picks:()=>pick,discoveries:()=>discoveries,deps};
+ return {flowRequests,statuses,routeEvents,policies,overrides,v,provider,tool,commands,contextKeys,uiCalls,calls,st,controller,cfg,token,send,arm:()=>commands['karma.armNative']({goal:'BYPASS',roots:['/']}),kind:k=>{kind=k;},hold:h=>{hold=h;},picks:()=>pick,discoveries:()=>discoveries,deps};
 }
 (async()=>{
  const checks=[];const h=setup();
@@ -68,6 +68,31 @@ function setup(saved={}){
  assert.deepEqual(h.uiCalls[0],['workbench.panel.chat.view.copilot.focus']);assert.deepEqual(h.uiCalls[1],['workbench.action.chat.newLocalChat']);
  assert.deepEqual(h.uiCalls[2],['workbench.action.chat.open',{modelSelector:{vendor:'karma',id:'karma-auto',family:'karma'},toolsInclude:['karma_native_action']}]);
  assert(!('query' in h.uiCalls[2][1]));checks.push('explicit native chat command saves unique default, selects scoped chat model, preserves disarming and never submits a prompt');
+ {
+  const thinking=setup();
+  thinking.cfg.thinking='adaptive';
+  const thinkNext='karma.toggleThinkingForNextRequest',cancelThinking='karma.cancelThinkingForNextRequest';
+  const thinkingQueued='sutraThinkingForNextRequest';
+  const hello=[{role:1,content:[new Text('Hello')]}];
+  await thinking.commands[thinkNext]();
+  assert(thinking.contextKeys[thinkingQueued]);
+  await assert.rejects(thinking.send('low',[{role:1,content:[new Text(' ')]}]),/text request/);
+  assert(thinking.contextKeys[thinkingQueued]);
+  await thinking.commands[cancelThinking]();
+  assert(!thinking.contextKeys[thinkingQueued]);
+  await thinking.send('low',hello);
+  assert.equal(thinking.flowRequests.find(x=>x.event==='start').think_for_turn,undefined);
+  await thinking.commands[thinkNext]();
+  await thinking.arm();
+  await thinking.send();
+  assert(thinking.flowRequests.some(x=>x.event==='step'));
+  assert(thinking.flowRequests.filter(x=>x.prompt==='Fix retry'||x.event==='step').every(x=>x.think_for_turn===true));
+  assert(!thinking.contextKeys[thinkingQueued]);
+  await thinking.send('high',hello);
+  assert.equal(thinking.flowRequests.at(-1).think_for_turn,undefined);
+  assert.equal(thinking.cfg.thinking,'adaptive');
+  checks.push('chat toggle is cancellable, skips invalid requests and applies across one governed turn before returning to Adaptive');
+ }
  const confirm=h.v.window.showWarningMessage;h.v.window.showWarningMessage=async()=>undefined;
  const setupReply=await h.send();assert(setupReply.some(p=>p.value?.includes('Sutra workspace permissions')));assert.equal(h.calls.length,1);assert.equal(h.calls[0].op,'conversation');checks.push('declining workspace access cannot read source or create a task');h.v.window.showWarningMessage=confirm;
  assert.equal(h.controller.status().routing.stage,'permission_declined');assert(!h.controller.status().routing.active);assert(!h.controller.status().armed);
@@ -507,24 +532,28 @@ function setup(saved={}){
   assert(!routed.calls.some(c=>c.op==='native_work'));
   checks.push('router without reasoning followed by workspace memory pause shows one call, no phantom thinking, and explicit host stages');
  }
- const cooling=setup();let blockedResource=true,resourceFlow;
- const normalCooling=cooling.deps.request;
- cooling.deps.request=async(m,t)=>{
-  if(m.op!=='orchestrate')return normalCooling(m,t);
-  if(m.event==='pending')return resourceFlow||{state:'DONE',flow_id:null};
-  if(m.event==='start')resourceFlow={flow_id:'resource-flow',cursor:'1',state:'PAUSED',prompt:m.prompt,children:[],stop:{status:'resource_wait',resume_phase:'CLASSIFYING',error:'RESOURCE_WAIT: memory pressure: warning'}};
-  if(m.event==='resume'&&!blockedResource)resourceFlow={...resourceFlow,state:'CLASSIFYING',stop:null};
-  if(m.event==='step'&&resourceFlow.state==='CLASSIFYING'){
-   const conversation=await cooling.deps.backendRequest({...m,op:'conversation',prompt:resourceFlow.prompt},t);
-   resourceFlow={...resourceFlow,state:'DONE',conversation};
-  }
-  return structuredClone(resourceFlow);
- };
- let coolReply=await cooling.send('low',[{role:1,content:[new Text('Hello')]}]);
- assert(coolReply.some(p=>p.value?.includes('Sutra paused the request')));assert(!cooling.controller.status().armed);assert.equal(cooling.calls.length,0);
- await cooling.send('high',[{role:1,content:[new Text('continue')]}]);assert.equal(cooling.calls.length,0);
- blockedResource=false;coolReply=await cooling.send('high',[{role:1,content:[new Text('continue')]}]);
- assert(coolReply.some(p=>p.value?.includes('Conversational answer')));assert.equal(cooling.calls[0].prompt,'Hello');assert.equal(cooling.calls[0].tier,'high');assert(!cooling.controller.status().armed);
+ for(const firstThinking of [true,false]){
+  const cooling=setup();let blockedResource=true,resourceFlow;
+  const normalCooling=cooling.deps.request;
+  cooling.deps.request=async(m,t)=>{
+   if(m.op!=='orchestrate')return normalCooling(m,t);
+   if(m.event==='pending')return resourceFlow||{state:'DONE',flow_id:null};
+   if(m.event==='start')resourceFlow={flow_id:'resource-flow',cursor:'1',state:'PAUSED',prompt:m.prompt,children:[],stop:{status:'resource_wait',resume_phase:'CLASSIFYING',error:'RESOURCE_WAIT: memory pressure: warning'}};
+   if(m.event==='resume'&&!blockedResource)resourceFlow={...resourceFlow,state:'CLASSIFYING',stop:null};
+   if(m.event==='step'&&resourceFlow.state==='CLASSIFYING'){
+    const conversation=await cooling.deps.backendRequest({...m,op:'conversation',prompt:resourceFlow.prompt},t);
+    resourceFlow={...resourceFlow,state:'DONE',conversation};
+   }
+   return structuredClone(resourceFlow);
+  };
+  if(firstThinking)await cooling.commands['karma.toggleThinkingForNextRequest']();
+  let coolReply=await cooling.send('low',[{role:1,content:[new Text('Hello')]}]);
+  assert(coolReply.some(p=>p.value?.includes('Sutra paused the request')));assert(!cooling.controller.status().armed);assert.equal(cooling.calls.length,0);
+  await cooling.send('high',[{role:1,content:[new Text('continue')]}]);assert.equal(cooling.calls.length,0);
+  if(!firstThinking)await cooling.commands['karma.toggleThinkingForNextRequest']();
+  blockedResource=false;coolReply=await cooling.send('high',[{role:1,content:[new Text('continue')]}]);
+  assert(coolReply.some(p=>p.value?.includes('Conversational answer')));assert.equal(cooling.calls[0].prompt,'Hello');assert.equal(cooling.calls[0].tier,'high');assert.equal(cooling.calls[0].think_for_turn,firstThinking?true:undefined);assert(!cooling.controller.status().armed);
+ }
  checks.push('classification resource pause resumes the original conversational prompt on another model without arming files or replaying while blocked');
  for(const approve of [false,true]){
   const upgraded=setup();upgraded.kind('report');

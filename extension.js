@@ -131,6 +131,8 @@ function activate(context) {
   }
   async function request(message, token, internal=false, onActivity) {
     if(token?.isCancellationRequested)throw new Error("Sutra request cancelled before dispatch.");
+    const {think_for_turn:thinkForTurn,...payload}=message||{};
+    if(thinkForTurn!==undefined&&(thinkForTurn!==true||!internal||message.op!=='orchestrate'||!['start','step'].includes(message.event)))throw new Error('Invalid Sutra reasoning override.');
     const diagnostic=message?.op==='dashboard';
     if(diagnostic)return requestDashboard();
     if ((busy || ((sequence || nativeController?.status().working) && !internal)) && !diagnostic) throw new Error('A Sutra request is running. Switch models after it finishes.');
@@ -144,8 +146,9 @@ function activate(context) {
       if(message.op==='conversation')await waitForTelemetry(stateDir,token);
       return await new Promise((resolve,reject) => {
         const python = vscode.workspace.getConfiguration('karma').get('pythonPath','')||(process.platform==='win32'?'python':'python3');
+        const thinking=thinkForTurn?'on':vscode.workspace.getConfiguration('karma').get('thinking','adaptive');
         const child = spawn(python,['-B',path.join(context.extensionPath,'harness','vscode_bridge.py'),
-          '--workspace',cwd,'--storage',stateDir],{cwd,stdio:['pipe','pipe','pipe'],env:{...process.env,...runtimeEnvironment(cwd),KARMA_STORAGE_LIMIT_MIB:String(vscode.workspace.getConfiguration('karma').get('storageLimitMiB',512)),SUTRA_LOGIT_SENSOR:({'off':'','numbers':'1','tokens':'tokens'})[vscode.workspace.getConfiguration('karma').get('logitSensor','off')]||'',SUTRA_ACTIVITY:"1",SUTRA_THINKING:vscode.workspace.getConfiguration('karma').get('thinking','adaptive'),KARMA_NODE:process.execPath,KARMA_TYPESCRIPT:path.join(context.extensionPath,'vendor','typescript','typescript.js')}});
+          '--workspace',cwd,'--storage',stateDir],{cwd,stdio:['pipe','pipe','pipe'],env:{...process.env,...runtimeEnvironment(cwd),KARMA_STORAGE_LIMIT_MIB:String(vscode.workspace.getConfiguration('karma').get('storageLimitMiB',512)),SUTRA_LOGIT_SENSOR:({'off':'','numbers':'1','tokens':'tokens'})[vscode.workspace.getConfiguration('karma').get('logitSensor','off')]||'',SUTRA_ACTIVITY:"1",SUTRA_THINKING:thinking,KARMA_NODE:process.execPath,KARMA_TYPESCRIPT:path.join(context.extensionPath,'vendor','typescript','typescript.js')}});
         processes.add(child); let stdout='',stderr='';
         const events=require('./model_activity').decoder(e=>{usage?.activity(e);onActivity?.(e);},s=>{stderr=(stderr+s).slice(-10000);});
         let stopReason,killTimer;const cancel=reason=>{if(stopReason)return;stopReason=reason;child.kill('SIGTERM');killTimer=setTimeout(()=>child.kill('SIGKILL'),10000);};
@@ -169,7 +172,7 @@ function activate(context) {
           } catch(e) {reject(new Error(`${e.message}${stderr?'\n'+stderr:''}`));}
         });
         child.stdin.on('error',()=>{});
-        child.stdin.end(JSON.stringify(message));
+        child.stdin.end(JSON.stringify(payload));
       });
     } finally {if(!diagnostic){busy=false;panel?.webview.postMessage({type:'busy',value:sequence});}}
   }

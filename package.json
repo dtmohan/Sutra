@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Local orchestration with observe-only task commitments and completion assessments.",
-  "version": "0.38.0",
+  "version": "0.38.1",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -121,6 +121,18 @@
       {
         "command": "karma.useNativeChat",
         "title": "Sutra: Open Governed Chat (Sutra Auto)"
+      },
+      {
+        "command": "karma.toggleThinkingForNextRequest",
+        "title": "Sutra: Think on Next Request",
+        "icon": "$(lightbulb)",
+        "enablement": "config.karma.nativeEnabled"
+      },
+      {
+        "command": "karma.cancelThinkingForNextRequest",
+        "title": "Sutra: Cancel Thinking for Next Request",
+        "icon": "$(lightbulb-autofix)",
+        "enablement": "config.karma.nativeEnabled"
       },
       {
         "command": "karma.openLastDiagram",
@@ -728,11 +740,43 @@
       ]
     },
     "menus": {
+      "commandPalette": [
+        {
+          "command": "karma.cancelThinkingForNextRequest",
+          "when": "sutraThinkingForNextRequest"
+        },
+        {
+          "command": "karma.toggleThinkingForNextRequest",
+          "when": "!sutraThinkingForNextRequest"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "karma.toggleThinkingForNextRequest",
+          "when": "activeEditor == workbench.editor.chatSession && config.karma.nativeEnabled && !sutraThinkingForNextRequest",
+          "group": "navigation@80"
+        },
+        {
+          "command": "karma.cancelThinkingForNextRequest",
+          "when": "activeEditor == workbench.editor.chatSession && config.karma.nativeEnabled && sutraThinkingForNextRequest",
+          "group": "navigation@80"
+        }
+      ],
       "view/title": [
         {
           "command": "karma.refreshUsage",
           "when": "view == karma.usage",
           "group": "navigation"
+        },
+        {
+          "command": "karma.toggleThinkingForNextRequest",
+          "when": "view == workbench.panel.chat.view.copilot && config.karma.nativeEnabled && !sutraThinkingForNextRequest",
+          "group": "navigation@80"
+        },
+        {
+          "command": "karma.cancelThinkingForNextRequest",
+          "when": "view == workbench.panel.chat.view.copilot && config.karma.nativeEnabled && sutraThinkingForNextRequest",
+          "group": "navigation@80"
         }
       ]
     }
