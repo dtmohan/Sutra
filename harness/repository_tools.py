@@ -144,6 +144,11 @@ def request_check(s,session,kind,target='',query='',line=1,cursor=None):
   normalized(target)
   if target not in names or not scoped(target,c['allowed_paths']):raise InvalidUpdate('Read target outside committed catalog')
   if query:raise InvalidUpdate('Read cannot contain a query')
+  if cursor is not None and not any(
+      r['operation']['kind']=='read' and r['operation']['target']==target
+      and r['result']['status']=='ok' and r['result'].get('next_cursor')==cursor
+      for r in current_records(s,session)):
+   raise InvalidUpdate('Unknown read continuation for this file. Use a cursor from a read receipt or start a new read.')
  elif kind=='search':
   if target or not isinstance(query,str) or not 1<=len(query)<=80 or '\n' in query or line!=1:raise InvalidUpdate('Search requires one bounded literal query')
  elif target or query or line>len(names):raise InvalidUpdate('Invalid catalog page')

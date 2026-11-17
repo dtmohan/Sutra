@@ -128,6 +128,32 @@ class ReadCursorTests(unittest.TestCase):
         self.assertIn('Source changed', changed['error'])
         self.assertFalse(changed['excerpts'])
 
+    def test_unknown_cursor_rejected_before_reading_or_spending_repository_budget(self):
+        text = 'x' * 1600 + '\n'
+        for name in ('entry.py', 'broker.py'):
+            (self.fixture.ws / name).write_text(text)
+        cursor = self.read()['result']['next_cursor']
+        used = repo.usage(self.fixture.s, self.fixture.sid)['used']
+        for target, requested in (
+                ('entry.py', dict(cursor, sha256='0' * 64)),
+                ('entry.py', dict(cursor, column=cursor['column'] + 1)),
+                ('broker.py', cursor)):
+            with self.subTest(target=target, cursor=requested):
+                with self.assertRaisesRegex(InvalidUpdate, 'Unknown read continuation'):
+                    self.fixture.tool('read', target=target, line=requested['line'], cursor=requested)
+        self.assertEqual(repo.usage(self.fixture.s, self.fixture.sid)['used'], used)
+
+    def test_architect_gets_a_repair_hint_for_unknown_cursor(self):
+        def invalid_cursor(proposal):
+            proposal['tool']['cursor'] = {'line': 1, 'column': 0, 'sha256': '0' * 64}
+
+        model = fixtures.Model(fault=invalid_cursor)
+        result = self.fixture.step(model)
+        self.assertFalse(result['result']['admission']['admitted'])
+        self.assertIsNone(result['tool_receipt'])
+        self.assertIn('Unknown read continuation', model.payloads[1]['repair']['errors'][0])
+        self.assertEqual(repo.usage(self.fixture.s, self.fixture.sid)['used'], 1)
+
     def test_governed_read_continues_after_model_switch(self):
         text = '#' + 'x' * 1600 + '\nTAIL = 7\n'
         (self.fixture.ws / 'entry.py').write_text(text)

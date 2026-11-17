@@ -22,11 +22,12 @@ def schema(payload):
  'tool':obj({'kind':{'type':'string','enum':kinds},'target':S,'query':S,'line':{'type':'integer','minimum':1}}),
  'edges':arr(obj({'from':S,'to':S,'page_id':{'type':'string','enum':ids or ['']}})),
  'complete':{'type':'boolean','enum':[False]}}
- fields['tool']['properties']['cursor']=obj({'line':{'type':'integer','minimum':1},'column':{'type':'integer','minimum':0},'sha256':S})
  if kinds==['report','clarify']:
   fields['tool']['properties']['target']={'type':'string','enum':['']}
   fields['tool']['properties']['query']={'type':'string','enum':['']}
   fields['tool']['properties']['line']={'type':'integer','enum':[1]}
+ else:
+  fields['tool']['properties']['cursor']=obj({'line':{'type':'integer','minimum':1},'column':{'type':'integer','minimum':0},'sha256':S})
  fields['constraints'].update(minItems=len(keys),maxItems=len(keys));fields['findings']['maxItems']=3 if ids else 0
  fields['edges']['maxItems']=0 if payload.get('phase')=='explore' else 4
  nodes=sorted({e['path'] for e in payload['evidence']}) or ['']
@@ -47,6 +48,8 @@ def reduce_handoff(handoff,level):
  return None if level==4 else value
 
 def request_check(s,session,payload):
+ from review_reasoning import check
+ check(payload)
  check_request(s,session,payload,lambda h:reduce_handoff(h,payload.get('handoff_level',0)));repo.settings(s,session)
  if payload.get('phase') not in ('explore','report'):raise InvalidUpdate('Unknown architecture phase')
  if payload['repository'].get('last_tool')!=repo.feedback(s,session):raise InvalidUpdate('Repository result changed during inference')

@@ -2,6 +2,7 @@ import copy,json,os,tempfile,unittest
 from pathlib import Path
 from context_manager import InvalidUpdate,ContextBudgetExceeded,canonical,sha
 from invocation_gateway import InvocationLedger,consume_dispatch
+from local_model import OutputLimitExceeded
 from paging import Budget,PageFault
 from review_role import constraint_rows
 from vscode_bridge import handle
@@ -22,6 +23,20 @@ class Model:
    p['findings']={name:next(f for f in findings if next(e for e in payload['evidence'] if e['id']==f['page_id'])['path']==name) for name in schema['properties']['findings']['properties']}
   if self.fault:self.fault(p)
   return p,{'ok':True,'answer':p,'call_id':cid}
+class LengthLimitedModel(Model):
+ thinking=True
+ context_metadata={'thinking':{'values':[False,True],'default':True}}
+ def __init__(self,capped_calls=1):
+  super().__init__('report','');self.capped_calls=capped_calls;self.controls=[]
+ def call(self,cid,system,payload,schema):
+  self.controls.append(self.thinking)
+  proposal,record=super().call(cid,system,payload,schema)
+  if len(self.controls)<=self.capped_calls:
+   error=OutputLimitExceeded('Fixture reached the output limit')
+   error.call_record={'call_id':cid,'ok':False,'response':{'done':True,'done_reason':'length',
+      'prompt_eval_count':100,'eval_count':self.budget.response_reserve}}
+   raise error
+  return proposal,record
 class ArchitectureTests(unittest.TestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name);self.ws=self.root/'project';self.ws.mkdir();self.storage=self.root/'store'
@@ -114,7 +129,52 @@ class ArchitectureTests(unittest.TestCase):
   self.tool('read',target='entry.py');items=list(repo.evidence(self.s,self.sid,self.ws).values());items[0]['text']='forged'
   with self.assertRaises(InvalidUpdate):repo.validate_evidence(self.s,self.sid,self.ws,items)
  def test_report_requires_multiple_cited_files(self):
-  self.step(Model());r=self.step(Model('report',''));self.assertFalse(r['result']['admission']['admitted'])
+  self.step(Model());model=Model('report','');r=self.step(model)
+  self.assertFalse(r['result']['admission']['admitted'])
+  self.assertIn('Sutra has 1',r['result']['admission']['errors'][0])
+  self.assertEqual(model.payloads,[])
+  self.assertIsNone(r['routing'])
+ def test_report_supplies_distinct_fresh_receipts_without_prior_model_citations(self):
+  for name in ('entry.py','broker.py'):self.tool('read',target=name)
+  model=Model('report','');r=self.step(model)
+  self.assertTrue(r['result']['admission']['admitted'])
+  self.assertEqual({e['path'] for e in model.payloads[0]['evidence']},{'entry.py','broker.py'})
+  self.assertIn('flowchart LR',r['state']['report'])
+ def test_single_file_report_requires_only_its_own_receipt(self):
+  initial=handle(self.storage,self.ws,{'op':'review_new','goal':'Explain entry module.','roots':['entry.py']})
+  self.meta=json.loads((self.storage/'workspace.json').read_text());self.sid=initial['session']
+  self.tool('read',target='entry.py')
+  result=self.step(Model('report','',fault=lambda p:p.update(edges=[])))
+  self.assertTrue(result['result']['admission']['admitted'])
+ def test_report_schema_disallows_cursor(self):
+  from architecture_role import schema
+  for name in ('entry.py','broker.py'):self.tool('read',target=name)
+  model=Model('report','',fault=lambda p:p['tool'].update(cursor={'line':1,'column':0,'sha256':'0'*64}))
+  result=self.step(model)
+  self.assertNotIn('cursor',schema(model.payloads[0])['properties']['tool']['properties'])
+  self.assertFalse(result['result']['admission']['admitted'])
+  self.assertIsNone(result['tool_receipt'])
+ def test_output_limit_uses_one_existing_step_attempt_with_thinking_off(self):
+  self.step(Model());self.tool('read',target='broker.py')
+  before=repo.usage(self.s,self.sid);model=LengthLimitedModel();result=self.step(model)
+  self.assertTrue(result['result']['admission']['admitted'])
+  self.assertEqual(model.controls,[True,False])
+  for key in ('request','phase','contract','derived_from','evidence','repository'):
+   self.assertEqual(model.payloads[0][key],model.payloads[1][key],key)
+  self.assertEqual(repo.usage(self.s,self.sid),before)
+  calls=result['result']['token_usage']['calls']
+  self.assertEqual([call['status'] for call in calls],['accepted','quarantined'])
+  self.assertEqual(calls[1]['output_tokens'],model.budget.response_reserve)
+  events=self.s.run(result['result']['run_id'])['events']
+  self.assertEqual([event['data']['reason'] for event in events if event['kind']=='BRIDGE'],['bounded_output_repair'])
+  self.assertTrue(self.s.verify_invocations(self.sid))
+ def test_second_length_stop_closes_step_and_retains_previous_checkpoint(self):
+  earlier=self.step(Model());self.tool('read',target='broker.py')
+  model=LengthLimitedModel(capped_calls=2);result=self.step(model)
+  self.assertFalse(result['result']['admission']['admitted'])
+  self.assertEqual(model.controls,[True,False])
+  self.assertEqual(result['state']['checkpoint'],earlier['result']['invocation_id'])
+  self.assertEqual(self.s.run(result['result']['run_id'])['events'][-1]['kind'],'FIN')
  def test_search_literal_and_limits(self):
   result=self.tool('search',query='.*');self.assertEqual(result['result']['excerpts'],[])
   with self.assertRaises(InvalidUpdate):self.tool('search',query='x'*81)

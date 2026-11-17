@@ -144,7 +144,7 @@ window.addEventListener('message',({data:m})=>{
     }
   }
   if(m.type==='result'){
-    const r=m.data;lastReceipt=r;el('status').textContent=r.admission.admitted?(r.review_stage==='api_mapper'?'API draft recorded; independent review required':r.review_stage==='api_reviewer'?'Reviewer opinion recorded; check the API publication decision':`Proposal accepted from ${r.model}`):'Response withheld after validation';
+    const r=m.data;lastReceipt=r;el('status').textContent=r.admission.admitted?(r.review_stage==='api_mapper'?'API draft recorded; independent review required':r.review_stage==='api_reviewer'?'Reviewer opinion recorded; check the API publication decision':`Proposal accepted from ${r.model}`):r.review_stage==='architecture_evidence'?'More source evidence needed':'Response withheld after validation';
     if(!r.admission.admitted)el('error').textContent=r.admission.errors.join('\n');
   }
   if(m.type==='action'){lastReceipt=m.data;el('action-result').textContent=JSON.stringify(m.data.result,null,2);el('status').textContent='Host action: '+m.data.result.status;el('action-summary').textContent='Last action: '+m.data.result.status;}

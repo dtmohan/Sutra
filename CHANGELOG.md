@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.38.3
+
+- Reuse fresh read receipts from distinct files in architect reports and check evidence coverage before inference.
+- Retry the architect once with thinking off after an output-limit failure, within the same step's allocation.
+- Disallow continuation cursors in reports. Reject unissued read cursors before spending a repository operation and check issued cursors against current source.
+
 ## 0.38.2
 
 - Pause an architecture review when its claim reviewer reaches the output limit with thinking enabled and a retry available.

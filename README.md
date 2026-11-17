@@ -1,3 +1,7 @@
+# Sutra 0.38.3 — recover an architecture review step
+
+The **Sutra: Review Codebase** workflow checks for enough current source evidence before requesting a report. It can reuse settled reads even if earlier model notes omitted them. If an architect call reaches its output limit, Sutra can spend one existing retry with thinking off, keeping the prior checkpoint and read receipts. A read continuation must match a cursor issued for that file.
+
 # Sutra 0.38.2 — resume an interrupted claim review
 
 If the architecture claim reviewer reaches its output limit with thinking enabled and a retry available, Sutra pauses with the draft, completed reviews, source evidence and consumed budget saved. Choose **Resume** in Sutra Monitor, then send **continue** in chat. Sutra requests thinking off for the unfinished page and checks that the saved source evidence is current.
