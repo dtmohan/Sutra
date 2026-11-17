@@ -50,6 +50,8 @@ class OpenTaskWorkflowTests(unittest.TestCase):
                 result['intent'] = 'workspace'
                 if prompt == self.edit_ask:
                     result['workspace_request'] = {'operation': 'edit', 'paths': ['src/retry.py']}
+                else:
+                    result['workspace_request'] = {'operation': 'read', 'scope': 'workspace', 'paths': []}
             model = Router(name, route)
         elif stage == 'subagent':
             model = Child(name)

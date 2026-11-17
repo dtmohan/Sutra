@@ -470,7 +470,7 @@ function setup(saved={}){
  {
   const pendingKey='sutra.pendingOrchestration';
   const requestNotice='Sutra can review the résumé if you paste its text into this chat.';
-  const document=[{role:1,content:[new Text('Review /tmp/Application (1).docx for a validation role')]}];
+  const document=[{role:1,content:[new Text('Can you look at the resume now please?')]}];
   const pending={flow_id:'saved-review',state:'PAUSED',cursor:'4',workspace:'/project',
    stop:{status:'task_budget',resume_phase:'SYNTHESIS'},binding:{session:'task-1',contract_hash:'contract-1'}};
   for(const retained of [undefined,pending]){
@@ -496,6 +496,23 @@ function setup(saved={}){
    assert.equal(routing.invocationId,undefined);
    assert.equal(routing.token_usage,undefined);
   }
+  const referred=setup({[pendingKey]:pending}),invocation='a'.repeat(32),eventsForReference=[];
+  referred.v.window.showWarningMessage=async()=>{throw Error('Document routing must not ask for workspace access');};
+  referred.deps.request=async m=>{
+   eventsForReference.push(m.event);
+   assert.equal(m.event,'start');
+   return {state:'DONE',flow_id:'document-reference',request_notice:requestNotice,conversation:{
+    route:{model:'model-a'},memory_used:true,result:{invocation_id:invocation,admission:{admitted:true},
+     accepted_output:{intent:'document',answer:'DRAFT ROUTING MESSAGE'},
+     token_usage:{calls:[{invocation_id:invocation,model:'model-a',stage:'conversation',input_tokens:100,output_tokens:20}]}}
+   }};
+  };
+  const reply=await referred.send('auto',[{role:1,content:[new Text('Can you look at it now?')]}]);
+  assert.equal(reply[0].value,requestNotice);
+  assert(!reply.some(part=>part.value?.includes('DRAFT ROUTING MESSAGE')));
+  assert.deepEqual(eventsForReference,['start']);
+  assert.equal(referred.controller.status().routing.invocationId,invocation);
+  assert.deepEqual(referred.controller.status().pending,pending);
   const classifying={...pending,state:'CLASSIFYING',prompt:document[0].content[0].value,stop:undefined};
   const recovering=setup({[pendingKey]:classifying}),events=[];
   recovering.v.window.showWarningMessage=async()=>{throw Error('Document recovery must not ask for workspace access');};
@@ -513,6 +530,126 @@ function setup(saved={}){
   assert.equal(recovering.controller.status().pending,null);
   assert.equal(recovering.controller.status().routing.stage,'guidance');
   checks.push('document input guidance ends a fresh or resumed request without a model call or permission prompt and preserves unrelated saved work');
+ }
+ {
+  const persisted={},traffic=[],flowId='e'.repeat(32),invocation='a'.repeat(32);
+  const goal='Can you review the résumé for validation roles?';
+  const body='Résumé text:\nReduced hardware validation time by 17%.';
+  const stop={status:'evidence_bridge',resume_phase:'CLASSIFYING',error:'Paste the résumé excerpt.',
+   evidence_bridge:{target_kind:'document',target:'résumé',required:'text',decision:'BRIDGE'},
+   budget:{used:{calls:1,tokens:1842}}};
+  let flow,key;
+  const attach=fixture=>{
+   fixture.v.window.showWarningMessage=async()=>{throw Error('Document evidence must not ask for workspace permissions');};
+   fixture.deps.request=async m=>{
+    assert.equal(m.op,'orchestrate');
+    assert(!m.armed);
+    traffic.push(structuredClone(m));
+    const reply=(value,extra={})=>{
+     const focus=flow?.state!=='DONE'&&key===m.chat_key?flow:null;
+     return structuredClone({...value,...extra,task_stack:{focused:focus?.flow_id||null,open_tasks:focus?[focus]:[]},focused_flow:focus});
+    };
+    if(m.event==='pending')return reply({state:'DONE',flow_id:null});
+    if(m.event==='start'){
+     if(m.prompt!==goal){
+      assert.notEqual(m.chat_key,key,'Pasted text in another chat must remain independent');
+      return reply({state:'DONE',flow_id:'d'.repeat(32)},{request_notice:'Independent request'});
+     }
+     key=m.chat_key;
+     flow={flow_id:flowId,cursor:'1',state:'PAUSED',prompt:goal,stop};
+     return reply(flow);
+    }
+    assert.equal(m.chat_key,key);
+    assert.equal(m.flow_id,flowId);
+    if(m.event==='inspect')return reply(flow);
+    assert.equal(m.cursor,flow.cursor);
+    assert.equal(m.tier,'high');
+    if(m.event==='supply_evidence'){
+     assert.equal(m.evidence_text,body);
+     assert.equal(flow.prompt,goal);
+     assert.deepEqual(flow.stop.budget.used,{calls:1,tokens:1842});
+     flow={...flow,cursor:'2',state:'CLASSIFYING',stop:undefined};
+     return reply(flow);
+    }
+    assert.equal(m.event,'step');
+    flow={...flow,cursor:'3',state:'DONE'};
+    return reply(flow,{conversation:{route:{model:'model-c'},result:{
+     invocation_id:invocation,admission:{admitted:true},accepted_output:{intent:'conversation',answer:'The quantified validation result supports the résumé.'},
+     token_usage:{calls:[{invocation_id:invocation,model:'model-c',stage:'conversation',input_tokens:100,output_tokens:20}]}
+    }}});
+   };
+  };
+  const user=value=>({role:1,content:[new Text(value)]});
+  const first=setup(persisted);attach(first);
+  const pause=await first.send('low',[user(goal)],{});
+  assert(pause.some(part=>part.value?.includes('Paste the résumé excerpt.')));
+  assert(pause.some(part=>part.value?.includes('[Saved evidence request]')));
+  assert(!pause.some(part=>part.value?.includes('send **continue**')));
+  const history=[user(goal),{role:2,content:pause}];
+  const reloaded=setup(persisted);attach(reloaded);
+  const beforeContinue=traffic.length;
+  await reloaded.send('high',[...history,user('continue')],{});
+  assert.deepEqual(traffic.slice(beforeContinue).map(m=>m.event),['inspect']);
+  await reloaded.send('high',[user(body)],{});
+  assert.equal(reloaded.controller.status().pending.flow_id,flowId);
+  const beforeSupply=traffic.length;
+  const result=await reloaded.send('high',[...history,user(body)],{});
+  assert.deepEqual(traffic.slice(beforeSupply).map(m=>m.event),['inspect','supply_evidence','step']);
+  assert(result.some(part=>part.value?.includes('quantified validation result')));
+  assert(result.some(part=>part.value?.includes('Memory restored')));
+  assert.equal(reloaded.controller.status().pending,null);
+  checks.push('evidence bridge guides continue, preserves the originating flow across reload, and resumes pasted text on the selected model without workspace permission');
+ }
+ {
+  const workspace=setup(),traffic=[],invocation='b'.repeat(32),flowId='c'.repeat(32);
+  const chat={modelOptions:{_conversationId:'workspace-evidence'}};
+  const user=value=>[{role:1,content:[new Text(value)]}];
+  let scopeConfirmed=false,permissionPrompts=0,flow;
+  workspace.v.window.showWarningMessage=async(_message,_options,...choices)=>{
+   permissionPrompts++;
+   assert(scopeConfirmed,'Workspace authorization can be requested after the target is selected');
+   return choices.find(choice=>choice==='Read only');
+  };
+  const backend=workspace.deps.request;
+  workspace.deps.request=async(m,t)=>{
+   if(m.op!=='orchestrate')return backend(m,t);
+   traffic.push(structuredClone(m));
+   if(m.event==='pending')return {state:'DONE',flow_id:null};
+   if(m.event==='start'){
+    flow={flow_id:flowId,cursor:'1',state:'PAUSED',prompt:m.prompt,conversation_id:invocation,
+     stop:{status:'evidence_bridge',resume_phase:'CLASSIFYING',error:'Reply with Use this workspace to choose this project.',
+      evidence_bridge:{target_kind:'workspace',target:null,required:'scope',decision:'BRIDGE'}}};
+    return {...flow,conversation:{route:{model:'model-a'},result:{
+     invocation_id:invocation,admission:{admitted:true},accepted_output:{intent:'workspace',answer:'Unpublished routing proposal'}
+    }}};
+   }
+   assert.equal(m.flow_id,flowId);
+   if(m.event==='inspect')return flow;
+   assert.equal(m.cursor,flow.cursor);
+   if(m.event==='supply_evidence'){
+    assert.equal(m.evidence_text,'Use this workspace.');
+    assert(!m.armed);
+    scopeConfirmed=true;
+    flow={...flow,cursor:'2',state:'NEED_ARM',stop:undefined};
+    return flow;
+   }
+   assert.equal(m.event,'step');
+   assert(m.armed);
+   return {...flow,cursor:'3',state:'DONE',data:{route:{model:'model-a'},result:{
+    invocation_id:'review',admission:{admitted:true},accepted_output:{answer:'Workspace review completed'}
+   }}};
+  };
+  const pause=await workspace.send('auto',user('Can you review the project?'),chat);
+  assert(pause.some(part=>part.value?.includes('Use this workspace')));
+  assert(pause.some(part=>part.value?.includes('/conversation/'+invocation)));
+  assert(!pause.some(part=>part.value?.includes('Continuing this request through Sutra’s workspace workflow')));
+  assert.equal(permissionPrompts,0);
+  const before=traffic.length;
+  const reviewed=await workspace.send('auto',user('Use this workspace.'),chat);
+  assert.deepEqual(traffic.slice(before).map(m=>m.event),['inspect','supply_evidence','step']);
+  assert.equal(permissionPrompts,1);
+  assert(reviewed.some(part=>part.value?.includes('Workspace review completed')));
+  checks.push('a missing workspace target requests explicit scope before normal permission checks and retains the same workflow');
  }
  const routingFlow=setup();let routingStep=0;const routingEvents=[];
  const routingChat=(id,model,followup)=>({route:{model},routing_followup:followup,result:{invocation_id:id,admission:{admitted:true},accepted_output:{intent:'conversation',answer:followup?'UNPUBLISHED DRAFT':'Final routed answer'},token_usage:{calls:[{invocation_id:id,model,stage:'conversation',input_tokens:100,output_tokens:20}]}}});

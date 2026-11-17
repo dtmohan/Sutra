@@ -256,8 +256,8 @@ def handle(root,workspace,request):
         if metadata.exists() and json.loads(metadata.read_text())['workspace']!=str(Path(workspace).resolve()):
             raise InvalidUpdate('Storage belongs to a different workspace')
         if request.get('op')=='state' and 'review_prompt' in request:
-            from review_targets import document_input_notice
-            notice=document_input_notice(request['review_prompt'])
+            from orchestration_flow import document_workspace_notice
+            notice=document_workspace_notice(request['review_prompt'])
             if notice:return {'request_notice':notice}
         if request.get('op')=='models':
             from model_catalog import catalog
@@ -353,7 +353,7 @@ def handle(root,workspace,request):
             raise
 
 
-def _handle(root,workspace,request,metadata=None):
+def _handle(root,workspace,request,metadata=None,prepare_catalog=True):
     root=root.resolve();workspace=workspace.resolve()
     root.mkdir(parents=True,exist_ok=True);metadata=metadata or root/'workspace.json'
     meta=json.loads(metadata.read_text()) if metadata.exists() else {'workspace':str(workspace)}
@@ -417,8 +417,9 @@ def _handle(root,workspace,request,metadata=None):
                 bind(s,meta['active'],request['conversation_id'])
             # Persist identity before the first interruptible repository action.
             temp=metadata.with_suffix('.tmp');temp.write_text(canonical(meta));temp.replace(metadata)
-            from repository_tools import execute
-            execute(s,meta['active'],workspace,root,'catalog',resource_check=False)
+            if prepare_catalog:
+                from repository_tools import execute
+                execute(s,meta['active'],workspace,root,'catalog',resource_check=False)
             result=state(s,meta,workspace)
         elif op=='native_permissions':
             from native_access import grant

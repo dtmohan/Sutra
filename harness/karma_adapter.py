@@ -1,4 +1,4 @@
-"""Karma domain: operation/task/storage budgets, hardware, uncertain observations."""
+"""Karma domain: scoped work and evidence admission, budgets and hardware."""
 from kernel_boundary import KernelBoundary,measurement
 
 
@@ -31,6 +31,28 @@ class KarmaAdapter:
         else:
             deviation=0.
         return dict(self.frame('task-focus-v1',deviation,0.),**signals)
+    def evidence_admission(self, *, target_status, evidence_status, recovery_possible, budget_exhausted=False):
+        """Map host-verified target, evidence and recovery facts into STP."""
+        if target_status not in ('resolved', 'missing', 'invalid'):
+            raise ValueError('Unknown evidence target status')
+        if evidence_status not in ('available', 'missing', 'stale', 'invalid'):
+            raise ValueError('Unknown evidence availability status')
+        if type(recovery_possible) is not bool or type(budget_exhausted) is not bool:
+            raise ValueError('Evidence admission requires boolean recovery and exhaustion signals')
+
+        if target_status == 'invalid' or evidence_status == 'invalid':
+            omega = 3 * self.boundary.k
+        elif target_status == 'resolved' and evidence_status == 'available':
+            omega = 0.
+        elif recovery_possible:
+            omega = 2 * self.boundary.k
+        else:
+            omega = 3 * self.boundary.k
+        sigma = self.boundary.sigma_clause if budget_exhausted else 0.
+        return dict(self.frame('evidence-admission-v1', omega, sigma),
+                    target_status=target_status, evidence_status=evidence_status,
+                    recovery_possible=recovery_possible, budget_exhausted=budget_exhausted)
+
     def allocations(self,used,limits,cost=None):
         cost=cost or {}
         if not limits or set(used)!=set(limits) or set(cost)-set(limits):raise ValueError('Allocation dimensions differ')

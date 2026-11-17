@@ -16,6 +16,8 @@ LEGACY_POLICIES = {'2319f693bfd23c67bda96909572c6a5646d1a299497aa3ab9c23fc990721
                    'd71f0acf70b42a1d0cb1332c1413bfb85b90156d5820d590cdb19b41ea79ce04'}
 # Recomputed from the released VSIX policy manifests; never from an untrusted receipt.
 RELEASE_POLICIES = {
+    '0.40.1': 'ba7c8a0b03562f0163dd2e3bfc43f5c34bb6cbd3aa113ab0e26fb3dc8280e13c',
+    '0.40.0': '5871f7892da65b3a4a247e32d2bf0fe4e8bbc6ffe4c90318d2e20e30c50bc006',
     '0.39.0': '27fe01bb03e675dd64312b7617d0f4d3f378ccf8d4d23428655b3dd2a1b206f2',
     '0.38.5': '9cffb3f7c40ea12c02e1702d8a1839fa420b6023ccda4b8385a7502178ffa039',
     '0.38.4': 'b2fa448a9b28671ae65f117422ed53dd63478f8178136df276455725aadb65cc',
@@ -119,6 +121,7 @@ def history(s, sid, parent):
             raise PageFault('Conversation fact has no user source', code='corrupt')
         result.append({'id': parent, 'model': env['model'], 'user': p['request'],
                        'assistant': proposal['answer'], 'summary': proposal['summary'],
+                       'intent': proposal['intent'],
                        'facts': proposal.get('facts', []), 'legacy': r['logic_hash'] != s.logic_hash})
         parent = (p.get('memory') or {}).get('invocation_id')
     return result

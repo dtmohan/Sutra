@@ -13,18 +13,23 @@ const MANIFEST=require('./package.json');
 const EXTENSION_ID=MANIFEST.publisher+'.'+MANIFEST.name;
 const RESUME_PROMPT=/^Resume saved Sutra request \[([a-f0-9]{32})\]$/;
 const classifying=flow=>flow?.state==='CLASSIFYING'||flow?.stop?.resume_phase==='CLASSIFYING';
+const evidencePause=flow=>flow?.state==='PAUSED'&&flow.stop?.status==='evidence_bridge';
+const DOCUMENT_EVIDENCE=/^\s*(?:document|r[eé]sum[eé]|cv|cover[ -]+letter)[ \t]+text:[ \t]*\r?\n\s*\S/i;
+const WORKSPACE_EVIDENCE=/^(?:use this workspace[.!?]*|workspace files:[ \t]*\r?\n\s*\S[\s\S]*)$/i;
 function latestRequest(vscode,messages){
   const last=messages.at(-1);
   const results=last?.content?.filter(p=>p instanceof vscode.LanguageModelToolResultPart)||[];
   if(results.length)return {results};
-  const user=[...messages].reverse().find(m=>m.role===vscode.LanguageModelChatMessageRole.User&&m.content.some(p=>p instanceof vscode.LanguageModelTextPart));
-  let prompt=user?.content.filter(p=>p instanceof vscode.LanguageModelTextPart).map(p=>p.value).join('\n')||'';
-  const wrapped=prompt.match(/<userRequest>([\s\S]*?)<\/userRequest>/);
-  if(wrapped)prompt=wrapped[1];
-  if(!prompt.trim()||prompt.length>1800)throw new Error('Sutra needs a text request of 1–1800 characters. Attach source through the approved workspace scope.');
+  const users=[...messages].reverse().filter(m=>m.role===vscode.LanguageModelChatMessageRole.User&&m.content.some(p=>p instanceof vscode.LanguageModelTextPart));
+  const input=message=>{
+    const value=message?.content.filter(p=>p instanceof vscode.LanguageModelTextPart).map(p=>p.value).join('\n')||'';
+    return value.match(/<userRequest>([\s\S]*?)<\/userRequest>/)?.[1]??value;
+  };
+  const prompt=input(users[0]),priorPrompt=input(users[1]);
+  if(!prompt.trim()||prompt.length>1800)throw new Error('Sutra needs a text request of 1–1800 characters. For a document review, paste one relevant section at a time.');
   const previous=[...messages].reverse().filter(m=>m.role===vscode.LanguageModelChatMessageRole.Assistant);
   const parent=previous.map(m=>m.content.filter(p=>p instanceof vscode.LanguageModelTextPart).map(p=>p.value).join('')).map(text=>{const matches=[...text.matchAll(/\[(?:Karma|Sutra)[^\n]*\]\(karma-preview:\/conversation\/([a-f0-9]{32})\/Response\.md\)/g)];return matches.at(-1)?.[1]||text.match(/^(?:Karma|Sutra) conversation receipt: ([a-f0-9]{32})$/m)?.[1];}).find(Boolean);
-  return {prompt,parent};
+  return {prompt,parent,priorPrompt:priorPrompt.length<=1800?priorPrompt:undefined};
 }
 // Model task observations are inert prose. They never create actions or grants.
 function observationText(observations, final=false){
@@ -361,6 +366,7 @@ function install(vscode,context,deps){
     const binding=flow?.binding||flow?.bound_task;
     const next=await deps.request({op:'orchestrate',event,flow_id:flow?.flow_id,cursor:flow?.cursor,
       ...(thinkForTurn&&['start','step'].includes(event)?{think_for_turn:true}:{}),
+      ...(flow?.state==='CLASSIFYING'&&event==='step'?{conversation_step:true}:{}),
       armed:!!access,binding,models,tier,...(stackChat?{chat_key:stackChat}:{}),...extra},token,activityProgress);
     await rememberFlow(next,event==='pending'?undefined:thinkForTurn,event==='pending'&&!next.task_stack?undefined:chatKey,stackChat);return next;
   }
@@ -371,6 +377,16 @@ function install(vscode,context,deps){
   }
   function showPause(flow,audit,progress){
     const stop=flow.stop||{},failures=stop.failures||[];
+    if(evidencePause(flow)){
+      const reason=stop.error||'Supply the evidence requested for this task.';
+      audit.stage='paused';audit.message=reason;publish();
+      const pending=context.workspaceState.get(pendingKey);
+      const link=vscode.window.registerUriHandler&&pending?.flow_id===flow.flow_id&&pending.resumeLink
+        ? '\n\n[Saved evidence request]('+resumeUri(pending.resumeLink)+')' : '';
+      const reply=stop.evidence_bridge?.target_kind==='document'?'Begin a reply in this chat with `Document text:`.':'Reply in this chat to continue.';
+      progress.report(new vscode.LanguageModelTextPart('**Evidence needed**\n\n'+reason+'\n\n'+reply+' Your remaining budget is saved.'+link));
+      return;
+    }
     const details=[stop.error,...failures.map(f=>f.path+': '+f.error)].filter(Boolean);
     if(stop.status==='resource_wait'){
       const stage={CLASSIFYING:'Conversation routing',MAPPING:'Source mapping',CHILDREN:'Child review',SYNTHESIS:'Workspace synthesis',CODING:'Workspace coding'}[stop.resume_phase]||'Workflow';
@@ -533,9 +549,16 @@ function install(vscode,context,deps){
       const chatKey=memory.chatKey(options);
       const resumeToken=prompt.trim().match(RESUME_PROMPT)?.[1];
       const requestedResume=/^(continue|resume|please continue|please resume)[.! ]*$/i.test(prompt.trim())||!!resumeToken;
+      const suppliedKind=!request.results&&(DOCUMENT_EVIDENCE.test(prompt)?'document':WORKSPACE_EVIDENCE.test(prompt.trim())?'workspace':null);
+      const evidenceReply=flow=>evidencePause(flow)&&suppliedKind===flow.stop.evidence_bridge?.target_kind;
+      const hasFlowLink=flow=>!!flow?.resumeLink&&messages.some(message=>message.role===vscode.LanguageModelChatMessageRole.Assistant&&
+        message.content.some(part=>part instanceof vscode.LanguageModelTextPart&&part.value.includes(resumeUri(flow.resumeLink)+')')));
       let stackChat=request.results?actionScope?.chat_key:
         chatKey||(audit.memorySource==='signed_checkpoint'?memory.taskStack(request.parent):undefined);
       if(!stackChat&&resumeToken&&resumeSubmission?.id===resumeToken)stackChat=resumeSubmission.stackChat;
+      const cached=context.workspaceState.get(pendingKey);
+      if(!stackChat&&cached?.workspace===deps.workspace()&&evidencePause(cached)&&(requestedResume||evidenceReply(cached))&&hasFlowLink(cached))
+        stackChat=cached.stackChat;
       const unidentifiedResume=!stackChat&&requestedResume&&!!context.workspaceState.get(pendingKey)?.stackChat;
       if(!stackChat&&!request.results)stackChat=crypto.randomBytes(32).toString('hex');
       const rememberMemory=id=>memory.remember(id,options,stackChat);
@@ -552,7 +575,7 @@ function install(vscode,context,deps){
         progress.report(new vscode.LanguageModelTextPart(message));
       }
       function showRequestNotice(flow){
-        if(flow.state!=='DONE'||!flow.request_notice)return false;
+        if(!flow.request_notice)return false;
         assertCurrent(a,activeCancel.token);
         audit.stage='guidance';
         audit.message=flow.request_notice;
@@ -585,8 +608,7 @@ function install(vscode,context,deps){
         if(!explicit)return true; // Older saved reviews still accept an intentional exact continue.
         if(pending.conversation_id&&request.parent===pending.conversation_id&&audit.memorySource==='signed_checkpoint')return true;
         // The host-generated pause link can bind a conversation without a session ID or receipt.
-        return !!pending.resumeLink&&messages.some(message=>message.role===vscode.LanguageModelChatMessageRole.Assistant&&
-          message.content.some(part=>part instanceof vscode.LanguageModelTextPart&&part.value.includes(resumeUri(pending.resumeLink)+')')));
+        return hasFlowLink(pending);
       }
       async function allowActionProfile(){
         assertCurrent(a,activeCancel.token);
@@ -628,8 +650,9 @@ function install(vscode,context,deps){
             pending=saved.flow_id?{...saved,workspace:deps.workspace(),stackChat:saved.task_stack?stackChat:undefined}:undefined;
           }
           const resumeRequested=!!resumeId||/^(continue|resume|please continue|please resume)[.! ]*$/i.test(prompt.trim());
-          if(resumeRequested&&pending?.workspace===deps.workspace()){
-            if(!sameChat(pending,!!submission)){
+          const supply=pending?.workspace===deps.workspace()&&evidenceReply(pending)&&sameChat(pending,true);
+          if((resumeRequested||supply)&&pending?.workspace===deps.workspace()){
+            if(!sameChat(pending,!!submission||supply)){
               resumeUnavailable('Open the originating Sutra chat and send **continue** there to resume this request.');
               return;
             }
@@ -640,7 +663,21 @@ function install(vscode,context,deps){
               resumeUnavailable('The saved Sutra request advanced. Choose Resume from the current pause in Sutra Monitor.');
               return;
             }
-            if(['DONE','CANCELLED'].includes(old.state))await rememberFlow(old,undefined,chatKey,pending.stackChat);
+            if(showRequestNotice(old))return;
+            if(evidencePause(old)){
+              if(!supply||!evidenceReply(old)){
+                showPause(old,audit,progress);
+                return;
+              }
+              flow=await advance(old,'supply_evidence',{evidence_text:prompt});
+              prompt=old.prompt||prompt;
+              conversationId=old.conversation_id;
+              audit.memoryUsed=true;
+              if(!evidencePause(flow))progress.report(new vscode.LanguageModelTextPart('Continuing the saved request with the supplied evidence.\n\n'));
+            }else if(supply){
+              resumeUnavailable('The saved evidence request has changed. Review its current state in Sutra Monitor.');
+              return;
+            }else if(['DONE','CANCELLED'].includes(old.state))await rememberFlow(old,undefined,chatKey,pending.stackChat);
             else if(old.recovery){
               await rememberFlow(old,undefined,chatKey,pending.stackChat);
               const recovery=old.recovery;
@@ -666,7 +703,8 @@ function install(vscode,context,deps){
               progress.report(new vscode.LanguageModelTextPart('Resuming the saved Sutra workflow with its context and remaining budget.\n\n'));
             }
           }
-          if(!flow)flow=await advance(null,'start',{prompt,parent:request.parent});
+          if(!flow)flow=await advance(null,'start',{prompt,parent:request.parent,
+            prior_prompt:!chatKey&&!request.parent?request.priorPrompt:undefined});
           if(resuming&&flow.state==='PAUSED'&&flow.stop?.resume_phase==='CLASSIFYING'){
             flow=await advance(flow,'resume');
           }
@@ -682,16 +720,19 @@ function install(vscode,context,deps){
             if(flow.state!=='CLASSIFYING')break;
             flow=await advance(flow,'step');
           }
-          if(showRequestNotice(flow))return;
-          if(flow.state==='PAUSED'&&flow.stop?.resume_phase==='CLASSIFYING'){showPause(flow,audit,progress);return;}
+          if(!flow.conversation&&showRequestNotice(flow))return;
+          if(!flow.conversation&&flow.state==='PAUSED'&&(classifying(flow)||evidencePause(flow))){showPause(flow,audit,progress);return;}
           const chat=flow.conversation;
           if(chat){
           assertCurrent(a,activeCancel.token);
-          const r=chat.result;recordUsage(r);lastRoute=chat.route.model;audit.model=lastRoute;audit.memoryUsed=chat.memory_used;audit.memoryAllocation=chat.memory_allocation;audit.memoryStatus=chat.memory_status;audit.modelCapacity=chat.model_capacity;audit.conversationBudget=chat.budget;audit.invocationId=r.invocation_id;audit.stage=r.admission.admitted?'conversation':'withheld';publish();
+          const r=chat.result;recordUsage(r);lastRoute=chat.route.model;audit.model=lastRoute;audit.memoryUsed=!!(chat.memory_used||audit.memoryUsed);audit.memoryAllocation=chat.memory_allocation;audit.memoryStatus=chat.memory_status;audit.modelCapacity=chat.model_capacity;audit.conversationBudget=chat.budget;audit.invocationId=r.invocation_id;audit.stage=r.admission.admitted?'conversation':'withheld';publish();
           if(!r.admission.admitted){progress.report(new vscode.LanguageModelTextPart('Sutra withheld the conversation response: '+r.admission.errors.join('; ')));return;}
           const p=r.accepted_output;
-          if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&flow.state==='DONE'&&!flow.deferred_flow_id)throw new Error('No admitted action is available to satisfy required tool mode.');
+          if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&flow.state==='DONE'&&!flow.deferred_flow_id&&!flow.request_notice)throw new Error('No admitted action is available to satisfy required tool mode.');
           footerSignature=await rememberMemory(r.invocation_id);footerId=r.invocation_id;
+          if(showRequestNotice(flow))return;
+          if(evidencePause(flow)){showPause(flow,audit,progress);return;}
+          if(flow.state==='PAUSED'&&classifying(flow)){showPause(flow,audit,progress);return;}
           if(flow.deferred_flow_id){
             const old=await deps.request({op:'orchestrate',event:'inspect',flow_id:flow.deferred_flow_id},activeCancel.token);
             await rememberFlow(old);
@@ -736,6 +777,7 @@ function install(vscode,context,deps){
         }
         if(restartReview){
           flow=await advance(flow,'restart_review');
+          if(showRequestNotice(flow))return;
           showHostProgress(flow,progress);
         }
         if(!flow)flow=await advance(null,'start_existing',{prompt,conversation_id:conversationId,
@@ -743,6 +785,7 @@ function install(vscode,context,deps){
         if(showRequestNotice(flow))return;
         if(flow.state==='PAUSED'){
           flow=await advance(flow,'resume');
+          if(showRequestNotice(flow))return;
           showHostProgress(flow,progress);
         }
         while(!['DONE','AWAITING_ACTION'].includes(flow.state)){
@@ -783,6 +826,7 @@ function install(vscode,context,deps){
             event='grant';extra={grant};
           }
           flow=await advance(flow,event,extra);
+          if(showRequestNotice(flow))return;
           const bound=flow.binding||flow.bound_task;
           if(bound)audit.session=bound.session;
           if(flow.claim_review_usage)recordUsage({token_usage:flow.claim_review_usage});

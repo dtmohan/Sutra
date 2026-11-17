@@ -1,3 +1,17 @@
+Sutra 0.41.0 — Resume when evidence arrives
+
+When a review needs a document or source target, Sutra pauses the request.
+Reply in the same chat with Document text: and the relevant résumé section,
+Use this workspace, or Workspace files: followed by one relative path per line.
+The saved request keeps context and spending across reloads and model changes.
+Workspace access follows the workspace's authorization settings.
+
+Sutra 0.40.1 — Route document reviews in chat
+
+If a résumé, CV, or cover letter is referenced without its content, Sutra
+asks for the text. Paste the relevant section below a separate Document text:
+heading in Sutra Auto to review it in chat.
+
 Sutra 0.40.0 — Open tasks in native chat
 
 A new workspace request parks the focused task and starts with its own goal

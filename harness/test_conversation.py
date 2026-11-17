@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 import conversation as chat
-from context_manager import InvalidUpdate, canonical
+from context_manager import InvalidUpdate, canonical, sha
 from invocation_gateway import InvocationLedger, consume_dispatch
 from paging import Budget, PageFault
 from review_budget import usage
@@ -54,7 +54,7 @@ class ConversationTests(unittest.TestCase):
                 r['answer']='This conversation has no file-access tools. Start a workspace-enabled session or paste files.'
             else:
                 r.update(intent='workspace', answer='Handing this review to the host in this chat.',
-                         workspace_request={'operation':'read','paths':[]})
+                         workspace_request={'operation':'read','scope':'workspace','paths':[]})
         m=Fake(fault=fault)
         out=self.ask('can you do an indepth review. you can recursively access files beyond the 8 file limit',provider=m)
         self.assertTrue(out['result']['admission']['admitted'])
@@ -223,6 +223,98 @@ class ConversationTests(unittest.TestCase):
         self.assertNotIn('allowed_paths', m.payloads[0]['contract']['constraints'])
         authority = self.s.db.execute('SELECT authority FROM events WHERE session=?', (out['session'],)).fetchone()[0]
         self.assertEqual(authority, 'host')
+
+    def test_workspace_scope_is_an_explicit_read_target(self):
+        for intent, work, admitted in (
+            ('workspace', {'operation': 'read', 'scope': 'workspace', 'paths': []}, True),
+            ('workspace', {'operation': 'read', 'paths': ['private.py']}, True),
+            ('workspace', {'operation': 'read', 'paths': []}, True),
+            ('workspace', {'operation': 'read', 'scope': 'workspace', 'paths': ['private.py']}, False),
+            ('workspace', {'operation': 'edit', 'scope': 'workspace', 'paths': []}, False),
+            ('conversation', {'operation': 'read', 'scope': 'workspace', 'paths': []}, False),
+        ):
+            with self.subTest(intent=intent, work=work):
+                model = Fake(fault=lambda r, p: r.update(intent=intent, workspace_request=work))
+                result = self.ask('Review source', provider=model)
+                self.assertEqual(result['result']['admission']['admitted'], admitted)
+                if admitted:
+                    self.assertEqual(result['result']['accepted_output']['workspace_request'], work)
+                self.assertFalse(result['workspace_tools_used'])
+
+    def test_receipted_document_keeps_request_context_and_spending_across_reload(self):
+        parent = self.ask('Remember to focus on practical fit for the validation role.')
+        sid = parent['session']
+        prompt = 'Review my résumé.'
+        first = self.ask(prompt, parent['result']['invocation_id'],
+                         Fake(fault=lambda r, p: r.update(intent='document')))
+        self.assertTrue(first['result']['admission']['admitted'])
+        flow_id = 'a' * 32
+        body = 'Validation engineering résumé with PCIe qualification and failure triage.'
+        doc = self.s.put_document(sid, 'document-bridge:' + flow_id, body,
+                                  source={'flow_id': flow_id, 'request_hash': sha(prompt),
+                                          'kind': 'evidence_bridge'})
+        reference = {key: doc[key] for key in chat.DOCUMENT_EVIDENCE_REF}
+        self.s.close()
+        self.s = InvocationLedger(self.storage/'state.sqlite')
+
+        def respond(result, packet):
+            if 'repair' not in packet:
+                result.update(workspace_request={'operation': 'read', 'paths': ['private.py']})
+            else:
+                result.update(answer='Your PCIe qualification experience fits validation roles.')
+        model = Fake('large', respond)
+        resumed = chat.answer(self.s, self.meta, self.storage, {
+            'prompt': prompt, 'parent': parent['result']['invocation_id'],
+            'conversation_session': sid, 'document_evidence': reference,
+            'tier': 'high', 'models': MODELS,
+        }, model)
+        self.assertTrue(resumed['result']['admission']['admitted'])
+        self.assertEqual(resumed['session'], sid)
+        self.assertEqual(usage(self.s, sid)['used']['calls'], 4)
+        self.assertFalse(resumed['workspace_tools_used'])
+        packet = model.payloads[0]
+        self.assertIn('practical fit for the validation role', canonical(packet['memory']))
+        self.assertEqual(packet['document_evidence'], dict(reference, text=body))
+        self.assertEqual(chat.schema(packet)['properties']['intent']['enum'], ['conversation'])
+        messages = chat.ConversationModel(self.storage/'calls').messages(chat.SYSTEM, packet)
+        self.assertNotIn('workspace_handoff', messages[0]['content'])
+        self.assertIn('practical fit for the validation role', messages[0]['content'])
+        self.assertEqual(messages[1]['role'], 'user')
+        self.assertEqual(json.loads(messages[1]['content']), {'original_request': prompt, 'document_text': body})
+        self.assertIn('cannot propose workspace operations', model.payloads[1]['repair']['errors'][0])
+
+        altered = copy.deepcopy(packet)
+        altered['document_evidence']['text'] += ' A fabricated accomplishment.'
+        altered['context_binding'] = chat.binding(altered)
+        with self.assertRaisesRegex(InvalidUpdate, 'differs from its evidence receipt'):
+            chat.request_check(self.s, sid, altered)
+
+    def test_changed_or_cross_task_document_evidence_stops_before_model_call(self):
+        prompt = 'Review my CV.'
+        sid = chat.open_session(self.s, prompt)
+        flow_id = 'b' * 32
+        key = 'document-bridge:' + flow_id
+        source = {'flow_id': flow_id, 'request_hash': sha(prompt), 'kind': 'evidence_bridge'}
+        doc = self.s.put_document(sid, key, 'Initial CV text.', source=source)
+        ref = {name: doc[name] for name in chat.DOCUMENT_EVIDENCE_REF}
+        request = {'prompt': prompt, 'conversation_session': sid, 'document_evidence': ref,
+                   'tier': 'low', 'models': MODELS}
+        bad_cases = [
+            dict(request, prompt='Review another document.'),
+            dict(request, conversation_session=chat.open_session(self.s, prompt)),
+            dict(request, document_evidence=dict(ref, digest='f'*64)),
+        ]
+        for invalid in bad_cases:
+            with self.subTest(invalid=invalid):
+                model = Fake()
+                with self.assertRaisesRegex(InvalidUpdate, 'Document evidence'):
+                    chat.answer(self.s, self.meta, self.storage, invalid, model)
+                self.assertFalse(model.payloads)
+        self.s.put_document(sid, key, 'Newer CV text.', source=source, expected_version=1)
+        model = Fake()
+        with self.assertRaisesRegex(InvalidUpdate, 'changed'):
+            chat.answer(self.s, self.meta, self.storage, request, model)
+        self.assertFalse(model.payloads)
 
     def test_budget_stop_survives_model_switch(self):
         first = self.ask(); parent = first['result']['invocation_id']; m = Fake('large')

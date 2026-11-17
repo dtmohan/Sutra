@@ -198,7 +198,7 @@ class BranchAccountingTests(unittest.TestCase):
     def provider(self,stage):
         name=orchestration_fixture.MODELS[self.tier]
         if stage=='conversation':
-            p=WireConversation(name,lambda r,p:r.update(intent='workspace',facts=['Remember project Cedar, ticket CED724.'],workspace_request={'operation':'read','paths':[]}))
+            p=WireConversation(name,lambda r,p:r.update(intent='workspace',facts=['Remember project Cedar, ticket CED724.'],workspace_request={'operation':'read','scope':'workspace','paths':[]}))
         else:p=WireModel(name)
         self.models.append((stage,p));return p
 

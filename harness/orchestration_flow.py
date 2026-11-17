@@ -5,7 +5,62 @@ from context_manager import InvalidUpdate,ContextBudgetExceeded,canonical,sha
 import orchestration as m
 from memory_layer import PageFault, fault_details, observe_fault
 from review_budget import BudgetStop
-from review_targets import document_input_notice
+from review_targets import (
+    DOCUMENT_TEXT_REQUIRED, document_input_notice, document_text, has_document_text, refers_to_previous_review_target,
+)
+from evidence_admission import measure as evidence_measure, record_document, workspace_roots
+
+
+def document_workspace_notice(prompt):
+    notice=document_input_notice(prompt)
+    if not notice and has_document_text(prompt):
+        return 'Open Sutra Auto in VS Code Local Chat to review the pasted document text.'
+    return notice
+
+def latest_chat_flow(s,workspace,chat):
+    previous=s.db.execute(
+            """SELECT id FROM orchestration_nodes
+               WHERE json_extract(record_json,'$.kind')='flow'
+               AND json_extract(record_json,'$.workspace')=? AND json_extract(record_json,'$.chat_key')=?
+               ORDER BY rowid DESC LIMIT 1""",(str(workspace),chat)).fetchone()
+    return info(s,previous[0]) if previous else None
+
+
+def referenced_document_notice(s,workspace,prompt,chat,parent,prior_prompt=None):
+    if not refers_to_previous_review_target(prompt):
+        return None
+    if chat:
+        previous=latest_chat_flow(s,workspace,chat)
+        if previous:
+            turn,data=previous
+            if (data.get('workflow_stop') or {}).get('status')=='evidence_bridge':
+                bridge=data['workflow_stop']['evidence_bridge']
+                if bridge['target_kind']=='document':return data['workflow_stop']['error']
+            if data.get('request_notice') and m.events(s,turn['id'])[-1]['kind']=='DOCUMENT_INPUT_REQUIRED':
+                return data['request_notice']
+            notice=document_input_notice(turn['prompt'])
+            if notice:return notice
+            if data.get('conversation_id')!=parent:return None
+    if not isinstance(parent,str) or not re.fullmatch('[a-f0-9]{32}',parent):
+        # A chat can omit both a stable ID and a model receipt after host guidance.
+        # This hint can only request document input. It never binds or grants work.
+        return document_input_notice(prior_prompt)
+    row=s.db.execute('SELECT session FROM invocations WHERE id=?',(parent,)).fetchone()
+    if row:
+        from conversation_memory import history
+        previous=history(s,row[0],parent)[0]
+        if not has_document_text(previous['user']):
+            return document_input_notice(previous['user']) or (
+                DOCUMENT_TEXT_REQUIRED if previous['intent']=='document' else None)
+    return None
+
+def saved_document_notice(s,workspace,flow,phase,data):
+    if phase in m.TERMINAL|{'CLASSIFYING','EXECUTING_ACTION','CANCELLING'}:
+        return None
+    if phase=='PAUSED' and (data.get('workflow_stop') or {}).get('resume_phase')=='CLASSIFYING':
+        return None
+    return document_workspace_notice(flow['prompt']) or referenced_document_notice(
+        s,workspace,flow['prompt'],None,flow.get('conversation_parent'))
 
 
 def metadata_path(root, flow_id=None):
@@ -34,9 +89,9 @@ def info(s,fid):
     for e in history:data.update(e['data'])
     return n,data
 
-def move(s,fid,target,kind,**data):
+def move(s,fid,target,kind,*,kernel=None,**data):
     with s.db:
-        result = m.transition(s,fid,target,kind,data)
+        result = m.transition(s,fid,target,kind,data,kernel)
         if target == 'DONE':
             from execution_sessions import finish
             finish(s, fid)
@@ -363,6 +418,58 @@ def with_provenance(out, snapshot):
     return result
 
 
+def evidence_gap(s,f,session,kind,notice,*,recoverable=True,target_status=None,conversation_id=None):
+    target_status=target_status or ('resolved' if kind=='document' else 'missing')
+    frame,budget=evidence_measure(s,session,target_status,'missing',recoverable)
+    fid=f['id']
+    data={'conversation_session':session}
+    if conversation_id:
+        data['conversation_id']=conversation_id
+    if frame['decision']!='BRIDGE':
+        message='The task budget is exhausted.' if frame['budget_exhausted'] else notice
+        move(s,fid,'DONE','EVIDENCE_FIN',kernel=frame,request_notice=message,**data)
+        return
+    target='Requested document' if kind=='document' else 'Workspace scope'
+    required='document_text' if kind=='document' else 'workspace_selection'
+    stop={'status':'evidence_bridge','resume_phase':'CLASSIFYING','error':notice,'budget':budget,
+          'automatic_retry':False,'evidence_bridge':{'target_kind':kind,'target':target,
+                                                       'required':required,'decision':frame['decision']}}
+    move(s,fid,'PAUSED','EVIDENCE_BRIDGE',kernel=frame,workflow_stop=stop,**data)
+
+
+def supply_evidence(s,f,d,req):
+    bridge=d['workflow_stop']['evidence_bridge']
+    supplied=req.get('evidence_text')
+    if not isinstance(supplied,str) or not supplied.strip() or len(supplied)>1800:
+        raise InvalidUpdate('Supply the requested evidence in a message of 1–1800 characters')
+    session=d['conversation_session']
+    frame,_=evidence_measure(s,session,'resolved','available',False)
+    if frame['decision']!='ALLOW':
+        move(s,f['id'],'DONE','EVIDENCE_FIN',kernel=frame,request_notice='The task budget is exhausted.')
+        return response(s,f['id'])
+    if bridge['target_kind']=='document':
+        text=document_text(supplied,leading=True)
+        if not text:raise InvalidUpdate('Reply with the document text below a Document text: heading')
+        ref=record_document(s,session,f,text)
+        move(s,f['id'],'CLASSIFYING','EVIDENCE_SUPPLIED',kernel=frame,workflow_stop=None,
+             document_evidence=ref,routing_continuation=None)
+    else:
+        if re.fullmatch(r'use this workspace[.!?]*',supplied.strip(),re.IGNORECASE):
+            work={'operation':'read','scope':'workspace','paths':[]}
+        else:
+            header,_,body=supplied.strip().partition('\n')
+            paths=[line.strip() for line in body.splitlines() if line.strip()]
+            if header.strip().lower()!='workspace files:' or not 1<=len(paths)<=8:
+                raise InvalidUpdate('Reply Use this workspace or list up to eight paths below Workspace files:')
+            work={'operation':'read','paths':paths}
+        status,roots=workspace_roots(work)
+        if status!='resolved':
+            raise InvalidUpdate('Select paths within the workspace or reply Use this workspace')
+        move(s,f['id'],'NEED_ARM','EVIDENCE_SUPPLIED',kernel=frame,workflow_stop=None,
+             permission=work,source_roots=roots)
+    return response(s,f['id'])
+
+
 def _handle(s,meta,workspace,root,req,providers=None):
     # Only the extension's private bridge can supply arming/permission events.
     # Model proposals cannot invoke this endpoint or set permissions.
@@ -375,8 +482,18 @@ def _handle(s,meta,workspace,root,req,providers=None):
     if event in ('start','start_existing','start_review'):
         prompt=req.get('prompt','')
         if not isinstance(prompt,str) or not prompt.strip():raise InvalidUpdate('Empty workflow request')
-        notice=document_input_notice(prompt)
+        notice=(document_input_notice(prompt) if event=='start' else document_workspace_notice(prompt))
         chat=req.get('chat_key')
+        if not notice and event=='start':
+            notice=referenced_document_notice(s,workspace,prompt,chat,req.get('parent'),req.get('prior_prompt'))
+            if notice and chat:
+                from task_stack import view
+                previous=view(s,workspace,chat)['focused']
+                if previous and m.state(s,previous)=='PAUSED':
+                    _,data=info(s,previous)
+                    if (data.get('workflow_stop') or {}).get('evidence_bridge',{}).get('target_kind')=='document':
+                        latest=latest_chat_flow(s,workspace,chat)
+                        if latest and latest[0]['id']==previous:return response(s,previous)
         # Classify ordinary chat before asking the user to replace saved work.
         if not notice and not chat and event!='start' and pending_flows(s,workspace):
             raise InvalidUpdate('A saved workflow exists; explicitly resume or discard it before starting another request')
@@ -405,7 +522,7 @@ def _handle(s,meta,workspace,root,req,providers=None):
                        conversation_parent=req.get('parent'),chat_key=chat,
                        action_flow_id=req.get('action_flow_id') if chat and event=='start_existing' else None)
             m.transition(s,f['id'],'CLASSIFYING','REQUEST')
-            if chat and not notice:
+            if chat and (event=='start' or not notice):
                 from task_stack import select,view
                 select(s,workspace,chat,f['id'],expected_cursor=view(s,workspace,chat)['cursor'],attach=True)
                 meta['_flow']=f['id']
@@ -413,27 +530,51 @@ def _handle(s,meta,workspace,root,req,providers=None):
         fid=f['id']
         req['_created_flow_id']=fid
         if notice:
-            move(s,fid,'DONE','DOCUMENT_INPUT_REQUIRED',request_notice=notice)
+            if event=='start':
+                from conversation import session_for
+                session=session_for(s,{'prompt':prompt,'parent':req.get('parent')})
+                evidence_gap(s,f,session,'document',notice)
+            else:
+                move(s,fid,'DONE','DOCUMENT_INPUT_REQUIRED',request_notice=notice)
             return response(s,fid)
         if event=='start_review':
             sid=meta.get('active')
             if not req.get('armed') or not sid or req.get('binding')!=identity(s,sid) or not s.snapshot(sid)['constraints'].get('auto_review'):raise InvalidUpdate('Explicit review requires a user-created read-only task')
-            move(s,fid,'NEED_ARM','USER_REVIEW',conversation_id=req.get('conversation_id'),permission={'operation':'read','paths':[]})
+            roots=s.snapshot(sid)['constraints']['allowed_paths']
+            frame,_=evidence_measure(s,sid,'resolved','available',False)
+            if frame['decision']!='ALLOW':
+                move(s,fid,'DONE','EVIDENCE_FIN',kernel=frame,request_notice='The task budget is exhausted.')
+            else:
+                move(s,fid,'NEED_ARM','USER_REVIEW',kernel=frame,conversation_id=req.get('conversation_id'),
+                     permission={'operation':'read','paths':[]},source_roots=roots)
             return response(s,fid)
         if event=='start_existing':
+            work=proposal.get('workspace_request') or {'operation':'read','paths':[]}
+            status,roots=workspace_roots(work)
+            if status!='resolved':
+                raise InvalidUpdate('Continuation needs the original admitted workspace target')
             move(s,fid,'NEED_ARM','ACTION_CONTINUATION',conversation_id=req['conversation_id'],
-                 permission=proposal.get('workspace_request') or {'operation':'read','paths':[]})
+                 permission=work,source_roots=roots)
             return response(s,fid)
     else:
         fid=req.get('flow_id');f,d=info(s,fid)
         if f['workspace']!=str(workspace):raise InvalidUpdate('Workflow belongs to another workspace')
         if event=='inspect':
             extra={'prompt':f['prompt']}
+            notice=saved_document_notice(s,workspace,f,m.state(s,fid),d)
+            if notice:return response(s,fid,request_notice=notice,**extra)
             if m.state(s,fid)=='NEED_TOOL_APPROVAL':extra['capability_proposal']=d.get('capability_proposal')
             if m.state(s,fid)=='NEED_PERMISSION' and not recovery(s,fid):extra.update(permission=permission(s,meta['active'],d['permission']),bound_task=identity(s,meta['active']))
             return response(s,fid,**extra)
         if req.get('cursor')!=response(s,fid)['cursor']:raise InvalidUpdate('Workflow event is stale or replayed')
     f,d=info(s,fid);phase=m.state(s,fid);prompt=f['prompt']
+    if event=='supply_evidence':
+        if phase!='PAUSED' or (d.get('workflow_stop') or {}).get('status')!='evidence_bridge':
+            raise InvalidUpdate('This workflow is not waiting for evidence')
+        return supply_evidence(s,f,d,req)
+    if event!='cancel':
+        notice=saved_document_notice(s,workspace,f,phase,d)
+        if notice:return response(s,fid,request_notice=notice)
     if event in ('allocation_preview','allocation_grant'):
         from allocation_recovery import preview,grant
         if event=='allocation_preview':
@@ -489,6 +630,8 @@ def _handle(s,meta,workspace,root,req,providers=None):
     if incompatibility:return response(s,fid)
     if phase=='PAUSED':
         stop = d.get('workflow_stop') or {}
+        if stop.get('status')=='evidence_bridge':
+            return response(s,fid)
         if stop.get('status') == 'provenance_confirmation':
             if event == 'resume':
                 return response(s, fid)
@@ -532,14 +675,19 @@ def _handle(s,meta,workspace,root,req,providers=None):
              reason='User resumed with existing contract and allocation')
         return response(s,fid)
     if phase=='CLASSIFYING':
-        notice=document_input_notice(prompt)
+        notice=None if d.get('document_evidence') else document_input_notice(prompt)
         if notice:
-            move(s,fid,'DONE','DOCUMENT_INPUT_REQUIRED',request_notice=notice)
+            from conversation import session_for
+            session=session_for(s,{'prompt':prompt,'parent':f.get('conversation_parent'),
+                                   'conversation_session':d.get('conversation_session')})
+            evidence_gap(s,f,session,'document',notice)
             return response(s,fid)
         from conversation import session_for
         from conversation_routing import RoutingBlocked
         request={'prompt':prompt,'parent':f.get('conversation_parent'),'models':models,'tier':tier,
                  'conversation_session':d.get('conversation_session'),'routing_continuation':d.get('routing_continuation'),'one_step':True}
+        if d.get('document_evidence'):
+            request['document_evidence']=d['document_evidence']
         request['conversation_session']=session_for(s,request)
         if not d.get('conversation_session'):
             move(s,fid,'CLASSIFYING','CONVERSATION_BOUND',conversation_session=request['conversation_session'])
@@ -561,14 +709,36 @@ def _handle(s,meta,workspace,root,req,providers=None):
                 stop={'status':'routing_choice','resume_phase':'CLASSIFYING','error':next_step['reason'],'automatic_retry':False}
                 move(s,fid,'PAUSED','ROUTING_STOPPED',workflow_stop=stop)
             return response(s,fid,routing_step=chat,progress=next_step['reason'])
-        p=r['accepted_output'];target='NEED_ARM' if p['intent']=='workspace' else 'DONE'
+        p=r['accepted_output']
+        if p['intent']=='document':
+            evidence_gap(s,f,request['conversation_session'],'document',DOCUMENT_TEXT_REQUIRED,
+                         conversation_id=r['invocation_id'])
+            return response(s,fid,conversation=chat)
+        if p['intent']!='workspace':
+            move(s,fid,'DONE','CLASSIFIED',conversation_id=r['invocation_id'])
+            return response(s,fid,conversation=chat)
+        work=p.get('workspace_request') or {'operation':'read','paths':[]}
+        status,roots=workspace_roots(work)
+        if status!='resolved':
+            recoverable=status=='missing' and work['operation']=='read'
+            guidance=('Reply **Use this workspace**, or list up to eight relative paths below a **Workspace files:** heading.'
+                      if recoverable else 'Name the authorized workspace files for this operation.')
+            evidence_gap(s,f,request['conversation_session'],'workspace',guidance,recoverable=recoverable,target_status=status,
+                         conversation_id=r['invocation_id'])
+            return response(s,fid,conversation=chat)
+        frame,_=evidence_measure(s,request['conversation_session'],'resolved','available',False)
+        if frame['decision']!='ALLOW':
+            move(s,fid,'DONE','EVIDENCE_FIN',kernel=frame,conversation_id=r['invocation_id'],
+                 request_notice='The task budget is exhausted.')
+            return response(s,fid,conversation=chat)
+        target='NEED_ARM' if p['intent']=='workspace' else 'DONE'
         other=[] if f.get('chat_key') else pending_flows(s,workspace,exclude=fid)
         if target=='NEED_ARM' and other:
             # Only the host can resolve this conflict. No source reads or grants
             # are made, and the existing task/allocations remain untouched.
-            move(s,fid,'DONE','WORKSPACE_DEFERRED',conversation_id=r['invocation_id'],saved_flow_id=other[0])
+            move(s,fid,'DONE','WORKSPACE_DEFERRED',kernel=frame,conversation_id=r['invocation_id'],saved_flow_id=other[0])
             return response(s,fid,conversation=chat,deferred_flow_id=other[0])
-        move(s,fid,target,'CLASSIFIED',conversation_id=r['invocation_id'],permission=p.get('workspace_request') or {'operation':'read','paths':[]})
+        move(s,fid,target,'CLASSIFIED',kernel=frame,conversation_id=r['invocation_id'],permission=work,source_roots=roots)
         return response(s,fid,conversation=chat)
     if phase in m.TERMINAL:return response(s,fid)
     if not req.get('armed'):raise InvalidUpdate('Workspace workflow requires a user-armed harness')
@@ -585,8 +755,12 @@ def _handle(s,meta,workspace,root,req,providers=None):
         if sid and req.get('binding') and req['binding']!=identity(s,sid):raise InvalidUpdate('Task changed during arming')
         if not sid or not any(s.snapshot(sid)['constraints'].get(k) for k in ('native_task','auto_review')):
             path=metadata_path(root,meta.get('_flow'))
-            roots=(d['permission']['paths'] or ['.']) if f.get('chat_key') and d['permission']['operation']=='read' else ['.']
-            _handle(Path(root),Path(workspace),{'op':'auto_new','goal':prompt,'roots':roots,'conversation_id':d['conversation_id']},metadata=path)
+            roots=d.get('source_roots')
+            if not roots:raise InvalidUpdate('A workspace review requires an admitted source target')
+            work=d['permission']
+            catalog=not (work['operation']=='capability' and work.get('capability_action')=='install')
+            _handle(Path(root),Path(workspace),{'op':'auto_new','goal':prompt,'roots':roots,'conversation_id':d['conversation_id']},
+                    metadata=path,prepare_catalog=catalog)
             meta.clear();meta.update(json.loads(path.read_text()));sid=meta['active']
         wanted=permission(s,sid,d['permission'])
         if phase=='NEED_PERMISSION':

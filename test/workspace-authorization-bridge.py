@@ -24,7 +24,7 @@ def providers(tier):
     def classification(result, packet):
         if packet['request'].startswith('Review'):
             result.update(intent='workspace', facts=[packet['request'].split('. ', 1)[0] + '.'],
-                          workspace_request={'operation': 'read', 'paths': []})
+                          workspace_request={'operation': 'read', 'scope': 'workspace', 'paths': []})
         if packet['request'].startswith('Fix'):
             result.update(intent='workspace', workspace_request={
                 'operation': 'edit', 'paths': ['src/retry.py']})

@@ -15,6 +15,7 @@ import conversation_memory as cm
 import conversation_routing as routing
 
 from conversation_prompt import SYSTEM
+from review_targets import document_review_requested, has_document_text, refers_to_previous_review_target
 
 CONSTRAINTS = dict(DEFAULTS, conversation_only=True, network_allowed=False,
                    dependencies_allowed=False, edits_allowed=False, tests_allowed=False,
@@ -80,11 +81,53 @@ def bind_output(p, proposal):
     return dict(proposal, context_binding=p['context_binding'])
 
 
+DOCUMENT_EVIDENCE_REF = ('key', 'version', 'digest')
+
+
+def document_evidence(s, sid, ref, prompt):
+    if not isinstance(ref, dict) or set(ref) != set(DOCUMENT_EVIDENCE_REF):
+        raise InvalidUpdate('Invalid document evidence reference')
+    key = ref['key']
+    match = re.fullmatch(r'document-bridge:([a-f0-9]{32})', key) if isinstance(key, str) else None
+    if not match or type(ref['version']) is not int or ref['version'] < 1 or not isinstance(ref['digest'], str):
+        raise InvalidUpdate('Invalid document evidence reference')
+    try:
+        doc = s.document(sid, key)
+    except PageFault as exc:
+        raise InvalidUpdate('Document evidence is unavailable in this session') from exc
+    expected_source = canonical({'flow_id': match[1], 'request_hash': sha(prompt), 'kind': 'evidence_bridge'})
+    if (doc['version'] != ref['version'] or doc['digest'] != ref['digest'] or sha(doc['text']) != doc['digest']
+            or not doc['text'].strip() or doc['authority'] != 'user' or doc['source_json'] != expected_source):
+        raise InvalidUpdate('Document evidence changed or belongs to a different request')
+    fields = ('session', 'key', 'version', 'text', 'digest', 'authority', 'source_json')
+    commit = canonical({'record': [doc[field] for field in fields]})
+    if not s.audit_valid() or not s.db.execute(
+        "SELECT 1 FROM page_audit WHERE event='DOCUMENT_COMMIT' AND payload_json=?",
+        (commit,),
+    ).fetchone():
+        raise InvalidUpdate('Document evidence has no valid commit receipt')
+    return dict(ref, text=doc['text'])
+
+
+def supplied_document(p):
+    if 'document_evidence' in p or has_document_text(p['request']):
+        return True
+    memory = p.get('memory') or {}
+    return refers_to_previous_review_target(p['request']) and any(
+        turn['id'] == memory.get('invocation_id') and has_document_text(turn['user'])
+        for turn in memory.get('recent_turns', [])
+    )
+
 
 def schema(p):
     available = [r['id'] for r in (p.get('memory') or {}).get('toc', [])]
     quotations = list(dict.fromkeys(q for q in re.split(r'(?<=[.!?])\s+|\n+', p['request']) if q.strip()))
-    fmt = obj({'intent': {'type': 'string', 'enum': ['conversation', 'workspace']},
+    intents = ['conversation']
+    if not supplied_document(p):
+        intents.append('document')
+        if not document_review_requested(p['request']):
+            intents.insert(1,'workspace')
+    fmt = obj({'intent': {'type': 'string', 'enum': intents},
                 'context_binding': {'type': 'string', 'enum': [p['context_binding']]},
                 'answer': {'type': 'string', 'minLength': 1, 'maxLength': 6000},
                 'summary': {'type': 'string', 'minLength': 1, 'maxLength': p['memory_allocation']['summary_max_chars']},
@@ -93,6 +136,7 @@ def schema(p):
                 'page_requests': {'type': 'array', 'maxItems': 4 if available else 0, 'items': dict(type='string', **({'enum': available} if available else {}))},
                 'facts': {'type': 'array', 'maxItems': 8, 'items': {'type': 'string', 'enum': quotations}},
                 'workspace_request': obj({'operation': {'type': 'string', 'enum': ['read', 'edit', 'test', 'capability']},
+                    'scope': {'type': 'string', 'enum': ['workspace']},
                     'capability': {'type':'string','enum':['ruff','pyright']},
                     'capability_action': {'type':'string','enum':['install','check']},
                     'paths': {'type': 'array', 'maxItems': 8, 'items': {'type': 'string', 'minLength': 1, 'maxLength': 240}}}),
@@ -147,7 +191,10 @@ def memory(s, sid, iid):
 
 
 def binding(p):
-    return sha(canonical([p['contract'], p['workspace_context'], p['routing_capabilities']]))
+    fields = [p['contract'], p['workspace_context'], p['routing_capabilities']]
+    if 'document_evidence' in p:
+        fields.append(p['document_evidence'])
+    return sha(canonical(fields))
 
 
 def workspace_handoff(s, sid, iid, prompt):
@@ -179,6 +226,13 @@ def request_check(s, sid, p):
         raise InvalidUpdate('Conversation contract or context binding mismatch')
     if not isinstance(p['request'], str) or not 1 <= len(p['request']) <= 1800 or not p['request'].strip():
         raise InvalidUpdate('Conversation prompt must be 1..1800 characters')
+    if 'document_evidence' in p:
+        supplied = p['document_evidence']
+        if not isinstance(supplied, dict) or any(key not in supplied for key in DOCUMENT_EVIDENCE_REF):
+            raise InvalidUpdate('Invalid document evidence payload')
+        ref = {key: supplied[key] for key in DOCUMENT_EVIDENCE_REF}
+        if supplied != document_evidence(s, sid, ref, p['request']):
+            raise InvalidUpdate('Delivered document text differs from its evidence receipt')
     if not re.fullmatch('[a-f0-9]{32}', p['_request_nonce']):
         raise InvalidUpdate('Missing conversation request identity')
     # Only ledger metadata is inspected here. Never load repository pages/results.
@@ -219,6 +273,10 @@ def check_delivery(p, proposal):
         raise InvalidUpdate('Complete the answer and close every fenced code block; summary cannot finish the answer.')
     pages = proposal.get('page_requests', [])
     work=proposal.get('workspace_request', {})
+    if (proposal['intent']=='document' or supplied_document(p)) and 'workspace_request' in proposal:
+        raise InvalidUpdate('A document request cannot propose workspace operations')
+    if 'scope' in work and (proposal['intent'] != 'workspace' or work.get('operation') != 'read' or work.get('paths')):
+        raise InvalidUpdate('Whole-workspace scope requires a workspace read and empty paths')
     if work.get('operation')=='capability' and not all(k in work for k in ('capability','capability_action')):
         raise InvalidUpdate('Capability requests require capability and capability_action')
     if work.get('operation')!='capability' and any(k in work for k in ('capability','capability_action')):
@@ -298,6 +356,8 @@ def _answer_step(s,meta,root,request,provider=None):
     p['diagram_reference'] = visuals.reference(s, sid, parent, prompt)
     from capabilities import context as tool_context
     p['tool_evidence']=tool_context(s,meta.get('active'))
+    if 'document_evidence' in request:
+        p['document_evidence'] = document_evidence(s, sid, request['document_evidence'], prompt)
     p['context_binding'] = binding(p)
     real = provider is None
     if real:

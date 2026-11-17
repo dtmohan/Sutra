@@ -25,7 +25,9 @@ class OrchestrationTests(unittest.TestCase):
     def provider(self,stage):
         model=MODELS[self.tier]
         if stage=='conversation':
-            p=Conversation(model,lambda r,p:r.update(intent='workspace',facts=['Remember project Cedar, ticket CED724.'],workspace_request={'operation':getattr(self,'operation','read'),'paths':[]}))
+            op=getattr(self,'operation','read')
+            work={'operation':'read','scope':'workspace','paths':[]} if op=='read' else {'operation':op,'paths':['part0.py']}
+            p=Conversation(model,lambda r,p:r.update(intent='workspace',facts=['Remember project Cedar, ticket CED724.'],workspace_request=work))
         else:p=Child(model) if stage=='subagent' else Review(model)
         self.models.append((stage,p));return p
     def step(self,out=None,**kw):
@@ -46,7 +48,7 @@ class OrchestrationTests(unittest.TestCase):
             if stage!='conversation':return original(stage)
             def reply(r,p):
                 if 'repair' not in p:r['answer']='This conversation has no file-access tools.'
-                else:r.update(intent='workspace',answer='Handing off in this chat.',workspace_request={'operation':'read','paths':[]})
+                else:r.update(intent='workspace',answer='Handing off in this chat.',workspace_request={'operation':'read','scope':'workspace','paths':[]})
             model=Conversation(MODELS[self.tier],reply);self.models.append((stage,model));return model
         self.provider=provider
         out=self.step(armed=False)
@@ -68,7 +70,8 @@ class OrchestrationTests(unittest.TestCase):
         self.tier='auto';self.prompt='Review the architecture. Remember Cedar, CED724. Keep this read only; no network or new dependencies.'
         def provider(stage):
             if stage=='conversation':
-                p=Conversation('small',lambda r,p:r.update(intent='workspace',escalation_reason='reasoning_capacity'))
+                p=Conversation('small',lambda r,p:r.update(intent='workspace',escalation_reason='reasoning_capacity',
+                    workspace_request={'operation':'read','scope':'workspace','paths':[]}))
             else:
                 p=Child('large') if stage=='subagent' else Review('large')
                 p.budget=__import__('paging').Budget(32768,4096,256)
@@ -479,24 +482,125 @@ class OrchestrationTests(unittest.TestCase):
         contract=self.s.pinned(sid)
         permissions=m.permissions(self.s,sid)
         usage=review_budget.usage(self.s,sid)
-        prompt="Can you review this resume and comment? I am applying for post-silicon validation roles. The file is /Users/example/Downloads/Candidate Resume (1).docx"
+        prompts=[
+            ("Can you review this resume and comment? I am applying for post-silicon validation roles. The file is /Users/example/Downloads/Candidate Resume (1).docx",'DOCX'),
+            ("i was requesting for the resume review but you gave me worksapce review. can you look at the resume now please?",'Document text:'),
+        ]
         self.tier='high'
         with patch.object(self,'provider',side_effect=AssertionError('Document request dispatched a model')), \
                 patch('repository_tools.execute',side_effect=AssertionError('Document request read the repository')):
-            for event in ('start','start_existing','start_review'):
-                with self.subTest(event=event):
-                    result=self.step(event=event,prompt=prompt,armed=False)
-                    self.assertEqual(result['state'],'DONE')
-                    self.assertIsNone(result['conversation_id'])
-                    self.assertIn('DOCX',result['request_notice'])
-                    self.assertIn('paste',result['request_notice'].lower())
-                    self.assertEqual(m.events(self.s,result['flow_id'])[-1]['kind'],'DOCUMENT_INPUT_REQUIRED')
+            for prompt,expected in prompts:
+                for event in ('start','start_existing','start_review'):
+                    with self.subTest(event=event,prompt=prompt):
+                        scope={'chat_key':'7'*64} if event=='start' else {}
+                        result=self.step(event=event,prompt=prompt,armed=False,**scope)
+                        self.assertIsNone(result['conversation_id'])
+                        if event=='start':
+                            self.assertEqual(result['state'],'PAUSED')
+                            self.assertIn(expected,result['stop']['error'])
+                            self.assertEqual(m.events(self.s,result['flow_id'])[-1]['kind'],'EVIDENCE_BRIDGE')
+                        else:
+                            self.assertEqual(result['state'],'DONE')
+                            self.assertIn(expected,result['request_notice'])
         self.assertEqual(self.meta['active'],sid)
         self.assertEqual(flow.response(self.s,saved['flow_id']),before)
         self.assertEqual(self.s.pinned(sid),contract)
         self.assertEqual(m.permissions(self.s,sid),permissions)
         self.assertEqual(review_budget.usage(self.s,sid),usage)
         self.assertEqual(self.step(event='pending')['flow_id'],saved['flow_id'])
+
+    def test_document_reference_from_memory_uses_non_workspace_route(self):
+        first=Conversation()
+        self.provider=lambda stage:first
+        origin=self.step(prompt='The CV I mentioned is saved in /tmp/Example Applicant (1).docx.',armed=False)
+        router=Conversation(fault=lambda out,_:out.update(intent='document'))
+        self.provider=lambda stage:router
+        with patch('repository_tools.execute',side_effect=AssertionError('Document request read the repository')):
+            result=self.step(prompt='Can you look at it now?',parent=origin['conversation_id'],armed=False)
+        self.assertEqual(result['state'],'PAUSED')
+        self.assertIn('Document text:',result['stop']['error'])
+        self.assertTrue(result['conversation']['memory_used'])
+        self.assertIn('Example Applicant',canonical(router.payloads[0]['memory']))
+        self.assertTrue(result['conversation']['result']['admission']['admitted'])
+        self.assertNotIn('active',self.meta)
+        self.assertEqual(m.events(self.s,result['flow_id'])[-1]['kind'],'EVIDENCE_BRIDGE')
+
+    def test_pronoun_review_after_document_route_is_guidance_without_a_model(self):
+        router=Conversation(fault=lambda out,_:out.update(intent='document'))
+        self.provider=lambda stage:router
+        first=self.step(prompt='For later discussion my résumé is in /tmp/Applicant.docx. Please acknowledge this.',armed=False)
+        with patch.object(self,'provider',side_effect=AssertionError('Document follow-up dispatched an inference call')), \
+                patch('repository_tools.execute',side_effect=AssertionError('Document follow-up read the repository')):
+            ref=self.step(prompt='Can you look at it now?',parent=first['conversation_id'],armed=True)
+        self.assertEqual(ref['state'],'PAUSED')
+        self.assertIn('Document text:',ref['stop']['error'])
+        self.assertIsNone(ref['conversation_id'])
+        self.assertNotIn('active',self.meta)
+
+    def test_latest_document_notice_guides_reference_without_receipt(self):
+        chat_key='7'*64
+        with patch.object(self,'provider',side_effect=AssertionError('Document follow-up dispatched an inference call')), \
+                patch('repository_tools.execute',side_effect=AssertionError('Document follow-up read the repository')):
+            first=self.step(prompt='Please review my CV.',chat_key=chat_key,armed=True)
+            ref=self.step(prompt='Can you look at it now?',chat_key=chat_key,armed=True)
+            without_chat_id=self.step(prompt='Can you look at it now?',chat_key='8'*64,armed=True,
+                                      prior_prompt='Please review my CV.')
+        self.assertIsNone(first['conversation_id'])
+        self.assertEqual(ref['flow_id'],first['flow_id'])
+        self.assertEqual(ref['stop']['error'],first['stop']['error'])
+        self.assertEqual(without_chat_id['stop']['error'],first['stop']['error'])
+        self.assertTrue(ref['task_stack']['open_tasks'])
+        workspace=Conversation(fault=lambda out,_:out.update(intent='workspace',
+            workspace_request={'operation':'read','scope':'workspace','paths':[]}))
+        self.provider=lambda stage:workspace
+        fresh=self.step(prompt='Please review the architecture of this codebase.', chat_key=chat_key,armed=False)
+        self.assertEqual(fresh['state'],'NEED_ARM')
+
+    def test_supplied_document_text_cannot_create_workspace_review(self):
+        def propose(out,packet):
+            if 'repair' not in packet:
+                out.update(intent='workspace')
+            else:
+                out.update(answer='Lead with the validation work.')
+        router=Conversation(fault=propose)
+        self.provider=lambda stage:router
+        with patch('repository_tools.execute',side_effect=AssertionError('Document review read the repository')):
+            result=self.step(prompt='Review this résumé.\n\nRésumé text:\nValidated a PCIe interface on first silicon.',armed=False)
+        self.assertEqual(result['state'],'DONE')
+        self.assertNotIn('request_notice',result)
+        self.assertEqual(result['conversation']['result']['accepted_output']['answer'],'Lead with the validation work.')
+        self.assertEqual(len(router.payloads),2)
+        self.assertNotIn('active',self.meta)
+        router.payloads.clear()
+        with patch('repository_tools.execute',side_effect=AssertionError('Document review read the repository')):
+            followup=self.step(prompt='Could you review it again?',parent=result['conversation_id'],armed=False)
+        self.assertEqual(followup['state'],'DONE')
+        self.assertEqual(followup['conversation']['result']['accepted_output']['answer'],'Lead with the validation work.')
+        self.assertEqual(len(router.payloads),2)
+
+    def test_old_misrouted_document_flow_cannot_reenter_workspace(self):
+        prompt='Can you look at the resume now please?'
+        with self.s.db:
+            saved=m.create(self.s,'flow',workspace=str(self.ws),objective=prompt,prompt=prompt)
+            m.transition(self.s,saved['id'],'CLASSIFYING','REQUEST')
+            m.transition(self.s,saved['id'],'NEED_ARM','CLASSIFIED',{'permission':{'operation':'read','paths':[]}})
+        before=flow.response(self.s,saved['id'])
+        with patch('repository_tools.execute',side_effect=AssertionError('Saved document request read the repository')):
+            self.assertIn('Document text:',self.step(before,event='inspect')['request_notice'])
+            self.assertIn('Document text:',self.step(before)['request_notice'])
+        self.assertEqual(flow.response(self.s,saved['id']),before)
+        self.assertNotIn('active',self.meta)
+
+    def test_paused_pasted_document_can_resume_conversation(self):
+        with patch('conversation.answer',side_effect=ContextBudgetExceeded('Small model context')):
+            paused=self.step(prompt='Review this paragraph.\n\nDocument text:\nValidated PCIe on first silicon.',
+                             armed=False)
+        self.assertEqual(paused['stop']['resume_phase'],'CLASSIFYING')
+        resumed=self.step(paused,event='resume',armed=False)
+        self.assertEqual(resumed['state'],'CLASSIFYING')
+        self.assertNotIn('request_notice',resumed)
+        self.provider=lambda stage:Conversation()
+        self.assertEqual(self.step(resumed,armed=False)['state'],'DONE')
 
     def test_replacing_review_keeps_edit_intent_and_requires_permission(self):
         out=self.children();sid=self.meta['active'];self.operation='edit'

@@ -31,6 +31,8 @@ def followup(proposal,p):
         # The first stage has no source. Fresh scoped reads must precede the
         # workspace adapter's model decision, regardless of the model's opinion.
         return None
+    if proposal['intent']=='document':
+        return None
     reason=proposal.get('escalation_reason','none')
     if reason=='missing_context':
         return None  # Ask the user for the missing evidence; a bigger model cannot supply it.

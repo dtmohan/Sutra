@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.41.0
+
+- Use the Karma evidence-admission profile to govern missing document input and repository targets.
+- Resume a document or workspace review in its originating chat after receiving pasted evidence or a source selection. Retain the request, context and spending across reloads and model switches.
+- Show what evidence is needed and the saved budget in native chat and Sutra Monitor.
+
+## 0.40.1
+
+- Keep direct résumé, CV, and cover letter requests out of repository review, including follow-ups without a filename.
+- Give the router a document input route for references from prior conversation. Review supplied document text in chat.
+- Stop a saved misrouted document request before workspace recovery and retain its receipt and spending.
+
 ## 0.40.0
 
 - Keep several workspace tasks open in one native chat. Focus, resume, or close

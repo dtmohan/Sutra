@@ -18,7 +18,7 @@ EDGES = {
  'READY': {'RUNNING','WAITING_CHILDREN','DONE','PAUSED','CANCELLED','QUARANTINED'},
  'RUNNING': {'READY','DONE','PAUSED','CANCELLED','QUARANTINED'},
  'WAITING_CHILDREN': {'READY','PAUSED','CANCELLED','QUARANTINED'},
- 'PAUSED': {'READY','CLASSIFYING','BINDING','MAPPING','BRANCHING','CHILDREN','SYNTHESIS','CODING','WORKSPACE','NEED_TOOL_APPROVAL','CANCELLED','QUARANTINED'},
+ 'PAUSED': {'READY','CLASSIFYING','NEED_ARM','BINDING','MAPPING','BRANCHING','CHILDREN','SYNTHESIS','CODING','WORKSPACE','NEED_TOOL_APPROVAL','DONE','CANCELLED','QUARANTINED'},
  'CREATED': {'CLASSIFYING','CANCELLED','PAUSED'},
  'CLASSIFYING': {'NEED_ARM','BINDING','DONE','PAUSED','CANCELLED'},
  'NEED_ARM': {'BINDING','CANCELLED','PAUSED'},
@@ -305,7 +305,7 @@ def overview(db,sid=None):
             for k,v in (json.loads(settled)['used'] if settled else json.loads(cost)).items():used[k]=used.get(k,0)+v
         page = db.execute("SELECT payload_json FROM page_audit WHERE event='SOURCE_PAGE_PLAN' AND json_extract(payload_json,'$.owner')=? ORDER BY seq DESC LIMIT 1", (nid,)).fetchone()
         result.append({'id':nid,'parent':n['parent_id'],'kind':n['kind'],'state':e.get('to',n['initial_state']),
-                       'objective':n.get('objective',n.get('goal','')),'kernel':last_dispatch.get('kernel'),'limits':n.get('limits'),
+                       'objective':n.get('objective',n.get('goal','')),'kernel':e.get('kernel') or last_dispatch.get('kernel'),'limits':n.get('limits'),
                        'permissions':n.get('permissions'),'context_hash':n.get('context_hash'),'last_event':e.get('kind'),
                        'resource_fallback':resource_fallback,
                        'source_paging':json.loads(page[0]) if page else None,

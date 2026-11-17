@@ -97,7 +97,7 @@ function renderMonitor(){
  for(const id of ['resume-workflow','discard-workflow','increase-allocation'])el(id).disabled=!!native?.working;
  el('increase-allocation').hidden=pending?.state!=='PAUSED'||automatic?.status==='model_context'||
    !(['context_budget','task_budget','budget_stopped'].includes(stop?.status)||stop?.memory_fault?.code==='capacity');
- const budget=pending?.stackChat?pending.task_budget:d.review_budget;
+ const budget=stop?.status==='evidence_bridge'?stop.budget:pending?.stackChat?pending.task_budget:d.review_budget;
  el('task-allocation').textContent=budget?.limits&&budget?.used
    ? (snapshotFresh?'':'Last snapshot · ')+'Task allocation v'+(budget.allocation_version||0)+' · '+Object.entries({tokens:'model units',calls:'calls',source_bytes:'source bytes',operations:'operations',seconds:'seconds'}).map(([key,label])=>Number(budget.used[key]).toLocaleString(undefined,{maximumFractionDigits:1})+' / '+Number(budget.limits[key]).toLocaleString()+' '+label).join(' · ')+'. Spent / total; increases never erase spending.'
    : '';
