@@ -126,7 +126,7 @@
 
 ## Adaptive reasoning
 
-- Adaptive applies to conversation routing and workspace generation. Workspace calls start at the lowest known control; report writers, child reviewers and independent report checkers bind that choice to receipts. This does not establish answer quality or guarantee that a backend disables reasoning. Source-informed tier selection is unchanged.
+- Adaptive applies to conversation routing and workspace generation. Multi-file architecture synthesis may use the lowest positive control when its existing allocation has the full output reserve and a spare draft attempt. If it exhausts output, the spare attempt can retry at the lowest control. Evidence selection, child reviews and independent claim checks start at the lowest known control. Each call records the requested control in its receipt.
 - The escalation signal is a fallible model assessment. More deliberation is not a correctness guarantee, and a request can stop at an incorrect direct answer without asking for help.
 - Ollama's `think=false` request may fall back to a model's lowest available level. If thinking-on is advertised, the generic false request can be followed by true, but backend fallback may make them computationally equivalent. Metadata does not prove the backend's actual computation. Unknown level names are not ordered automatically.
 - Each supported retry consumes the existing call, time and output allocation. Increasing `num_predict` alone is not used as a reasoning control. A long thought stream can still exhaust the combined reasoning/answer output reserve and be withheld.

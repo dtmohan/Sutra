@@ -27,6 +27,26 @@ def model(name='small', values=(False, True), fault=escalate):
 
 
 class ControlsTests(unittest.TestCase):
+    def test_adaptive_initial_effort_for_substantive_requests(self):
+        advertised = policy.capabilities({'thinking': {'values': [False, 'low', 'medium']}})
+        for prompt, signal in [
+            ('Compare the trade-offs of a bus and a shuttle for this schedule.', 'trade-off-analysis'),
+            ('Design a plan that fits the budget.', 'comparison-or-planning'),
+            ('Diagnose this stack trace.', 'supplied-code-analysis'),
+            ('Calculate the optimal allocation for 8 workers.', 'numeric-planning-or-correction'),
+            ('Reason through this example.', 'explicit-reasoning-request'),
+        ]:
+            with self.subTest(prompt=prompt):
+                request = {'request': prompt}
+                self.assertEqual(policy.task_signal(request), signal)
+                self.assertEqual(policy.initial_step(request, advertised, 'adaptive'), 1)
+                self.assertEqual(policy.initial_step(request, advertised, 'off'), 0)
+                self.assertEqual(policy.initial_step(request, policy.capabilities({}), 'adaptive'), 0)
+
+        for prompt in ('Hello, how are you?', 'What name did we use?', 'Explain this codebase architecture.'):
+            with self.subTest(prompt=prompt):
+                self.assertEqual(policy.initial_step({'request': prompt}, advertised, 'adaptive'), 0)
+
     def test_only_documented_distinct_controls_form_the_ladder(self):
         for values, expected in [([False, True], [False, True]), ([True], [False, True]),
                 ([False], [False]), ([], [None]), (['unknown'], [None]),

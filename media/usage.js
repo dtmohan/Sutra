@@ -87,6 +87,9 @@ function renderMonitor(){
  const pending=native?.pending, stop=pending?.stop;
  const recovery=pending?.recovery?.message||stop?.error;
  const automatic=stop?.automatic_allocation;
+ const openTasks=native?.openTaskCount;
+ setText('open-tasks',Number.isSafeInteger(openTasks)&&openTasks>=0?'Open tasks ('+openTasks.toLocaleString()+')':'Open tasks');
+ el('open-tasks').disabled=!!native?.working;
  el('saved-review').hidden=!pending&&!architect;
  el('recovery-controls').hidden=!pending;
  setText('recovery-status',pending?[...new Set([recovery,automatic?.message||automatic?.reason].filter(Boolean))].join(' ')||
@@ -94,7 +97,7 @@ function renderMonitor(){
  for(const id of ['resume-workflow','discard-workflow','increase-allocation'])el(id).disabled=!!native?.working;
  el('increase-allocation').hidden=pending?.state!=='PAUSED'||automatic?.status==='model_context'||
    !(['context_budget','task_budget','budget_stopped'].includes(stop?.status)||stop?.memory_fault?.code==='capacity');
- const budget=d.review_budget;
+ const budget=pending?.stackChat?pending.task_budget:d.review_budget;
  el('task-allocation').textContent=budget?.limits&&budget?.used
    ? (snapshotFresh?'':'Last snapshot · ')+'Task allocation v'+(budget.allocation_version||0)+' · '+Object.entries({tokens:'model units',calls:'calls',source_bytes:'source bytes',operations:'operations',seconds:'seconds'}).map(([key,label])=>Number(budget.used[key]).toLocaleString(undefined,{maximumFractionDigits:1})+' / '+Number(budget.limits[key]).toLocaleString()+' '+label).join(' · ')+'. Spent / total; increases never erase spending.'
    : '';
@@ -171,10 +174,17 @@ el('reset').onclick=()=>{filters={};for(const key of ['model','stage','status','
 el('refresh').onclick=()=>vscode.postMessage({type:'refresh'});
 el('telemetry').onclick=()=>vscode.postMessage({type:'telemetry'});
 el('reasoning-settings').onclick=()=>vscode.postMessage({type:'reasoning_settings'});
-function renderReasoningPreference(preference){
+function renderReasoningPreference(preference,fixed){
  const labels={adaptive:'Adaptive',off:'Off',on:'On','model-default':'Model default'};
- setText('reasoning-preference','Reasoning setting: '+(labels[preference]||'Unavailable'));
- el('reasoning-preference-note').textContent=preference==='adaptive'?'Conversation starts with supported effort for the request; workspace workers use model default. Each call below shows the control actually requested.':labels[preference]?'Adaptive is inactive. This saved choice applies to new calls; change it in Reasoning settings.':'Waiting for the effective VS Code setting.';
+ setText('reasoning-preference','Shared reasoning: '+(Object.hasOwn(labels,preference)?labels[preference]:'Unavailable'));
+ const overrides=[];
+ for(const [tier,name] of [['low','Low'],['mid','Mid'],['high','High']]){
+  const choice=fixed?.[tier];
+  if(Object.hasOwn(labels,choice))overrides.push('Sutra '+name+' · '+labels[choice]);
+ }
+ setText('tier-reasoning-summary',overrides.join(' | '));
+ el('tier-reasoning-summary').hidden=!overrides.length;
+ setText('reasoning-preference-note','Sutra Auto and inheriting tiers use the shared setting. In Adaptive, multi-file report synthesis can use thinking when there is room for the answer and a retry. Use Sutra: Think on Next Request in the Command Palette for a one-turn override.');
 }
 function fillOptions(key){
  const values=[...new Set((snapshot?.calls||[]).map(c=>c[key]))].sort();if(filters[key]&&!values.includes(filters[key]))values.push(filters[key]);
@@ -232,8 +242,9 @@ function renderActivity(calls){
  }
  el('reasoning-empty').hidden=calls.length>0;
 }
-window.addEventListener('message',({data:m})=>{if(m.type!=='usage')return;renderReasoningPreference(m.reasoningPreference);renderActivity(m.activity||[]);setText('reasoning-error',m.activityError||'');el('reasoning-error').hidden=!m.activityError;snapshot=m.snapshot;routing=m.routing;native=m.native;error=m.error;for(const key of ['model','stage'])fillOptions(key);if(!snapshot){for(const key of ['input','output','calls','unknown'])el(key).textContent='—';for(const key of ['input','output'])el(key+'-note').textContent='Waiting for measurements';el('scope').textContent='This workspace · waiting for recorded calls…';el('visuals').hidden=true;el('details').hidden=true;el('empty').hidden=true;setText('window','');}render();});
+window.addEventListener('message',({data:m})=>{if(m.type!=='usage')return;renderReasoningPreference(m.reasoningPreference,m.tierReasoning);renderActivity(m.activity||[]);setText('reasoning-error',m.activityError||'');el('reasoning-error').hidden=!m.activityError;snapshot=m.snapshot;routing=m.routing;native=m.native;error=m.error;for(const key of ['model','stage'])fillOptions(key);if(!snapshot){for(const key of ['input','output','calls','unknown'])el(key).textContent='—';for(const key of ['input','output'])el(key+'-note').textContent='Waiting for measurements';el('scope').textContent='This workspace · waiting for recorded calls…';el('visuals').hidden=true;el('details').hidden=true;el('empty').hidden=true;setText('window','');}render();});
 // Expire live readings even if the host/reader stops delivering messages.
+el('open-tasks').onclick=()=>vscode.postMessage({type:'open_tasks'});
 el('resume-workflow').onclick=()=>vscode.postMessage({type:'resume'});el('discard-workflow').onclick=()=>vscode.postMessage({type:'discard'});
 el('manage-tools').onclick=()=>vscode.postMessage({type:'tools'});el('tool-policy').onclick=()=>vscode.postMessage({type:'tool_policy'});
 el('increase-allocation').onclick=()=>vscode.postMessage({type:'increase_allocation'});

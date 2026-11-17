@@ -1,3 +1,24 @@
+# Sutra 0.40.0 — Open tasks in native chat
+
+A new workspace request can park the focused task and start with its own goal
+and scope. Use **Open tasks** in Sutra Monitor or **Sutra: Open Tasks** in the
+Command Palette to focus, resume, or close a task from the last active Sutra
+chat. Finishing or closing the focused task restores focus to the previous
+open task. Send **continue** in the originating chat to resume it, using
+whichever Sutra model tier you want to run next.
+
+Each task retains its workflow checkpoint, Smriti memory references, permissions
+and consumed allocation across reloads. Resuming revalidates the source and
+permission binding. Saved edits and tests still require action confirmation.
+
+# Sutra 0.39.0 — Adaptive thinking and fixed-tier settings
+
+Adaptive requests the model’s lowest supported positive reasoning level for substantive conversation. Sutra looks for request cues such as debugging supplied code, numerical planning, comparing approaches or explaining trade-offs, and explicit requests to reason. Routine or unclassified chat starts at the lowest known level. This check runs in the host without another model call.
+
+During a workspace review, Sutra uses fresh evidence and the stage’s allocation. A report writer synthesizing multiple files can use thinking when the existing allocation has the full output reserve and a spare draft attempt. Adaptive evidence selection, child reviews and claim checks start at the lowest known level. If thinking exhausts the report writer’s output reserve, Sutra can use an existing attempt to retry at the lowest level.
+
+Run **Sutra: Configure Reasoning**. The shared setting applies to **Sutra Auto**. Each fixed tier pins its configured model and can **Inherit** the shared choice or use **Adaptive**, **On**, **Off**, or **Model default**. The Chat title bar lightbulb requests thinking for one turn. Open a call’s details to see which control Sutra actually requested.
+
 # Sutra 0.38.5 — start in chat and recover reviews where they stop
 
 Use **Sutra: Open Chat (Sutra Auto)** to start in VS Code's native Local Chat. Ask for a review and describe the scope you want. Sutra asks for workspace access when needed, then discovers and reads relevant files.
@@ -26,7 +47,7 @@ If the architecture claim reviewer reaches its output limit with thinking enable
 
 # Sutra 0.38.1 — thinking for one chat request
 
-Click the lightbulb in the VS Code Chat toolbar to request thinking for your next Sutra turn. Click the lit bulb to cancel. Sutra shows thinking inline when the local model streams it. Later requests use your saved reasoning setting, which defaults to Adaptive.
+Click the lightbulb in the VS Code Chat title bar, or run **Sutra: Think on Next Request** from the Command Palette. This requests thinking for one Sutra turn even with Adaptive selected. Click the lit bulb or run **Sutra: Cancel Thinking for Next Request** before sending to cancel. Later requests use your saved reasoning setting. Sutra shows thinking inline when the local model streams it.
 
 # Sutra 0.38.0 — Git provenance and targeted architecture evidence
 

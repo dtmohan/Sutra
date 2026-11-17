@@ -109,7 +109,7 @@ def conversation_pages(s,p,budget,materialize=False,mandatory_only=False):
 
 def request_check(s,sid,p):
     from review_reasoning import check
-    check(p)
+    check(p, synthesis=True)
     from conversation import check_workspace_handoff
     check_workspace_handoff(s,sid,p)
     if p.get('memory_budget') and p.get('memory')!=conversation_pages(s,p,Budget(**p['memory_budget'])):raise InvalidUpdate('Parent synthesis memory changed')
@@ -374,8 +374,8 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
         _, _, p = report_review.candidate(s, sid, checkpoint)
     else:
         from review_reasoning import bind, repair
-        bind(provider, p)
         fmt, attempts = fit_packet(s, sid, p, data, provider, real)
+        bind(provider, p, synthesis_attempts=attempts)
         run=s.begin_run(sid,prompt,[],None,max_calls=attempts,max_repairs=attempts-1)
         output_repaired = False
         for attempt in range(attempts):
@@ -390,12 +390,14 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
                 s.event(run,'ALLOW',{'reason':'chat_review_admitted','invocation_id':out['invocation_id']})
                 break
             s.event(run,'NACK',{'errors':out['admission']['errors']})
-            recovery = repair(out, p, output_repaired, attempt < attempts-1)
+            recovery = repair(out, p, output_repaired, attempt < attempts-1, synthesis=True)
             if attempt==attempts-1 or (out.get('blocked') and recovery is None):s.event(run,'FIN',{'reason':'chat_repair_exhausted'});break
             try:request_check(s,sid,p)
             except (InvalidUpdate,PageFault) as exc:
                 s.event(run,'FIN',{'reason':'chat_context_changed','error':str(exc)});break
             s.event(run,'BRIDGE',{'reason':'bounded_output_repair' if recovery else 'bounded_chat_repair'})
+            if recovery and p['reasoning']['step'] > 0:
+                bind(provider, p, preference='adaptive')
             p['repair'] = recovery or {'errors':[e[:140] for e in out['admission']['errors'][:2]]}
             output_repaired = output_repaired or recovery is not None
     reviewer = review_provider if review_provider is not None else (None if real else provider)

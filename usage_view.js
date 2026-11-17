@@ -29,7 +29,14 @@ function install(vscode,context,deps){
   const item=vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right,19);
   item.name='Sutra Monitor';item.text='$(dashboard) Sutra Monitor';item.command='karma.openMonitor';
   item.tooltip='Open tokens, system telemetry and kernel decisions';item.show();
-  const publish=()=>{const a=currentActivity();if(ready)view?.webview.postMessage({type:'usage',snapshot,routing,native,error,reasoningPreference:vscode.workspace.getConfiguration('karma').get('thinking','adaptive'),activity:a?.calls||[],activityError:a?.error||''});};
+  const publish=()=>{
+    const a=currentActivity();
+    if(!ready)return;
+    const config=vscode.workspace.getConfiguration('karma');
+    view?.webview.postMessage({type:'usage',snapshot,routing,native,error,
+      reasoningPreference:config.get('thinking','adaptive'),tierReasoning:config.get('tierReasoning',{}),
+      activity:a?.calls||[],activityError:a?.error||''});
+  };
   const link=id=>{const a=currentActivity();return a?activityUri(a.directory,id):null;};
   const openDetails=async id=>{
     const uri=link(id);if(!uri)return;
@@ -51,6 +58,7 @@ function install(vscode,context,deps){
       else if(message?.type==='tools')void vscode.commands.executeCommand('karma.manageTools');
       else if(message?.type==='tool_policy')void vscode.commands.executeCommand('karma.configureTools');
       else if(message?.type==='refresh')void refresh();
+      else if(message?.type==='open_tasks'&&!native?.working)void vscode.commands.executeCommand('karma.openTasks');
       else if(message?.type==='resume')void vscode.commands.executeCommand('karma.resumeWorkflow');
       else if(message?.type==='discard')void vscode.commands.executeCommand('karma.discardWorkflow');
       else if(message?.type==='increase_allocation')void vscode.commands.executeCommand('karma.increaseAllocation');
@@ -60,14 +68,14 @@ function install(vscode,context,deps){
           void vscode.commands.executeCommand('karma.architectureReadAndRetry',stop.run_id);
       }
       else if(message?.type==='telemetry')void vscode.commands.executeCommand('karma.open');
-      else if(message?.type==='reasoning_settings')void vscode.commands.executeCommand('workbench.action.openSettings','karma.thinking');
+      else if(message?.type==='reasoning_settings')void vscode.commands.executeCommand('karma.configureReasoning');
       else if(message?.type==='activity_details')void openDetails(message.id);
     },null,context.subscriptions);
     current.onDidChangeVisibility(()=>{if(current.visible)void refresh();},null,context.subscriptions);
     current.onDidDispose(()=>{if(view===current){view=undefined;ready=false;}},null,context.subscriptions);
   }};
   context.subscriptions.push(item,
-    vscode.workspace.onDidChangeConfiguration(e=>{if(e.affectsConfiguration('karma.thinking'))publish();}),
+    vscode.workspace.onDidChangeConfiguration(e=>{if(e.affectsConfiguration('karma.thinking')||e.affectsConfiguration('karma.tierReasoning'))publish();}),
     vscode.window.registerWebviewViewProvider('karma.usage',provider),
     vscode.commands.registerCommand('karma.openMonitor',()=>vscode.commands.executeCommand('karma.usage.focus')),
     vscode.commands.registerCommand('karma.openUsage',()=>vscode.commands.executeCommand('karma.usage.focus')),
@@ -96,7 +104,7 @@ function install(vscode,context,deps){
     setStatus(value){
       const r=value?.routing;
       routing=r?{active:!!r.active,workspaceAccess:r.workspaceAccess,stage:r.stage,model:r.model,memoryUsed:r.memoryUsed,memorySource:r.memorySource,memoryAllocation:r.memoryAllocation,memoryStatus:r.memoryStatus,modelCapacity:r.modelCapacity,conversationBudget:r.conversationBudget,invocationId:r.invocationId}:undefined;
-      native=value?{enabled:value.enabled,armed:value.armed,accessProfile:value.accessProfile,label:value.label,compaction:value.compaction,pending:value.pending,working:value.working}:undefined;publish();
+      native=value?{enabled:value.enabled,armed:value.armed,accessProfile:value.accessProfile,label:value.label,compaction:value.compaction,pending:value.pending,working:value.working,openTaskCount:value.openTaskCount}:undefined;publish();
     },
     recordResponse(group){if(group?.calls?.length)item.tooltip='Latest completed stage / response: '+tokens.compact(group)+'\nClick for workspace history and per-stage counts.';},
     reset(){snapshot=undefined;routing=undefined;native=undefined;error=undefined;item.tooltip='Open tokens, system telemetry and kernel decisions';publish();}

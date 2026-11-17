@@ -23,9 +23,17 @@ class NativeMemory{
   }
   signature(id){return crypto.createHmac('sha256',this.data.secret).update('karma-native-context-v1:'+id).digest('hex');}
   valid(id,sig){return /^[a-f0-9]{32}$/.test(id)&&/^[a-f0-9]{64}$/.test(sig)&&crypto.timingSafeEqual(Buffer.from(sig,'hex'),Buffer.from(this.signature(id),'hex'));}
-  async remember(id,options){
+  taskStack(parent){return parent&&this.data.taskStacks?.[parent];}
+  async remember(id,options,stackChat){
     if(!/^[a-f0-9]{32}$/.test(id))throw Error('Invalid conversation receipt identity');
     const key=this.chatKey(options);if(key)this.data.chats[key]=id;
+    if(stackChat){
+      this.data.taskStacks??={};
+      delete this.data.taskStacks[id];
+      this.data.taskStacks[id]=stackChat;
+      const ids=Object.keys(this.data.taskStacks);
+      if(ids.length>1024)delete this.data.taskStacks[ids[0]];
+    }
     await this.storage?.update(KEY,this.data);
     return this.signature(id);
   }

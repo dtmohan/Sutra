@@ -56,6 +56,9 @@ exports.run=async()=>{
   assert.equal(vscode.workspace.getConfiguration('chat').get('defaultModel'),'karma-auto');
   assert.equal(api.getRoutingStatus().routing,null);
   report.checks.push('primary Open Chat command opens Local Chat and saves Sutra Auto as the default without sending a prompt');
+  assert((await vscode.commands.getCommands(true)).includes('karma.configureReasoning'));
+  assert.deepEqual(vscode.workspace.getConfiguration('karma').get('tierReasoning'),{low:'inherit',mid:'inherit',high:'inherit'});
+  report.checks.push('fixed-tier reasoning settings inherit the shared default on a new profile');
   if(process.platform==='darwin'&&process.arch==='arm64'){
     const native=JSON.parse((await exec(path.join(extension.extensionPath,'bin','telemetry'),['--once'])).stdout);
     if(native.temperatures.machine==='Mac17,13'){

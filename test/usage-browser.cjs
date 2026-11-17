@@ -65,6 +65,22 @@ function monitorHost(){
  const newerRun=dashboard();newerRun.runs.unshift({state:'ALLOW',recent_events:[{kind:'ALLOW'}]});
  host.view.setData(newerRun,snapshot.workspace);await send(host.posted);
  assert(await page.locator('#saved-review').isHidden());
+ const taskPicker=page.getByRole('button',{name:'Open tasks',exact:true});
+ assert(await taskPicker.isVisible(),'Task picker remains available when no recovery is focused');
+ host.view.setStatus({enabled:true,armed:true,openTaskCount:2,working:true});
+ await send(host.posted);
+ assert(await page.getByRole('button',{name:'Open tasks (2)',exact:true}).isDisabled());
+ const beforeOpen=host.commands.length;
+ host.receive({type:'open_tasks'});assert.equal(host.commands.length,beforeOpen);
+ host.view.setStatus({enabled:true,armed:true,openTaskCount:2,working:false});
+ await send(host.posted);
+ const openTasks=page.getByRole('button',{name:'Open tasks (2)',exact:true});
+ await openTasks.focus();await send(host.posted);
+ assert(await openTasks.evaluate(e=>e===document.activeElement),'Task picker retains focus during refresh');
+ await openTasks.press('Enter');
+ assert.deepEqual(await page.evaluate(()=>sent.at(-1)),{type:'open_tasks'});
+ host.receive({type:'open_tasks',flow_id:'untrusted-id'});
+ assert.deepEqual(host.commands.slice(beforeOpen),[['karma.openTasks']]);
  const accounting={basis:'runtime_measured',reserved_tokens:11048,used_tokens:1396,released_unused_reservation:9652,overrun_tokens:0};
  await send({snapshot:{...snapshot,calls:[{...calls[0],accounting_settlement:accounting},...calls.slice(1)],monitor:{...monitor,context:{...monitor.context,model_packet:{prompt_utf8_bytes:2400,schema_allowance:344,template_allowance:256},accounting_settlement:accounting}}}});
  assert((await page.locator('#rows').textContent()).includes('1,396 (measured)'));
@@ -85,7 +101,8 @@ function monitorHost(){
  await send({snapshot,reasoningPreference:'model-default'});
  assert.equal(await page.evaluate(()=>window.liveUpdates),0,'An unchanged heartbeat leaves live regions untouched');
 
- assert.equal(await page.locator('#reasoning-preference').textContent(),'Reasoning setting: Model default');
+ assert.equal(await page.locator('#reasoning-preference').textContent(),'Shared reasoning: Model default');
+ assert(await page.locator('#tier-reasoning-summary').isHidden());
  assert((await page.locator('#memory-summary').textContent()).includes('3 evictions · 2 refaults'));
  assert((await page.locator('#memory-events').textContent()).includes('refresh source and dependents'));
  assert.equal(await page.locator('#memory-events img').count(),0);
@@ -95,11 +112,14 @@ function monitorHost(){
  await send({snapshot,reasoningPreference:'model-default'});
  await page.locator('[aria-label="Context memory"] summary').click();
  await page.screenshot({path:path.join(out,'Memory-lifecycle.png'),fullPage:true});
- assert((await page.locator('#reasoning-preference-note').textContent()).includes('Adaptive is inactive'));
  await page.click('#reasoning-settings');assert.deepEqual((await page.evaluate(()=>sent)).at(-1),{type:'reasoning_settings'});
- await send({snapshot,reasoningPreference:'adaptive'});
- assert.equal(await page.locator('#reasoning-preference').textContent(),'Reasoning setting: Adaptive');
- assert(!(await page.locator('#reasoning-preference-note').textContent()).includes('inactive'));
+ await send({snapshot,reasoningPreference:'adaptive',tierReasoning:{low:'off',mid:'inherit',high:'on'}});
+ assert.equal(await page.locator('#reasoning-preference').textContent(),'Shared reasoning: Adaptive');
+ assert.equal(await page.locator('#tier-reasoning-summary').textContent(),'Sutra Low · Off | Sutra High · On');
+ const adaptiveNote=await page.locator('#reasoning-preference-note').textContent();
+ assert.match(adaptiveNote,/Sutra Auto and inheriting tiers use the shared setting/);
+ assert.match(adaptiveNote,/multi-file report synthesis can use thinking/);
+ assert.match(adaptiveNote,/Think on Next Request in the Command Palette for a one-turn override/);
  await page.screenshot({path:path.join(out,'Reasoning-setting.png')});
  const observations=[{gateway_status:'accepted',observation:{mode:'observe_only',kind:'commitment',status:'recorded',invocation_id:'commit-1',version:1,model:'qwen3:4b',request:'Explain source <img src=x onerror=alert(1)>',value:{understanding:'Read source',criteria:[{id:'c1',deliverable:'Overview',done_when:'Source references'}],assumptions:[]},issues:[]}},
  {gateway_status:'quarantined',observation:{mode:'observe_only',kind:'assessment',status:'recorded',invocation_id:'assess-1',model:'larger-model',scope:'worker_response',commitment_id:'commit-1',commitment_version:1,request:'Explain source',value:{judgement:'complete',delivered:'A draft <script>bad</script>',remaining:[],items:[{criterion_id:'c1',status:'met',evidence:'entry.py'}]},issues:['Completion is a model claim.']}}];

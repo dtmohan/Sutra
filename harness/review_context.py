@@ -4,6 +4,8 @@ from pathlib import Path
 from context_manager import InvalidUpdate, ContextBudgetExceeded, canonical
 from paging import Budget
 
+MAX_REVIEW_OUTPUT_RESERVE = 8192
+
 CAPABILITIES = {
     'execution': 'host reads source; this model analyses supplied evidence',
     'source_field': 'excerpts',
@@ -74,7 +76,7 @@ def context_budget(provider, s, sid, slots=2, expand_output=True):
         available = budget.context_limit * slots
     limit = min(budget.context_limit, int(available // slots))
     # A structured architecture report needs room for source citations. Reserve output within the same per-call/task allocation.
-    reserve = max(budget.response_reserve, min(8192, limit // 3)) if expand_output else min(budget.response_reserve, max(512, limit // 4))
+    reserve = max(budget.response_reserve, min(MAX_REVIEW_OUTPUT_RESERVE, limit // 3)) if expand_output else min(budget.response_reserve, max(512, limit // 4))
     if limit <= reserve + 1024:
         # Do not invent extra allocation. The normal budget checks stop dispatch.
         limit = max(1, limit)

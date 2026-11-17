@@ -20,6 +20,17 @@ class KarmaAdapter:
         if type(used) is not int or type(limit) is not int or used<0 or limit<=0:
             raise ValueError('Budget counts must be nonnegative integers with a positive limit')
         return dict(self.frame('counted-slots-v1',0.,self.boundary.sigma_clause*used/limit),used=used,limit=limit)
+    def task_transition(self,cursor_matches,target_matches,checkpoint_clear):
+        signals=dict(cursor_matches=cursor_matches,target_matches=target_matches,checkpoint_clear=checkpoint_clear)
+        if any(type(value) is not bool for value in signals.values()):
+            raise ValueError('Task transition signals must be boolean')
+        if not cursor_matches or not target_matches:
+            deviation=3*self.boundary.k
+        elif not checkpoint_clear:
+            deviation=2*self.boundary.k
+        else:
+            deviation=0.
+        return dict(self.frame('task-focus-v1',deviation,0.),**signals)
     def allocations(self,used,limits,cost=None):
         cost=cost or {}
         if not limits or set(used)!=set(limits) or set(cost)-set(limits):raise ValueError('Allocation dimensions differ')

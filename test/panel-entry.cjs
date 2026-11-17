@@ -27,6 +27,15 @@ el('save-model-tiers').onclick();assert.equal(sent.at(-1).op,'save_model_tiers')
 receive({type:'models-saved'});assert.match(el('model-save-status').textContent,/saved/);
 receive({type:'show-section',section:'models'});assert(el('tier-config').open&&el('tier-config').scrolled);
 assert.equal(el('nav-settings').attributes['aria-selected'],'true');assert.equal(el('nav-dashboard').tabIndex,-1);assert(el('nav-settings').focused);
+receive({type:'show-section',section:'reasoning'});assert(el('reasoning-section').scrolled&&el('thinking-mode').focused);
+receive({type:'runtime-settings',settings:{storageLimitMiB:512,thinking:'adaptive',tierReasoning:{mid:'off',high:'on'}}});
+assert.equal(el('reasoning-low').value,'inherit');
+assert.equal(el('reasoning-mid').value,'off');
+assert.equal(el('reasoning-high').value,'on');
+el('save-tier-reasoning').onclick();
+assert.equal(sent.at(-1).op,'save_tier_reasoning');
+assert.equal(sent.at(-1).settings.mid,'off');
+assert.equal(el('thinking-mode').value,'adaptive');
 receive({type:'state',data:{session:'legacy-task',model:'large'}});assert.equal(el('workflow-notice').hidden,false);
 el('open-current-task').onclick();assert(el('advanced').open&&el('advanced').scrolled);
 el('chat-prompt').value='Review this codebase';el('chat-tier').value='auto';

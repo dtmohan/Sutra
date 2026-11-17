@@ -190,6 +190,7 @@ def dispatch(s,meta,workspace,root,request,provider=None):
         if request.get('native_route'):
             from paging import Budget
             provider.budget=Budget(16384,2048,256);provider.keep_alive=0
+            provider.context_metadata=show
     parent=st['checkpoint'];pages=[]
     for key in chosen:
         p=s.read_page(session,key)
@@ -202,7 +203,10 @@ def dispatch(s,meta,workspace,root,request,provider=None):
              'toc':[{'id':p['id'],'lines':p['lines']} for p in catalog[:24]],
              'toc_total':len(catalog),'derived_from':[parent] if parent else [],
              'handoff':compact(st['last_result']) if parent else None}
-    if request.get('native_route'):payload['native_route']=request['native_route']
+    if request.get('native_route'):
+        from review_reasoning import bind
+        payload['native_route']=request['native_route']
+        bind(provider,payload)
     if request.get('conversation_id'):
         from conversation import workspace_handoff
         payload['conversation_handoff']=workspace_handoff(s,session,request['conversation_id'],prompt)
@@ -251,11 +255,35 @@ def handle(root,workspace,request):
         metadata=root/'workspace.json'
         if metadata.exists() and json.loads(metadata.read_text())['workspace']!=str(Path(workspace).resolve()):
             raise InvalidUpdate('Storage belongs to a different workspace')
+        if request.get('op')=='state' and 'review_prompt' in request:
+            from review_targets import document_input_notice
+            notice=document_input_notice(request['review_prompt'])
+            if notice:return {'request_notice':notice}
         if request.get('op')=='models':
             from model_catalog import catalog
             return catalog(ollama)
         s=InvocationLedger(root/'state.sqlite')
         try:
+            if request.get('chat_key') and request.get('op') in ('state','native_preview','native_execute'):
+                from orchestration_flow import flow_metadata, metadata_path, task_projection
+                from task_stack import assert_focused, close, owner, view
+                import orchestration as orchestration_state
+                ws=Path(workspace).resolve()
+                fid=request.get('flow_id')
+                if not fid or owner(s,ws,fid)!=request['chat_key']:
+                    raise InvalidUpdate('Workflow belongs to another Sutra chat')
+                scoped=flow_metadata(root,ws,fid)
+                if request['op']=='state':
+                    return state(s,scoped,ws)
+                reconcile(s,ws)
+                assert_focused(s,ws,request['chat_key'],fid)
+                if orchestration_state.action_flow(s,request.get('invocation_id'))!=fid:
+                    raise InvalidUpdate('Action proposal belongs to another workflow')
+                result=_handle(root,ws,request,metadata=metadata_path(root,fid))
+                if request['op']=='native_execute' and orchestration_state.state(s,fid) in orchestration_state.TERMINAL:
+                    with s.db:
+                        close(s,ws,request['chat_key'],fid,expected_cursor=view(s,ws,request['chat_key'])['cursor'])
+                return dict(result,**task_projection(s,ws,request['chat_key']))
             if request.get('op') in ('capability_list','capability_preview','capability_execute'):
                 import capabilities
                 meta=json.loads(metadata.read_text()) if metadata.exists() else {}
@@ -270,14 +298,15 @@ def handle(root,workspace,request):
             if request.get('op')=='orchestrate':
                 from orchestration_flow import handle as orchestrate
                 from storage_policy import prune,require_space
-                prune(root);require_space(root)
+                if request.get('event') not in ('task_list','task_focus','task_close','pending','inspect','cancel'):
+                    prune(root);require_space(root)
                 meta=json.loads(metadata.read_text()) if metadata.exists() else {'workspace':str(Path(workspace).resolve())}
                 if not metadata.exists():metadata.write_text(canonical(meta))
                 # Classification is tool-free; later events reconcile committed work.
-                if request.get('event')!='start':reconcile(s,workspace)
+                if request.get('event') not in ('start','task_list','pending','inspect'):reconcile(s,workspace)
                 try:return orchestrate(s,meta,Path(workspace).resolve(),root,request)
                 except BaseException:
-                    if request.get('event')!='start':reconcile(s,workspace)
+                    if request.get('event') not in ('start','task_list','pending','inspect'):reconcile(s,workspace)
                     raise
             if request.get('op')=='conversation_read':
                 from conversation import read
@@ -324,9 +353,9 @@ def handle(root,workspace,request):
             raise
 
 
-def _handle(root,workspace,request):
+def _handle(root,workspace,request,metadata=None):
     root=root.resolve();workspace=workspace.resolve()
-    root.mkdir(parents=True,exist_ok=True);metadata=root/'workspace.json'
+    root.mkdir(parents=True,exist_ok=True);metadata=metadata or root/'workspace.json'
     meta=json.loads(metadata.read_text()) if metadata.exists() else {'workspace':str(workspace)}
     if meta['workspace']!=str(workspace):raise InvalidUpdate('Storage belongs to a different workspace')
     s=InvocationLedger(root/'state.sqlite')
@@ -383,13 +412,13 @@ def _handle(root,workspace,request):
                 data['constraints'].update(auto_review=True,**{key:request.get(key,value) for key,value in working.items()})
                 meta['auto']={'pages':[],'failures':{},'status':'ready'}
             save_contract(s,meta['active'],data,workspace)
+            if request.get('conversation_id'):
+                from native_access import bind
+                bind(s,meta['active'],request['conversation_id'])
             # Persist identity before the first interruptible repository action.
             temp=metadata.with_suffix('.tmp');temp.write_text(canonical(meta));temp.replace(metadata)
             from repository_tools import execute
             execute(s,meta['active'],workspace,root,'catalog',resource_check=False)
-            if request.get('conversation_id'):
-                from native_access import bind
-                bind(s,meta['active'],request['conversation_id'])
             result=state(s,meta,workspace)
         elif op=='native_permissions':
             from native_access import grant

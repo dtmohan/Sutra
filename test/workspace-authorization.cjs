@@ -103,9 +103,13 @@ function host(fixture, buttons = {}) {
     isBusy: () => false, modelSettings: () => models, configureModels: async () => models,
     onStatus: noop, publishReview: noop, showDiff: async () => {},
     request: async request => {
+      // These fixtures seed the original workspace task slot before native chat opens.
+      // Use its bridge route so recovery exercises the exact preseeded contract.
+      const bridgeRequest = {...request};
+      if (bridgeRequest.op === 'orchestrate') delete bridgeRequest.chat_key;
       requests.push(structuredClone(request));
       try {
-        const result = bridge(request);
+        const result = bridge(bridgeRequest);
         if (result._fixture_synthesis_reads !== undefined) synthesisReads.push(result._fixture_synthesis_reads);
         return result;
       } catch (error) {

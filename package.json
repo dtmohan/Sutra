@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Governed local AI chat, codebase reviews, and diagnostics in VS Code.",
-  "version": "0.38.5",
+  "version": "0.40.0",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -104,6 +104,10 @@
         "title": "Sutra: Configure Local Models"
       },
       {
+        "command": "karma.configureReasoning",
+        "title": "Sutra: Configure Reasoning"
+      },
+      {
         "command": "karma.openAdvanced",
         "title": "Sutra: Open Current Task Controls"
       },
@@ -157,6 +161,10 @@
         "command": "karma.openMonitor",
         "title": "Sutra: Open Monitor",
         "icon": "$(dashboard)"
+      },
+      {
+        "command": "karma.openTasks",
+        "title": "Sutra: Open Tasks"
       },
       {
         "command": "karma.resumeWorkflow",
@@ -328,13 +336,37 @@
             "model-default"
           ],
           "enumDescriptions": [
-            "Select supported effort for conversation routing. Workspace calls start at the lowest known control; bounded report retries use existing allocations. Page context before conversation reasoning retries and model switches.",
+            "Start substantive conversation at the lowest supported positive effort. Multi-file architecture synthesis can also use thinking when its existing allocation includes the full output reserve and a retry.",
             "Request thinking off. Models that require it may still emit reasoning.",
             "Enable reasoning at the lowest advertised positive level.",
             "Use each installed model\u2019s default reasoning setting."
           ],
           "default": "adaptive",
-          "description": "Local-model reasoning. Adaptive applies to routing and workspace generation. Evidence selection uses the lowest advertised effort or the model default when its controls are unknown. Off requests thinking off throughout. Reasoning and answers share the existing token, call and time allocations."
+          "description": "Reasoning for Sutra Auto and fixed tiers set to Inherit. Evidence selection uses the lowest known effort. The Chat lightbulb requests thinking for one turn. Reasoning and answers share the existing allocation."
+        },
+        "karma.tierReasoning": {
+          "type": "object",
+          "default": {"low": "inherit", "mid": "inherit", "high": "inherit"},
+          "scope": "application",
+          "additionalProperties": false,
+          "description": "Reasoning for explicitly selected Sutra Low, Mid and High. Inherit uses the shared reasoning setting. Sutra Auto uses the shared setting.",
+          "properties": {
+            "low": {
+              "type": "string",
+              "enum": ["inherit", "adaptive", "on", "off", "model-default"],
+              "description": "Reasoning when Sutra Low is selected."
+            },
+            "mid": {
+              "type": "string",
+              "enum": ["inherit", "adaptive", "on", "off", "model-default"],
+              "description": "Reasoning when Sutra Mid is selected."
+            },
+            "high": {
+              "type": "string",
+              "enum": ["inherit", "adaptive", "on", "off", "model-default"],
+              "description": "Reasoning when Sutra High is selected."
+            }
+          }
         },
         "karma.logitSensor": {
           "type": "string",

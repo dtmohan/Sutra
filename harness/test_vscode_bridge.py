@@ -41,6 +41,14 @@ class VSCodeBridgeTests(unittest.TestCase):
         self.s=InvocationLedger(self.storage/'state.sqlite')
         self.meta=json.loads((self.storage/'workspace.json').read_text());self.session=self.meta['active']
     def tearDown(self):self.s.close();self.tmp.cleanup()
+    def test_legacy_chat_preflight_returns_guidance_before_reconciliation(self):
+        request={'op':'state','review_prompt':'Review this resume at "/Users/example/Downloads/Candidate Resume (1).docx"'}
+        with patch('lifecycle.reconcile',side_effect=AssertionError('Unexpected workspace reconciliation')):
+            result=handle(self.storage,self.workspace,request)
+        self.assertIn('DOCX',result['request_notice'])
+        self.assertEqual(set(result),{'request_notice'})
+        self.assertEqual(json.loads((self.storage/'workspace.json').read_text()),self.meta)
+
     def review(self,model=None,page='src/retry.py#1'):
         return dispatch(self.s,self.meta,self.workspace,self.storage,
                         {'prompt':'Review this source.','model':'test-reviewer','pages':[page]},model or FakeModel())

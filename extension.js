@@ -4,6 +4,23 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const {spawn} = require('node:child_process');
 
+const FIXED_TIERS = ['low', 'mid', 'high'];
+const REASONING_PREFERENCES = ['adaptive', 'off', 'on', 'model-default'];
+const TIERED_REQUESTS = ['orchestrate', 'chat_answer', 'conversation', 'native_work'];
+
+function tierReasoning(config) {
+  const settings = config.get('tierReasoning', {});
+  return Object.fromEntries(FIXED_TIERS.map(tier => {
+    const choice = settings?.[tier];
+    return [tier, REASONING_PREFERENCES.includes(choice) ? choice : 'inherit'];
+  }));
+}
+
+function reasoningPreference(config, tier) {
+  const choice = FIXED_TIERS.includes(tier) ? tierReasoning(config)[tier] : 'inherit';
+  return choice === 'inherit' ? config.get('thinking', 'adaptive') : choice;
+}
+
 function activate(context) {
   // Detect changed runtime files before loading local modules. This is a
   // consistency check, not protection against replacement of this entry point.
@@ -137,7 +154,7 @@ function activate(context) {
     if(diagnostic)return requestDashboard();
     if ((busy || ((sequence || nativeController?.status().working) && !internal)) && !diagnostic) throw new Error('A Sutra request is running. Switch models after it finishes.');
     if (!['capability_list','capability_preview','capability_execute','orchestrate','conversation_read','conversation','native_permissions','native_work','native_preview','native_execute','chat_answer','calibration_register','calibration_list','calibration_bind','calibration_revoke','calibration_evaluate','models','state','new','save','switch','review','work','preview','execute','dashboard','quarantine','review_new','architecture','repository_tool','api_build','api_verify','static_build','static_explain','auto_new','auto_step','auto_report'].includes(message?.op)) throw new Error('Unknown Sutra request.');
-    if((['native_work','chat_answer','static_build','static_explain','auto_step','auto_report'].includes(message.op)||(message.op==='orchestrate'&&!['start','inspect','pending','cancel'].includes(message.event)))&&hasDirtyFiles())throw new Error('Save or discard unsaved workspace buffers before mapping current source.');
+    if((['native_work','chat_answer','static_build','static_explain','auto_step','auto_report'].includes(message.op)||(message.op==='orchestrate'&&!['start','inspect','pending','cancel','task_list','task_focus','task_close'].includes(message.event)))&&hasDirtyFiles())throw new Error('Save or discard unsaved workspace buffers before mapping current source.');
     if(['execute','native_execute'].includes(message.op) && hasDirtyFiles())throw new Error('Save or discard unsaved workspace buffers before applying an edit or running tests.');
     const cwd = workspace(), stateDir = storage();
     fs.mkdirSync(stateDir,{recursive:true});startTelemetry();
@@ -145,8 +162,10 @@ function activate(context) {
     try {
       if(message.op==='conversation')await waitForTelemetry(stateDir,token);
       return await new Promise((resolve,reject) => {
-        const python = vscode.workspace.getConfiguration('karma').get('pythonPath','')||(process.platform==='win32'?'python':'python3');
-        const thinking=thinkForTurn?'on':vscode.workspace.getConfiguration('karma').get('thinking','adaptive');
+        const config=vscode.workspace.getConfiguration('karma');
+        const python=config.get('pythonPath','')||(process.platform==='win32'?'python':'python3');
+        const fixedTier=internal&&TIERED_REQUESTS.includes(payload.op)?payload.tier:undefined;
+        const thinking=thinkForTurn?'on':reasoningPreference(config,fixedTier);
         const child = spawn(python,['-B',path.join(context.extensionPath,'harness','vscode_bridge.py'),
           '--workspace',cwd,'--storage',stateDir],{cwd,stdio:['pipe','pipe','pipe'],env:{...process.env,...runtimeEnvironment(cwd),KARMA_STORAGE_LIMIT_MIB:String(vscode.workspace.getConfiguration('karma').get('storageLimitMiB',512)),SUTRA_LOGIT_SENSOR:({'off':'','numbers':'1','tokens':'tokens'})[vscode.workspace.getConfiguration('karma').get('logitSensor','off')]||'',SUTRA_ACTIVITY:"1",SUTRA_THINKING:thinking,KARMA_NODE:process.execPath,KARMA_TYPESCRIPT:path.join(context.extensionPath,'vendor','typescript','typescript.js')}});
         processes.add(child); let stdout='',stderr='';
@@ -196,7 +215,7 @@ function activate(context) {
   function publishSettings(){
     nativeController?.publish();
     panel?.webview.postMessage({type:'tier-settings',models:modelSettings(),catalog:modelCatalog});
-    const config=vscode.workspace.getConfiguration('karma');panel?.webview.postMessage({type:'runtime-settings',settings:{storageLimitMiB:config.get('storageLimitMiB',512),pythonPath:config.get('pythonPath',''),thinking:config.get('thinking','adaptive'),logitSensor:config.get('logitSensor','off'),memoryOwnership:config.get('memoryOwnership','shared')}});
+    const config=vscode.workspace.getConfiguration('karma');panel?.webview.postMessage({type:'runtime-settings',settings:{storageLimitMiB:config.get('storageLimitMiB',512),pythonPath:config.get('pythonPath',''),thinking:config.get('thinking','adaptive'),tierReasoning:tierReasoning(config),logitSensor:config.get('logitSensor','off'),memoryOwnership:config.get('memoryOwnership','shared')}});
   }
   async function discoverModels(token,internal=false){
     let catalog;try{catalog=await request({op:'models'},token,internal);}catch(error){modelCatalog={models:[],suggested_tiers:{},error:'Cannot discover local models. Start Ollama, then choose Retry model discovery. '+error.message};publishSettings();throw new Error(modelCatalog.error);}
@@ -235,7 +254,8 @@ function activate(context) {
     if(hasDirtyFiles())throw new Error('Save or discard unsaved files so Sutra can read current source.');
     sequence=true;panel?.webview.postMessage({type:'busy',value:true});
     try{
-      let st=await request({op:'state'},token,true);
+      let st=await request({op:'state',review_prompt:prompt},token,true);
+      if(st.request_notice)return notice('input',st.request_notice);
       if(!fresh&&st.session&&!st.auto){
         panel?.webview.postMessage({type:'state',data:st});
         return notice('workflow','An existing task is active in Advanced controls. Open current task controls to continue with its scope and permissions, or start a separate read-only review. No model call was made and the active task was not replaced.');
@@ -248,6 +268,7 @@ function activate(context) {
       const binding={session:st.session,contract_hash:st.contract.contract_hash,calibration_hash:st.calibration.binding.hash};
       let childUsage={calls:[]};
       let flow=await request({op:'orchestrate',event:'start_review',prompt,models,tier,binding,armed:true,conversation_id:conversationId},token,true);
+      if(flow.request_notice)return notice('input',flow.request_notice);
       while(flow.state!=='DONE'){
         if(flow.recovery)throw new Error(flow.recovery.message+' Open Sutra chat to choose recovery.');
         if(token?.isCancellationRequested)throw new Error('Sutra request cancelled. Task state and budgets were preserved.');
@@ -391,6 +412,17 @@ function activate(context) {
         if(message.op==='chat_stop'){chatCancellation?.cancel();return;}
         if(message.op==='configure_models'){await configureModels();return;}
         if(message.op==='refresh_models'){await discoverModels();return;}
+        if(message.op==='save_tier_reasoning'){
+          if(busy||sequence||nativeController?.status().working)throw new Error('Wait for the current turn before changing reasoning preferences.');
+          const settings=message.settings;
+          if(!settings||typeof settings!=='object'||Object.keys(settings).length!==FIXED_TIERS.length||
+              !FIXED_TIERS.every(tier=>Object.hasOwn(settings,tier)&&
+                (settings[tier]==='inherit'||REASONING_PREFERENCES.includes(settings[tier])))){
+            throw new Error('Choose a reasoning preference for each fixed Sutra tier.');
+          }
+          await vscode.workspace.getConfiguration('karma').update('tierReasoning',settings,vscode.ConfigurationTarget.Global);
+          publishSettings();panel?.webview.postMessage({type:'tier-reasoning-saved'});return;
+        }
         if(message.op==='save_runtime_settings'){
           if(busy||sequence)throw new Error('Wait for the current turn before changing runtime settings.');
           const s=message.settings;
@@ -529,6 +561,7 @@ function activate(context) {
   status.text='$(layers) Sutra';status.command='karma.open';status.tooltip='Open the local harness';status.show();
   context.subscriptions.push(status,output,previewChanges,vscode.commands.registerCommand('karma.open',open),
     vscode.commands.registerCommand('karma.configureModels',()=>configureModels()),
+    vscode.commands.registerCommand('karma.configureReasoning',()=>showPanelSection('reasoning')),
     vscode.commands.registerCommand('karma.openAdvanced',()=>showPanelSection('advanced')),
     vscode.commands.registerCommand('karma.newChatReview',()=>newChatReview()),
     vscode.workspace.registerTextDocumentContentProvider('karma-preview',{onDidChange:previewChanges.event,provideTextDocumentContent(uri){if(uri.toString().startsWith('karma-preview:/activity/'))return usage?.activityDocument(uri.toString())||'Reasoning history is not ready.';const match=uri.toString().match(/^karma-preview:\/conversation\/([a-f0-9]{32})\/Response\.md(?:\?checkpoint=[a-f0-9]{64})?$/);if(match)return request({op:'conversation_read',invocation_id:match[1]}).then(data=>{const p=data.result.accepted_output;return p.answer+'\n\n---\n\nModel: '+data.route.model+'\n\n'+tokens.markdown(data.result.token_usage)+'\nConversation receipt: '+match[1]+'\n\nWorkspace tools: not used by the conversation role.\n\n'+(p.diagram?'Open **Sutra: Open Last Diagram** to view the latest diagram.\n\n```mermaid\n'+diagramView.mermaidSource(p.diagram)+'\n```':'');});return previewDocuments.get(uri.toString())||'';}}),

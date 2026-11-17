@@ -4,7 +4,11 @@ const {EventEmitter}=require('node:events');
 const root=path.resolve(__dirname,'..'),tmp=fs.mkdtempSync(path.join(os.tmpdir(),'karma-host-test-'));
 const views=new Map(),statusItems=[],commands=new Map(),tools=new Map(),participants=new Map(),intervals=[],timers=[],prompts=[],requests=[],changes=[],panelMessages=[];
 const tierModels={low:'fixture-small',mid:'fixture-mid',high:'fixture-large'};
+const documentPrompt='Review this resume at "/tmp/Candidate Resume (1).docx"';
+const documentNotice='Paste the document text for review.';
 const runtimeUpdates=[],bridgeAllocations=[],bridgeThinking=[];
+const requestThinking=new WeakMap();
+const runtimeSettings=new Map();
 const inputValues=[],openedDocuments=[];
 const repoAllocation={source_bytes:1024000000};
 let userAllocation,provider,panel,holdDashboard=false,pendingDashboard,bridgeCount=0,dashboardSpawns=0;
@@ -21,10 +25,11 @@ function spawn(exe,args,options){
  const streaming=args.includes('--dashboard-stream');if(streaming)dashboardSpawns++;
  const child=new EventEmitter();child.stdout=new EventEmitter();child.stderr=new EventEmitter();child.stdin=new EventEmitter();child.kill=()=>true;
  child.stdin.end=child.stdin.write=raw=>{const req=streaming?{op:'dashboard'}:JSON.parse(raw);requests.push(req);bridgeCount++;
-  if(!streaming)bridgeThinking.push(options.env.SUTRA_THINKING);
+  if(!streaming){bridgeThinking.push(options.env.SUTRA_THINKING);requestThinking.set(req,options.env.SUTRA_THINKING);}
   const finish=()=>{if(req.op==='auto_new')state={...state,contract:{contract_hash:'fixture-contract',contract:{constraints:{auto_review:true}}},calibration:{binding:{hash:'fixture-calibration'}},session:'new-review',auto:{pending_files:0,mapped_files:2,source_files:2}};
    const data=req.op==='orchestrate'?{flow_id:'fixture-flow',state:'DONE',data:{state,route:{tier:'low',model:tierModels.low},result:{invocation_id:'fixture',admission:{admitted:true},accepted_output:{answer:'Fixture answer',remaining:[]}},coverage:{mapped_files:2,source_files:2},source_files:['a.py']}}:req.op==='models'?{models:Object.values(tierModels).map(name=>({name,eligible:true})),suggested_tiers:tierModels}:req.op==='chat_answer'?{state,route:{tier:'low',model:tierModels.low,reason:'focused request'},result:{invocation_id:'fixture-invocation',admission:{admitted:true},accepted_output:{answer:'Fixture answer',remaining:[]}},coverage:{mapped_files:2,source_files:2},source_files:['a.py']}:req.op==='calibration_list'?{binding:{hash:'fixture',profiles:[]},profiles:[]}:req.op==='dashboard'?{hardware:{available:false,temperatures:{cpu:{available:true,maximum_celsius:42.12},gpu:{available:true,maximum_celsius:40.82}}},runs:[],invocations:{},actions:[]}:state;
-   const response=req.op==='architecture'&&architectureDispatch?architectureDispatch(req):data;
+   let response=req.op==='architecture'&&architectureDispatch?architectureDispatch(req):data;
+   if(req.op==='state'&&req.review_prompt===documentPrompt)response={request_notice:documentNotice};
    child.stdout.emit('data',Buffer.from(JSON.stringify({ok:true,data:response})+'\n'));if(!streaming)child.emit('close',0,null);};
   if(req.op==='dashboard'&&holdDashboard)pendingDashboard=finish;else queueMicrotask(finish);
  };return child;
@@ -33,7 +38,7 @@ const vscode={
  EventEmitter:Emitter,Uri:{file:uri,parse:uri},StatusBarAlignment:{Right:1},ViewColumn:{One:1},
  env:{appRoot:'/must/not/load/internal/typescript'},
  MarkdownString:class{constructor(value){this.value=value;}},ConfigurationTarget:{Global:1},chat:{createChatParticipant(id,handler){participants.set(id,handler);return disposable();}},
- workspace:{onDidChangeConfiguration:()=>disposable(),isTrusted:true,workspaceFolders:[{uri:uri(tmp)}],textDocuments:[],getConfiguration(){return {get(k,d){return k==='models'?tierModels:k==='workspaceAllocation'?repoAllocation:d;},inspect(k){return k==='workspaceAllocation'?{globalValue:userAllocation,workspaceValue:repoAllocation}:undefined;},async update(k,v){if(k==='models')throw Error('Existing model choices must not be overwritten by discovery');runtimeUpdates.push([k,v]);}};},
+ workspace:{onDidChangeConfiguration:()=>disposable(),isTrusted:true,workspaceFolders:[{uri:uri(tmp)}],textDocuments:[],getConfiguration(){return {get(k,d){return k==='models'?tierModels:k==='workspaceAllocation'?repoAllocation:runtimeSettings.get(k)??d;},inspect(k){return k==='workspaceAllocation'?{globalValue:userAllocation,workspaceValue:repoAllocation}:undefined;},async update(k,v){if(k==='models')throw Error('Existing model choices must not be overwritten by discovery');runtimeSettings.set(k,v);runtimeUpdates.push([k,v]);}};},
   registerTextDocumentContentProvider(s,p){provider=p;return disposable();},async openTextDocument(u){return {uri:u};},fs:{writeFile:async()=>{}}},
  commands:{registerCommand(n,f){commands.set(n,f);return disposable();},async executeCommand(n,...a){return commands.get(n)?.(...a);}},
  window:{createOutputChannel(){return {appendLine(){},dispose(){}};},registerWebviewViewProvider(id,provider){views.set(id,provider);return disposable();},createStatusBarItem(){const item={show(){},dispose(){}};statusItems.push(item);return item;},
@@ -79,6 +84,8 @@ const subscriptions=[];
  await panel.webview.receive({type:'ready'});
  assert(panelMessages.some(m=>m.type==='show-section'&&m.section==='models'),'First-open model picker lost its focus request');
  assert(panelMessages.some(m=>m.type==='runtime-settings'&&m.settings.storageLimitMiB===512));
+ assert.deepEqual(structuredClone(panelMessages.filter(m=>m.type==='runtime-settings').at(-1).settings.tierReasoning),
+  {low:'inherit',mid:'inherit',high:'inherit'});
  const beforeRuntime=requests.length;
  for(const settings of [{storageLimitMiB:0,pythonPath:''},{storageLimitMiB:512.5,pythonPath:''},{storageLimitMiB:512,pythonPath:'python3\nanything'},{storageLimitMiB:512,pythonPath:'',extra:true}])await panel.webview.receive({op:'save_runtime_settings',settings});
  assert.equal(runtimeUpdates.length,0);
@@ -87,6 +94,20 @@ const subscriptions=[];
  await panel.webview.receive({op:'save_runtime_settings',settings:{storageLimitMiB:1024,pythonPath:'',thinking:'adaptive'}});
  assert.deepEqual(runtimeUpdates.slice(-3),[['storageLimitMiB',1024],['pythonPath',''],['thinking','adaptive']]);
  assert.equal(requests.length,beforeRuntime,'Choosing Adaptive must not dispatch a model or change a task');
+ const beforeTierSave=runtimeUpdates.length;
+ for(const settings of [null,{low:'on'},{low:'on',mid:'off',high:'unsupported'},
+  {low:'on',mid:'off',high:'inherit',auto:'off'}]){
+  await panel.webview.receive({op:'save_tier_reasoning',settings});
+ }
+ assert.equal(runtimeUpdates.length,beforeTierSave,'Malformed tier preferences must not be persisted');
+ const fixedReasoning={low:'off',mid:'model-default',high:'inherit'};
+ await panel.webview.receive({op:'save_tier_reasoning',settings:fixedReasoning});
+ assert.deepEqual(runtimeUpdates.slice(beforeTierSave),[['tierReasoning',fixedReasoning]]);
+ assert.deepEqual(structuredClone(panelMessages.filter(m=>m.type==='runtime-settings').at(-1).settings.tierReasoning),fixedReasoning);
+ assert.equal(panelMessages.at(-1).type,'tier-reasoning-saved');
+ assert.equal(requests.length,beforeRuntime,'Saving tier reasoning must not dispatch or change a task');
+ await commands.get('karma.configureReasoning')();
+ assert(panelMessages.some(m=>m.type==='show-section'&&m.section==='reasoning'));
  const native=participants.get('karma.local'),rendered=[],buttons=[],token={isCancellationRequested:false,onCancellationRequested:()=>disposable()};
  const capture={markdown(m){rendered.push(typeof m==='string'?m:m.value);},progress(){},reference(){},button(b){buttons.push(b);}};
  assert(views.has('karma.usage'));assert(statusItems.some(i=>i.command==='karma.openMonitor'));
@@ -99,6 +120,12 @@ const subscriptions=[];
  const blocked=await native({prompt:'Review this codebase'}, {},capture,token);
  assert(!blocked?.errorDetails);assert.deepEqual(requests.slice(beforeBlocked).map(r=>r.op),['state']);assert.equal(JSON.stringify(state),oldState);
  assert(buttons.some(b=>b.command==='karma.openAdvanced'));
+ const beforeDocument=requests.length;
+ const document=await native({command:'new',prompt:documentPrompt},{},capture,token);
+ assert(!document?.errorDetails);
+ assert.deepEqual(requests.slice(beforeDocument),[{op:'state',review_prompt:documentPrompt}]);
+ assert.equal(rendered.at(-1),documentNotice);
+ assert.equal(JSON.stringify(state),oldState);
  await commands.get('karma.openAdvanced')();assert(panelMessages.some(m=>m.type==='show-section'&&m.section==='advanced'));
  const beforeFresh=requests.length;
  await native({command:'new',prompt:'Review fresh sources'}, {},capture,token);
@@ -113,6 +140,12 @@ const subscriptions=[];
  await participants.get('karma.local')({prompt:'Explain start.',model:{sendRequest(){throw Error('Must never use VS Code model provider');}}},{history:[{content:'Do not forward transcript'}]},stream,{isCancellationRequested:false,onCancellationRequested:()=>disposable()});
  const chatCalls=requests.slice(beforeChat);assert(chatCalls.some(r=>r.op==='orchestrate'&&r.event==='start_review'));
  const chatRequest=chatCalls.find(r=>r.op==='orchestrate');assert.deepEqual(chatRequest.models,tierModels);assert.equal(chatRequest.prompt,'Explain start.');assert(!('history' in chatRequest));assert(!chatCalls.some(r=>r.op==='auto_new'));
+ assert.equal(requestThinking.get(chatRequest),'adaptive','Auto cannot inherit the reasoning of the routed model tier');
+ const beforeFixedChat=requests.length;
+ await native({command:'low',prompt:'Explain the start function.'},{},stream,token);
+ const fixedChat=requests.slice(beforeFixedChat).find(r=>r.op==='orchestrate');
+ assert.equal(fixedChat.tier,'low');
+ assert.equal(requestThinking.get(fixedChat),'off','Explicit legacy chat must use its fixed tier preference');
  const cancelledBefore=requests.length;await participants.get('karma.local')({prompt:'Cancelled'}, {},stream,{isCancellationRequested:true});assert.equal(requests.length,cancelledBefore);
  await commands.get('karma.openReport')();await commands.get('karma.openAPIReport')();
  assert.equal(provider.provideTextDocumentContent(uri('karma-preview:/fixture/Architecture.md')),'architecture v1');
@@ -161,7 +194,7 @@ const subscriptions=[];
  moduleFixture.exports.activate({subscriptions,extensionPath:root,globalStorageUri:uri(tmp),extension:{packageJSON:{version:'0.18.0'}}});
  const requestsBeforeOverride=requests.length,updatesBeforeOverride=runtimeUpdates.length;
  for(const event of ['start','step']){
-  await nativeRequest({op:'orchestrate',event,think_for_turn:true});
+  await nativeRequest({op:'orchestrate',event,tier:'low',think_for_turn:true});
   assert.equal(bridgeThinking.at(-1),'on');
   assert(!Object.hasOwn(requests.at(-1),'think_for_turn'),'Private transport flag reached the bridge payload');
  }
@@ -173,5 +206,14 @@ const subscriptions=[];
  assert.equal(requests.length,requestsBeforeOverride+3,'Untrusted reasoning overrides dispatched');
  assert.equal(runtimeUpdates.length,updatesBeforeOverride,'One-request reasoning changed persisted settings');
  assert(panelMessages.some(m=>m.type==='error'&&m.message.includes('Invalid Sutra reasoning override')));
- console.log(JSON.stringify({passed:true,checks:['runtime settings validate before saving and never dispatch or change the task','greeting with legacy task requires no model or state mutation','legacy task yields actionable guidance without duplicate error or model discovery','explicit /new creates a separate review and dispatches','new-review command arguments cannot bypass user goal entry','first-open model picker waits for webview readiness','status renders measured CPU/GPU Celsius','real errors render once','restricted public API','command arguments cannot bypass user input','calibration commands require user selection','no agent calibration mutation tools','agent tool boundary','native @sutra uses private bridge and configured models, never VS Code inference or transcript replay','cancelled native chat never dispatches','one-request reasoning stays in the trusted child environment and preserves Adaptive','model discovery preserves configured choices; command arguments cannot replace them','live report refresh and invalidation','persistent single-flight dashboard','Darwin reclaimable-memory parser','report and calibration commands declared']},null,2));
+ for(const [event,tier,wanted] of [
+  ['start','low','off'],['step','mid','model-default'],['resume','low','off'],
+  ['step','high','adaptive'],['step','auto','adaptive']
+ ]){
+  await nativeRequest({op:'orchestrate',event,tier});
+  assert.equal(requestThinking.get(requests.at(-1)),wanted,`Wrong reasoning for ${event} at ${tier}`);
+ }
+ assert.deepEqual(runtimeSettings.get('tierReasoning'),fixedReasoning);
+ assert.equal(runtimeSettings.get('thinking'),'adaptive');
+ console.log(JSON.stringify({passed:true,checks:['runtime settings validate before saving and never dispatch or change the task','greeting with legacy task requires no model or state mutation','legacy task yields actionable guidance without duplicate error or model discovery','explicit /new creates a separate review and dispatches','new-review command arguments cannot bypass user goal entry','first-open model picker waits for webview readiness','status renders measured CPU/GPU Celsius','real errors render once','restricted public API','command arguments cannot bypass user input','calibration commands require user selection','no agent calibration mutation tools','agent tool boundary','native @sutra uses private bridge and configured models, never VS Code inference or transcript replay','cancelled native chat never dispatches','one-request reasoning stays in the trusted child environment and preserves Adaptive','fixed tiers keep distinct saved reasoning without affecting Auto','model discovery preserves configured choices; command arguments cannot replace them','live report refresh and invalidation','persistent single-flight dashboard','Darwin reclaimable-memory parser','report and calibration commands declared']},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>{for(const d of subscriptions)d.dispose?.();fs.rmSync(tmp,{recursive:true,force:true});});

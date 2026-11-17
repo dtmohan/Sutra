@@ -109,12 +109,13 @@ try{
 
 (async()=>{
  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'sutra-reasoning-view-'));
- let current=path.join(tmp,'a'.repeat(24));const changes=[],opened=[],sent=[],commands=[];let receive,configChanged,preference='model-default';
+ let current=path.join(tmp,'a'.repeat(24));const changes=[],opened=[],sent=[],commands=[];
+ let receive,configChanged,preference='model-default',tierReasoning={};
  const fake={StatusBarAlignment:{Right:1},ViewColumn:{Beside:2},Uri:{file:p=>({fsPath:p}),parse:s=>({toString:()=>s})},
   window:{createStatusBarItem:()=>({show(){},dispose(){}}),registerWebviewViewProvider:(name,p)=>{
    p.resolveWebviewView({visible:true,webview:{asWebviewUri:u=>({toString:()=>u.fsPath}),postMessage:m=>sent.push(m),onDidReceiveMessage:cb=>{receive=cb;}},onDidChangeVisibility(){},onDidDispose(){}});return {dispose(){}};
   },showTextDocument:async(doc,options)=>opened.push({doc,options})},
-  commands:{registerCommand:()=>({dispose(){}}),executeCommand:async(...args)=>commands.push(args)},workspace:{getConfiguration:()=>({get:()=>preference}),onDidChangeConfiguration:cb=>{configChanged=cb;return {dispose(){}};},openTextDocument:async uri=>({uri,text:view.activityDocument(uri.toString())})}};
+  commands:{registerCommand:()=>({dispose(){}}),executeCommand:async(...args)=>commands.push(args)},workspace:{getConfiguration:()=>({get:key=>key==='tierReasoning'?tierReasoning:preference}),onDidChangeConfiguration:cb=>{configChanged=cb;return {dispose(){}};},openTextDocument:async uri=>({uri,text:view.activityDocument(uri.toString())})}};
  const context={extensionPath:path.resolve(__dirname,'..'),subscriptions:[]};
  const {install}=require('../usage_view');
  const deps={storage:()=>current,refresh:()=>{},activityChanged:u=>changes.push(u.toString())};
@@ -122,7 +123,10 @@ try{
  assert.equal(sent.at(-1).reasoningPreference,'model-default');
  preference='adaptive';configChanged({affectsConfiguration:key=>key==='karma.thinking'});
  assert.equal(sent.at(-1).reasoningPreference,'adaptive');
- await receive({type:'reasoning_settings'});assert.deepEqual(commands.at(-1),['workbench.action.openSettings','karma.thinking']);
+ tierReasoning={low:'off',mid:'inherit',high:'on'};configChanged({affectsConfiguration:key=>key==='karma.tierReasoning'});
+ assert.deepEqual(sent.at(-1).tierReasoning,tierReasoning);
+ assert.equal(sent.at(-1).reasoningPreference,'adaptive');
+ await receive({type:'reasoning_settings'});assert.deepEqual(commands.at(-1),['karma.configureReasoning']);
  view.activity({kind:'start',id:id(60),model:'small',role:'conversation'});
  view.activity({kind:'thinking',id:id(60),text:'Router details'});
  view.activity({kind:'finish',id:id(60),status:'accepted'});

@@ -1,4 +1,5 @@
 const vscode=acquireVsCodeApi(), el=id=>document.getElementById(id);
+const modelTiers=['low','mid','high'];
 let preservedConstraints={};
 let current=null,selectedModel='local-assistant:latest',proposalId=null,proposalKind=null,busy=false,nativeState={},lastReceipt=null,cpuHistory=[],autoRunning=false;
 function send(op,data={}){el('error').textContent='';vscode.postMessage({op,...data});}
@@ -17,6 +18,7 @@ function updateButtons(){document.querySelectorAll('button,select').forEach(e=>e
     el(id).disabled = !!nativeState.arming;
   }
   el('save-model-tiers').disabled=busy||!modelCandidates.length;
+  el('save-tier-reasoning').disabled=!!nativeBusy;
 }
 function save(op){try{const extra={...preservedConstraints};
   setText('constraint-error','');
@@ -214,13 +216,14 @@ function showView(view){if(!Object.hasOwn(panels,view))return;
  if(view==='tools')el('advanced').open=true;vscode.setState?.({...vscode.getState?.(),view});window.scrollTo?.({top:0,behavior:'instant'});
 }
 function showSection(section){
- const view={models:'settings',advanced:'tools',dashboard:'dashboard',chat:'chat'}[section];
+ const view={models:'settings',reasoning:'settings',advanced:'tools',dashboard:'dashboard',chat:'chat'}[section];
  if(!view)return;
  showView(view);
- const target=el({models:'tier-config',advanced:'advanced'}[section]||panels[view]);
+ const target=el({models:'tier-config',reasoning:'reasoning-section',advanced:'advanced'}[section]||panels[view]);
  if(target.tagName==='DETAILS')target.open=true;
  target.scrollIntoView({block:'start'});
- (target.querySelector('summary')||el('nav-'+view)).focus({preventScroll:true});
+ const focus=section==='reasoning'?el('thinking-mode'):target.querySelector('summary')||el('nav-'+view);
+ focus.focus({preventScroll:true});
 }
 for(const [index,view] of tabNames.entries()){
  const tab=el('nav-'+view);
@@ -263,9 +266,22 @@ el('refresh-models').onclick=()=>send('refresh_models');
 el('save-model-tiers').onclick=()=>send('save_model_tiers',{models:Object.fromEntries(['low','mid','high'].map(t=>[t,el('tier-'+t).value]))});
 
 window.addEventListener('message',({data:m})=>{
- if(m.type==='runtime-settings'){el('storage-limit').value=m.settings.storageLimitMiB;el('python-path').value=m.settings.pythonPath;el('thinking-mode').value=m.settings.thinking||'adaptive';el('logit-sensor').value=m.settings.logitSensor||'off';el('memory-ownership').value=m.settings.memoryOwnership||'shared';}
+ if(m.type==='runtime-settings'){
+  el('storage-limit').value=m.settings.storageLimitMiB;
+  el('python-path').value=m.settings.pythonPath;
+  el('thinking-mode').value=m.settings.thinking||'adaptive';
+  el('logit-sensor').value=m.settings.logitSensor||'off';
+  el('memory-ownership').value=m.settings.memoryOwnership||'shared';
+  for(const tier of modelTiers)el('reasoning-'+tier).value=m.settings.tierReasoning?.[tier]||'inherit';
+ }
  if(m.type==='runtime-saved')el('runtime-save-status').textContent='Runtime settings saved. They apply to subsequent requests.';
+ if(m.type==='tier-reasoning-saved')setText('tier-reasoning-status','Fixed-tier reasoning saved.');
 });
+for(const tier of modelTiers)el('reasoning-'+tier).onchange=()=>setText('tier-reasoning-status','Unsaved reasoning choices.');
+el('save-tier-reasoning').onclick=()=>{
+ setText('tier-reasoning-status','');
+ send('save_tier_reasoning',{settings:Object.fromEntries(modelTiers.map(tier=>[tier,el('reasoning-'+tier).value]))});
+};
 for(const id of ['storage-limit','python-path'])el(id).oninput=()=>fieldError(id,'');
 el('save-runtime').onclick=()=>{
  const storageLimitMiB=Number(el('storage-limit').value),pythonPath=el('python-path').value.trim();

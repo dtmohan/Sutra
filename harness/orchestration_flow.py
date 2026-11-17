@@ -1,14 +1,31 @@
 """Host-owned native workflow. The UI renders states and supplies user grants."""
-import copy,json,math
+import copy,json,math,re
 from pathlib import Path
 from context_manager import InvalidUpdate,ContextBudgetExceeded,canonical,sha
 import orchestration as m
 from memory_layer import PageFault, fault_details, observe_fault
 from review_budget import BudgetStop
+from review_targets import document_input_notice
 
+
+def metadata_path(root, flow_id=None):
+    if flow_id is None:
+        return Path(root)/'workspace.json'
+    if not isinstance(flow_id,str) or not re.fullmatch('[a-f0-9]{32}',flow_id):
+        raise InvalidUpdate('Invalid workspace workflow identity')
+    return Path(root)/'workflows'/(flow_id+'.json')
+
+def flow_metadata(root,workspace,fid):
+    path=metadata_path(root,fid)
+    meta=json.loads(path.read_text()) if path.exists() else {'workspace':str(workspace),'_flow':fid}
+    if meta.get('workspace')!=str(workspace) or meta.get('_flow')!=fid:
+        raise InvalidUpdate('Workspace checkpoint belongs to another workflow')
+    return meta
 
 def save(root,meta):
-    path=Path(root)/'workspace.json';temp=path.with_suffix('.tmp');temp.write_text(canonical(meta));temp.replace(path)
+    path=metadata_path(root,meta.get('_flow'))
+    path.parent.mkdir(parents=True,exist_ok=True)
+    temp=path.with_suffix('.tmp');temp.write_text(canonical(meta));temp.replace(path)
 
 def info(s,fid):
     n=m.node(s,fid)
@@ -23,12 +40,18 @@ def move(s,fid,target,kind,**data):
         if target == 'DONE':
             from execution_sessions import finish
             finish(s, fid)
+            from task_stack import close, owner, view
+            workspace=m.node(s,fid)['workspace']
+            chat=owner(s,workspace,fid)
+            if chat:
+                close(s,workspace,chat,fid,expected_cursor=view(s,workspace,chat)['cursor'])
         return result
 
 def pending_flows(s,workspace,exclude=None):
     return [nid for nid, in s.db.execute(
         "SELECT id FROM orchestration_nodes WHERE json_extract(record_json,'$.kind')='flow' ORDER BY rowid DESC")
         if nid!=exclude and m.node(s,nid).get('workspace')==str(workspace)
+        and not m.node(s,nid).get('chat_key')
         and m.state(s,nid) not in m.TERMINAL]
 
 def response(s,fid,**extra):
@@ -38,7 +61,11 @@ def response(s,fid,**extra):
         p=data.get('capability_proposal')
         extra.setdefault('capability_proposal',p)
         extra['capability_settled']=bool(p and capabilities.completed(s,p['id']))
-    if m.state(s,fid)=='DONE' and data.get('capability_result'):extra.setdefault('capability_result',data['capability_result'])
+    if m.state(s,fid)=='DONE':
+        for key in ('capability_result','request_notice'):
+            if key in data:extra.setdefault(key,data[key])
+    if m.state(s,fid)=='AWAITING_ACTION':
+        extra.setdefault('pending_action',data.get('invocation_id'))
     from task_observations import summary
     outcome = extra.get('data', {}).get('result')
     observations = summary(s, data.get('conversation_id'), data.get('invocation_id'),
@@ -154,7 +181,65 @@ def budget_pause(s, meta, root, req, fid, phase, stop, kind='CONTEXT_STOPPED', *
                     progress='Sutra added '+dimension.replace('_', ' ')+' from the workspace reserve. Continuing with prior spending retained.')
 
 
+def task_projection(s,workspace,chat_key):
+    from task_stack import view
+    stack=view(s,workspace,chat_key)
+    fid=stack['focused']
+    focus=response(s,fid) if fid else None
+    if focus and focus['binding']:
+        from review_budget import usage
+        focus['task_budget']=usage(s,focus['binding']['session'])
+    return {'task_stack':stack,'focused_flow':focus}
+
 def handle(s,meta,workspace,root,req,providers=None):
+    req=dict(req)
+    chat=req.get('chat_key')
+    event=req.get('event','step')
+    fid=req.get('flow_id')
+    if chat is None:
+        if fid and m.node(s,fid).get('chat_key'):
+            raise InvalidUpdate('This workflow requires its originating Sutra chat')
+        return run(s,meta,workspace,root,req,providers)
+    if not isinstance(chat,str) or not re.fullmatch('[a-f0-9]{64}',chat):
+        raise InvalidUpdate('Invalid Sutra chat identity')
+    if fid is not None and event in ('start','start_existing','start_review'):
+        raise InvalidUpdate('A new request needs a new workflow identity')
+    from task_stack import assert_focused, close, owner, select
+    if event in ('task_list','pending'):
+        projection=task_projection(s,workspace,chat)
+        if event=='task_list':
+            return projection
+        return dict(projection['focused_flow'] or {'state':'DONE','flow_id':None},**projection)
+    if fid:
+        n=m.node(s,fid)
+        if n.get('workspace')!=str(workspace) or owner(s,workspace,fid)!=chat:
+            raise InvalidUpdate('Workflow belongs to another Sutra chat')
+        meta=flow_metadata(root,workspace,fid)
+        if event in ('task_focus','task_close','cancel'):
+            if req.get('cursor')!=response(s,fid)['cursor']:
+                raise InvalidUpdate('Workflow event is stale or replayed')
+            if event=='cancel':
+                assert_focused(s,workspace,chat,fid)
+            expected=req.get('stack_cursor') if event!='cancel' else task_projection(s,workspace,chat)['task_stack']['cursor']
+            with s.db:
+                if event=='task_focus':
+                    select(s,workspace,chat,fid,expected_cursor=expected)
+                else:
+                    close(s,workspace,chat,fid,expected_cursor=expected)
+                    if m.state(s,fid) not in m.TERMINAL:
+                        from execution_sessions import finish
+                        finish(s,fid,cancelled=True)
+                        m.transition(s,fid,'CANCELLED','CANCELLED',{'spending_retained':True})
+            projection=task_projection(s,workspace,chat)
+            return dict(response(s,fid),**projection) if event=='cancel' else projection
+        if event!='inspect':
+            assert_focused(s,workspace,chat,fid)
+    else:
+        meta={'workspace':str(workspace)}
+    out=run(s,meta,workspace,root,req,providers)
+    return dict(out,**task_projection(s,workspace,chat))
+
+def run(s,meta,workspace,root,req,providers=None):
     """Translate measured resource stops at the shared orchestration boundary."""
     from monitoring import ResourceWait
     req=dict(req)
@@ -284,25 +369,52 @@ def _handle(s,meta,workspace,root,req,providers=None):
     from conversation import answer as converse
     event=req.get('event','step');models=req.get('models');tier=req.get('tier','auto')
     def provider(stage):return providers(stage) if providers else None
-    if event in ('pending','start','start_existing','start_review'):
+    if event=='pending':
         pending=pending_flows(s,workspace)
-        if event=='pending':return response(s,pending[0]) if pending else {'state':'DONE','flow_id':None}
-        # A saved workspace task must not intercept unrelated conversation.
-        # Classify a new request through the gateway before asking to replace work.
-        if pending and event!='start':raise InvalidUpdate('A saved workflow exists; explicitly resume or discard it before starting another request')
+        return response(s,pending[0]) if pending else {'state':'DONE','flow_id':None}
     if event in ('start','start_existing','start_review'):
         prompt=req.get('prompt','')
         if not isinstance(prompt,str) or not prompt.strip():raise InvalidUpdate('Empty workflow request')
-        if event=='start_existing':
+        notice=document_input_notice(prompt)
+        chat=req.get('chat_key')
+        # Classify ordinary chat before asking the user to replace saved work.
+        if not notice and not chat and event!='start' and pending_flows(s,workspace):
+            raise InvalidUpdate('A saved workflow exists; explicitly resume or discard it before starting another request')
+        if not notice and event=='start_existing':
             from conversation import workspace_handoff,read
+            if chat:
+                from task_stack import owner
+                previous=req.get('action_flow_id')
+                if not previous or owner(s,workspace,previous)!=chat:
+                    raise InvalidUpdate('Continuation requires the original Sutra action workflow')
+                _,prior=info(s,previous)
+                settled=m.events(s,previous)[-1]
+                if (settled['to']!='DONE' or settled['kind']!='ACTION_SETTLED'
+                        or settled['data'].get('status') not in ('applied','process_exited_zero','process_failed')
+                        or prior.get('conversation_id')!=req.get('conversation_id')):
+                    raise InvalidUpdate('Continuation requires a settled Sutra action')
+                if s.db.execute("SELECT 1 FROM orchestration_nodes WHERE json_extract(record_json,'$.action_flow_id')=?",
+                                (previous,)).fetchone():
+                    raise InvalidUpdate('This action has already been continued')
+                meta.update(flow_metadata(root,workspace,previous))
             workspace_handoff(s,meta.get('active'),req.get('conversation_id'),prompt)
             proposal=read(s,req['conversation_id'])['result']['accepted_output']
             if proposal['intent']!='workspace':raise InvalidUpdate('Continuation requires an admitted workspace intent')
         with s.db:
-            f=m.create(s,'flow',objective=prompt,workspace=str(workspace),prompt=prompt,conversation_parent=req.get('parent'))
+            f=m.create(s,'flow',objective=prompt,workspace=str(workspace),prompt=prompt,
+                       conversation_parent=req.get('parent'),chat_key=chat,
+                       action_flow_id=req.get('action_flow_id') if chat and event=='start_existing' else None)
             m.transition(s,f['id'],'CLASSIFYING','REQUEST')
+            if chat and not notice:
+                from task_stack import select,view
+                select(s,workspace,chat,f['id'],expected_cursor=view(s,workspace,chat)['cursor'],attach=True)
+                meta['_flow']=f['id']
+                save(root,meta)
         fid=f['id']
         req['_created_flow_id']=fid
+        if notice:
+            move(s,fid,'DONE','DOCUMENT_INPUT_REQUIRED',request_notice=notice)
+            return response(s,fid)
         if event=='start_review':
             sid=meta.get('active')
             if not req.get('armed') or not sid or req.get('binding')!=identity(s,sid) or not s.snapshot(sid)['constraints'].get('auto_review'):raise InvalidUpdate('Explicit review requires a user-created read-only task')
@@ -350,17 +462,27 @@ def _handle(s,meta,workspace,root,req,providers=None):
             workspace_handoff(s,sid,conversation_id,prompt)
         # This is an explicit host UI event. Keep the task and all consumed use;
         # do not transfer old model results or authorize any new file/action scope.
+        chat=f.get('chat_key')
         with s.db:
             from execution_sessions import finish
             finish(s, fid, cancelled=True)
-            m.abandon_children(s,parent['id'],'User restarted review after a policy or source change')
-            m.cancel(s,fid)
+            if chat:
+                from task_stack import close, select, view
+                close(s,workspace,chat,fid,expected_cursor=view(s,workspace,chat)['cursor'])
+                m.transition(s,fid,'CANCELLED','CANCELLED',{'spending_retained':True})
+            else:
+                m.abandon_children(s,parent['id'],'User restarted review after a policy or source change')
+                m.cancel(s,fid)
             new=m.create(s,'flow',objective=prompt,workspace=str(workspace),prompt=prompt,
-                         conversation_parent=conversation_id,restarted_from=fid)
+                         conversation_parent=conversation_id,restarted_from=fid,chat_key=chat)
             restart_kind = 'SOURCE_RESTART' if incompatibility['kind']=='provenance_changed' else 'POLICY_RESTART'
             m.transition(s,new['id'],'CLASSIFYING',restart_kind,{'previous_flow':fid})
             m.transition(s,new['id'],'NEED_ARM','USER_REVIEW',{'conversation_id':conversation_id,
                          'permission':d.get('permission') or {'operation':'read','paths':[]}})
+            if chat:
+                meta['_flow']=new['id']
+                save(root,meta)
+                select(s,workspace,chat,new['id'],expected_cursor=view(s,workspace,chat)['cursor'],attach=True)
         return response(s,new['id'],progress=('Review restarted with the current source snapshot; task constraints and consumed budget retained.'
                         if incompatibility['kind']=='provenance_changed' else
                         'Review restarted under the current policy; task constraints and consumed budget retained.'))
@@ -410,6 +532,10 @@ def _handle(s,meta,workspace,root,req,providers=None):
              reason='User resumed with existing contract and allocation')
         return response(s,fid)
     if phase=='CLASSIFYING':
+        notice=document_input_notice(prompt)
+        if notice:
+            move(s,fid,'DONE','DOCUMENT_INPUT_REQUIRED',request_notice=notice)
+            return response(s,fid)
         from conversation import session_for
         from conversation_routing import RoutingBlocked
         request={'prompt':prompt,'parent':f.get('conversation_parent'),'models':models,'tier':tier,
@@ -436,7 +562,7 @@ def _handle(s,meta,workspace,root,req,providers=None):
                 move(s,fid,'PAUSED','ROUTING_STOPPED',workflow_stop=stop)
             return response(s,fid,routing_step=chat,progress=next_step['reason'])
         p=r['accepted_output'];target='NEED_ARM' if p['intent']=='workspace' else 'DONE'
-        other=pending_flows(s,workspace,exclude=fid)
+        other=[] if f.get('chat_key') else pending_flows(s,workspace,exclude=fid)
         if target=='NEED_ARM' and other:
             # Only the host can resolve this conflict. No source reads or grants
             # are made, and the existing task/allocations remain untouched.
@@ -458,8 +584,10 @@ def _handle(s,meta,workspace,root,req,providers=None):
         sid=meta.get('active')
         if sid and req.get('binding') and req['binding']!=identity(s,sid):raise InvalidUpdate('Task changed during arming')
         if not sid or not any(s.snapshot(sid)['constraints'].get(k) for k in ('native_task','auto_review')):
-            _handle(Path(root),Path(workspace),{'op':'auto_new','goal':prompt,'roots':['.'],'conversation_id':d['conversation_id']})
-            meta.clear();meta.update(json.loads((Path(root)/'workspace.json').read_text()));sid=meta['active']
+            path=metadata_path(root,meta.get('_flow'))
+            roots=(d['permission']['paths'] or ['.']) if f.get('chat_key') and d['permission']['operation']=='read' else ['.']
+            _handle(Path(root),Path(workspace),{'op':'auto_new','goal':prompt,'roots':roots,'conversation_id':d['conversation_id']},metadata=path)
+            meta.clear();meta.update(json.loads(path.read_text()));sid=meta['active']
         wanted=permission(s,sid,d['permission'])
         if phase=='NEED_PERMISSION':
             if d.get('permission_binding')!=identity(s,sid):raise InvalidUpdate('Task changed while asking for permission')

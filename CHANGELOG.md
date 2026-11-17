@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.40.0
+
+- Keep several workspace tasks open in one native chat. Focus, resume, or close
+  tasks from Sutra Monitor and return to the previous task when work closes.
+- Govern task switches through the Karma adapter. Keep the original checkpoint,
+  permissions and spending with each task across reloads and model switches.
+- Give each new workspace request its own goal and scope. Ask for document text
+  when a review explicitly names a DOCX, DOC, or PDF.
+
+## 0.39.0
+
+- Request the lowest supported positive reasoning level for substantive chat, including comparisons, trade-offs, numerical planning and code analysis.
+- Let multi-file report synthesis use supported thinking within its existing output reserve and retry with lower effort after output exhaustion.
+- Add independent reasoning settings for fixed Low, Mid and High tiers, with shared defaults and the one-turn Chat override.
+- Apply the effective reasoning choice to native coding calls and show the requested control with call details.
+
 ## 0.38.5
 
 - Make native Sutra Auto the primary chat entry and move duplicate palette commands to their corresponding views.

@@ -12,6 +12,8 @@ def binding(s,meta,request):
     return sid
 
 def check_route(s,sid,p):
+    from review_reasoning import check
+    check(p)
     route=p['native_route'];record=route['record']
     row=s.db.execute('SELECT seq,event,payload_json,previous_hash,event_hash FROM page_audit WHERE event_hash=?',(route['receipt'],)).fetchone()
     if not row or row[1]!='NATIVE_ROUTE' or sha(canonical(list(row[:4])))!=row[4] or json.loads(row[2])!=record:raise InvalidUpdate('Native route receipt mismatch')

@@ -472,6 +472,32 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(paused['stop']['resume_phase'],'CLASSIFYING')
         self.assertEqual(flow.response(self.s,out['flow_id']),before)
 
+    def test_document_review_does_not_reuse_saved_architecture_task(self):
+        saved=self.children()
+        sid=self.meta['active']
+        before=flow.response(self.s,saved['flow_id'])
+        contract=self.s.pinned(sid)
+        permissions=m.permissions(self.s,sid)
+        usage=review_budget.usage(self.s,sid)
+        prompt="Can you review this resume and comment? I am applying for post-silicon validation roles. The file is /Users/example/Downloads/Candidate Resume (1).docx"
+        self.tier='high'
+        with patch.object(self,'provider',side_effect=AssertionError('Document request dispatched a model')), \
+                patch('repository_tools.execute',side_effect=AssertionError('Document request read the repository')):
+            for event in ('start','start_existing','start_review'):
+                with self.subTest(event=event):
+                    result=self.step(event=event,prompt=prompt,armed=False)
+                    self.assertEqual(result['state'],'DONE')
+                    self.assertIsNone(result['conversation_id'])
+                    self.assertIn('DOCX',result['request_notice'])
+                    self.assertIn('paste',result['request_notice'].lower())
+                    self.assertEqual(m.events(self.s,result['flow_id'])[-1]['kind'],'DOCUMENT_INPUT_REQUIRED')
+        self.assertEqual(self.meta['active'],sid)
+        self.assertEqual(flow.response(self.s,saved['flow_id']),before)
+        self.assertEqual(self.s.pinned(sid),contract)
+        self.assertEqual(m.permissions(self.s,sid),permissions)
+        self.assertEqual(review_budget.usage(self.s,sid),usage)
+        self.assertEqual(self.step(event='pending')['flow_id'],saved['flow_id'])
+
     def test_replacing_review_keeps_edit_intent_and_requires_permission(self):
         out=self.children();sid=self.meta['active'];self.operation='edit'
         edit_prompt='Remember project Cedar, ticket CED724. Edit part0.py'

@@ -85,17 +85,22 @@ def next_control(plan):
 
 
 def task_signal(p):
-    """Versioned task heuristic, not a semantic difficulty or correctness score."""
-    request = p['request']
-    if re.search(r'\b(think carefully|reason step by step)\b', request, re.I):
+    """Use request cues before classification, without an extra model call."""
+    request = p['request'].lower()
+    if re.search(r'\b(think carefully|reason (?:step by step|through))\b', request):
         return 'explicit-reasoning-request'
-    if re.search(r'\bfenced\s+(?:json|python)\b', request, re.I):
+    if re.search(r'\bfenced\s+(?:json|python)\b', request):
         return 'explicit-structured-result'
-    if re.search(r'\b(maximi[sz]e|minimi[sz]e|optimal|optimi[sz]e|recompute|calculate|correction|best remaining|best plan)\b', request, re.I) and re.search(r'\d', request):
+    if re.search(r'\b(maximi[sz]e|minimi[sz]e|optimal|optimi[sz]e|recompute|calculate|correction|best remaining|best plan)\b', request) and re.search(r'\d', request):
         return 'numeric-planning-or-correction'
-    if (re.search(r'\b(analy[sz]e|debug|trace|corrected|fix)\b', request, re.I)
-            and ('```' in request or re.search(r'\b(function|code|algorithm|implementation)\b', request, re.I))):
+    if (re.search(r'\b(analy[sz]e|debug|diagnose|trace|corrected|fix|refactor)\b', request)
+            and ('```' in request or re.search(r'\b(function|code|algorithm|implementation|stack trace)\b', request))):
         return 'supplied-code-analysis'
+    if re.search(r'\b(trade[- ]?offs?|pros and cons)\b', request):
+        return 'trade-off-analysis'
+    if (re.search(r'\b(compare|evaluate|assess|weigh|design|plan|recommend)\b', request)
+            and re.search(r'\b(approach(?:es)?|alternatives?|options?|strateg(?:y|ies)|risks?|constraints?|budget|schedule)\b', request)):
+        return 'comparison-or-planning'
     return 'routine-or-unclassified'
 
 

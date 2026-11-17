@@ -9,7 +9,7 @@ from model_activity import thinking_control
 from reasoning_policy import check_provider
 from review_reasoning import bind, repair
 from review_budget import usage
-from paging import PageFault
+from paging import Budget, PageFault
 import chat_runtime as chat
 import test_chat as fixture
 from test_chat import Fake
@@ -88,6 +88,56 @@ class ReviewRecoveryTests(unittest.TestCase):
     tearDown = fixture.ChatTests.tearDown
     ask = fixture.ChatTests.ask
 
+    def architecture(self, model, reviewer):
+        return chat.answer(self.s, self.meta, self.ws, self.storage,
+            {'prompt': 'Explain the architecture.', 'models': fixture.MODELS, 'tier': 'low'},
+            provider=model, review_provider=reviewer)
+
+    def test_adaptive_report_writer_retries_at_lowest_effort_and_charges_truncation(self):
+        writer = Exhausted()
+        writer.budget = Budget(32384, 8192, 256)
+        writer.context_metadata = {'thinking': {'values': [False, 'low', 'medium'], 'default': 'medium'}}
+        reviewer = Exhausted(failures=0)
+        reviewer.model = fixture.MODELS['mid']
+        before = usage(self.s, self.sid)
+
+        with patch.dict('os.environ', SUTRA_THINKING='adaptive'):
+            out = self.architecture(writer, reviewer)
+
+        self.assertTrue(out['result']['admission']['admitted'], out)
+        self.assertTrue(out['report_markdown'])
+        first, retry = writer.payloads
+        self.assertEqual(set(first['excerpts']), {'entry.py', 'leaf.py'})
+        self.assertEqual(
+            [(p['reasoning']['preference'], p['reasoning']['step'], p['reasoning']['requested'])
+             for p in (first, retry)],
+            [('adaptive', 1, 'low'), ('adaptive', 0, False)])
+        self.assertEqual(
+            {k: v for k, v in first.items() if k != 'reasoning'},
+            {k: v for k, v in retry.items() if k not in ('reasoning', 'repair')})
+        self.assertTrue(reviewer.payloads)
+        self.assertTrue(all(p['reasoning']['requested'] is False for p in reviewer.payloads))
+        calls = out['result']['token_usage']['calls']
+        generation = [c for c in calls if c['stage'] == 'chat_reviewer']
+        self.assertEqual(len(generation), 2)
+        failed = next(c for c in generation if c['status'] == 'quarantined')
+        self.assertEqual(failed['output_tokens'], writer.budget.response_reserve)
+        self.assertEqual(usage(self.s, self.sid)['used']['calls'] - before['used']['calls'], len(calls))
+        self.assertTrue(self.s.verify_invocations(self.sid))
+
+    def test_report_writer_keeps_low_effort_with_tight_output_or_explicit_off(self):
+        for preference, reserve in (('adaptive', 2048), ('off', 8192)):
+            with self.subTest(preference=preference, reserve=reserve):
+                writer = Exhausted(failures=0)
+                writer.budget = Budget(32384, reserve, 256)
+                with patch.dict('os.environ', SUTRA_THINKING=preference):
+                    out = self.architecture(writer, Fake())
+                self.assertTrue(out['result']['admission']['admitted'], out)
+                self.assertEqual(len(writer.payloads), 1)
+                plan = writer.payloads[0]['reasoning']
+                self.assertEqual(plan['preference'], preference)
+                self.assertIs(plan['requested'], False)
+
     def test_recovery_then_model_switch_retains_pins_and_charges_failure(self):
         before = usage(self.s, self.sid)
         model = Exhausted()
@@ -142,10 +192,12 @@ class ReviewRecoveryTests(unittest.TestCase):
         fit = chat.fit_packet
         def one(*args): return fit(*args)[0], 1
         model = Exhausted()
+        model.budget = Budget(32384, 8192, 256)
         with patch('chat_runtime.fit_packet', side_effect=one), patch.dict('os.environ', SUTRA_THINKING='adaptive'):
-            out = self.ask(provider=model)
+            out = self.architecture(model, Fake())
         self.assertFalse(out['result']['admission']['admitted'])
         self.assertEqual(len(model.payloads), 1)
+        self.assertIs(model.payloads[0]['reasoning']['requested'], False)
 
     def test_independent_report_check_can_recover_without_publishing_partial_claims(self):
         reviewer = Exhausted()

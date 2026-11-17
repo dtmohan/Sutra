@@ -342,6 +342,111 @@ function setup(saved={}){
  await discarded.send('high',[{role:1,content:[new Text('New request')]}]);assert(discarded.flowRequests.some(r=>r.event==='cancel'));
  assert.equal(discarded.calls.filter(c=>c.op==='conversation').at(-1).prompt,'New request');
  checks.push('new workspace intent is classified first; explicit discard releases saved work before any new workspace operation');
+ {
+  const persisted={},open=new Map(),traffic=[];
+  const taskChat={modelOptions:{_conversationId:'task-stack-origin'}};
+  const chatKey=require('node:crypto').createHash('sha256').update(taskChat.modelOptions._conversationId).digest('hex');
+  let order=[],stackVersion=0,sequence=0;
+  const attach=fixture=>{
+   const original=fixture.deps.request;
+   const response=(flow,extra={})=>{
+    const focused=order.at(-1)??null;
+    const open_tasks=order.map(id=>{
+     const {flow_id,prompt,state,cursor}=open.get(id);
+     return {flow_id,prompt,state,cursor,focused:id===focused};
+    });
+    const task_stack={focused,open_tasks,cursor:stackVersion?String(stackVersion):null,last_transition:null};
+    return structuredClone({...flow,...extra,task_stack,focused_flow:open.get(focused)||null});
+   };
+   fixture.deps.request=async (m,t)=>{
+    if(m.op!=='orchestrate')return original(m,t);
+    assert.equal(m.chat_key,chatKey);
+    traffic.push(structuredClone(m));
+    if(m.event==='task_list')return response({});
+    if(m.event==='pending')return response(open.get(order.at(-1))||{state:'DONE',flow_id:null});
+    if(m.event==='start'){
+     const c=await fixture.deps.backendRequest({...m,op:'conversation'},t);
+     const id=(++sequence).toString(16).padStart(32,'0');
+     const binding={session:'session-'+sequence,contract_hash:'contract-'+sequence,calibration_hash:'cal-'+sequence};
+     const flow={flow_id:id,prompt:m.prompt,state:'NEED_ARM',cursor:'1',conversation_id:c.result.invocation_id,binding};
+     open.set(id,flow);order.push(id);stackVersion++;
+     return response(flow,{conversation:c});
+    }
+    const flow=open.get(m.flow_id);assert(flow,'Host request needs a known flow ID');
+    if(m.event==='inspect')return response(flow);
+    assert.equal(m.cursor,flow.cursor,'Host request uses the selected task cursor');
+    if(m.event==='task_focus'||m.event==='task_close'){
+     assert.equal(m.stack_cursor,String(stackVersion),'Task choice needs the inspected stack revision');
+     order=order.filter(id=>id!==flow.flow_id);
+     stackVersion++;
+     if(m.event==='task_focus')order.push(flow.flow_id);
+     else{flow.state='CANCELLED';open.delete(flow.flow_id);}
+     return response({});
+    }
+    assert(m.armed);
+    assert.deepEqual(m.binding,flow.binding);
+    assert.equal(order.at(-1),flow.flow_id,'Only a focused flow can run');
+    flow.cursor=String(Number(flow.cursor)+1);
+    if(m.event==='resume'){
+     assert.equal(flow.state,'PAUSED');
+     flow.state='SYNTHESIS';
+     return response(flow);
+    }
+    assert.equal(m.event,'step');
+    const previous=flow.stop?.budget.used.calls||0;
+    flow.state='PAUSED';
+    flow.stop={status:'resource_wait',resume_phase:'SYNTHESIS',error:'Fixture memory wait.',budget:{used:{calls:previous+1}}};
+    return response(flow);
+   };
+  };
+  const firstHost=setup(persisted);attach(firstHost);await firstHost.arm();
+  firstHost.v.window.showWarningMessage=async()=>{throw Error('An independent task must not prompt to discard parked work');};
+  const originalReply=await firstHost.send('low',chatUser('Review top-level architecture'),taskChat);
+  const architecture=structuredClone(open.get(order[0]));
+  await firstHost.send('mid',chatUser('Review parsing tests'),taskChat);
+  const second=structuredClone(open.get(order[1]));
+  assert.equal(open.size,2);
+  assert.deepEqual(open.get(architecture.flow_id),architecture);
+  assert.deepEqual(firstHost.calls.filter(c=>c.op==='conversation').map(c=>c.prompt),[architecture.prompt,second.prompt]);
+  assert.equal(firstHost.controller.status().openTaskCount,2);
+  assert(!traffic.some(m=>m.event==='cancel'));
+
+  const reloadedHost=setup(persisted);attach(reloadedHost);
+  assert(reloadedHost.controller.status().armed);
+  const beforeDetached=traffic.length;
+  const detached=await reloadedHost.send('high',chatUser('continue'),{});
+  assert(detached.some(part=>part.value?.includes('chat that started it')));
+  assert.equal(traffic.length,beforeDetached,'A detached chat cannot resume another chat’s task');
+  let action='Focus task';
+  reloadedHost.v.window.showQuickPick=async items=>items.find(item=>item.label===action||item.label===architecture.prompt);
+  const beforeFocus=traffic.length;
+  await reloadedHost.commands['karma.openTasks']();
+  assert.equal(order.at(-1),architecture.flow_id);
+  assert(traffic.slice(beforeFocus).some(m=>m.event==='task_focus'&&m.flow_id===architecture.flow_id));
+  assert(!traffic.slice(beforeFocus).some(m=>['start','step','resume'].includes(m.event)));
+  assert.deepEqual(open.get(architecture.flow_id),architecture);
+  const beforeResume=traffic.length;
+  const restoredChat=[{role:2,content:originalReply},...chatUser('continue')];
+  const continued=await reloadedHost.send('high',restoredChat,{});
+  const resumed=traffic.slice(beforeResume).find(m=>m.event==='resume');
+  assert(continued.some(part=>part.value?.includes('Resuming the saved Sutra workflow')));
+  assert.equal(resumed.flow_id,architecture.flow_id);
+  assert.equal(resumed.cursor,architecture.cursor);
+  assert.equal(resumed.tier,'high');
+  assert.deepEqual(resumed.binding,architecture.binding);
+  assert.equal(reloadedHost.calls.filter(m=>m.op==='conversation').length,0);
+  assert.equal(open.get(architecture.flow_id).stop.budget.used.calls,2);
+  assert.deepEqual(open.get(second.flow_id),second);
+
+  action='Close task';
+  await reloadedHost.commands['karma.openTasks']();
+  assert(traffic.some(m=>m.event==='task_close'&&m.flow_id===architecture.flow_id));
+  assert.equal(order.at(-1),second.flow_id);
+  assert.equal(reloadedHost.controller.status().openTaskCount,1);
+  assert.equal(reloadedHost.controller.status().pending.flow_id,second.flow_id);
+  assert.deepEqual(open.get(second.flow_id),second);
+  checks.push('open tasks keep distinct receipts across reload, focus without replay, resume on a new tier, and restore parked focus on close');
+ }
  for(const incompatible of [false,true]){
   const greeting=setup();greeting.kind('report');await greeting.arm();
   greeting.hold(()=>{throw Error('saved review fixture');});await assert.rejects(greeting.send(),/saved review/);greeting.hold(null);
@@ -362,6 +467,53 @@ function setup(saved={}){
   assert(!greeting.controller.status().armed);
  }
  checks.push('greetings bypass saved review recovery, including older policies and Resume selection, with one conversation call and no arming or workspace effects');
+ {
+  const pendingKey='sutra.pendingOrchestration';
+  const requestNotice='Sutra can review the résumé if you paste its text into this chat.';
+  const document=[{role:1,content:[new Text('Review /tmp/Application (1).docx for a validation role')]}];
+  const pending={flow_id:'saved-review',state:'PAUSED',cursor:'4',workspace:'/project',
+   stop:{status:'task_budget',resume_phase:'SYNTHESIS'},binding:{session:'task-1',contract_hash:'contract-1'}};
+  for(const retained of [undefined,pending]){
+   const blocked=setup({[pendingKey]:retained}),events=[];
+   blocked.v.window.showWarningMessage=async()=>{throw Error('Document guidance must not ask for workspace access');};
+   blocked.deps.request=async m=>{
+    assert.equal(m.op,'orchestrate');
+    events.push(m.event);
+    if(m.event==='pending')return {state:'DONE',flow_id:null};
+    assert.equal(m.event,'start');
+    assert.equal(m.prompt,document[0].content[0].value);
+    return {state:'DONE',flow_id:retained?'document-request':null,request_notice:requestNotice};
+   };
+   const reply=await blocked.send('auto',document);
+   assert.deepEqual(reply.map(part=>part.value),[requestNotice]);
+   assert.deepEqual(events,retained?['start']:['pending','start']);
+   const {armed,routing,pending:saved}=blocked.controller.status();
+   assert.equal(armed,false);
+   assert.deepEqual(saved,retained||null);
+   assert.equal(routing.active,false);
+   assert.equal(routing.stage,'guidance');
+   assert.equal(routing.message,requestNotice);
+   assert.equal(routing.invocationId,undefined);
+   assert.equal(routing.token_usage,undefined);
+  }
+  const classifying={...pending,state:'CLASSIFYING',prompt:document[0].content[0].value,stop:undefined};
+  const recovering=setup({[pendingKey]:classifying}),events=[];
+  recovering.v.window.showWarningMessage=async()=>{throw Error('Document recovery must not ask for workspace access');};
+  recovering.deps.request=async m=>{
+   assert.equal(m.op,'orchestrate');
+   assert.equal(m.flow_id,classifying.flow_id);
+   events.push(m.event);
+   if(m.event==='inspect')return classifying;
+   assert.equal(m.event,'step');
+   return {state:'DONE',flow_id:classifying.flow_id,request_notice:requestNotice};
+  };
+  const resumedNotice=await recovering.send('auto',[{role:1,content:[new Text('continue')]}]);
+  assert.deepEqual(events,['inspect','step']);
+  assert.equal(resumedNotice.at(-1).value,requestNotice);
+  assert.equal(recovering.controller.status().pending,null);
+  assert.equal(recovering.controller.status().routing.stage,'guidance');
+  checks.push('document input guidance ends a fresh or resumed request without a model call or permission prompt and preserves unrelated saved work');
+ }
  const routingFlow=setup();let routingStep=0;const routingEvents=[];
  const routingChat=(id,model,followup)=>({route:{model},routing_followup:followup,result:{invocation_id:id,admission:{admitted:true},accepted_output:{intent:'conversation',answer:followup?'UNPUBLISHED DRAFT':'Final routed answer'},token_usage:{calls:[{invocation_id:id,model,stage:'conversation',input_tokens:100,output_tokens:20}]}}});
  routingFlow.deps.request=async m=>{

@@ -33,6 +33,18 @@ class NativeTests(unittest.TestCase):
     def req(self,prompt='Review retry behavior.',tier='low'):
         return {'session':self.session,'contract_hash':self.s.origin(self.session)['contract_hash'],'calibration_hash':current(self.s,self.session)['hash'],'prompt':prompt,'models':self.models,'tier':tier}
     def call(self,model,**kwargs):return turn(self.s,self.meta,self.workspace,self.storage,self.req(**kwargs),provider=model)
+    def test_coding_honors_the_effective_tier_reasoning_control(self):
+        for preference, expected in [('on', 'low'), ('off', False), ('model-default', None)]:
+            with self.subTest(preference=preference):
+                model = NativeModel('model-a')
+                model.context_metadata = {'thinking': {'values': [False, 'low', 'medium'], 'default': 'medium'}}
+                with patch.dict('os.environ', SUTRA_THINKING=preference):
+                    result = self.call(model)
+                self.assertTrue(result['result']['admission']['admitted'])
+                self.assertEqual(result['route']['model'], 'model-a')
+                self.assertEqual(model.calls[0]['reasoning']['requested'], expected)
+        self.assertTrue(self.s.verify_invocations(self.session))
+
     def test_switch_preserves_contract_context_and_spent_allocations(self):
         before=self.s.current_contract(self.session);a=NativeModel('model-a','edit');first=self.call(a,prompt='Fix the retry off-by-one error.')
         self.assertTrue(first['result']['admission']['admitted']);self.assertEqual(first['route']['model'],'model-a')
