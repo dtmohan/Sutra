@@ -260,7 +260,7 @@ def pending_candidate(s, sid, payload):
     return None
 
 
-def run(s, sid, root, candidate_id, provider=None, requested='auto', strict=False):
+def run(s, sid, root, candidate_id, provider=None, requested='auto', strict=False, retry=None):
     import claim_pages as pages
     from api_runtime import provider_for
     from invocation_gateway import InvocationGateway
@@ -283,12 +283,20 @@ def run(s, sid, root, candidate_id, provider=None, requested='auto', strict=Fals
         separation = compare(mapper, observed); separation.update(selection='injected', requested_model=provider.model)
         enforce(separation, strict)
     all_claims = claims(draft['report'], source['excerpts']); evidence = pages.inventory(candidate_id, source)
-    plan = pages.find(s, sid, candidate_id)
+    plan = pages.find(s, sid, candidate_id, retry['plan_id'] if retry else None)
+    retry_index = None
+    if retry:
+        retry_index = retry['review_page'] - 1
+        if not 0 <= retry_index < len(plan['pages']):
+            raise InvalidUpdate('Saved claim review page is outside the committed plan')
+        failed = pages.attempts(s, sid, plan['id'], retry_index)
+        if not failed or failed[0][0] != retry['failed_invocation'] or failed[0][2] != 'quarantined':
+            raise InvalidUpdate('Saved claim review failure differs from the committed attempt')
     attempts = 2
     if real: allocation = context_budget(provider, s, sid, slots=attempts)
     def make(plan, index):
         p = pages.packet(source, draft, candidate_id, plan, index, all_claims, evidence, separation, strict)
-        bind(provider, p)
+        bind(provider, p, preference='off' if index == retry_index else None)
         return p
     def fits(item):
         # Extra page-count digits make the probe conservative for the real page.
@@ -334,7 +342,18 @@ def run(s, sid, root, candidate_id, provider=None, requested='auto', strict=Fals
             s.event(run_id, 'NACK', {'errors': final['admission']['errors']})
             recovery = repair(final, p, output_repaired, attempt < count-1)
             if attempt == count-1 or (final.get('blocked') and recovery is None):
-                s.event(run_id, 'FIN', {'reason': 'claim_page_repair_exhausted'}); break
+                if (final.get('failure_kind') == 'output_limit' and p['reasoning']['requested'] is not False
+                        and len(prior) + attempt + 1 < plan['attempts_per_page']):
+                    final['claim_review_stop'] = {
+                        'status': 'claim_review_output_limit', 'resume_phase': 'SYNTHESIS',
+                        'candidate_id': candidate_id, 'plan_id': plan['id'],
+                        'failed_invocation': final['invocation_id'], 'review_page': index + 1,
+                        'total_pages': len(plan['pages']),
+                        'error': 'The claim reviewer reached its shared thinking and answer limit.',
+                    }
+                s.event(run_id, 'FIN', {'reason': ('claim_page_waiting_for_resume'
+                        if final.get('claim_review_stop') else 'claim_page_repair_exhausted')})
+                break
             request_check(s, sid, p)
             s.event(run_id, 'BRIDGE', {'reason': 'bounded_claim_page_repair'})
             p['repair'] = recovery or {'errors': [e[:160] for e in final['admission']['errors'][:2]]}

@@ -9,8 +9,8 @@ from context_manager import InvalidUpdate
 from reasoning_policy import capabilities, make, validate
 
 
-def bind(provider, payload, *, bounded_selection=False):
-    preference = os.environ.get('SUTRA_THINKING', 'adaptive')
+def bind(provider, payload, *, bounded_selection=False, preference=None):
+    preference = preference or os.environ.get('SUTRA_THINKING', 'adaptive')
     if bounded_selection and preference != 'off':
         preference = 'adaptive'
     plan = make(capabilities(getattr(provider, 'context_metadata', {})), preference)

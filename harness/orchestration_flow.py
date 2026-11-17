@@ -384,10 +384,10 @@ def _handle(s,meta,workspace,root,req,providers=None):
             move(s, fid, 'BINDING', 'GIT_SNAPSHOT_CONFIRMED', workflow_stop=None, git_provenance=snapshot)
             return response(s, fid, progress=summary(snapshot))
         if event!='resume':raise InvalidUpdate('Workflow paused. Choose Resume or Discard; allocations remain unchanged.')
-        stopped=[e for e in m.events(s,fid) if e['kind'] in ('MAPPING_STOPPED','CONTEXT_STOPPED','RESOURCE_STOPPED','ROUTING_STOPPED','MEMORY_STOPPED')]
+        stopped=[e for e in m.events(s,fid) if e['kind'] in ('MAPPING_STOPPED','CONTEXT_STOPPED','RESOURCE_STOPPED','ROUTING_STOPPED','MEMORY_STOPPED','CLAIM_REVIEW_STOPPED')]
         if not stopped:raise InvalidUpdate('Paused workflow requires inspection before recovery')
         last=stopped[-1]
-        target=(last['data']['workflow_stop']['resume_phase'] if last['kind'] in ('RESOURCE_STOPPED','ROUTING_STOPPED','MEMORY_STOPPED')
+        target=(last['data']['workflow_stop']['resume_phase'] if last['kind'] in ('RESOURCE_STOPPED','ROUTING_STOPPED','MEMORY_STOPPED','CLAIM_REVIEW_STOPPED')
                 else last['from'] if last['kind']=='CONTEXT_STOPPED' else 'MAPPING')
         if target!='CLASSIFYING':
             if not req.get('armed'):raise InvalidUpdate('Workspace workflow requires a user-armed harness')
@@ -560,17 +560,30 @@ def _handle(s,meta,workspace,root,req,providers=None):
         return response(s,fid)
     if phase in ('SYNTHESIS','CODING'):
         from resource_routing import effective
+        from static_analysis import StaticSourceChanged
+        from review_followup import FollowupSourceChanged
         if phase == 'SYNTHESIS' and provenance_changed(s, workspace, fid, d):
             return response(s, fid)
         request={'prompt':prompt,'models':models,'tier':effective(d,models,tier),'conversation_id':d['conversation_id'],**d['binding'],'child_results':d.get('child_results',[]),'orchestration_parent':d.get('result_parent',parent['id'])}
+        claim_retry = d.get('claim_review_retry') if phase == 'SYNTHESIS' else None
         try:
             with m.scope(parent['id']):
                 if phase=='CODING':
                     from native_runtime import turn
                     out=turn(s,meta,workspace,root,request,provider=provider('coder'))
+                elif claim_retry:
+                    from chat_runtime import resume_claim_review
+                    out=resume_claim_review(s,meta,workspace,root,request,claim_retry,
+                                            review_provider=provider('synthesis'))
                 else:
                     from chat_runtime import answer
                     out=answer(s,meta,workspace,root,request,provider=provider('synthesis'))
+        except (StaticSourceChanged, FollowupSourceChanged) as exc:
+            if not claim_retry: raise
+            stop = {'status': 'provenance_changed', 'error': str(exc)}
+            move(s, fid, 'PAUSED', 'GIT_SNAPSHOT_CHANGED', workflow_stop=stop)
+            save(root,meta)
+            return response(s,fid)
         except (ContextBudgetExceeded, m.OrchestrationStop, BudgetStop) as exc:
             observe_fault(s,sid,exc)
             import review_budget
@@ -588,6 +601,12 @@ def _handle(s,meta,workspace,root,req,providers=None):
         if phase == 'SYNTHESIS':
             if provenance_changed(s, workspace, fid, d):
                 return response(s, fid)
+            claim_stop = out.get('claim_review_stop')
+            if claim_stop:
+                move(s, fid, 'PAUSED', 'CLAIM_REVIEW_STOPPED', workflow_stop=claim_stop,
+                     claim_review_retry=claim_stop)
+                save(root,meta)
+                return response(s,fid,claim_review_usage=out['result']['token_usage'])
             out = with_provenance(out, d.get('git_provenance'))
         save(root,meta)
         action=(out['result'].get('accepted_output') or {}).get('action',{}).get('kind')

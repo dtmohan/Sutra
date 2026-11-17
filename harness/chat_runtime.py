@@ -367,11 +367,8 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
     import report_review
     resumed = report_review.pending_candidate(s, sid, p)
     if resumed:
-        from token_usage import summarize
         checkpoint, draft = resumed
-        out = {'invocation_id': checkpoint, 'accepted_output': draft,
-               'admission': {'admitted': True, 'errors': [], 'semantic_correctness_verified': False},
-               'token_usage': {'calls': [], 'totals': summarize([]), 'total_calls': 0, 'limit': None}}
+        out = _draft_result(checkpoint, draft)
         # Publication and reviewer checks use the original fresh candidate packet.
         # Accepted draft and reviewer pages are not replayed.
         _, _, p = report_review.candidate(s, sid, checkpoint)
@@ -401,26 +398,67 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
             s.event(run,'BRIDGE',{'reason':'bounded_output_repair' if recovery else 'bounded_chat_repair'})
             p['repair'] = recovery or {'errors':[e[:140] for e in out['admission']['errors'][:2]]}
             output_repaired = output_repaired or recovery is not None
+    reviewer = review_provider if review_provider is not None else (None if real else provider)
+    return _finish_answer(s, meta, workspace, root, request, out, p, data, reviewer,
+                          followup_usage=followup_usage)
+
+
+def _draft_result(checkpoint, draft):
+    from token_usage import summarize
+    return {'invocation_id': checkpoint, 'accepted_output': draft,
+            'admission': {'admitted': True, 'errors': [], 'semantic_correctness_verified': False},
+            'token_usage': {'calls': [], 'totals': summarize([]), 'total_calls': 0, 'limit': None}}
+
+
+def resume_claim_review(s, meta, workspace, root, request, retry, review_provider=None):
+    """Continue a host-saved claim review using its existing draft and evidence."""
+    import orchestration as machine
+    import report_review
+    sid = meta['active']
+    checkpoint = retry['candidate_id']
+    draft, env, packet = report_review.candidate(s, sid, checkpoint)
+    owner = machine.ACTIVE.get()
+    draft_owner = env['orchestration']['node_id']
+    if (not owner or machine.node(s, owner).get('flow_id') != machine.node(s, draft_owner).get('flow_id')
+            or packet['workspace'] != str(workspace) or packet['request'] != request['prompt']
+            or (packet.get('conversation_handoff') or {}).get('invocation_id') != request['conversation_id']):
+        raise InvalidUpdate('Saved claim review belongs to another workflow or request')
+    data = runtime.load_partition(s, sid, workspace, packet['snapshot_receipts'], packet['snapshot_owner'])
+    return _finish_answer(s, meta, workspace, root, request, _draft_result(checkpoint, draft),
+                          packet, data, review_provider, retry=retry)
+
+
+def _finish_answer(s, meta, workspace, root, request, out, p, data, reviewer, *,
+                   followup_usage=None, retry=None):
+    import orchestration as machine
     from review_budget import BudgetStop
+    from monitoring import ResourceWait
+    sid = meta['active']
+    record = p['route']['record']
+    choice = record['choice']
+    graph = data['graph']
     publication=None
+    claim_review_stop = None
     if out['admission']['admitted']:
         checkpoint=out['invocation_id']; reviewer_id=None
         if 'report' in out['accepted_output']:
             import report_review
             try:
-                reviewed=report_review.run(s,sid,root,checkpoint,
-                    provider=review_provider if review_provider is not None else (None if real else provider),
-                    requested=request.get('reviewer_model','auto'),strict=request.get('require_distinct_reviewer',False))
+                reviewed=report_review.run(s,sid,root,checkpoint,provider=reviewer,
+                    requested=request.get('reviewer_model','auto'),strict=request.get('require_distinct_reviewer',False),
+                    retry=retry)
                 from token_usage import summarize
                 calls=out['token_usage']['calls']+reviewed['token_usage']['calls']
                 out['token_usage']={'calls':calls,'totals':summarize(calls),'total_calls':len(calls),'limit':None}
                 if not reviewed['admission']['admitted']:
+                    claim_review_stop = reviewed.get('claim_review_stop')
                     raise InvalidUpdate('Architecture claim review was withheld: '+'; '.join(reviewed['admission']['errors']))
                 reviewer_id=reviewed['invocation_id']
                 out['accepted_output'],publication=report_review.published(s,sid,checkpoint,reviewer_id)
                 out['publication']=publication
             except (InvalidUpdate,PageFault,ContextBudgetExceeded) as exc:
-                if machine.ACTIVE.get() and isinstance(exc, (machine.OrchestrationStop, BudgetStop)):
+                if machine.ACTIVE.get() and (isinstance(exc, (machine.OrchestrationStop, BudgetStop))
+                        or retry and isinstance(exc, (ResourceWait, ContextBudgetExceeded, PageFault, analysis.StaticSourceChanged))):
                     raise
                 out['admission']={'admitted':False,'errors':['Architecture report not published: '+str(exc)],'semantic_correctness_verified':False}
                 out['accepted_output']=None
@@ -432,6 +470,7 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
         out['token_usage'] = {'calls': calls, 'totals': summarize(calls), 'total_calls': len(calls), 'limit': None}
     out.pop('record',None);out.pop('model_proposal',None)
     return {'result':out,'route':choice,'coverage':dict(record['coverage'],evidence=p['evidence_coverage']),'source_files':list(p['excerpts']),
+            'claim_review_stop':claim_review_stop,
             'report_review':publication,'report_markdown':report.markdown(out['accepted_output']) if out['admission']['admitted'] else None,
             'review_diagram':report.diagram(graph,list(p['excerpts']),data['sources']) if out['admission']['admitted'] else None,
             'diagram':analysis.render(graph) if out['admission']['admitted'] else None,'auto':auto.status(s,meta,workspace)}

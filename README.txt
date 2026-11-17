@@ -1,3 +1,7 @@
+Sutra 0.38.2 — resume an interrupted claim review
+
+If the architecture claim reviewer reaches its output limit with thinking enabled and a retry available, Sutra pauses with the draft, completed reviews, source evidence and consumed budget saved. Choose Resume in Sutra Monitor, then send continue in chat. Sutra requests thinking off for the unfinished page and checks that the saved source evidence is current.
+
 Sutra 0.38.1 — thinking for one chat request
 
 Click the lightbulb in the VS Code Chat toolbar to request thinking for your next Sutra turn. Click the lit bulb to cancel. Sutra shows thinking inline when the local model streams it. Later requests use your saved reasoning setting, which defaults to Adaptive.

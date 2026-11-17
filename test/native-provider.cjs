@@ -369,6 +369,44 @@ function setup(saved={}){
  shouldPause=false;await paused.send('high',[{role:1,content:[new Text('continue')]}]);
  const afterPause=paused.calls.find(c=>c.op==='native_work');assert.equal(afterPause.prompt,'Fix retry');assert.equal(afterPause.tier,'high');assert.equal(afterPause.contract_hash,'contract-1');
  checks.push('mapping pauses return actionable details without a client error; original context and permission binding resume on another model');
+ {
+  const review=setup();review.kind('report');await review.arm();let resumed,publications=0;
+  const original=review.deps.request;
+  review.deps.publishReview=()=>{publications++;};
+  review.deps.request=async(m,t)=>{
+   if(m.op==='orchestrate'&&m.event==='resume'){
+    resumed=m;
+    return {...review.controller.status().pending,state:'SYNTHESIS',stop:undefined};
+   }
+   const out=await original(m,t);
+   if(!resumed&&m.op==='orchestrate'&&out.state==='CODING'){
+    return {...out,state:'PAUSED',stop:{status:'claim_review_output_limit',resume_phase:'SYNTHESIS',
+     review_page:2,total_pages:3,error:'The claim reviewer reached its output allowance.'},
+     claim_review_usage:{calls:[
+      {invocation_id:'saved-draft',stage:'chat_reviewer',model:'model-c',input_tokens:123,output_tokens:456,status:'accepted'},
+      {invocation_id:'failed-page',stage:'report_reviewer',model:'model-a',input_tokens:234,output_tokens:8192,status:'quarantined'}
+     ]}};
+   }
+   return out;
+  };
+  const paused=await review.send();
+  const message=paused.map(p=>p.value).join('');
+  for(const label of ['reached its output allowance','draft and completed claim-review pages','**Resume**','**continue**','request thinking off','page 2 of 3','consumed budget','357 in · 8,648 out · 2 calls'])assert(message.includes(label));
+  assert.equal(review.controller.status().routing.stage,'paused');
+  const pending=review.controller.status().pending;
+  assert.equal(pending.stop.status,'claim_review_output_limit');
+  assert.equal(pending.claim_review_usage,undefined);
+  assert.equal(publications,0);
+  await review.commands['karma.resumeWorkflow']();
+  assert(!resumed);assert.equal(publications,0);
+  await review.send('high',[{role:1,content:[new Text('continue')]}]);
+  assert.equal(resumed.flow_id,pending.flow_id);
+  assert.equal(resumed.cursor,pending.cursor);
+  assert.deepEqual(resumed.binding,pending.binding);
+  assert.equal(review.calls.filter(c=>c.op==='conversation').length,1);
+  assert.equal(publications,1);
+  checks.push('claim review output limits preserve the saved draft and resume the same workflow without reclassification');
+ }
  for(const approve of [false,true]){
   const provenance=setup();provenance.kind('report');await provenance.arm();
   const original=provenance.deps.request;let selected,confirmation;

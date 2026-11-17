@@ -227,7 +227,7 @@ function install(vscode,context,deps){
     const stop=automatic?{...flow.stop,automatic_allocation:{...automatic,message:allocationMessage(automatic)}}:flow.stop;
     // Finishing a conversational turn must not erase another saved review.
     if(!terminal||saved?.flow_id===flow.flow_id)
-      await context.workspaceState.update(pendingKey,terminal?undefined:{...flow,stop,resumeThinking,workspace:deps.workspace(),conversation:undefined,routing_step:undefined,child:undefined,data:undefined,mapping:undefined,allocation_proposal:undefined,allocation_amendment:undefined});
+      await context.workspaceState.update(pendingKey,terminal?undefined:{...flow,stop,resumeThinking,workspace:deps.workspace(),conversation:undefined,routing_step:undefined,child:undefined,data:undefined,mapping:undefined,claim_review_usage:undefined,allocation_proposal:undefined,allocation_amendment:undefined});
     publish();
   }
   async function recoverSaved(discard=false){
@@ -309,6 +309,10 @@ function install(vscode,context,deps){
     let guidance='Resolve the reported cause, then use **Resume** in Sutra Monitor and send **continue** here.';
     if(stop.status==='resource_wait'){
       guidance='Check both **System pressure** and the **Last model allocation** in Sutra Monitor. Healthy system pressure alone does not mean the selected model fits. After resources recover, or after selecting a smaller configured model, use **Resume** and send **continue** here. Resume checks a fresh measurement and model allocation before dispatch. Sutra will not automatically retry this stop.';
+    }else if(stop.status==='claim_review_output_limit'){
+      const page=Number.isInteger(stop.review_page)&&Number.isInteger(stop.total_pages)
+        ? `claim-review page ${stop.review_page} of ${stop.total_pages}` : 'the unfinished claim-review page';
+      guidance='The draft and completed claim-review pages are saved. Use **Resume** in Sutra Monitor, then send **continue** here. Sutra will request thinking off when it retries '+page+'.';
     }else if(automatic?.status==='model_context'){
       guidance='Select a model with a larger context window, then send **continue** here.';
     }else if(allocationStop){
@@ -613,6 +617,7 @@ function install(vscode,context,deps){
           flow=await advance(flow,event,extra);
           const bound=flow.binding||flow.bound_task;
           if(bound)audit.session=bound.session;
+          if(flow.claim_review_usage)recordUsage({token_usage:flow.claim_review_usage});
           audit.orchestration={flowId:flow.flow_id,state:flow.state,children:flow.children};publish();
           showHostProgress(flow,progress);
           if(flow.child)recordUsage(flow.child.result);

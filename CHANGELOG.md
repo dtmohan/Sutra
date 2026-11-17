@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.38.2
+
+- Pause an architecture review when its claim reviewer reaches the output limit with thinking enabled and a retry available.
+- Resume the saved draft and retry the unfinished claim page with thinking off, preserving accepted pages, evidence, permissions and spending.
+
 ## 0.38.1
 
 - Add a cancellable lightbulb in native VS Code Chat to request thinking for the next Sutra turn. Later turns use the saved reasoning setting.
