@@ -1,3 +1,9 @@
+Sutra 0.41.1 — Review named workspace documents
+
+Name a DOCX in Sutra Auto. Sutra locates it in the active workspace folder
+and requests a one-time read. Choose the intended path when names match
+more than one file. Continue a saved review in its original chat.
+
 Sutra 0.41.0 — Resume when evidence arrives
 
 When a review needs a document or source target, Sutra pauses the request.

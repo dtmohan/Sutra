@@ -42,12 +42,12 @@ def settings(s,session):
 
 def scoped(name,roots):return any(r=='.' or name==r or name.startswith(r+'/') for r in roots)
 
-def read_bytes(workspace,name,limit=MAX_FILE):
+def read_bytes(workspace,name,limit=MAX_FILE,*,binary=False):
  if type(limit) is not int or limit<=0:raise InvalidUpdate('Invalid source byte allocation')
  if os.name=='nt':
   from platform_support import windows_read
   normalized(name)
-  try:return windows_read(workspace,name,limit)
+  try:return windows_read(workspace,name,limit,binary=binary)
   except (OSError,UnicodeError) as exc:raise InvalidUpdate('Repository read rejected: '+str(exc)) from None
  normalized(name);parts=Path(name).parts;fd=os.open(str(Path(workspace).resolve()),os.O_RDONLY|os.O_DIRECTORY)
  try:
@@ -61,8 +61,10 @@ def read_bytes(workspace,name,limit=MAX_FILE):
    if before.st_size>limit:raise SourceReadLimitExceeded(f'Source {name} needs {before.st_size} bytes; remaining page allocation is {limit} bytes')
    raw=stream.read(limit+1);after=os.fstat(stream.fileno())
    if len(raw)>limit or (before.st_mtime_ns,before.st_size)!=(after.st_mtime_ns,after.st_size):raise InvalidUpdate('File changed while reading')
-  if b'\0' in raw:raise InvalidUpdate('Binary file rejected')
-  raw.decode('utf-8');return raw
+  if not binary:
+   if b'\0' in raw:raise InvalidUpdate('Binary file rejected')
+   raw.decode('utf-8')
+  return raw
  except (OSError,UnicodeError) as exc:raise InvalidUpdate('Repository read rejected: '+str(exc)) from None
  finally:os.close(fd)
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.41.1
+
+- Locate named DOCX files in the active workspace and request a one-time scoped read before extracting their text locally.
+- Resume existing document BRIDGE requests in the same chat, keeping the original prompt, context and spending.
+- Account for approved document reads in the task ledger and bind the extracted evidence to its source receipt.
+
 ## 0.41.0
 
 - Use the Karma evidence-admission profile to govern missing document input and repository targets.

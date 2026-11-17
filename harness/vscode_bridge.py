@@ -302,11 +302,13 @@ def handle(root,workspace,request):
                     prune(root);require_space(root)
                 meta=json.loads(metadata.read_text()) if metadata.exists() else {'workspace':str(Path(workspace).resolve())}
                 if not metadata.exists():metadata.write_text(canonical(meta))
-                # Classification is tool-free; later events reconcile committed work.
-                if request.get('event') not in ('start','task_list','pending','inspect'):reconcile(s,workspace)
+                # Document evidence has its own scoped read and ledger reservation.
+                reconcile_workspace=request.get('event') not in (
+                    'start','task_list','pending','inspect','supply_evidence','locate_document','approve_document')
+                if reconcile_workspace:reconcile(s,workspace)
                 try:return orchestrate(s,meta,Path(workspace).resolve(),root,request)
                 except BaseException:
-                    if request.get('event') not in ('start','task_list','pending','inspect'):reconcile(s,workspace)
+                    if reconcile_workspace:reconcile(s,workspace)
                     raise
             if request.get('op')=='conversation_read':
                 from conversation import read

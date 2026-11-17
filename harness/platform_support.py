@@ -22,7 +22,7 @@ def lock_file(path):
    if os.name=='nt':
     stream.seek(0);msvcrt.locking(stream.fileno(),msvcrt.LK_UNLCK,1)
 
-def windows_read(workspace,name,limit):
+def windows_read(workspace,name,limit,*,binary=False):
  # Open each component without following reparse points; deny delete sharing so
  # directories cannot be renamed or redirected while the file handle is used.
  import ctypes,msvcrt
@@ -53,7 +53,9 @@ def windows_read(workspace,name,limit):
   with os.fdopen(fd,'rb') as stream:
    before=os.fstat(stream.fileno());raw=stream.read(limit+1);after=os.fstat(stream.fileno())
    if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or len(raw)>limit or (before.st_mtime_ns,before.st_size)!=(after.st_mtime_ns,after.st_size):raise InvalidUpdate('Source changed while reading')
-  if b'\0' in raw:raise InvalidUpdate('Binary file rejected')
-  raw.decode('utf-8');return raw
+  if not binary:
+   if b'\0' in raw:raise InvalidUpdate('Binary file rejected')
+   raw.decode('utf-8')
+  return raw
  finally:
   for h in reversed(handles):close(h)

@@ -19,6 +19,12 @@ def usage(s,session):
  used.update(carry_usage(s,session,digest))
  from capabilities import usage as capability_usage
  for key,value in capability_usage(s,session,digest).items():used[key]+=value
+ if c.get('conversation_only'):
+  from document_review import READ_SECONDS, RESERVED
+  count,total=s.db.execute(
+   """SELECT COUNT(*), COALESCE(SUM(json_extract(payload_json,'$.bytes')),0)
+      FROM page_audit WHERE event=? AND json_extract(payload_json,'$.session')=?""",(RESERVED,session)).fetchone()
+  used['operations']+=count;used['source_bytes']+=total;used['seconds']+=count*READ_SECONDS
  if s.db.execute("SELECT 1 FROM sqlite_master WHERE name='repository_ops'").fetchone():
   for raw,elapsed in s.db.execute("SELECT o.record_json,json_extract(r.record_json,'$.elapsed_seconds') FROM repository_ops o LEFT JOIN repository_receipts r ON r.operation_id=o.id WHERE o.session=?",(session,)):
    op=json.loads(raw)

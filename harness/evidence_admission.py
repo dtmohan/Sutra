@@ -36,15 +36,19 @@ def workspace_roots(proposal):
     return 'missing', []
 
 
-def record_document(store, session, flow, text):
+def record_document(store, session, flow, text, *, read=None):
     key = 'document-bridge:' + flow['id']
-    origin = {'kind': 'evidence_bridge', 'flow_id': flow['id'], 'request_hash': sha(flow['prompt'])}
+    origin = {'kind': 'workspace_document' if read else 'evidence_bridge',
+              'flow_id': flow['id'], 'request_hash': sha(flow['prompt'])}
+    authority = 'tool' if read else 'user'
+    if read:
+        origin.update(read)
     if store.db.execute('SELECT 1 FROM document_heads WHERE session=? AND key=?', (session, key)).fetchone():
         # A bridge may have committed the document before being interrupted.
         record = store.document(session, key)
         if (record['version'] != 1 or record['text'] != text or record['digest'] != sha(text)
-                or record['authority'] != 'user' or json.loads(record['source_json']) != origin):
+                or record['authority'] != authority or json.loads(record['source_json']) != origin):
             raise InvalidUpdate('A different document was already committed to this request')
     else:
-        record = store.put_document(session, key, text, authority='user', source=origin)
+        record = store.put_document(session, key, text, authority=authority, source=origin)
     return {field: record[field] for field in ('key', 'version', 'digest')}

@@ -151,11 +151,13 @@ function activate(context) {
     const {think_for_turn:thinkForTurn,conversation_step:conversationStep,...payload}=message||{};
     if(thinkForTurn!==undefined&&(thinkForTurn!==true||!internal||message.op!=='orchestrate'||!['start','step'].includes(message.event)))throw new Error('Invalid Sutra reasoning override.');
     if(conversationStep!==undefined&&(conversationStep!==true||!internal||message.op!=='orchestrate'||message.event!=='step'))throw new Error('Invalid Sutra conversation step.');
+    const documentEvidence=message?.op==='orchestrate'&&['locate_document','approve_document'].includes(message.event);
+    if(documentEvidence&&!internal)throw new Error('Document access must be requested in Sutra chat.');
     const diagnostic=message?.op==='dashboard';
     if(diagnostic)return requestDashboard();
     if ((busy || ((sequence || nativeController?.status().working) && !internal)) && !diagnostic) throw new Error('A Sutra request is running. Switch models after it finishes.');
     if (!['capability_list','capability_preview','capability_execute','orchestrate','conversation_read','conversation','native_permissions','native_work','native_preview','native_execute','chat_answer','calibration_register','calibration_list','calibration_bind','calibration_revoke','calibration_evaluate','models','state','new','save','switch','review','work','preview','execute','dashboard','quarantine','review_new','architecture','repository_tool','api_build','api_verify','static_build','static_explain','auto_new','auto_step','auto_report'].includes(message?.op)) throw new Error('Unknown Sutra request.');
-    if((['native_work','chat_answer','static_build','static_explain','auto_step','auto_report'].includes(message.op)||(message.op==='orchestrate'&&!conversationStep&&!['start','inspect','pending','cancel','task_list','task_focus','task_close','supply_evidence'].includes(message.event)))&&hasDirtyFiles())throw new Error('Save or discard unsaved workspace buffers before mapping current source.');
+    if((['native_work','chat_answer','static_build','static_explain','auto_step','auto_report'].includes(message.op)||(message.op==='orchestrate'&&!conversationStep&&!documentEvidence&&!['start','inspect','pending','cancel','task_list','task_focus','task_close','supply_evidence'].includes(message.event)))&&hasDirtyFiles())throw new Error('Save or discard unsaved workspace buffers before mapping current source.');
     if(['execute','native_execute'].includes(message.op) && hasDirtyFiles())throw new Error('Save or discard unsaved workspace buffers before applying an edit or running tests.');
     const cwd = workspace(), stateDir = storage();
     fs.mkdirSync(stateDir,{recursive:true});startTelemetry();

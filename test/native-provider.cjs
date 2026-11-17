@@ -601,6 +601,61 @@ function setup(saved={}){
   checks.push('evidence bridge guides continue, preserves the originating flow across reload, and resumes pasted text on the selected model without workspace permission');
  }
  {
+  const fixture=setup(),traffic=[],file='people/Candidate Resume (1).docx';
+  const goal='Can you review this resume please?\nCandidate Resume (1).docx\nSuggest changes to reach more employers.';
+  const user=value=>[{role:1,content:[new Text(value)]}];
+  const chat={modelOptions:{_conversationId:'local-docx-review'}};
+  let approve=false,dialogs=0,flow;
+  fixture.v.window.showWarningMessage=async(message,options,...buttons)=>{
+   dialogs++;
+   assert.match(message,/Read this document/);
+   assert.match(options.detail,/people\/Candidate Resume \(1\)\.docx/);
+   assert.deepEqual(buttons,['Read document']);
+   return approve?'Read document':undefined;
+  };
+  fixture.deps.request=async request=>{
+   traffic.push(request.event);
+   if(request.event==='pending')return {state:'DONE',flow_id:null};
+   if(request.event==='start'){
+    assert.equal(request.prompt,goal);
+    flow={state:'PAUSED',cursor:'1',flow_id:'a'.repeat(32),prompt:goal,
+     stop:{status:'evidence_bridge',resume_phase:'CLASSIFYING',
+      evidence_bridge:{target_kind:'document',required:'document_file'}}};
+    return flow;
+   }
+   assert.equal(request.flow_id,flow.flow_id);
+   if(request.event==='inspect')return flow;
+   assert.equal(request.cursor,flow.cursor);
+   if(request.event==='locate_document'){
+    flow={...flow,cursor:String(Number(flow.cursor)+1),stop:{...flow.stop,document_lookup:{status:'found',paths:[file]}}};
+    return flow;
+   }
+   assert(approve);
+   if(request.event==='approve_document'){
+    assert.equal(request.document_path,file);
+    assert.equal(request.confirmed,true);
+    assert.equal(request.armed,false);
+    flow={...flow,state:'CLASSIFYING',cursor:'5',stop:undefined};
+    return flow;
+   }
+   assert.equal(request.event,'step');
+   assert.equal(request.tier,'high');
+   return {...flow,state:'DONE',cursor:'6',conversation:{route:{model:'model-c'},result:{
+    invocation_id:'b'.repeat(32),admission:{admitted:true},accepted_output:{intent:'conversation',answer:'Lead with the quantified validation work.'}
+   }}};
+  };
+  const pause=await fixture.send('low',user(goal),chat);
+  assert.deepEqual(traffic,['pending','start','locate_document']);
+  assert(pause.some(part=>part.value?.includes('try the file lookup again')));
+  approve=true;
+  const answer=await fixture.send('high',user('continue'),chat);
+  assert.deepEqual(traffic.slice(3),['inspect','locate_document','approve_document','step']);
+  assert.equal(dialogs,2);
+  assert(answer.some(part=>part.value?.includes('quantified validation')));
+  assert.equal(fixture.controller.status().pending,null);
+  checks.push('a named workspace DOCX requests only file-specific read consent, can resume after declining, and uses the newly selected tier');
+ }
+ {
   const workspace=setup(),traffic=[],invocation='b'.repeat(32),flowId='c'.repeat(32);
   const chat={modelOptions:{_conversationId:'workspace-evidence'}};
   const user=value=>[{role:1,content:[new Text(value)]}];

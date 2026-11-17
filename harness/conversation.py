@@ -95,9 +95,16 @@ def document_evidence(s, sid, ref, prompt):
         doc = s.document(sid, key)
     except PageFault as exc:
         raise InvalidUpdate('Document evidence is unavailable in this session') from exc
-    expected_source = canonical({'flow_id': match[1], 'request_hash': sha(prompt), 'kind': 'evidence_bridge'})
+    origin = json.loads(doc['source_json'])
+    expected_source = {'flow_id': match[1], 'request_hash': sha(prompt), 'kind': 'evidence_bridge'}
+    if doc['authority'] == 'tool' and origin.get('kind') == 'workspace_document':
+        from document_review import verifies
+        valid_source = (origin.get('flow_id') == match[1] and origin.get('request_hash') == sha(prompt)
+                        and verifies(s, sid, origin))
+    else:
+        valid_source = doc['authority'] == 'user' and origin == expected_source
     if (doc['version'] != ref['version'] or doc['digest'] != ref['digest'] or sha(doc['text']) != doc['digest']
-            or not doc['text'].strip() or doc['authority'] != 'user' or doc['source_json'] != expected_source):
+            or not doc['text'].strip() or not valid_source):
         raise InvalidUpdate('Document evidence changed or belongs to a different request')
     fields = ('session', 'key', 'version', 'text', 'digest', 'authority', 'source_json')
     commit = canonical({'record': [doc[field] for field in fields]})

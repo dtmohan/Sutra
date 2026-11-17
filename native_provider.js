@@ -14,6 +14,8 @@ const EXTENSION_ID=MANIFEST.publisher+'.'+MANIFEST.name;
 const RESUME_PROMPT=/^Resume saved Sutra request \[([a-f0-9]{32})\]$/;
 const classifying=flow=>flow?.state==='CLASSIFYING'||flow?.stop?.resume_phase==='CLASSIFYING';
 const evidencePause=flow=>flow?.state==='PAUSED'&&flow.stop?.status==='evidence_bridge';
+const documentFilePause=flow=>evidencePause(flow)&&flow.stop.evidence_bridge?.target_kind==='document'&&
+  (flow.stop.evidence_bridge.required==='document_file'||/\.docx\b/i.test(flow.prompt||''));
 const DOCUMENT_EVIDENCE=/^\s*(?:document|r[eé]sum[eé]|cv|cover[ -]+letter)[ \t]+text:[ \t]*\r?\n\s*\S/i;
 const WORKSPACE_EVIDENCE=/^(?:use this workspace[.!?]*|workspace files:[ \t]*\r?\n\s*\S[\s\S]*)$/i;
 function latestRequest(vscode,messages){
@@ -357,7 +359,7 @@ function install(vscode,context,deps){
   let activityProgress;
   async function flowEvent(flow,event,tier,token,extra,thinkForTurn,chatKey,stackChat){
     const access=refreshAccess();
-    const models=['inspect','pending','cancel'].includes(event)?undefined:await deps.configureModels(false,token);
+    const models=['inspect','pending','cancel','locate_document','approve_document'].includes(event)?undefined:await deps.configureModels(false,token);
     const workspaceStep=['step','resume','grant','capability_grant','restart_review','accept_provenance'].includes(event) && !classifying(flow);
     if(workspaceStep){
       assertCurrent(access,token);
@@ -384,7 +386,9 @@ function install(vscode,context,deps){
       const link=vscode.window.registerUriHandler&&pending?.flow_id===flow.flow_id&&pending.resumeLink
         ? '\n\n[Saved evidence request]('+resumeUri(pending.resumeLink)+')' : '';
       const reply=stop.evidence_bridge?.target_kind==='document'?'Begin a reply in this chat with `Document text:`.':'Reply in this chat to continue.';
-      progress.report(new vscode.LanguageModelTextPart('**Evidence needed**\n\n'+reason+'\n\n'+reply+' Your remaining budget is saved.'+link));
+      const guidance=stop.evidence_bridge?.required==='document_file'
+        ?'Send **continue** to try the file lookup again, or paste an excerpt under `Document text:`.':reply;
+      progress.report(new vscode.LanguageModelTextPart('**Evidence needed**\n\n'+reason+'\n\n'+guidance+' Your remaining budget is saved.'+link));
       return;
     }
     const details=[stop.error,...failures.map(f=>f.path+': '+f.error)].filter(Boolean);
@@ -582,6 +586,29 @@ function install(vscode,context,deps){
         progress.report(new vscode.LanguageModelTextPart(flow.request_notice));
         return true;
       }
+      async function readDocumentEvidence(flow){
+        const workspace=deps.workspace();
+        const located=await advance(flow,'locate_document');
+        const lookup=located.stop?.document_lookup;
+        if(!lookup||!['found','ambiguous'].includes(lookup.status))return located;
+        assertCurrent(a,activeCancel.token);
+        let file=lookup.paths[0];
+        if(lookup.status==='ambiguous'){
+          const choice=await vscode.window.showQuickPick(lookup.paths,{title:'Choose the DOCX to review'});
+          assertCurrent(a,activeCancel.token);
+          if(!choice)return located;
+          file=choice;
+        }
+        const decision=await vscode.window.showWarningMessage('Read this document for the saved review?',{
+          modal:true,detail:file+'\n\nSutra will read this file once and send its extracted text to the selected local model.'
+        },'Read document');
+        assertCurrent(a,activeCancel.token);
+        if(decision!=='Read document'||deps.workspace()!==workspace)return located;
+        const next=await advance(located,'approve_document',{confirmed:true,document_path:file});
+        if(next.state==='CLASSIFYING')
+          progress.report(new vscode.LanguageModelTextPart('Document read approved. Continuing the saved review.\n\n'));
+        return next;
+      }
       async function offerAction(flow,invocationId,kind){
         if(!canAct){
           progress.report(new vscode.LanguageModelTextPart('Enable the Sutra action tool in native Agent chat to review the saved proposal.'));
@@ -665,15 +692,18 @@ function install(vscode,context,deps){
             }
             if(showRequestNotice(old))return;
             if(evidencePause(old)){
-              if(!supply||!evidenceReply(old)){
+              if(supply&&evidenceReply(old)){
+                flow=await advance(old,'supply_evidence',{evidence_text:prompt});
+                if(!evidencePause(flow))progress.report(new vscode.LanguageModelTextPart('Continuing the saved request with the supplied evidence.\n\n'));
+              }else if(documentFilePause(old)){
+                flow=old;
+              }else{
                 showPause(old,audit,progress);
                 return;
               }
-              flow=await advance(old,'supply_evidence',{evidence_text:prompt});
               prompt=old.prompt||prompt;
               conversationId=old.conversation_id;
               audit.memoryUsed=true;
-              if(!evidencePause(flow))progress.report(new vscode.LanguageModelTextPart('Continuing the saved request with the supplied evidence.\n\n'));
             }else if(supply){
               resumeUnavailable('The saved evidence request has changed. Review its current state in Sutra Monitor.');
               return;
@@ -705,6 +735,7 @@ function install(vscode,context,deps){
           }
           if(!flow)flow=await advance(null,'start',{prompt,parent:request.parent,
             prior_prompt:!chatKey&&!request.parent?request.priorPrompt:undefined});
+          if(documentFilePause(flow))flow=await readDocumentEvidence(flow);
           if(resuming&&flow.state==='PAUSED'&&flow.stop?.resume_phase==='CLASSIFYING'){
             flow=await advance(flow,'resume');
           }

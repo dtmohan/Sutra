@@ -6,7 +6,8 @@ import orchestration as m
 from memory_layer import PageFault, fault_details, observe_fault
 from review_budget import BudgetStop
 from review_targets import (
-    DOCUMENT_TEXT_REQUIRED, document_input_notice, document_text, has_document_text, refers_to_previous_review_target,
+    DOCUMENT_TEXT_REQUIRED, document_file_target, document_input_notice, document_text, has_document_text,
+    refers_to_previous_review_target,
 )
 from evidence_admission import measure as evidence_measure, record_document, workspace_roots
 
@@ -431,6 +432,10 @@ def evidence_gap(s,f,session,kind,notice,*,recoverable=True,target_status=None,c
         return
     target='Requested document' if kind=='document' else 'Workspace scope'
     required='document_text' if kind=='document' else 'workspace_selection'
+    file_target=document_file_target(f['prompt']) if kind=='document' else None
+    if file_target:
+        target,required=file_target,'document_file'
+        notice='Sutra can look for the named DOCX in this workspace and request permission to read it.'
     stop={'status':'evidence_bridge','resume_phase':'CLASSIFYING','error':notice,'budget':budget,
           'automatic_retry':False,'evidence_bridge':{'target_kind':kind,'target':target,
                                                        'required':required,'decision':frame['decision']}}
@@ -467,6 +472,53 @@ def supply_evidence(s,f,d,req):
             raise InvalidUpdate('Select paths within the workspace or reply Use this workspace')
         move(s,f['id'],'NEED_ARM','EVIDENCE_SUPPLIED',kernel=frame,workflow_stop=None,
              permission=work,source_roots=roots)
+    return response(s,f['id'])
+
+
+def workspace_document_evidence(s,workspace,f,d,req):
+    from document_source import locate_document
+    from document_review import approve
+
+    stop=d['workflow_stop']
+    bridge=stop['evidence_bridge']
+    session=d['conversation_session']
+    filename=document_file_target(f['prompt'])
+    if not filename:
+        return response(s,f['id'])
+    if req['event']=='locate_document':
+        frame,_=evidence_measure(s,session,'resolved','missing',True)
+        if frame['decision']!='BRIDGE':
+            move(s,f['id'],'DONE','EVIDENCE_FIN',kernel=frame,request_notice='The task budget is exhausted.')
+            return response(s,f['id'])
+        lookup=locate_document(workspace,filename)
+        messages={'found':'Confirm a one-time read of the named DOCX to continue.',
+                  'ambiguous':'Choose which matching DOCX to read.',
+                  'missing':'The named DOCX was not found in this workspace.',
+                  'blocked':'The named DOCX cannot be read within this workspace scope.',
+                  'scan_limit':'Sutra reached the lookup limit. Use the workspace-relative path in a new request.'}
+        updated=dict(stop,error=messages.get(lookup['status'],'Sutra could not locate the named DOCX.'),
+                     evidence_bridge=dict(bridge,target=filename,required='document_file'),document_lookup=lookup)
+        move(s,f['id'],'PAUSED','DOCUMENT_LOCATED',kernel=frame,workflow_stop=updated)
+        return response(s,f['id'])
+    lookup=stop.get('document_lookup') or {}
+    path=req.get('document_path')
+    if (req.get('confirmed') is not True or not isinstance(path,str)
+            or lookup.get('status') not in ('found','ambiguous') or path not in lookup['sizes']):
+        raise InvalidUpdate('Document read requires confirmation of a located file.')
+    try:
+        ref=approve(s,session,workspace,f,path,lookup['sizes'][path])
+    except InvalidUpdate as exc:
+        _,budget=evidence_measure(s,session,'resolved','missing',True)
+        updated=dict(stop,error=str(exc),budget=budget,document_lookup={'status':'read_failed'})
+        move(s,f['id'],'PAUSED','DOCUMENT_READ_STOPPED',kernel=getattr(exc,'frame',None),workflow_stop=updated)
+        return response(s,f['id'])
+    frame,_=evidence_measure(s,session,'resolved','available',False)
+    if frame['decision']!='ALLOW':
+        move(s,f['id'],'DONE','EVIDENCE_FIN',kernel=frame,document_evidence=ref,
+             request_notice='The task budget is exhausted.')
+        return response(s,f['id'])
+    move(s,f['id'],'CLASSIFYING','EVIDENCE_SUPPLIED',kernel=frame,workflow_stop=None,
+         document_evidence=ref,routing_continuation=None)
     return response(s,f['id'])
 
 
@@ -572,6 +624,12 @@ def _handle(s,meta,workspace,root,req,providers=None):
         if phase!='PAUSED' or (d.get('workflow_stop') or {}).get('status')!='evidence_bridge':
             raise InvalidUpdate('This workflow is not waiting for evidence')
         return supply_evidence(s,f,d,req)
+    if event in ('locate_document','approve_document'):
+        stop=d.get('workflow_stop') or {}
+        if (phase!='PAUSED' or stop.get('status')!='evidence_bridge'
+                or stop['evidence_bridge']['target_kind']!='document'):
+            raise InvalidUpdate('This workflow is not waiting for document evidence.')
+        return workspace_document_evidence(s,workspace,f,d,req)
     if event!='cancel':
         notice=saved_document_notice(s,workspace,f,phase,d)
         if notice:return response(s,fid,request_notice=notice)

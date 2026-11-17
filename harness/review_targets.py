@@ -17,7 +17,7 @@ _QUOTED_NAME = r'''["`](?!(?:https?|ftp)://)[\w~./\\][^\r\n<>"`*?]*?'''
 
 _DIRECT_TARGET = re.compile(
     rf"\b{_REVIEW}\s+{_QUALIFIERS}(?:(?:file|document|from)\s+)*"
-    rf"(?:{_QUOTED_NAME}|{_PATH}|[\w][\w.-]*){_SUFFIX}",
+    rf"(?P<target>(?:{_QUOTED_NAME}|{_PATH}|[\w][\w.-]*){_SUFFIX})",
     re.IGNORECASE,
 )
 _DOCUMENT_REVIEW = re.compile(
@@ -27,7 +27,8 @@ _DOCUMENT_REVIEW = re.compile(
     r"implementation|integration|library|parser|pipeline|reader|renderer|support|writer)\b)",
     re.IGNORECASE,
 )
-_LOCAL_TARGET = re.compile(rf"(?<![\w:./\\]){_PATH}{_SUFFIX}", re.IGNORECASE)
+_LOCAL_TARGET = re.compile(rf"(?<![\w:./\\])(?P<target>{_PATH}{_SUFFIX})", re.IGNORECASE)
+_DOCUMENT_LINE = re.compile(r"""[^\r\n<>"`*?]+?\.docx""", re.IGNORECASE)
 _NEGATED = re.compile(r"\b(?:do\s+not|don['’]t|never|without|instead\s+of)\s+$", re.IGNORECASE)
 
 DOCUMENT_TEXT_REQUIRED = "Paste the document or the sections you want reviewed under a “Document text:” heading."
@@ -67,6 +68,11 @@ def refers_to_previous_review_target(prompt: str) -> bool:
 
 
 def _named_document_kind(prompt: str) -> Optional[str]:
+    target = _named_document(prompt)
+    return target.group("kind").upper() if target else None
+
+
+def _named_document(prompt: str):
     target = next(
         (match for match in _DIRECT_TARGET.finditer(prompt) if not _NEGATED.search(prompt[:match.start()])),
         None,
@@ -75,7 +81,21 @@ def _named_document_kind(prompt: str) -> Optional[str]:
         not _NEGATED.search(prompt[:match.start()]) for match in _DOCUMENT_REVIEW.finditer(prompt)
     ):
         target = _LOCAL_TARGET.search(prompt)
-    return target.group("kind").upper() if target else None
+    return target
+
+
+def document_file_target(prompt: str) -> Optional[str]:
+    """Find an explicitly named DOCX in a document review request."""
+    if not isinstance(prompt, str) or has_document_text(prompt):
+        return None
+    named = _named_document(prompt)
+    targets = {named.group('target').lstrip('"`')} if named and named.group('kind').lower() == 'docx' else set()
+    if _CAREER_REVIEW.search(prompt) or _DOCUMENT_REVIEW.search(prompt):
+        for line in prompt.splitlines()[1:]:
+            line = line.strip().strip('"`').strip()
+            if _DOCUMENT_LINE.fullmatch(line):
+                targets.add(line)
+    return next(iter(targets)) if len(targets) == 1 else None
 
 
 def document_text(prompt: str, *, leading=False) -> Optional[str]:
@@ -87,7 +107,8 @@ def document_text(prompt: str, *, leading=False) -> Optional[str]:
     if not heading or (leading and heading.start() != 0):
         return None
     body = prompt[heading.end():].strip()
-    return body if body and not _DOCUMENT_REFERENCE.fullmatch(body.strip("`'\"")) else None
+    candidate = body.strip("`'\"")
+    return body if body and not (_DOCUMENT_REFERENCE.fullmatch(candidate) or _DOCUMENT_LINE.fullmatch(candidate)) else None
 
 
 def has_document_text(prompt: str) -> bool:
