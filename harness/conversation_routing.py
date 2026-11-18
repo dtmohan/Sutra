@@ -21,6 +21,8 @@ def next_tier(route,tried):
 
 
 def followup(proposal,p):
+    if 'document_stage_flow' in p:
+        return None  # The committed plan already selects the synthesis model.
     state=p['routing_state']
     requested=proposal.get('page_requests',[])
     if requested:
@@ -52,10 +54,18 @@ def followup(proposal,p):
 
 
 def prepare(s,sid,request):
-    route=choose(request['prompt'],request['models'],request.get('tier','auto'),SIGNALS)
     previous=request.get('routing_continuation')
     state={'previous':previous,'steps':0,'page_passes':0,'models_tried':[],
            'requested_pages':[],'parent':request.get('parent')}
+    if request.get('document_stage_flow'):
+        from document_stages import committed_plan, synthesis_route
+        if previous:
+            raise InvalidUpdate('Document synthesis requires its committed stage plan')
+        flow = request['document_stage_flow']
+        route=synthesis_route(s,flow,committed_plan(s,sid,flow))
+        state['models_tried'].append(route['model'])
+        return route,state
+    route=choose(request['prompt'],request['models'],request.get('tier','auto'),SIGNALS)
     if previous:
         row=s.db.execute('SELECT record_json,delivery_id FROM invocations WHERE id=? AND session=?',(previous,sid)).fetchone()
         if not row or json.loads(row[0])['role']!='conversation':
@@ -101,7 +111,8 @@ def check(s,sid,p):
     if (p.get('memory') or {}).get('invocation_id')!=state['parent']:
         raise InvalidUpdate('Routing lost its original conversation parent')
     route,expected=prepare(s,sid,{'prompt':p['request'],'parent':state['parent'],
-        'models':p['route']['models'],'tier':p['route']['mode'],'routing_continuation':state['previous']})
+        'models':p['route']['models'],'tier':p['route']['mode'],'routing_continuation':state['previous'],
+        'document_stage_flow':p.get('document_stage_flow')})
     if p['route']!=route or state!=expected or p.get('requested_memory_pages',[])!=state['requested_pages']:
         raise InvalidUpdate('Routing decision or requested context differs from its receipts')
     if state['previous']:

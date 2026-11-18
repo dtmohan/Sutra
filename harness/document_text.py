@@ -10,7 +10,7 @@ from context_manager import InvalidUpdate
 
 MAX_DOCX_BYTES = 4 * 1024 * 1024
 MAX_DOCX_XML_BYTES = 2 * 1024 * 1024
-MAX_DOCX_TEXT_BYTES = 24 * 1024
+MAX_DOCX_TEXT_BYTES = 96 * 1024
 _WORD_NAMESPACES = (
     'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
     'http://purl.oclc.org/ooxml/wordprocessingml/main',
@@ -82,7 +82,7 @@ def extract_docx(raw: bytes) -> str:
         if text:
             text_size += len(text.encode('utf-8')) + bool(paragraphs)
             if text_size > MAX_DOCX_TEXT_BYTES:
-                raise InvalidUpdate('Word document text is too large to review at once. Paste the relevant section instead.')
+                raise InvalidUpdate('Word document text is too large for the staged review. Supply a smaller document or paste the relevant section.')
             paragraphs.append(text)
     if not paragraphs:
         raise InvalidUpdate('Word document has no readable body text')

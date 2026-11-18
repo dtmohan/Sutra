@@ -5,7 +5,12 @@ const retention=require('./harness/memory-policy.json').diagnostics;
 const MAX_BYTES=retention.reasoning_bytes,MAX_AGE=retention.max_age_seconds*1000;
 const KINDS=new Set(['start','control','thinking','finish']);
 function callLabel(role){
-  return {review_reader:'Architecture evidence selection',report_reviewer:'Architecture claim review',subagent:'Child review',chat_reviewer:'Workspace review',conversation:'Conversation / routing'}[role]||'Model call';
+  return {
+    review_reader:'Architecture evidence selection',report_reviewer:'Architecture claim review',
+    subagent:'Child review',chat_reviewer:'Workspace review',conversation:'Conversation / routing',
+    document_extract:'Document evidence extraction',document_synthesis:'Document synthesis',
+    document_verdict_reviewer:'Document verdict review',
+  }[role]||'Model call';
 }
 function controlLabel(requested){
   return requested===undefined?'not reported':requested===null?'model default':requested===false?'off requested':requested===true?'on requested':String(requested);

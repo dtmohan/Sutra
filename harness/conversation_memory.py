@@ -17,6 +17,8 @@ LEGACY_POLICIES = {'2319f693bfd23c67bda96909572c6a5646d1a299497aa3ab9c23fc990721
                    'd71f0acf70b42a1d0cb1332c1413bfb85b90156d5820d590cdb19b41ea79ce04'}
 # Recomputed from the released VSIX policy manifests; never from an untrusted receipt.
 RELEASE_POLICIES = {
+    '0.43.0': '42edde7c6b8f06cc3f21d5e19b7a20360b1ca1ec0702deccfddfa787bb654a3d',
+    '0.42.1': '1e0c7f1e07bfa7a77552d08799920a3b167cea0e8e2a6a1203efed2b25a68f89',
     '0.42.0': 'f7696bff0467330eca914871125ce436c62a08627f01ac1a30a13e1dc0901b10',
     '0.41.3': '9a85ba0a6d5abfad542069d58783ad16ca94b10d230da81cdef7564bf7c6cfa7',
     '0.41.2': '2d21a9d2a89ffaf5ee9737eb43b1cda87049743b22a8240e1a8146174d73ff8f',
@@ -118,6 +120,9 @@ def history(s, sid, parent):
         if not delivery or sha(delivery[0]) != delivery[1] or delivery[1] != r['payload_hash']:
             raise PageFault('Conversation delivery is corrupt', code='corrupt')
         p = json.loads(delivery[0])
+        if p.get('document_review_version') == 2:
+            from document_stages import publication
+            publication(s, p, parent)
         check_routing_ancestry(s,sid,p)
         if p.get('pages') or p['contract']['contract_hash'] != origin:
             raise PageFault('Historical conversation is not tool-free', code='denied')
@@ -125,8 +130,11 @@ def history(s, sid, parent):
         # Recheck source quotations even for compatible historical data.
         if any(not isinstance(q, str) or not q or q not in p['request'] for q in proposal.get('facts', [])):
             raise PageFault('Conversation fact has no user source', code='corrupt')
+        public_answer = proposal['answer']
+        if proposal.get('basis'):
+            public_answer += '\n\n' + proposal['basis']
         result.append({'id': parent, 'model': env['model'], 'user': p['request'],
-                       'assistant': proposal['answer'], 'summary': proposal['summary'],
+                       'assistant': public_answer, 'summary': proposal['summary'],
                        'intent': proposal['intent'],
                        'facts': proposal.get('facts', []), 'legacy': r['logic_hash'] != s.logic_hash})
         if 'document_evidence' in p:

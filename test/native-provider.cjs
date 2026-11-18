@@ -695,9 +695,9 @@ function setup(saved={}){
  {
   const fixture=setup(),traffic=[],file='remnant.docx',flowId='4'.repeat(32);
   const chat={modelOptions:{_conversationId:'classified-docx-review'}};
-  const reply=(id,intent,answer)=>({route:{model:'model-a'},result:{
-   invocation_id:id,admission:{admitted:true},accepted_output:{intent,answer},
-   token_usage:{calls:[{invocation_id:id,stage:'conversation',model:'model-a',input_tokens:11,output_tokens:12}]}
+  const reply=(id,intent,answer,{basis,stage='conversation',model='model-a'}={})=>({route:{model},result:{
+   invocation_id:id,admission:{admitted:true},accepted_output:{intent,answer,basis},
+   token_usage:{calls:[{invocation_id:id,stage,model,input_tokens:11,output_tokens:12}]}
   }});
   let dialogs=0;
   fixture.v.window.showWarningMessage=async(_message,options,...buttons)=>{
@@ -728,16 +728,36 @@ function setup(saved={}){
    assert.equal(request.event,'step');
    if(steps++===0)return {state:'PAUSED',flow_id:flowId,cursor:'2',stop,
     conversation:reply('5'.repeat(32),'document','Unpublished router draft')};
-   assert.equal(request.cursor,'4');
-   return {state:'DONE',flow_id:flowId,cursor:'5',conversation:reply('6'.repeat(32),'conversation','Review of the supplied file.')};
+   if(steps===2){
+    assert.equal(request.cursor,'4');
+    return {state:'CLASSIFYING',flow_id:flowId,cursor:'5',progress:'Checking the draft against the document evidence.',
+     routing_step:reply('6'.repeat(32),'conversation','Unpublished synthesis draft',{
+      basis:'Unpublished basis',stage:'document_synthesis'})};
+   }
+   if(steps===3){
+    assert.equal(request.cursor,'5');
+    return {state:'CLASSIFYING',flow_id:flowId,cursor:'6',progress:'Document verdict review completed.',
+     routing_step:reply('7'.repeat(32),'conversation','Unpublished reviewer output',{
+      stage:'document_verdict_reviewer',model:'model-b'})};
+   }
+   assert.equal(request.cursor,'6');
+   const approved=reply('8'.repeat(32),'conversation','```json\n{"verdict":"HOLD"}\n```',{
+    basis:'The signed test took 16 minutes against a 15-minute limit [D4-E1].',
+    stage:'document_synthesis',model:'model-b'});
+   approved.document_verification={verdict:'supported',evidence_ids:['D4-E1']};
+   return {state:'DONE',flow_id:flowId,cursor:'7',conversation:approved};
   };
   const output=await fixture.send('low',[{role:1,content:[new Text('Thoughts? /project/remnant.docx')]}],chat);
-  assert.deepEqual(traffic,['pending','start','step','locate_document','approve_document','step']);
+  assert.deepEqual(traffic,['pending','start','step','locate_document','approve_document','step','step','step']);
   assert.equal(dialogs,1);
-  assert(output.some(part=>part.value?.includes('Review of the supplied file.')));
-  assert(!output.some(part=>part.value?.includes('Unpublished router draft')));
-  assert(output.some(part=>part.value?.includes('2 calls')));
-  checks.push('a document discovered by the model after classification opens one scoped read approval and retains both calls in the footer');
+  const visible=output.map(part=>part.value).join('');
+  assert(visible.includes('```json\n{"verdict":"HOLD"}\n```\n\n**Basis for the verdict**'));
+  assert(visible.includes('16 minutes against a 15-minute limit \\[D4-E1\\].'));
+  assert(visible.includes('Checking the draft against the document evidence.'));
+  assert(visible.includes('Document verdict review completed.'));
+  assert(!visible.includes('Unpublished'));
+  assert(visible.includes('4 calls'));
+  checks.push('document review prompts for one scoped read, shows review progress and a final basis beside the answer, and counts withheld drafts without displaying them');
  }
  {
   const workspace=setup(),traffic=[],invocation='b'.repeat(32),flowId='c'.repeat(32);
@@ -830,6 +850,49 @@ function setup(saved={}){
  shouldPause=false;await paused.send('high',[{role:1,content:[new Text('continue')]}]);
  const afterPause=paused.calls.find(c=>c.op==='native_work');assert.equal(afterPause.prompt,'Fix retry');assert.equal(afterPause.tier,'high');assert.equal(afterPause.contract_hash,'contract-1');
  checks.push('mapping pauses return actionable details without a client error; original context and permission binding resume on another model');
+ {
+  const sliced=setup();sliced.kind('report');await sliced.arm();let saved,resumed;
+  const original=sliced.deps.request;
+  const childUsage=(id,input,output,status)=>({result:{token_usage:{calls:[
+    {invocation_id:id,stage:'subagent',model:'model-a',input_tokens:input,output_tokens:output,status}
+  ]}}});
+  sliced.deps.request=async(m,t)=>{
+   if(m.op==='orchestrate'&&saved&&m.flow_id===saved.flow_id){
+    if(m.event==='inspect')return saved;
+    if(m.event==='resume'){
+     resumed=m;
+     saved={...saved,state:'CHILDREN',cursor:'5',stop:undefined};
+     return saved;
+    }
+    if(m.event==='step'&&!resumed){
+     saved={...saved,state:'PAUSED',cursor:'4',progress:undefined,
+       stop:{status:'child_slice_timeout',resume_phase:'CHILDREN',slice_ordinal:2,
+         error:'The child review reached its time limit before returning a checkpoint.'}};
+     return {...saved,child:childUsage('child-timeout',30,40,'quarantined')};
+    }
+   }
+   const out=await original(m,t);
+   if(m.op==='orchestrate'&&out.state==='CODING'){
+    saved={...out,state:'CHILDREN',cursor:'3',progress:'Child review saved slice 1. Continuing the partition.'};
+    return {...saved,child:childUsage('child-checkpoint',10,20,'accepted')};
+   }
+   return out;
+  };
+  const response=await sliced.send('low');
+  const message=response.map(p=>p.value).join('');
+  for(const phrase of ['Child review saved slice 1','reached its time limit','last completed child checkpoint',
+     'different Sutra model tier','40 in · 60 out · 2 calls'])assert(message.includes(phrase),phrase);
+  assert(!sliced.calls.some(c=>c.op==='native_work'));
+  assert.equal(sliced.controller.status().pending.stop.slice_ordinal,2);
+  assert.equal(sliced.controller.status().pending.child,undefined);
+  await sliced.send('high',[{role:1,content:[new Text('continue')]}]);
+  assert.equal(resumed.cursor,'4');assert.equal(resumed.tier,'high');
+  assert.deepEqual(resumed.binding,saved.binding);
+  assert.equal(sliced.calls.filter(c=>c.op==='conversation').length,1);
+  const completed=sliced.calls.find(c=>c.op==='native_work');
+  assert.equal(completed.prompt,'Fix retry');assert.equal(completed.contract_hash,'contract-1');
+  checks.push('child checkpoints show progress, pause with charged usage, and resume the same bound task on another tier');
+ }
  {
   const review=setup();review.kind('report');await review.arm();let resumed,publications=0;
   const original=review.deps.request;

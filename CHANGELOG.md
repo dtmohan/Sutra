@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.44.0
+
+- Save evidence-backed child review slices as checkpoints. Resume the same slice after a transport timeout or output limit, with the original read scope, checkpoint history and remaining budget. Join a branch after its final slice is accepted.
+- Check Auto's long-document draft against approved quotations before delivery, preserve its evidence on a higher-tier retry, and display the basis for the verdict in chat.
+
+## 0.43.0
+
+- Decompose approved long DOCX reviews into receipt-backed sections. Auto routes source extraction to Low and the synthesis to the strongest distinct configured tier.
+- Reuse admitted extraction on resume. Verify source quotations and evidence IDs against the approved snapshot. Fixed tiers apply to both stages.
+
 ## 0.42.1
 
 - Bind native conversation memory to its workspace and chat axis. Check the ancestry before restoring a receipt, including receipts saved by earlier releases.

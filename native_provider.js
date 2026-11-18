@@ -33,6 +33,12 @@ function latestRequest(vscode,messages){
   const parent=previous.map(m=>m.content.filter(p=>p instanceof vscode.LanguageModelTextPart).map(p=>p.value).join('')).map(text=>{const matches=[...text.matchAll(/\[(?:Karma|Sutra)[^\n]*\]\(karma-preview:\/conversation\/([a-f0-9]{32})\/Response\.md\)/g)];return matches.at(-1)?.[1]||text.match(/^(?:Karma|Sutra) conversation receipt: ([a-f0-9]{32})$/m)?.[1];}).find(Boolean);
   return {prompt,parent,priorPrompt:priorPrompt.length<=1800?priorPrompt:undefined};
 }
+function conversationMarkdown(output){
+  const answer=output.answer;
+  if(typeof output.basis!=='string'||!output.basis.trim())return answer;
+  const basis=output.basis.trim().replace(/\s+/g,' ').replace(/[\\`*_{}\[\]()<>#|!]/g,'\\$&');
+  return answer+'\n\n**Basis for the verdict**\n\n'+basis;
+}
 // Model task observations are inert prose. They never create actions or grants.
 function observationText(observations, final=false){
   if(!observations)return '';
@@ -409,6 +415,9 @@ function install(vscode,context,deps){
     let guidance='Resolve the reported cause before resuming.';
     if(stop.status==='resource_wait'){
       guidance='Check **System pressure** and **Last model allocation** in Sutra Monitor. Resume checks fresh measurements and the model allocation before dispatch.';
+    }else if(stop.status==='child_slice_timeout'){
+      const checkpoint=stop.slice_ordinal>1?'Resume from the last completed child checkpoint.':'Resume to retry the first child slice.';
+      guidance=checkpoint+' You can select a different Sutra model tier before resuming.';
     }else if(stop.status==='claim_review_output_limit'){
       const page=Number.isInteger(stop.review_page)&&Number.isInteger(stop.total_pages)
         ? `claim-review page ${stop.review_page} of ${stop.total_pages}` : 'the unfinished claim-review page';
@@ -730,7 +739,10 @@ function install(vscode,context,deps){
             }else if(supply){
               resumeUnavailable('The saved evidence request has changed. Review its current state in Sutra Monitor.');
               return;
-            }else if(['DONE','CANCELLED'].includes(old.state))await rememberFlow(old,undefined,chatKey,pending.stackChat);
+            }else if(['DONE','CANCELLED'].includes(old.state)){
+              await rememberFlow(old,undefined,chatKey,pending.stackChat);
+              if(old.conversation?.document_verification)flow=old;
+            }
             else if(old.recovery){
               await rememberFlow(old,undefined,chatKey,pending.stackChat);
               const recovery=old.recovery;
@@ -768,6 +780,9 @@ function install(vscode,context,deps){
           let documentLookupAttempted=false;
           while(flow.routing_step||flow.state==='CLASSIFYING'||(!documentLookupAttempted&&documentFilePause(flow))){
             assertCurrent(a,activeCancel.token);
+            if(flow.document_stage_progress){
+              progress.report(new vscode.LanguageModelTextPart(flow.document_stage_progress+'\n\n'));
+            }
             if(flow.routing_step){
               const step=flow.routing_step;recordUsage(step.result);lastRoute=step.route.model;audit.model=lastRoute;
               audit.routingDecision=step.routing_followup;audit.stage='routing';publish();
@@ -814,7 +829,7 @@ function install(vscode,context,deps){
           }
           // Routing prose is not an authority on host capabilities or permissions.
           // Present a host-owned transition; publish model prose for conversation.
-          progress.report(new vscode.LanguageModelTextPart((flow.state!=='DONE'?'Continuing this request through Sutra’s workspace workflow.':p.answer)+'\n\n'));
+          progress.report(new vscode.LanguageModelTextPart((flow.state!=='DONE'?'Continuing this request through Sutra’s workspace workflow.':conversationMarkdown(p))+'\n\n'));
           if(p.diagram){try{await deps.presentConversation?.(chat);progress.report(new vscode.LanguageModelTextPart('Diagram opened beside the chat. Use **Sutra: Open Last Diagram** to reopen it.\n\n'));}catch(error){progress.report(new vscode.LanguageModelTextPart('Diagram preview could not open: '+error.message+'\n\n'));}}
           if(flow.state==='DONE')return;
           const commitmentText=observationText(flow.task_observations);
@@ -1001,4 +1016,4 @@ function install(vscode,context,deps){
     clearAccess('Extension stopped.');
   }};
 }
-module.exports={install,latestRequest,observationText};
+module.exports={install,latestRequest,observationText,conversationMarkdown};

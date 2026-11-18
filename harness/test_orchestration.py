@@ -269,6 +269,241 @@ class OrchestrationTests(unittest.TestCase):
         self.tier='high';res=self.until('DONE',out);self.assertTrue(res['data']['result']['admission']['admitted'])
         self.assertGreater(m.spent(self.s,parent)['calls'],charged['calls'])
 
+    def test_child_timeout_resumes_same_slice_with_new_model_and_retained_spend(self):
+        from invocation_gateway import consume_dispatch
+
+        out = self.children()
+        child = out['children'][0]['id']
+        node = m.node(self.s, child)
+        parent = node['parent_id']
+        sid = node['session']
+        contract = self.s.pinned(sid)
+        original_call = Child.call
+
+        def checkpoint(worker, *args):
+            proposal, record = original_call(worker, *args)
+            proposal['slice_status'] = 'continue'
+            return proposal, record
+
+        with patch.object(Child, 'call', checkpoint):
+            sliced = self.step(out)
+        self.assertEqual(sliced['state'], 'CHILDREN')
+        self.assertEqual(sliced['child']['slice_status'], 'checkpoint')
+        partial_id = sliced['child']['result']['invocation_id']
+        first_packet = self.models[-1][1].payloads[0]
+        self.assertEqual(m.state(self.s, child), 'READY')
+        self.assertFalse(any(event['kind'] == 'RESULT' for event in m.events(self.s, child)))
+        with self.assertRaisesRegex(InvalidUpdate, 'not ready'):
+            m.join(self.s, parent)
+        with self.assertRaisesRegex(InvalidUpdate, 'stale'):
+            m.complete(self.s, child, partial_id)
+        before_timeout = m.spent(self.s, child)
+        task_before_timeout = review_budget.usage(self.s, sid)
+
+        def timeout(worker, call_id, system, payload, schema):
+            consume_dispatch(call_id, worker.model, system, payload, schema)
+            worker.payloads.append(copy.deepcopy(payload))
+            raise TimeoutError('Model transport deadline reached')
+
+        with patch.object(Child, 'call', timeout):
+            paused = self.step(sliced)
+        timeout_packet = self.models[-1][1].payloads[0]
+        self.assertEqual(paused['state'], 'PAUSED')
+        self.assertEqual(paused['stop']['status'], 'child_slice_timeout')
+        self.assertFalse(paused['stop']['automatic_retry'])
+        self.assertEqual(paused['stop']['branch_id'], child)
+        timed_out_id = paused['child']['result']['invocation_id']
+        self.assertNotEqual(timed_out_id, partial_id)
+        with self.assertRaises(PageFault):
+            self.s.load_result(sid, timed_out_id)
+        forged = dict(timeout_packet['child_slice'], predecessor=timed_out_id)
+        with self.assertRaisesRegex(InvalidUpdate, 'predecessor'):
+            m.check_slice(self.s, child, forged, current=True)
+        self.assertEqual(m.state(self.s, child), 'READY')
+        charged = m.spent(self.s, child)
+        self.assertEqual(charged['calls'], before_timeout['calls'] + 1)
+        self.assertGreater(charged['tokens'], before_timeout['tokens'])
+        self.assertGreater(charged['seconds'], before_timeout['seconds'])
+        self.assertEqual(charged['operations'], before_timeout['operations'])
+        self.assertEqual(charged['source_bytes'], before_timeout['source_bytes'])
+        task_spending = review_budget.usage(self.s, sid)
+        self.assertEqual(task_spending['used']['calls'], task_before_timeout['used']['calls'] + 1)
+
+        self.s.close()
+        self.s = InvocationLedger(self.root / 'state.sqlite')
+        self.tier = 'high'
+        with self.assertRaisesRegex(InvalidUpdate, 'user-armed'):
+            self.step(paused, event='resume', armed=False)
+        resumed = self.step(paused, event='resume')
+        self.assertEqual(resumed['state'], 'CHILDREN')
+        self.assertEqual(m.spent(self.s, child), charged)
+        self.assertEqual(review_budget.usage(self.s, sid), task_spending)
+        finished = self.step(resumed)
+        worker = self.models[-1][1]
+        packet = worker.payloads[0]
+        self.assertEqual(worker.model, MODELS['high'])
+        self.assertEqual(packet['contract'], first_packet['contract'])
+        self.assertEqual(packet['branch'], first_packet['branch'])
+        self.assertEqual(packet['snapshot_receipts'], first_packet['snapshot_receipts'])
+        self.assertEqual(packet['child_slice'], timeout_packet['child_slice'])
+        self.assertEqual(packet['child_slice']['predecessor'], partial_id)
+        self.assertEqual(packet['child_checkpoint'], timeout_packet['child_checkpoint'])
+        self.assertIn('Inspected the entry and leaf source.', canonical(packet['child_checkpoint']))
+        self.assertIn('Review runtime behavior.', canonical(packet['child_checkpoint']))
+        self.assertIn('CED724', canonical(packet['memory']))
+        self.assertEqual(m.node(self.s, child)['permissions'], node['permissions'])
+        self.assertEqual(self.s.pinned(sid), contract)
+        self.assertEqual(m.spent(self.s, child)['calls'], charged['calls'] + 1)
+        self.assertEqual(m.spent(self.s, child)['source_bytes'], charged['source_bytes'])
+        self.assertEqual(m.state(self.s, child), 'DONE')
+        final_id = finished['child']['result']['invocation_id']
+        self.assertNotIn(final_id, (partial_id, timed_out_id))
+        result = self.until('DONE', finished)
+        self.assertTrue(result['data']['result']['admission']['admitted'])
+        join = next(event for event in m.events(self.s, parent) if event['kind'] == 'JOIN')
+        self.assertIn(final_id, join['data']['invocations'])
+        self.assertNotIn(partial_id, join['data']['invocations'])
+        self.assertNotIn(timed_out_id, join['data']['invocations'])
+        self.assertTrue(self.s.verify_invocations(sid))
+        self.assertTrue(self.s.audit_valid())
+
+    def test_accepted_child_slice_recovers_before_checkpoint_commit_without_repeating_call(self):
+        out = self.children()
+        child = out['children'][0]['id']
+        sid = m.node(self.s, child)['session']
+        original_call = Child.call
+
+        def checkpoint(worker, *args):
+            proposal, record = original_call(worker, *args)
+            proposal['slice_status'] = 'continue'
+            return proposal, record
+
+        with patch.object(Child, 'call', checkpoint), patch(
+                'subagent_runtime.machine.complete', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.step(out)
+        self.assertEqual(m.state(self.s, child), 'READY')
+        self.assertFalse(any(event['kind'] == 'CHILD_SLICE_SAVED' for event in m.events(self.s, child)))
+        used = m.spent(self.s, child)
+        self.s.close()
+        self.s = InvocationLedger(self.root / 'state.sqlite')
+
+        with patch('subagent_runtime.InvocationGateway.invoke', side_effect=AssertionError('duplicate inference')):
+            recovered = self.step(out)
+        self.assertTrue(recovered['child']['recovered'])
+        self.assertEqual(recovered['child']['slice_status'], 'checkpoint')
+        self.assertEqual(m.state(self.s, child), 'READY')
+        self.assertEqual(m.spent(self.s, child), used)
+        saved = [event for event in m.events(self.s, child) if event['kind'] == 'CHILD_SLICE_SAVED']
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]['data']['invocation_id'], recovered['child']['result']['invocation_id'])
+
+        self.tier = 'high'
+        finished = self.step(recovered)
+        self.assertTrue(finished['child']['result']['admission']['admitted'])
+        worker = self.models[-1][1]
+        self.assertEqual(worker.model, MODELS['high'])
+        self.assertEqual(worker.payloads[0]['child_slice']['predecessor'], saved[0]['data']['invocation_id'])
+        self.assertEqual(m.state(self.s, child), 'DONE')
+        self.assertEqual(m.spent(self.s, child)['calls'], used['calls'] + 1)
+        self.assertTrue(self.s.verify_invocations(sid))
+
+    def test_socket_timeout_receipt_recovers_before_stop_commit_without_repeating_call(self):
+        from invocation_gateway import consume_dispatch
+        from socket import timeout
+
+        out = self.children()
+        child = out['children'][0]['id']
+        cursor = m.slice_cursor(self.s, child)
+        before = m.spent(self.s, child)
+
+        def transport_timeout(worker, call_id, system, payload, schema):
+            consume_dispatch(call_id, worker.model, system, payload, schema)
+            raise timeout('timed out')
+
+        with patch.object(Child, 'call', transport_timeout), patch(
+                'subagent_runtime.machine.timeout_child', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.step(out)
+        charged = m.spent(self.s, child)
+        self.assertEqual(charged['calls'], before['calls'] + 1)
+        self.assertEqual(m.slice_cursor(self.s, child), cursor)
+        self.assertEqual(m.state(self.s, child), 'READY')
+        self.assertFalse(any(event['kind'] == 'CHILD_SLICE_TIMED_OUT' for event in m.events(self.s, child)))
+        self.s.close()
+        self.s = InvocationLedger(self.root / 'state.sqlite')
+
+        with patch('subagent_runtime.InvocationGateway.invoke', side_effect=AssertionError('duplicate timeout')):
+            recovered = self.step(out)
+        self.assertEqual(recovered['state'], 'PAUSED')
+        self.assertEqual(recovered['stop']['slice_ordinal'], cursor['ordinal'])
+        self.assertEqual(recovered['stop']['slice_reason'], 'timeout')
+        self.assertTrue(recovered['child']['recovered'])
+        self.assertEqual(m.spent(self.s, child), charged)
+        self.assertEqual(m.slice_cursor(self.s, child), cursor)
+        event, = [event for event in m.events(self.s, child) if event['kind'] == 'CHILD_SLICE_TIMED_OUT']
+        self.assertEqual(event['data']['invocation_id'], recovered['child']['result']['invocation_id'])
+
+    def test_successive_child_checkpoints_advance_source_and_reach_parent_synthesis(self):
+        out = self.children()
+        child = out['children'][0]['id']
+        original_call = Child.call
+
+        def checkpoint(worker, call_id, system, payload, schema):
+            proposal, record = original_call(worker, call_id, system, payload, schema)
+            proposal['summary'] = f"Inspected source segment {payload['child_slice']['ordinal']}."
+            proposal['slice_status'] = 'continue'
+            return proposal, record
+
+        with patch.object(Child, 'call', checkpoint):
+            first = self.step(out)
+            second = self.step(first)
+        self.assertEqual(first['child']['slice_status'], 'checkpoint')
+        self.assertEqual(second['child']['slice_status'], 'checkpoint')
+        first_result = first['child']['result']['accepted_output']
+        second_result = second['child']['result']['accepted_output']
+        self.assertNotEqual(first_result['citations'], second_result['citations'])
+        self.assertTrue(second_result['citations'][0]['quote'].strip().startswith('return '))
+        self.assertEqual(m.slice_cursor(self.s, child)['ordinal'], 3)
+        final = self.until('DONE', second)
+        self.assertTrue(final['data']['result']['admission']['admitted'])
+
+        synthesizer = next(worker for stage, worker in self.models if stage == 'synthesis')
+        joined = next(result for result in synthesizer.payloads[0]['child_results'] if result['branch_id'] == child)
+        for prior in (first_result, second_result):
+            self.assertIn(prior['summary'], joined['summary_unverified'])
+            for citation in prior['citations']:
+                self.assertIn(citation, joined['citations'])
+
+    def test_output_limit_repair_only_pauses_for_the_last_attempt(self):
+        from invocation_gateway import consume_dispatch
+        from local_model import OutputLimitExceeded
+
+        out = self.children()
+        child = out['children'][0]['id']
+        before = m.spent(self.s, child)
+
+        def exhausted(worker, call_id, system, payload, schema):
+            consume_dispatch(call_id, worker.model, system, payload, schema)
+            raise OutputLimitExceeded('The output allowance ended before the checkpoint')
+
+        metadata = {'thinking': {'values': [True], 'default': True}}
+        with patch.dict('os.environ', SUTRA_THINKING='adaptive'), patch.object(
+                Child, 'context_metadata', metadata, create=True), patch.object(Child, 'call', exhausted):
+            paused = self.step(out)
+        self.assertEqual(paused['state'], 'PAUSED')
+        self.assertEqual(paused['stop']['slice_reason'], 'output_limit')
+        self.assertEqual(m.spent(self.s, child)['calls'], before['calls'] + 2)
+        self.assertIsNone(m.recover_child(self.s, child))
+
+        self.tier = 'high'
+        resumed = self.step(paused, event='resume')
+        finished = self.step(resumed)
+        self.assertEqual(m.state(self.s, child), 'DONE')
+        self.assertTrue(finished['child']['result']['admission']['admitted'])
+        self.assertEqual(m.spent(self.s, child)['calls'], before['calls'] + 3)
+        self.assertEqual(len([e for e in m.events(self.s, child) if e['kind'] == 'CHILD_SLICE_OUTPUT_LIMIT']), 1)
+
     def test_committed_fork_and_join_recover_without_duplicate_children(self):
         out=self.until('BRANCHING');n,d=flow.info(self.s,out['flow_id'])
         parent,children,_=flow.plan(self.s,self.meta,self.ws,n['prompt'],d['conversation_id'],d['root_node'])

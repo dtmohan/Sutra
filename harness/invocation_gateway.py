@@ -6,6 +6,7 @@ it is not a Python sandbox or protection against a privileged process.
 import copy
 from contextvars import ContextVar
 import json
+import socket
 import time
 import uuid
 from context_manager import canonical, sha, InvalidUpdate, Conflict
@@ -95,8 +96,18 @@ class InvocationLedger(GovernedContext):
             else:
                 if payload['contract']['contract_hash'] != config['contract_hash']:
                     raise Conflict('Invocation contract changed')
-                if role in ('memory_probe','reviewer','coder','architect','api_mapper','api_reviewer','static_explainer','chat_reviewer','review_reader','conversation','subagent','report_reviewer'):
-                    if role=='memory_probe':
+                if role in ('memory_probe','reviewer','coder','architect','api_mapper','api_reviewer','static_explainer','chat_reviewer','review_reader','conversation','subagent','report_reviewer','document_extract','document_verdict_reviewer'):
+                    if role == 'document_extract':
+                        from document_stages import request_check
+                        request_check(self, session, payload)
+                        if payload['model'] != model:
+                            raise InvalidUpdate('Dispatch model differs from document extraction route')
+                    elif role == 'document_verdict_reviewer':
+                        from document_verdict_review import request_check
+                        request_check(self, session, payload)
+                        if payload['reviewer_model'] != model:
+                            raise InvalidUpdate('Dispatch model differs from document verdict review route')
+                    elif role=='memory_probe':
                         from memory_probe import check
                         check(self,session,payload)
                         if payload['model']!=model:raise InvalidUpdate('Memory probe model changed')
@@ -161,7 +172,8 @@ class InvocationLedger(GovernedContext):
             self._audit('INVOCATION_DISPATCH', {'id': envelope['id'], 'hash': digest})
         return envelope
 
-    def finalize(self, envelope, payload, proposal, transport_error=None, elapsed_seconds=None, token_usage=None, accounting_settlement=None):
+    def finalize(self, envelope, payload, proposal, transport_error=None, elapsed_seconds=None, token_usage=None,
+                 accounting_settlement=None, failure_kind=None):
         session = envelope['session']; rid = envelope['delivery_id']
         model_proposal = copy.deepcopy(proposal)
         from task_observations import split, capture
@@ -212,6 +224,8 @@ class InvocationLedger(GovernedContext):
                        'admission': result['admission'], 'checks': result['checks'],
                        'status': 'accepted' if admitted else 'quarantined', 'previous_hash': prev,
                        'resulting_contract_hash': self.origin(session, bootstrap=True)['contract_hash']}
+            if failure_kind is not None:
+                receipt['failure_kind'] = failure_kind
             observation = capture(self, envelope, payload, proposal, observation_fields)
             if observation is not None:
                 receipt['task_observation'] = observation
@@ -386,7 +400,7 @@ class InvocationGateway:
         finally: ledger.close()
         permit = {'hash': envelope['request_hash'], 'used': False, 'packet_hash': (envelope.get('model_interface') or {}).get('packet_hash')}
         token = _permit.set(permit); error = None; proposal = None; record = None;started=time.monotonic()
-        output_limit = False
+        failure_kind = None
         from model_activity import scope
         try:
             with scope(envelope) as activity:
@@ -395,7 +409,10 @@ class InvocationGateway:
                     raise InvalidUpdate('Model identity changed during inference')
         except Exception as exc:
             from local_model import OutputLimitExceeded
-            output_limit = isinstance(exc, OutputLimitExceeded)
+            if isinstance(exc, OutputLimitExceeded):
+                failure_kind = 'output_limit'
+            elif isinstance(exc, (TimeoutError, socket.timeout)):
+                failure_kind = 'timeout'
             error = type(exc).__name__ + ': ' + str(exc)
             record = getattr(exc, 'call_record', None) or record or {'call_id': call_id, 'ok': False, 'error': error}
         finally: _permit.reset(token)
@@ -404,11 +421,12 @@ class InvocationGateway:
             if not error: ledger.confirm_delivery(delivery_id)
             from token_usage import measured, history
             from budget_accounting import settlement
-            result = ledger.finalize(envelope, payload, proposal, error,time.monotonic()-started, measured(record), settlement(envelope, record))
+            result = ledger.finalize(envelope, payload, proposal, error, time.monotonic() - started,
+                                     measured(record), settlement(envelope, record), failure_kind)
             activity.finish(result['admission']['admitted'], measured(record))
             result['token_usage'] = history(ledger.db, run_id=self.run_id)
             if error: result['blocked'] = error
-            if output_limit: result['failure_kind'] = 'output_limit'
+            if failure_kind is not None: result['failure_kind'] = failure_kind
             result['record'] = record
             return result
         finally: ledger.close()

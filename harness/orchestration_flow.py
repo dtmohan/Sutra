@@ -566,6 +566,136 @@ def workspace_document_evidence(s,workspace,f,d,req):
     return response(s,f['id'])
 
 
+def advance_document_stage(s, root, flow, data, request, provider):
+    from document_stages import extract, plan, synthesis_packet
+    from review_budget import require
+
+    sid = request['conversation_session']
+    fid = flow['id']
+    staged = data.get('document_stage_plan')
+    if staged is None:
+        staged = plan(s, sid, flow['prompt'], request['document_evidence'], request['parent'],
+                      request['tier'], request['models'])
+        if staged is None:
+            return None
+        final_calls = 2 if staged['version'] == 2 else 1
+        frame = require(s, sid, {'calls': len(staged['sections']) + final_calls})
+        move(s, fid, 'CLASSIFYING', 'DOCUMENT_STAGE_PLAN', kernel=frame, document_stage_plan=staged)
+        synthesis = (f"Evidence review starts after a first answer from {staged['synthesis_model']}."
+                     if staged['version'] == 2 else f"Synthesis is assigned to {staged['synthesis_model']}.")
+        progress = f"Reading {len(staged['sections'])} document sections with {staged['extract_model']}. {synthesis}"
+        return response(s, fid, document_stage_progress=progress)
+    receipts = data.get('document_stage_receipts', [])
+    count = len(staged['sections'])
+    if len(receipts) == count:
+        if not synthesis_packet(s, sid, fid)['evidence']:
+            move(s, fid, 'DONE', 'DOCUMENT_STAGE_EMPTY', request_notice=(
+                'Sutra found no supporting quotations for this request in the approved document. '
+                'Ask about a specific section or provide more source material.'))
+            return response(s, fid)
+        request['document_stage_flow'] = fid
+        return None
+    result = extract(s, sid, root, fid, staged, receipts, provider=provider('document_extract'))
+    if not result['admission']['admitted']:
+        stop_document_stage(s, fid, result['admission']['errors'], 'Document evidence extraction stopped.')
+        progress = f"Evidence extraction stopped at section {len(receipts) + 1} of {count}."
+    else:
+        move(s, fid, 'CLASSIFYING', 'DOCUMENT_STAGE_EXTRACTED',
+             document_stage_receipts=[*receipts, result['invocation_id']])
+        progress = f"Recorded evidence for section {len(receipts) + 1} of {count}."
+    step = {'result': result, 'route': result['route'],
+            'routing_followup': {'kind': 'document_extract', 'reason': progress}}
+    return response(s, fid, routing_step=step, progress=progress)
+
+
+def stop_document_stage(s, fid, errors, title):
+    stop = {'status': 'document_stage', 'resume_phase': 'CLASSIFYING',
+            'error': title + ' ' + ' '.join(errors), 'automatic_retry': False}
+    move(s, fid, 'PAUSED', 'DOCUMENT_STAGE_STOPPED', workflow_stop=stop)
+
+
+def advance_document_verdict(s, meta, root, fid, data, request, axis, provider):
+    from conversation import answer, read
+    from conversation_routing import next_tier
+    from document_stages import (CANDIDATE_EVENT, ESCALATION_EVENT, PUBLICATION_EVENT,
+                                recover_candidate, synthesis_route, verification_candidate)
+    from document_verdict_review import ROLE, review
+    from model_routing import TIERS
+    from review_budget import require
+
+    sid = request['conversation_session']
+    plan = data['document_stage_plan']
+    route = synthesis_route(s, fid, plan)
+    invocation = data.get('document_candidate_id')
+    if not invocation:
+        candidate = recover_candidate(s, sid, fid, route)
+        if candidate is None:
+            require(s, sid, {'calls': 2})
+            candidate = answer(s, meta, root, request, provider=provider('conversation'),
+                               axis=axis, orchestrated=True)
+        result = candidate['result']
+        if result['admission']['admitted']:
+            move(s, fid, 'CLASSIFYING', CANDIDATE_EVENT, document_candidate_id=result['invocation_id'])
+            progress = f"Checking the draft from {route['model']} against the document quotations."
+        else:
+            progress = 'Document synthesis stopped.'
+            stop_document_stage(s, fid, result['admission']['errors'], progress)
+        step = {'result': {key: value for key, value in result.items() if key != 'accepted_output'},
+                'route': route, 'routing_followup': {'kind': 'document_synthesis', 'reason': progress}}
+        return response(s, fid, routing_step=step, progress=progress)
+
+    candidate = verification_candidate(s, sid, fid)
+    result = review(s, sid, root, fid, provider=provider(ROLE))
+    review_route = result['route']
+    assessed = None
+    if not result['admission']['admitted']:
+        progress = 'Document evidence review stopped.'
+        stop_document_stage(s, fid, result['admission']['errors'], progress)
+    else:
+        verdict = result['accepted_output']
+        assessed = {**verdict, 'model': review_route['model'], 'synthesis_model': candidate['model'],
+                    'invocation_id': result['invocation_id'], 'authority': 'model_assessment'}
+        if verdict['verdict'] == 'supported':
+            move(s, fid, 'DONE', PUBLICATION_EVENT, conversation_id=invocation,
+                 document_verification=assessed)
+            chat = read(s, invocation)
+            chat.update(route=route, memory_used=bool(request['parent']))
+            progress = 'Document evidence review complete.'
+        elif verdict['verdict'] == 'insufficient_evidence':
+            progress = 'The evidence review found a gap in the supplied quotations.'
+            move(s, fid, 'DONE', 'DOCUMENT_EVIDENCE_INSUFFICIENT', document_verification=assessed,
+                 request_notice='Sutra could not establish the conclusion from the selected quotations. '
+                                'Point to a specific section or provide the missing source to continue.')
+        else:
+            tried = [plan['models'][rank] for rank in TIERS[:TIERS.index(route['tier']) + 1]]
+            tier = next_tier(route, tried)
+            if tier is None:
+                progress = 'Document evidence review did not support the conclusion.'
+                move(s, fid, 'DONE', 'DOCUMENT_SYNTHESIS_UNSUPPORTED', document_verification=assessed,
+                     request_notice='Sutra withheld the verdict after the evidence review found an unsupported conclusion.')
+            else:
+                try:
+                    frame = require(s, sid, {'calls': 2})
+                except BudgetStop as exc:
+                    progress = 'Evidence review found a problem in the draft. The next stage exceeds the remaining allocation.'
+                    stop = {'status': 'routing_budget', 'resume_phase': 'CLASSIFYING', 'error': str(exc),
+                            'budget': exc.frame, 'automatic_retry': False}
+                    move(s, fid, 'PAUSED', 'ROUTING_STOPPED', kernel=exc.frame, workflow_stop=stop,
+                         document_verification=assessed)
+                else:
+                    progress = f"Evidence review found a problem in the draft. Trying {plan['models'][tier]} with the same quotations."
+                    move(s, fid, 'CLASSIFYING', ESCALATION_EVENT, kernel=frame, document_synthesis_tier=tier,
+                         document_candidate_id=None, document_verification=assessed)
+
+    if assessed and assessed['verdict'] == 'supported':
+        # The candidate's own call was already reported on the preceding step.
+        chat['result']['token_usage'] = result['token_usage']
+        return response(s, fid, conversation=chat)
+    step = {'result': {key: value for key, value in result.items() if key != 'accepted_output'},
+            'route': review_route, 'routing_followup': {'kind': ROLE, 'reason': progress}}
+    return response(s, fid, routing_step=step, progress=progress)
+
+
 def _handle(s,meta,workspace,root,req,providers=None):
     # Only the extension's private bridge can supply arming/permission events.
     # Model proposals cannot invoke this endpoint or set permissions.
@@ -674,6 +804,10 @@ def _handle(s,meta,workspace,root,req,providers=None):
             extra={'prompt':f['prompt']}
             notice=saved_document_notice(s,workspace,f,m.state(s,fid),d)
             if notice:return response(s,fid,request_notice=notice,**extra)
+            if (m.state(s,fid) == 'DONE' and d.get('conversation_id')
+                    and (d.get('document_verification') or {}).get('verdict') == 'supported'):
+                from conversation import read
+                extra['conversation'] = read(s, d['conversation_id'])
             if m.state(s,fid)=='NEED_TOOL_APPROVAL':extra['capability_proposal']=d.get('capability_proposal')
             if m.state(s,fid)=='NEED_PERMISSION' and not recovery(s,fid):extra.update(permission=permission(s,meta['active'],d['permission']),bound_task=identity(s,meta['active']))
             return response(s,fid,**extra)
@@ -771,10 +905,13 @@ def _handle(s,meta,workspace,root,req,providers=None):
             move(s, fid, 'BINDING', 'GIT_SNAPSHOT_CONFIRMED', workflow_stop=None, git_provenance=snapshot)
             return response(s, fid, progress=summary(snapshot))
         if event!='resume':raise InvalidUpdate('Workflow paused. Choose Resume or Discard; allocations remain unchanged.')
-        stopped=[e for e in m.events(s,fid) if e['kind'] in ('MAPPING_STOPPED','CONTEXT_STOPPED','RESOURCE_STOPPED','ROUTING_STOPPED','MEMORY_STOPPED','CLAIM_REVIEW_STOPPED')]
+        saved_phase_stops = ('RESOURCE_STOPPED', 'ROUTING_STOPPED', 'MEMORY_STOPPED',
+                             'CLAIM_REVIEW_STOPPED', 'DOCUMENT_STAGE_STOPPED', 'CHILD_SLICE_STOPPED')
+        stopped = [e for e in m.events(s, fid)
+                   if e['kind'] in (*saved_phase_stops, 'MAPPING_STOPPED', 'CONTEXT_STOPPED')]
         if not stopped:raise InvalidUpdate('Paused workflow requires inspection before recovery')
         last=stopped[-1]
-        target=(last['data']['workflow_stop']['resume_phase'] if last['kind'] in ('RESOURCE_STOPPED','ROUTING_STOPPED','MEMORY_STOPPED','CLAIM_REVIEW_STOPPED')
+        target=(last['data']['workflow_stop']['resume_phase'] if last['kind'] in saved_phase_stops
                 else last['from'] if last['kind']=='CONTEXT_STOPPED' else 'MAPPING')
         if target!='CLASSIFYING':
             if not req.get('armed'):raise InvalidUpdate('Workspace workflow requires a user-armed harness')
@@ -815,7 +952,13 @@ def _handle(s,meta,workspace,root,req,providers=None):
         if not d.get('conversation_session'):
             move(s,fid,'CLASSIFYING','CONVERSATION_BOUND',conversation_session=request['conversation_session'])
         try:
-            chat=converse(s,meta,root,request,provider=provider('conversation'),axis=axis)
+            if 'document_evidence' in request:
+                staged = advance_document_stage(s, root, f, d, request, provider)
+                if staged is not None:
+                    return staged
+                if d.get('document_stage_plan', {}).get('version') == 2:
+                    return advance_document_verdict(s, meta, root, fid, d, request, axis, provider)
+            chat=converse(s,meta,root,request,provider=provider('conversation'),axis=axis,orchestrated=True)
         except (ContextBudgetExceeded,BudgetStop,m.OrchestrationStop,RoutingBlocked) as exc:
             if isinstance(exc,ContextBudgetExceeded):observe_fault(s,request['conversation_session'],exc)
             stop={'status':'routing_budget','resume_phase':'CLASSIFYING','error':str(exc),
@@ -824,6 +967,11 @@ def _handle(s,meta,workspace,root,req,providers=None):
             return response(s,fid)
         r=chat['result']
         if not r['admission']['admitted']:
+            if request.get('document_stage_flow'):
+                progress = 'Document synthesis stopped.'
+                stop_document_stage(s, fid, r['admission']['errors'], progress)
+                chat['routing_followup'] = {'kind': 'document_synthesis', 'reason': progress}
+                return response(s, fid, routing_step=chat, progress=progress)
             move(s,fid,'DONE','REJECTED',conversation_id=r['invocation_id']);return response(s,fid,conversation=chat)
         next_step=chat.get('routing_followup')
         if next_step:
@@ -986,10 +1134,28 @@ def _handle(s,meta,workspace,root,req,providers=None):
         from resource_routing import effective
         pending=[i for i in d['children'] if m.state(s,i)!='DONE']
         if pending:
-            if m.state(s,pending[0]) in m.TERMINAL:raise InvalidUpdate('Child is quarantined or cancelled; result cannot be joined')
-            out=run(s,meta,workspace,root,pending[0],models,effective(d,models,tier),provider('subagent'))
-            move(s,fid,'CHILDREN','CHILD_FINISHED',last_child=pending[0],last_model=out['route']['model'])
-            return response(s,fid,child=out,progress='Child review '+m.state(s,pending[0]))
+            child = pending[0]
+            if m.state(s,child) in m.TERMINAL:raise InvalidUpdate('Child is quarantined or cancelled; result cannot be joined')
+            out=run(s,meta,workspace,root,child,models,effective(d,models,tier),provider('subagent'))
+            latest = {'last_child': child, 'last_model': out['route']['model']}
+            if out.get('slice_status') == 'timeout':
+                reason = out.get('slice_reason', 'timeout')
+                message = {
+                    'output_limit': 'The child review reached its output allowance before returning a checkpoint.',
+                    'interrupted': 'The child review was interrupted before returning a checkpoint.',
+                }.get(reason, 'The child review reached its time limit before returning a checkpoint.')
+                stop = {'status': 'child_slice_timeout', 'resume_phase': 'CHILDREN',
+                        'error': message, 'slice_reason': reason, 'slice_ordinal': out['slice_ordinal'],
+                        'branch_id': child, 'automatic_retry': False}
+                move(s, fid, 'PAUSED', 'CHILD_SLICE_STOPPED', workflow_stop=stop, **latest)
+                return response(s, fid, child=out)
+            if out.get('slice_status') == 'checkpoint':
+                ordinal = out['slice_ordinal']
+                move(s, fid, 'CHILDREN', 'CHILD_SLICE_SAVED', slice_ordinal=ordinal, **latest)
+                return response(s, fid, child=out,
+                                progress=f'Child review saved slice {ordinal}. Continuing the partition.')
+            move(s, fid, 'CHILDREN', 'CHILD_FINISHED', **latest)
+            return response(s, fid, child=out, progress='Child review '+m.state(s, child))
         if m.state(s,parent['id'])=='READY':
             joined=[e for e in m.events(s,parent['id']) if e['kind']=='JOIN']
             ids=joined[-1]['data']['invocations'] if joined else []

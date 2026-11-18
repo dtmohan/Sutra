@@ -7,6 +7,12 @@ from protocol import SELECT_SYSTEM, SELECT_SCHEMA, schema_for
 
 
 def expected_request(role, payload):
+    if role == 'document_extract':
+        from document_stages import SYSTEM as DOCUMENT_SYSTEM, schema
+        return DOCUMENT_SYSTEM, schema(payload)
+    if role == 'document_verdict_reviewer':
+        from document_verdict_review import SYSTEM as VERDICT_SYSTEM, schema
+        return VERDICT_SYSTEM, schema(payload)
     if role == 'review_reader':
         from review_followup import SYSTEM as READ_SYSTEM, schema
         return READ_SYSTEM, schema(payload)
@@ -103,6 +109,12 @@ def validate_permission_ops(operations):
 def validate_result(store, session, role, payload, schema, proposal, delivery_id):
     from task_observations import answer_schema, ROLES
     validate_shape(proposal, answer_schema(schema) if role in ROLES else schema)
+    if role == 'document_extract':
+        from document_stages import validate
+        return validate(store, session, payload, proposal)
+    if role == 'document_verdict_reviewer':
+        from document_verdict_review import validate
+        return validate(store, session, payload, proposal)
     if role == 'review_reader':
         from review_followup import validate
         return validate(store, session, payload, proposal)

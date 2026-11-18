@@ -562,12 +562,43 @@ function activate(context) {
   }
   const status=vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right,20);
   status.text='$(layers) Sutra';status.command='karma.open';status.tooltip='Open the local harness';status.show();
+  function conversationDetails(data, invocationId) {
+    const answer = data.result.accepted_output;
+    const citations = data.document_citations || [];
+    const lines = [nativeProvider.conversationMarkdown(answer), '---', 'Model: '+data.route.model,
+      tokens.markdown(data.result.token_usage), 'Conversation receipt: '+invocationId];
+    if (citations.length) {
+      lines.push('## Document quotations\n\n'+citations.map(citation => {
+        const quote = citation.quote.replace(/[\r\n]+/g, ' ').replace(/[\\`*_{}\[\]()<>#|!]/g, '\\$&');
+        return '- **'+citation.id+'** (extracted lines '+citation.start_line+'–'+citation.end_line+') '+quote;
+      }).join('\n'));
+    }
+    if (answer.diagram) {
+      lines.push('Open **Sutra: Open Last Diagram** to view the latest diagram.',
+        '```mermaid\n'+diagramView.mermaidSource(answer.diagram)+'\n```');
+    }
+    return lines.join('\n\n')+'\n';
+  }
   context.subscriptions.push(status,output,previewChanges,vscode.commands.registerCommand('karma.open',open),
     vscode.commands.registerCommand('karma.configureModels',()=>configureModels()),
     vscode.commands.registerCommand('karma.configureReasoning',()=>showPanelSection('reasoning')),
     vscode.commands.registerCommand('karma.openAdvanced',()=>showPanelSection('advanced')),
     vscode.commands.registerCommand('karma.newChatReview',()=>newChatReview()),
-    vscode.workspace.registerTextDocumentContentProvider('karma-preview',{onDidChange:previewChanges.event,provideTextDocumentContent(uri){if(uri.toString().startsWith('karma-preview:/activity/'))return usage?.activityDocument(uri.toString())||'Reasoning history is not ready.';const match=uri.toString().match(/^karma-preview:\/conversation\/([a-f0-9]{32})\/Response\.md(?:\?checkpoint=[a-f0-9]{64})?$/);if(match)return request({op:'conversation_read',invocation_id:match[1]}).then(data=>{const p=data.result.accepted_output;return p.answer+'\n\n---\n\nModel: '+data.route.model+'\n\n'+tokens.markdown(data.result.token_usage)+'\nConversation receipt: '+match[1]+'\n\nWorkspace tools: not used by the conversation role.\n\n'+(p.diagram?'Open **Sutra: Open Last Diagram** to view the latest diagram.\n\n```mermaid\n'+diagramView.mermaidSource(p.diagram)+'\n```':'');});return previewDocuments.get(uri.toString())||'';}}),
+    vscode.workspace.registerTextDocumentContentProvider('karma-preview', {
+      onDidChange: previewChanges.event,
+      provideTextDocumentContent(uri) {
+        const value = uri.toString();
+        if (value.startsWith('karma-preview:/activity/')) {
+          return usage?.activityDocument(value) || 'Reasoning history is not ready.';
+        }
+        const match = value.match(/^karma-preview:\/conversation\/([a-f0-9]{32})\/Response\.md(?:\?checkpoint=[a-f0-9]{64})?$/);
+        if (match) {
+          return request({op:'conversation_read', invocation_id:match[1]})
+            .then(data => conversationDetails(data, match[1]));
+        }
+        return previewDocuments.get(value) || '';
+      },
+    }),
     vscode.commands.registerCommand('karma.exportDebug',async()=>{const data=await request({op:'dashboard'});
       const uri=await vscode.window.showSaveDialog({defaultUri:vscode.Uri.file(path.join(workspace(),'karma-debug.json')),filters:{JSON:['json']}});
       if(uri)await vscode.workspace.fs.writeFile(uri,Buffer.from(JSON.stringify(data,null,2)+'\n'));}),

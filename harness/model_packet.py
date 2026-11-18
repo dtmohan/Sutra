@@ -19,14 +19,15 @@ def role_for(system):
     # Lazy imports avoid cycles with role schema builders and Budget.
     import chat_runtime, subagent_runtime, report_review, conversation
     import review_role, coding_role, architecture_role, api_roles, static_role
-    import checked_protocol, protocol, legacy_model, memory_probe, review_followup
+    import checked_protocol, protocol, legacy_model, memory_probe, review_followup, document_stages, document_verdict_review
     systems = {'review_reader': review_followup.SYSTEM, 'chat_reviewer': chat_runtime.SYSTEM, 'subagent': subagent_runtime.SYSTEM,
         'report_reviewer': report_review.SYSTEM, 'conversation': conversation.SYSTEM,
         'reviewer': review_role.SYSTEM, 'coder': coding_role.SYSTEM,
         'architect': architecture_role.SYSTEM, 'api_mapper': api_roles.MAP_SYSTEM,
         'api_reviewer': api_roles.REVIEW_SYSTEM, 'static_explainer': static_role.SYSTEM,
         'worker': checked_protocol.SYSTEM, 'selector': protocol.SELECT_SYSTEM,
-        'parser': legacy_model.EXTRACTOR, 'memory_probe': memory_probe.SYSTEM}
+        'parser': legacy_model.EXTRACTOR, 'memory_probe': memory_probe.SYSTEM,
+        'document_extract': document_stages.SYSTEM, 'document_verdict_reviewer': document_verdict_review.SYSTEM}
     return next((role for role, text in systems.items() if system == text), None)
 
 
@@ -146,6 +147,12 @@ def build(system, payload, schema):
         if p.get('workspace_context'):
             p['workspace_context'] = {'goal': p['workspace_context']['goal'], 'constraints': requirements(p['workspace_context'])}
         messages_out = messages(system, p, fmt)
+    elif role == 'document_extract':
+        body = select(payload, ('request', 'section_text', 'repair'))
+        messages_out = [{'role': 'system', 'content': system}, {'role': 'user', 'content': canonical(body)}]
+    elif role == 'document_verdict_reviewer':
+        body = select(payload, ('request', 'quotes', 'answer', 'basis', 'citation_ids', 'repair'))
+        messages_out = [{'role': 'system', 'content': system}, {'role': 'user', 'content': canonical(body)}]
     elif role in REVIEW_ROLES:
         body = {'request': payload.get('request', payload['contract']['goal']), 'task': {'goal': payload['contract']['goal'],
                 'requirements': requirements(payload['contract'])}}
@@ -163,6 +170,11 @@ def build(system, payload, schema):
         if payload.get('evidence'):
             body['evidence'] = [select(p, ('id', 'text', 'path', 'line', 'next_line', 'cursor')) for p in payload['evidence']]
         if payload.get('branch'): body['objective'] = payload['branch']['objective']
+        if role == 'subagent' and payload.get('child_slice'):
+            body['slice_number'] = payload['child_slice']['ordinal']
+            body['earlier_slices_unverified'] = [
+                select(note, ('summary', 'remaining', 'citations')) for note in payload['child_checkpoint']
+            ]
         handoff = payload.get('conversation_handoff') or {}
         if handoff:
             body['conversation_note_unverified'] = note_view(handoff)
@@ -181,6 +193,14 @@ def build(system, payload, schema):
             body['repository']['last_tool'] = select(payload['repository'].get('last_tool'), ('kind', 'target', 'query', 'status', 'matches_or_excerpts', 'truncated', 'error', 'scanned_files', 'next_line', 'next_cursor', 'files')) or None
         if payload.get('repair'): body['repair'] = payload['repair']
         wire_system = system if role == 'review_reader' else SYSTEMS[role]
+        if role == 'subagent' and payload.get('child_slice'):
+            wire_system += (
+                ' Work on one bounded unit of the branch in this call. Use the saved findings and next steps as context. '
+                'If more distinct source work is needed, set slice_status to continue. Give a concise finding in answer '
+                'and summary, cite a new source quotation and name the next concrete check in remaining. Omit report '
+                'for a checkpoint. If this finishes the branch, use slice_status complete and include the branch report '
+                'when requested. Keep both kinds of reply short enough to finish the JSON object.'
+            )
         if role == 'architect' and 'operations_remaining' in body.get('repository', {}):
             wire_system += (' Each read, search or list uses one of repository.operations_remaining.'
                             ' A report needs current evidence from two distinct catalog files, or the sole file.')

@@ -1,3 +1,17 @@
+Sutra 0.44.0 — Resume child reviews
+
+Read-only workspace reviews save child findings between slices. After a timeout
+or output-limit pause, use Resume in Sutra Monitor. You can switch model tiers
+while retaining the checkpoint, scope and consumed budget.
+
+Long document reviews
+
+Approve the read of a named workspace DOCX in Sutra Auto. Extracted text
+above 24 KiB and up to 96 KiB is reviewed in sections. Auto starts synthesis
+on Low, checks the answer against the extracted quotations and can try a
+higher configured tier within the same task allocation. A fixed tier runs
+both stages with the selected model.
+
 Sutra 0.42.1 — Isolate chat and document context
 
 A native chat restores receipts that belong to its workspace and conversation.

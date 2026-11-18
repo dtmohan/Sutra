@@ -1,6 +1,8 @@
 'use strict';
 (function(root){
-  const labels={review_reader:'Architecture evidence selection',report_reviewer:'Architecture claim review',subagent:'Child review',conversation:'Conversation / routing',parser:'Task parsing',selector:'Page selection',worker:'Worker',coder:'Coding',reviewer:'Code review',chat_reviewer:'Workspace review',architect:'Architecture review',api_mapper:'API mapping',api_reviewer:'API verification',static_explainer:'Source explanation'};
+  const labels={review_reader:'Architecture evidence selection',report_reviewer:'Architecture claim review',subagent:'Child review',conversation:'Conversation / routing',document_extract:'Document evidence extraction',parser:'Task parsing',selector:'Page selection',worker:'Worker',coder:'Coding',reviewer:'Code review',chat_reviewer:'Workspace review',architect:'Architecture review',api_mapper:'API mapping',api_reviewer:'API verification',static_explainer:'Source explanation'};
+  labels.document_synthesis='Document synthesis';
+  labels.document_verdict_reviewer='Document verdict review';
   const valid=n=>Number.isSafeInteger(n)&&n>=0;
   const number=n=>valid(n)?n.toLocaleString('en-US'):'—';
   const stage=s=>labels[s]||s;

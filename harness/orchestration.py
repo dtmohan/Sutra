@@ -14,6 +14,8 @@ from karma_adapter import KarmaAdapter
 
 ACTIVE = ContextVar('sutra_orchestration_node', default=None)
 TERMINAL = {'DONE', 'CANCELLED', 'QUARANTINED'}
+SLICE_PROTOCOL = 1
+SLICE_STOPS = {'CHILD_SLICE_TIMED_OUT', 'CHILD_SLICE_OUTPUT_LIMIT'}
 EDGES = {
  'READY': {'RUNNING','WAITING_CHILDREN','DONE','PAUSED','CANCELLED','QUARANTINED'},
  'RUNNING': {'READY','DONE','PAUSED','CANCELLED','QUARANTINED'},
@@ -210,7 +212,8 @@ def fork(s,nid,proposals,signals,context):
             if 'versions' in child_context:child_context['versions']={name:context['versions'][name] for name in p['files']}
             children.append(create(s,'branch',parent['session'],nid,binding=parent['binding'],
                 goal=parent['goal'],objective=p['objective'],permissions=p['permissions'],limits=p['limits'],
-                context=child_context,context_hash=sha(canonical(child_context)),files=p['files'],roles=p.get('roles',['subagent'])))
+                context=child_context,context_hash=sha(canonical(child_context)),files=p['files'],
+                roles=p.get('roles',['subagent']),slice_protocol=SLICE_PROTOCOL))
         transition(s,nid,'WAITING_CHILDREN','FORK',{'children':[c['id'] for c in children],'signals':signals,'frames':frames},frames[0])
         return children
 
@@ -240,6 +243,10 @@ def admit(s,sid,kind,resource_id,cost,paths=(),role=None,payload=None,model=None
     scope_check(n,kind,paths,role)
     if n['kind']=='branch' and kind=='model':
         if not payload or payload.get('branch')!=packet(n):raise InvalidUpdate('Child model context differs from committed branch')
+        if n.get('slice_protocol') or 'child_slice' in payload:
+            check_slice(s,n['id'],payload.get('child_slice'),current=True)
+            if recover_child(s,n['id']):
+                raise InvalidUpdate('Recover the settled child slice before dispatching again')
     frames=gates(s,n['id'],cost);allowed(frames)
     if resource and resource.get('decision') and resource['decision']!='ALLOW':raise OrchestrationStop([resource])
     cid=uuid.uuid4().hex
@@ -267,14 +274,146 @@ def settle(s,owner,receipt,elapsed=None):
     pending=s.db.execute('SELECT COUNT(*) FROM orchestration_charges c LEFT JOIN orchestration_settlements r ON r.charge_id=c.id WHERE c.node_id=? AND r.charge_id IS NULL',(owner['node_id'],)).fetchone()[0]
     if state(s,owner['node_id'])=='RUNNING':transition(s,owner['node_id'],'RUNNING' if pending else 'READY','SETTLED',r)
 
+def _child_receipt(s,n,iid):
+    row=s.db.execute("""
+        SELECT i.record_json,i.digest,r.record_json,r.id,d.payload_json,d.payload_hash,
+               c.id,c.node_id,t.record_json,t.digest
+        FROM invocations i JOIN invocation_receipts r ON r.invocation_id=i.id AND r.session=i.session
+        JOIN deliveries d ON d.id=i.delivery_id AND d.session=i.session
+        JOIN orchestration_charges c ON c.resource_id=i.id AND c.kind='model'
+        JOIN orchestration_settlements t ON t.charge_id=c.id
+        WHERE i.id=? AND i.session=?
+          AND NOT EXISTS (SELECT 1 FROM invocation_quarantine q WHERE q.invocation_id=i.id)
+    """,(iid,n['session'])).fetchone()
+    if not row or n['kind']!='branch' or row[7]!=n['id']:
+        raise InvalidUpdate('Settled result does not belong to this child or was quarantined')
+    raw_envelope,envelope_hash,raw_receipt,receipt_id,raw_packet,packet_hash,charge_id,_,raw_settlement,settlement_hash=row
+    env,receipt,payload,settlement=map(json.loads,(raw_envelope,raw_receipt,raw_packet,raw_settlement))
+    owner=env.get('orchestration') or {}
+    if (env['role']!='subagent' or owner.get('node_id')!=n['id'] or owner.get('charge_id')!=charge_id
+            or payload.get('branch')!=packet(n) or env['contract_hash']!=n['binding']['contract_hash']
+            or env['logic_hash']!=n['binding']['logic_hash']
+            or sha('invocation-v1:'+raw_envelope)!=envelope_hash or receipt['invocation_hash']!=envelope_hash
+            or sha('invocation-receipt-v1:'+raw_receipt)!=receipt_id or receipt['invocation_id']!=iid
+            or sha(raw_packet)!=packet_hash or env['payload_hash']!=packet_hash or receipt['payload_hash']!=packet_hash
+            or sha(canonical(receipt['proposal']))!=receipt['response_hash']
+            or sha('orchestration-settlement-v1:'+raw_settlement)!=settlement_hash
+            or settlement['charge_id']!=charge_id or settlement['receipt']!=receipt_id):
+        raise InvalidUpdate('Child invocation, receipt or settlement failed integrity validation')
+    return env,receipt,payload
+
+
+def _cursor(previous):
+    return {'version':SLICE_PROTOCOL,'ordinal':len(previous)+1,
+            'predecessor':previous[-1]['invocation_id'] if previous else None}
+
+
+def _slice_history(s,nid):
+    n=node(s,nid);saved=[]
+    if n['kind']!='branch' or n.get('slice_protocol',SLICE_PROTOCOL)!=SLICE_PROTOCOL:
+        raise InvalidUpdate('Unsupported child slice protocol')
+    for event in events(s,nid):
+        if event['kind']!='CHILD_SLICE_SAVED':continue
+        data=event['data'];iid=data['invocation_id']
+        env,receipt,payload=_child_receipt(s,n,iid)
+        output=receipt['proposal']
+        if (data['child_slice']!=_cursor(saved) or payload.get('child_slice')!=data['child_slice']
+                or receipt['status']!='accepted' or output.get('slice_status')!='continue'):
+            raise InvalidUpdate('Child slice history does not match its accepted predecessor')
+        saved.append({'invocation_id':iid,'model':env['model'],'output':output})
+    return saved
+
+
+def slice_cursor(s,nid):
+    return _cursor(_slice_history(s,nid))
+
+
+def slice_history(s,nid,cursor):
+    saved=_slice_history(s,nid)
+    ordinal=cursor.get('ordinal') if isinstance(cursor,dict) else None
+    if (type(ordinal) is not int or not 1<=ordinal<=len(saved)+1
+            or type(cursor.get('version')) is not int or cursor!=_cursor(saved[:ordinal-1])):
+        raise InvalidUpdate('Child slice cursor does not match its checkpoint history')
+    return saved[:ordinal-1]
+
+
+def check_slice(s,nid,cursor,current=False):
+    if current:
+        expected=slice_cursor(s,nid)
+        if (not isinstance(cursor,dict) or type(cursor.get('version')) is not int
+                or type(cursor.get('ordinal')) is not int or cursor!=expected):
+            raise InvalidUpdate('Child slice cursor is stale or differs from its predecessor')
+    else:
+        slice_history(s,nid,cursor)
+
+
+def _resumable_failure(s,env,receipt):
+    if receipt['status']!='quarantined':return None
+    kind=receipt.get('failure_kind')
+    if kind=='timeout':return kind
+    if kind=='output_limit':
+        last=s.run(env['run_id'])['events'][-1]
+        if (last['kind']=='FIN' and last['data'].get('reason')=='child_slice_output_limit'
+                and last['data'].get('invocation_id')==env['id']):
+            return kind
+    return None
+
+
+def recover_child(s,nid):
+    n=checked(s,nid)
+    cursor=slice_cursor(s,nid)
+    stopped={event['data']['invocation_id'] for event in events(s,nid) if event['kind'] in SLICE_STOPS}
+    for iid, in s.db.execute("""
+        SELECT i.id FROM invocations i JOIN invocation_receipts r ON r.invocation_id=i.id
+        WHERE i.session=? AND json_extract(i.record_json,'$.orchestration.node_id')=?
+          AND (json_extract(r.record_json,'$.status')='accepted'
+               OR json_extract(r.record_json,'$.failure_kind') IN ('timeout','output_limit'))
+        ORDER BY i.rowid DESC
+    """,(n['session'],nid)):
+        if iid in stopped:continue
+        env,receipt,payload=_child_receipt(s,n,iid)
+        delivered=payload.get('child_slice')
+        if delivered!=cursor and not (delivered is None and not n.get('slice_protocol') and cursor['ordinal']==1):
+            continue
+        failure=_resumable_failure(s,env,receipt)
+        if failure or receipt['status']=='accepted':
+            return {'invocation_id':iid,'model':env['model'],'output':receipt['proposal'],
+                    'failure_kind':failure}
+    return None
+
+
+def timeout_child(s,nid,result_id):
+    with s.db:
+        n=checked(s,nid)
+        env,receipt,payload=_child_receipt(s,n,result_id)
+        cursor=payload.get('child_slice')
+        check_slice(s,nid,cursor,current=True)
+        kind=_resumable_failure(s,env,receipt)
+        if not kind or state(s,nid)!='READY':
+            raise InvalidUpdate('Child slice did not settle as a recoverable stop')
+        for event in events(s,nid):
+            if event['kind'] in SLICE_STOPS and event['data']['invocation_id']==result_id:return event
+        label='CHILD_SLICE_TIMED_OUT' if kind=='timeout' else 'CHILD_SLICE_OUTPUT_LIMIT'
+        return transition(s,nid,'READY',label,{'invocation_id':result_id,'child_slice':cursor,'failure_kind':kind})
+
+
 def complete(s,nid,result_id):
     with s.db:
         n=checked(s,nid)
-        s.load_result(n['session'],result_id)
-        row=s.db.execute('SELECT record_json FROM invocations WHERE id=?',(result_id,)).fetchone()
-        env=json.loads(row[0])
-        if n['kind']!='branch' or env['role']!='subagent' or env.get('orchestration',{}).get('node_id')!=nid:raise InvalidUpdate('Result does not belong to this child')
-        transition(s,nid,'DONE','RESULT',{'invocation_id':result_id})
+        _,receipt,payload=_child_receipt(s,n,result_id)
+        cursor=payload.get('child_slice')
+        if n.get('slice_protocol') or cursor is not None:
+            check_slice(s,nid,cursor,current=True)
+        if state(s,nid)!='READY' or receipt['status']!='accepted':
+            raise InvalidUpdate('Child result was not accepted and settled')
+        output=s.load_result(n['session'],result_id)
+        status=output.get('slice_status','complete')
+        data={'invocation_id':result_id}
+        if cursor is not None:data['child_slice']=cursor
+        if status=='continue' and cursor is not None:
+            return transition(s,nid,'READY','CHILD_SLICE_SAVED',data)
+        if status!='complete':raise InvalidUpdate('Invalid child slice outcome')
+        return transition(s,nid,'DONE','RESULT',data)
 
 def join(s,nid):
     with s.db:
@@ -285,7 +424,15 @@ def join(s,nid):
             if state(s,cid)!='DONE':raise InvalidUpdate('Child results are not ready to join')
             c=node(s,cid)
             if c['binding']!=binding(s,parent['session']):raise InvalidUpdate('Child context became stale')
-            iid=events(s,cid)[-1]['data']['invocation_id'];s.load_result(parent['session'],iid);results.append(iid)
+            final=events(s,cid)[-1]
+            if final['kind']!='RESULT':raise InvalidUpdate('Child has no completed slice to join')
+            iid=final['data']['invocation_id']
+            _,receipt,payload=_child_receipt(s,c,iid)
+            if c.get('slice_protocol') or 'child_slice' in payload:
+                check_slice(s,cid,payload.get('child_slice'),current=True)
+            if receipt['status']!='accepted' or receipt['proposal'].get('slice_status','complete')!='complete':
+                raise InvalidUpdate('Child result is not a completed, accepted slice')
+            s.load_result(parent['session'],iid);results.append(iid)
         if not results:raise InvalidUpdate('Join requires child results')
         transition(s,nid,'READY','JOIN',{'invocations':results})
         return results

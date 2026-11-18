@@ -84,6 +84,13 @@ def bind_output(p, proposal):
 
 DOCUMENT_EVIDENCE_REF = ('key', 'version', 'digest')
 PERCENT = re.compile(r'(?<![\d.])(\d+(?:\.\d+)?)\s*(?:%|percent\b)', re.IGNORECASE)
+BARE_VERDICT = re.compile(r'\W*(?:yes|no|go|hold|no[- ]go|pass|fail|approved|rejected|unknown)\W*', re.I)
+DOCUMENT_CITATION = re.compile(r'(?<![\w-])D\d+-E\d+(?![\w-])')
+
+
+def document_citation_ids(proposal):
+    prose = proposal['answer'] + '\n' + proposal.get('basis', '')
+    return list(dict.fromkeys([*proposal.get('citation_ids', []), *DOCUMENT_CITATION.findall(prose)]))
 
 
 def retained_document_reference(s, sid, parent, *, unique=False):
@@ -156,6 +163,23 @@ def supplied_document(p):
 
 
 def schema(p):
+    if p.get('document_stage_flow'):
+        ids = [item['id'] for item in p['document_synthesis']['evidence']]
+        fmt = obj({
+            'intent': {'type': 'string', 'enum': ['conversation']},
+            'context_binding': {'type': 'string', 'enum': [p['context_binding']]},
+            'answer': {'type': 'string', 'minLength': 1, 'maxLength': 6000},
+            'summary': {'type': 'string', 'minLength': 1, 'maxLength': 450},
+            'citation_ids': {'type': 'array', 'minItems': min(1, len(ids)), 'maxItems': min(24, len(ids)),
+                             'items': {'type': 'string', 'enum': ids} if ids else {'type': 'string'}},
+            'escalation_reason': {'type': 'string', 'enum': ['none']},
+            'page_requests': {'type': 'array', 'maxItems': 0, 'items': {'type': 'string'}},
+            'diagram': {'type': 'null'},
+        })
+        if p.get('document_review_version') == 2:
+            fmt['properties']['basis'] = {'type': 'string', 'maxLength': 700}
+            fmt['required'].append('basis')
+        return fmt
     available = [r['id'] for r in (p.get('memory') or {}).get('toc', [])]
     quotations = list(dict.fromkeys(q for q in re.split(r'(?<=[.!?])\s+|\n+', p['request']) if q.strip()))
     intents = ['conversation']
@@ -270,7 +294,8 @@ def memory(s, sid, iid):
 
 def binding(p):
     fields = [p['contract'], p['workspace_context'], p['routing_capabilities']]
-    for key in ('document_evidence', 'document_offer', 'conversation_axis'):
+    for key in ('document_evidence', 'document_offer', 'conversation_axis', 'document_stage_flow',
+                'document_synthesis', 'document_review_version'):
         if key in p:
             fields.append(p[key])
     return sha(canonical(fields))
@@ -296,6 +321,18 @@ def check_workspace_handoff(s, sid, p):
         raise InvalidUpdate('Workspace conversation note differs from admitted receipt')
 
 
+def document_synthesis(s, sid, flow, ref, prompt, parent):
+    from document_stages import committed_plan, synthesis_packet
+    plan = committed_plan(s, sid, flow)
+    if (plan['document_ref'] != ref or plan['prompt_hash'] != sha(prompt)
+            or plan['parent'] != parent):
+        raise InvalidUpdate('Document synthesis differs from its scoped request')
+    evidence = synthesis_packet(s, sid, flow)
+    if not evidence['evidence']:
+        raise InvalidUpdate('Document synthesis requires supporting quotations from the approved document')
+    return evidence
+
+
 def request_check(s, sid, p):
     if p.get('response_contract') != 2:
         raise InvalidUpdate('Conversation response contract changed')
@@ -312,7 +349,18 @@ def request_check(s, sid, p):
         if (not isinstance(offer, dict) or 'document_evidence' in p
                 or offer != offer_for_request(s, sid, offer.get('flow_id'), p['request'], p['routing_state']['parent'])):
             raise InvalidUpdate('Invalid retained document offer')
-    if 'document_evidence' in p:
+    if 'document_stage_flow' in p or 'document_synthesis' in p:
+        from document_stages import committed_plan
+        version = committed_plan(s, sid, p.get('document_stage_flow'))['version']
+        if p.get('document_review_version') != (version if version == 2 else None):
+            raise InvalidUpdate('Document synthesis review policy differs from the committed plan')
+        expected = document_synthesis(s, sid, p.get('document_stage_flow'), p.get('document_evidence'),
+                                      p['request'], p['routing_state']['parent'])
+        if p.get('document_synthesis') != expected:
+            raise InvalidUpdate('Document synthesis evidence differs from its admitted receipts')
+    elif 'document_review_version' in p:
+        raise InvalidUpdate('Document review policy requires a staged document')
+    elif 'document_evidence' in p:
         supplied = p['document_evidence']
         if not isinstance(supplied, dict) or any(key not in supplied for key in DOCUMENT_EVIDENCE_REF):
             raise InvalidUpdate('Invalid document evidence payload')
@@ -359,7 +407,20 @@ def check_delivery(p, proposal):
     if not answer or len(re.findall(r'^\s*```[^\n]*$', answer, re.M)) % 2:
         raise InvalidUpdate('Complete the answer and close every fenced code block; summary cannot finish the answer.')
     if p.get('document_evidence'):
-        text = p['document_evidence']['text']
+        staged = p.get('document_synthesis')
+        if staged is None:
+            text = p['document_evidence']['text']
+        else:
+            evidence = staged['evidence']
+            text = '\n'.join(item['quote'] for item in evidence)
+            ids = proposal.get('citation_ids', [])
+            basis = proposal.get('basis', '').strip()
+            if p.get('document_review_version') == 2 and not basis and BARE_VERDICT.fullmatch(answer):
+                raise InvalidUpdate('Explain the decisive evidence for the verdict in answer or basis. The summary is private.')
+            answer = '\n'.join((answer, basis))
+            cited = set(document_citation_ids(proposal))
+            if cited - {item['id'] for item in evidence} or (evidence and not ids) or len(ids) != len(set(ids)):
+                raise InvalidUpdate('Cite evidence using only the supplied document evidence IDs.')
         if set(PERCENT.findall(answer)) - set(PERCENT.findall(text)):
             raise InvalidUpdate(DOCUMENT_PERCENT_ERROR + ' Use placeholders such as [measured improvement].')
     pages = proposal.get('page_requests', [])
@@ -391,17 +452,42 @@ def check_delivery(p, proposal):
         raise InvalidUpdate('Set top-level page_requests from the TOC, or context_question if no listed page contains the missing evidence.')
 
 
-def read(s, iid):
+def read(s, iid, *, staged_candidate=False):
     if not isinstance(iid, str) or not re.fullmatch('[a-f0-9]{32}', iid):
         raise InvalidUpdate('Invalid conversation receipt')
-    row = s.db.execute('SELECT session,record_json FROM invocations WHERE id=?', (iid,)).fetchone()
+    row = s.db.execute("""SELECT i.session,i.record_json,d.payload_json FROM invocations i
+                          JOIN deliveries d ON i.delivery_id=d.id AND i.session=d.session
+                          WHERE i.id=?""", (iid,)).fetchone()
     if not row or json.loads(row[1])['role'] != 'conversation':
         raise InvalidUpdate('Unknown conversation receipt')
+    packet = json.loads(row[2])
+    verification = None
+    if packet.get('document_review_version') == 2 and not staged_candidate:
+        from document_stages import publication
+        verification = publication(s, packet, iid)
     proposal = s.load_result(row[0], iid)
     from token_usage import history
     usage = history(s.db, run_id=json.loads(row[1])['run_id'])
-    return {'session': row[0], 'route': {'model': json.loads(row[1])['model']},
-            'result': {'token_usage': usage, 'invocation_id': iid, 'admission': {'admitted': True}, 'accepted_output': proposal}}
+    result = {'session': row[0], 'route': {'model': json.loads(row[1])['model']},
+              'result': {'token_usage': usage, 'invocation_id': iid, 'admission': {'admitted': True}, 'accepted_output': proposal}}
+    if verification:
+        result['document_verification'] = verification
+        result['result']['admission']['semantic_correctness_verified'] = False
+        memory = packet['memory']
+        result.update(memory_allocation=packet['memory_allocation'], model_capacity=packet['model_capacity'],
+                      memory_status={key: memory[key] for key in ('stored_turns', 'omitted_turns', 'legacy_data_restored')}
+                      if memory else {'stored_turns': 0, 'omitted_turns': 0}, reasoning=packet['reasoning'])
+        from review_budget import decision
+        result['budget'] = decision(s, row[0])
+    if 'document_synthesis' in packet:
+        evidence = packet['document_synthesis']
+        spans = {section['id']: section for section in evidence['sections']}
+        result['document_citations'] = [
+            {'id': item['id'], 'quote': item['quote'],
+             'start_line': spans[item['section']]['start_line'], 'end_line': spans[item['section']]['end_line']}
+            for item in evidence['evidence'] if item['id'] in document_citation_ids(proposal)
+        ]
+    return result
 
 
 def session_for(s,request,*,axis=None):
@@ -424,8 +510,10 @@ def session_for(s,request,*,axis=None):
     return sid or open_session(s,prompt,axis)
 
 
-def answer(s,meta,root,request,provider=None,*,axis=None):
+def answer(s,meta,root,request,provider=None,*,axis=None,orchestrated=False):
     request=dict(request)
+    if request.get('document_stage_flow') and not orchestrated:
+        raise InvalidUpdate('Staged document synthesis requires the workflow')
     request['conversation_session']=session_for(s,request,axis=axis)
     calls=[]
     while True:
@@ -456,7 +544,15 @@ def _answer_step(s,meta,root,request,provider,axis):
     p['diagram_reference'] = visuals.reference(s, sid, parent, prompt)
     from capabilities import context as tool_context
     p['tool_evidence']=tool_context(s,meta.get('active'))
-    if 'document_evidence' in request:
+    if request.get('document_stage_flow'):
+        from document_stages import committed_plan
+        p['document_stage_flow'] = request['document_stage_flow']
+        p['document_evidence'] = request['document_evidence']
+        if committed_plan(s, sid, p['document_stage_flow'])['version'] == 2:
+            p['document_review_version'] = 2
+        p['document_synthesis'] = document_synthesis(s, sid, p['document_stage_flow'],
+                                                     p['document_evidence'], prompt, parent)
+    elif 'document_evidence' in request:
         p['document_evidence'] = document_evidence(s, sid, request['document_evidence'], prompt, parent)
     elif 'document_offer_flow' in request:
         from document_routing import offer_for_request
