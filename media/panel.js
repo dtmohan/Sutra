@@ -2,6 +2,7 @@ const vscode=acquireVsCodeApi(), el=id=>document.getElementById(id);
 const modelTiers=['low','mid','high'];
 let preservedConstraints={};
 let current=null,selectedModel='local-assistant:latest',proposalId=null,proposalKind=null,busy=false,nativeState={},lastReceipt=null,cpuHistory=[],autoRunning=false;
+let strataState={profiles:[],models:[],available:false},strataPending=false;
 function send(op,data={}){el('error').textContent='';vscode.postMessage({op,...data});}
 function setText(id,text){const element=el(id);if(element.textContent!==text)element.textContent=text;}
 function fieldError(id,message){el(id).setAttribute('aria-invalid',String(!!message));setText(id+'-error',message);}
@@ -19,6 +20,7 @@ function updateButtons(){document.querySelectorAll('button,select').forEach(e=>e
   }
   el('save-model-tiers').disabled=busy||!modelCandidates.length;
   el('save-tier-reasoning').disabled=!!nativeBusy;
+  updateStrataButtons();
 }
 function save(op){try{const extra={...preservedConstraints};
   setText('constraint-error','');
@@ -124,7 +126,7 @@ window.addEventListener('message',({data:m})=>{
  }
   if(m.type==='auto-running'){autoRunning=m.value;updateButtons();}
   if(m.type==='busy'){busy=m.value;updateButtons();el('status').textContent=busy?'Working locally…':'';}
-  if(m.type==='error')el('error').textContent=m.message;
+  if(m.type==='error'){el('error').textContent=m.message;if(strataPending){strataPending=false;updateStrataButtons();}}
   if(m.type==='dashboard'){showDashboard(m.data);if(!m.data.hardware?.available||!KarmaTokens.freshAge(m.data.hardware.age_seconds))expireDashboard('Readings expired. Waiting for a fresh update.');}
   if(m.type==='models'){for(const id of ['model','review-model','api-model','static-model','auto-model']){el(id).replaceChildren(...m.data.map(x=>{const o=document.createElement('option');o.value=x.name;o.textContent=x.name;return o;}));if(id==='api-model'){const opt=document.createElement('option');opt.value='auto';opt.textContent='Auto · prefer different model weights';el(id).prepend(opt);}const preferred=id==='api-model'?'auto':id==='static-model'&&!current?.static?.model?'qwen3.6:35b':selectedModel;el(id).value=preferred==='auto'||m.data.some(m=>m.name===preferred)?preferred:selectedModel;}}
   if(m.type==='state'){
@@ -267,6 +269,62 @@ for(const tier of ['low','mid','high'])el('tier-'+tier).onchange=()=>{
 };
 el('refresh-models').onclick=()=>send('refresh_models');
 el('save-model-tiers').onclick=()=>send('save_model_tiers',{models:Object.fromEntries(['low','mid','high'].map(t=>[t,el('tier-'+t).value]))});
+
+function strataBusy(){return !!(busy||nativeState.arming||nativeState.selecting||nativeState.working||strataState.busy||strataPending);}
+function selectedStrataProfile(){return strataState.profiles.find(profile=>profile.id===el('strata-profile').value);}
+function updateStrataButtons(){
+ const waiting=strataBusy(),available=strataState.available===true,selected=selectedStrataProfile();
+ el('strata-manager').setAttribute('aria-busy',String(!!(strataState.busy||strataPending)));
+ el('strata-profile').disabled=waiting||!available||!strataState.profiles.length;
+ el('strata-load').disabled=waiting||!available||!selected;
+ el('strata-unload').disabled=waiting||!available||!['ready','starting'].includes(strataState.runtime_state);
+ el('strata-refresh').disabled=waiting;
+ el('strata-add-config').disabled=waiting||!available;
+ el('strata-setup').disabled=waiting||!available;
+ el('strata-locate').disabled=waiting;
+ el('strata-autostart').disabled=waiting||!available||!selected;
+}
+function strataProfileDetails(){
+ const profile=selectedStrataProfile();
+ const context=Number.isSafeInteger(profile?.context_tokens)&&profile.context_tokens>0?profile.context_tokens.toLocaleString()+' context tokens':'Context size not reported';
+ setText('strata-profile-info',profile?[
+  profile.model||profile.name||'Native profile',context,
+  profile.selected?'Current High profile':'Available native profile'
+ ].join(' · '):'Add an installed model or run Strata setup to create a runtime profile.');
+ updateStrataButtons();
+}
+function showStrata(data){
+ const previous=el('strata-profile').value;
+ strataPending=false;
+ strataState={...data,profiles:Array.isArray(data?.profiles)?data.profiles:[],models:Array.isArray(data?.models)?data.models:[]};
+ const select=el('strata-profile');select.replaceChildren();
+ for(const profile of strataState.profiles){
+  const option=textNode('option',(profile.name||profile.id)+(profile.selected?' · current High':''));option.value=profile.id;select.append(option);
+ }
+ if(!strataState.profiles.length){const empty=textNode('option','No profile discovered');empty.value='';select.append(empty);}
+ select.value=strataState.profiles.some(profile=>profile.id===previous)?previous:
+  (strataState.profiles.find(profile=>profile.selected||profile.id===strataState.selected_profile)?.id||strataState.profiles[0]?.id||'');
+ setText('strata-runtime-state',({ready:'Loaded',starting:'Loading',stopped:'Unloaded',stale:'Needs recovery',failed:'Load failed'})[strataState.runtime_state]||(strataState.available?'Available':'Not connected'));
+ setText('strata-status',strataState.error||strataState.message||(strataState.available?'Choose a native profile to load.':'Locate the Strata executable to connect its runtime.'));
+ el('strata-autostart').checked=strataState.start_on_startup===true;
+ const list=el('strata-installed-models');list.replaceChildren();
+ for(const model of strataState.models){
+  const context=Number.isSafeInteger(model.context_tokens)&&model.context_tokens>0?' · '+model.context_tokens.toLocaleString()+' context tokens':'';
+  list.append(textNode('li',(model.name||model.id)+context));
+ }
+ setText('strata-installed-note',strataState.models.length?strataState.models.length+' installed model '+(strataState.models.length===1?'candidate':'candidates')+'. A ready runtime confirms the selected model can run.':'No installed model candidates reported. Setup can locate or download supported model files.');
+ strataProfileDetails();
+}
+function strataAction(op,fields={}){
+ if(strataBusy())return;
+ strataPending=true;setText('strata-status',({strata_refresh:'Checking the native Strata runtime…',strata_load:'Checking resources and loading the selected native profile…',strata_unload:'Checking that the native runtime is idle before unloading…',strata_add_config:'Choose an installed model configuration in VS Code…',strata_setup:'Opening native Strata setup…',strata_locate:'Choose the Strata executable in VS Code…',strata_autostart:'Saving the native runtime startup preference…'})[op]);
+ updateStrataButtons();send(op,fields);
+}
+el('strata-profile').onchange=strataProfileDetails;
+el('strata-load').onclick=()=>{const selected=selectedStrataProfile();if(selected)strataAction('strata_load',{id:selected.id});};
+for(const action of ['unload','refresh','add-config','setup','locate'])el('strata-'+action).onclick=()=>strataAction('strata_'+action.replaceAll('-','_'));
+el('strata-autostart').onchange=()=>strataAction('strata_autostart',{enabled:el('strata-autostart').checked});
+window.addEventListener('message',({data:m})=>{if(m.type==='strata-state')showStrata(m.data);});
 
 window.addEventListener('message',({data:m})=>{
  if(m.type==='runtime-settings'){

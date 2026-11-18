@@ -47,6 +47,22 @@ class ProviderStartupTests(unittest.TestCase):
         self.assertEqual(result['decision'], 'BRIDGE')
         self.assertEqual(result['memory_allocation']['decision'], 'ALLOW')
 
+    def test_explicit_native_first_load_labels_the_unknown_peak(self):
+        result = provider_startup.admission(None, self.storage, native_fit=True)
+        self.assertTrue(result['admitted'])
+        self.assertTrue(result['native_fit_only'])
+        self.assertFalse(result['peak_memory_verified'])
+        self.assertIsNone(result['cold_memory_bytes'])
+        self.assertIn('unknown', result['reason'])
+        with self.assertRaises(ValueError):
+            provider_startup.admission(None, self.storage)
+
+    def test_native_fit_cannot_override_pressure_or_system_reserve(self):
+        for observation in (sample(pressure=2), sample(free=3 * GIB)):
+            self.collect.return_value = observation, 'native-telemetry'
+            result = provider_startup.admission(None, self.storage, native_fit=True)
+            self.assertFalse(result['admitted'])
+
     def test_insufficient_capacity_uses_existing_memory_adapter(self):
         self.collect.return_value = sample(free=21 * GIB), 'native-telemetry'
         result = provider_startup.admission(20 * GIB, self.storage)

@@ -1,4 +1,33 @@
-# Sutra 0.46.0 — Persistent host memory
+# Sutra 0.47.0 — Native model management
+
+Open **Sutra → Settings → Models → Strata High runtime**, or run
+**Sutra: Manage Native Models**. Discover installed native profiles, load or
+switch the selected profile, and unload an idle instance. Sutra verifies
+Strata's native generation readiness and server identity before saving High.
+Low and Mid retain their Ollama choices. Automatic startup is optional.
+
+**Add installed model…** registers a native run configuration as a serving
+profile. **Locate Strata…** finds an installed native CLI without editing JSON.
+**Set up / download a model…** previews Strata's recommended model and download size, then opens its
+install-only setup in VS Code's Terminal panel after confirmation. Add the
+resulting configuration and choose Load to activate it. Strata supplies model
+acquisition, native execution and runtime ownership.
+Model weights and the native engine are installed separately from the VSIX.
+Native model-management controls are currently supported on a local Mac.
+
+Cold memory estimates are bound to the exact profile, source configuration and
+runtime environment. A new unmeasured profile uses fresh hardware and reserve
+checks while Strata sizes its own runtime. Loading refreshes system pressure;
+this is not a verified peak-memory estimate. A failed load retains the saved
+selection and reports whether the previous native profile could be recovered.
+Automatic startup uses the selected profile's saved admission mode.
+
+These controls are trusted user actions. Models cannot choose native executable
+paths, install components, or change permissions through this manager. Provider
+changes leave durable task context, constraints and consumed budgets in place.
+The canonical STP kernel is unchanged.
+
+## Sutra 0.46.0 — Persistent host memory
 
 Normal requests reuse a workspace-scoped Python worker. Active RAM holds decoded
 pages and receipt data used by the current request. Recently used entries move

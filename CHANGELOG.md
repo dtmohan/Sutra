@@ -1,3 +1,13 @@
+## 0.47.0
+
+- Added a native Strata model manager in Settings → Models and the Command Palette.
+- Discover and register native profiles, load/switch with verified readiness,
+  unload exact idle owners, and keep prior selections on failed activation.
+- Added executable discovery and native setup in the VS Code Terminal panel.
+- Bound cold estimates to profile/configuration/environment identity; monitor
+  fresh hardware during first loads without labelling estimates as measured peaks.
+- Preserve Ollama Low/Mid, task ledgers, permissions and canonical STP kernel.
+
 # Changelog
 
 ## 0.46.0

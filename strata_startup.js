@@ -1,5 +1,6 @@
 'use strict';
 const {execFile} = require('node:child_process');
+const {createHash} = require('node:crypto');
 const {constants, promises:fs} = require('node:fs');
 const http = require('node:http');
 const {connect} = require('node:net');
@@ -56,7 +57,8 @@ function validProfile(profile, selected) {
     typeof profile.executable === 'string' && isAbsolute(profile.executable) &&
     !/[\x00-\x1f\x7f]/.test(profile.executable) &&
     typeof profile.profile === 'string' && /^[a-z][a-z0-9_-]{0,63}$/.test(profile.profile) &&
-    Number.isSafeInteger(profile.cold_memory_bytes) && profile.cold_memory_bytes > 0 &&
+    ((Number.isSafeInteger(profile.cold_memory_bytes) && profile.cold_memory_bytes > 0) ||
+      (profile.cold_memory_bytes === null && profile.native_fit_authorized === true && profile.memory_binding)) &&
     profile.environment && typeof profile.environment === 'object' && !Array.isArray(profile.environment) &&
     Object.entries(profile.environment).every(([key,value]) => environmentKeys.has(key) &&
       typeof value === 'string' && value.length <= 4096 && !/[\x00-\x1f\x7f]/.test(value));
@@ -134,6 +136,12 @@ function matchingPlan(result, profile) {
     /^[0-9a-f]{64}$/.test(plan.source_sha256);
 }
 
+function memoryBinding(profile, plan) {
+  return {profile_revision:plan.launch.profile_revision, source_sha256:plan.source_sha256,
+    environment_sha256:createHash('sha256').update(JSON.stringify({executable:profile.executable,
+      environment:Object.entries(profile.environment).sort(([a],[b])=>a.localeCompare(b))})).digest('hex')};
+}
+
 async function configured(getConfig, readProfile, automatic) {
   const selected = selection(getConfig(), automatic);
   if (!selected.port) return {result:selected.invalid ? {
@@ -148,7 +156,7 @@ async function configured(getConfig, readProfile, automatic) {
     result:{status:'changed', message:'Strata settings changed before the runtime operation.'}
   };
   if (!validProfile(profile, selected)) return {result:{
-    status:'setup', message:`Configure the native Strata executable, saved profile, model and memory estimate in ~/${startupPath}.`
+    status:'setup', message:'Open Sutra → Settings → Models to locate Strata and load an installed native profile before enabling automatic startup.'
   }};
   return {selected, profile};
 }
@@ -187,6 +195,9 @@ async function start(getConfig, {
     const plan = await run(profile, 'start', ['--plan']);
     if (!matchingPlan(plan, profile)) return {
       status:'mismatch', message:'The native Strata start plan differs from the configured loopback port or model.'
+    };
+    if (profile.memory_binding && JSON.stringify(profile.memory_binding)!==JSON.stringify(memoryBinding(profile,plan.plan))) return {
+      status:'changed', message:'The native profile differs from its memory calibration. Load it from Sutra model settings with fresh hardware checks.'
     };
     const admission = await admit(profile.cold_memory_bytes);
     if (admission?.admitted !== true) return {
@@ -260,4 +271,6 @@ async function stop(getConfig, {
   }
 }
 
-module.exports = {settingKeys, start, stop};
+// Machine-management UI uses the same identity and lifecycle checks.
+module.exports = {settingKeys, start, stop, validProfile, readStartupProfile,
+  nativeCommand, readServer, matchingPlan, memoryBinding, startupPath};

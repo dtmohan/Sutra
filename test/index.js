@@ -50,6 +50,12 @@ exports.run=async()=>{
   const configured=vscode.workspace.getConfiguration('karma').get('models');
   assert(['low','mid','high'].every(t=>typeof configured[t]==='string'&&configured[t].length>0));
   report.model_defaults=configured;report.checks.push('installed local model metadata prefills all three tier settings in the isolated profile');
+  assert((await vscode.commands.getCommands(true)).includes('karma.manageStrata'));
+  const managed=await vscode.commands.executeCommand('karma.manageStrata');
+  assert(Array.isArray(managed.profiles)&&Array.isArray(managed.models));
+  assert(html.includes('id="strata-manager"')&&html.includes('id="strata-autostart"'));
+  report.native_model_catalog={available:managed.available,profiles:managed.profiles.length};
+  report.checks.push('native model-management command opens Settings and discovers profiles with the packaged controller');
   const startCommand=extension.packageJSON.contributes.commands.find(command=>command.command==='karma.useNativeChat');
   assert.equal(startCommand.title,'Sutra: Open Chat (Sutra Auto)');
   await vscode.commands.executeCommand(startCommand.command);

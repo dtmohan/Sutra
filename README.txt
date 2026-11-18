@@ -1,3 +1,23 @@
+Sutra 0.47.0 — Native model management
+
+Open Sutra > Settings > Models > Strata High runtime, or run Sutra: Manage
+Native Models. Discover, load, switch and unload native profiles. Successful
+loads verify native generation readiness and server identity before selecting
+High. Low and Mid retain their Ollama choices. Startup is optional.
+
+Add installed model registers a native run configuration. Locate Strata finds
+an installed CLI. Set up / download previews the recommended model and download
+size, then runs Strata's install-only setup after confirmation. Add the resulting
+configuration and choose Load. Native engine and weights are installed separately.
+Managed lifecycle controls currently require a local Mac.
+
+Profile-bound estimates are reused only for the same configuration/environment.
+Unmeasured profiles use current hardware/reserve admission and Strata native
+sizing, with refreshed pressure while loading; peak memory is not verified.
+Failed loads preserve the saved selection and report recovery state.
+Task context, constraints and consumed budgets survive provider switches.
+The canonical STP kernel is unchanged.
+
 Sutra 0.46.0 — Persistent host memory
 
 Workspace requests reuse a persistent host worker with bounded active and warm

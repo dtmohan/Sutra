@@ -122,6 +122,17 @@ async function verify() {
     if (args.includes('--plan')) return structuredClone(plan);
     return {ok:true, profile:profile.profile, state:'starting'};
   };
+  const bound = {...profile, memory_binding:startup.memoryBinding(profile,plan.plan)};
+  assert.equal((await startup.start(getConfig(), options({readProfile:async()=>bound,run:observe}))).status,'starting');
+  assert.equal((await startup.start(getConfig(), options({
+    readProfile:async()=>({...bound,memory_binding:{...bound.memory_binding,source_sha256:'f'.repeat(64)}}),
+    run:observe,admit:fail
+  }))).status,'changed');
+  const firstLoad = {...bound,cold_memory_bytes:null,native_fit_authorized:true};
+  assert.equal((await startup.start(getConfig(),options({
+    readProfile:async()=>firstLoad,run:observe,
+    admit:async bytes=>{assert.equal(bytes,null);return {admitted:true};}
+  }))).status,'starting');
   assert.equal((await startup.start(getConfig({...user, 'strata.startOnStartup':false}), options({
     automatic:false, run:observe
   }))).status, 'starting');

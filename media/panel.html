@@ -13,7 +13,7 @@ progress{display:block;width:100%;height:6px;border:0;border-radius:4px;overflow
 [aria-invalid=true]{border-color:var(--vscode-inputValidation-errorBorder,#ef9494)!important}.field-error{color:var(--vscode-errorForeground,#ef9494);font-size:12px;margin:4px 0 8px}
 #fixed-tier-reasoning{min-inline-size:0;border:1px solid var(--line);border-radius:6px;margin:18px 0;padding:12px}#fixed-tier-reasoning legend{font-weight:600;padding:0 5px}#tier-reasoning-status{margin:6px 0 0}#tier-reasoning-status:empty{display:none}
 </style></head><body>
-<header class="brand"><div class="brand-left"><span class="brand-mark" aria-hidden="true">S</span><div><h1>Sutra</h1><div class="muted">Your local AI workspace</div></div></div><span class="pill">Local models · 0.46.0</span></header>
+<header class="brand"><div class="brand-left"><span class="brand-mark" aria-hidden="true">S</span><div><h1>Sutra</h1><div class="muted">Your local AI workspace</div></div></div><span class="pill">Local models · 0.47.0</span></header>
 <p id="draft-status" role="status" hidden>Unsaved task changes are retained during refreshes. <button id="discard-draft" class="secondary">Reload saved values</button></p><p id="recovery-status" role="status"></p><div id="recovery-controls" hidden><button id="resume-workflow" aria-describedby="recovery-status">Resume saved request</button><button id="discard-workflow">Discard saved request</button></div><nav role="tablist" aria-label="Sutra views"><button id="nav-dashboard" role="tab" aria-controls="dashboard-section" aria-selected="true">Overview</button><button id="nav-chat" role="tab" aria-controls="chat-section" aria-selected="false" tabindex="-1">Review chat</button><button id="nav-usage" role="tab" aria-controls="usage-section" aria-selected="false" tabindex="-1">Usage</button><button id="nav-settings" role="tab" aria-controls="settings-section" aria-selected="false" tabindex="-1">Settings</button><button id="nav-tools" role="tab" aria-controls="tools-section" aria-selected="false" tabindex="-1">Advanced</button></nav>
 <div id="error" role="alert"></div><div id="status" role="status"></div>
 <section id="chat-section" role="tabpanel" aria-labelledby="nav-chat" hidden><h2>Manual review chat</h2>
@@ -71,6 +71,21 @@ progress{display:block;width:100%;height:6px;border:0;border-radius:4px;overflow
 <div class="model-grid"><div class="model-card"><h3>Low · focused questions</h3><p id="tier-low-help" class="muted">A smaller model for quick explanations and narrow tasks.</p><label for="tier-low">Local model</label><select id="tier-low" aria-describedby="tier-low-help model-discovery"></select></div><div class="model-card"><h3>Mid · cross-file work</h3><p id="tier-mid-help" class="muted">A balanced choice for connecting details across files.</p><label for="tier-mid">Local model</label><select id="tier-mid" aria-describedby="tier-mid-help model-discovery"></select></div><div class="model-card"><h3>High · demanding reviews</h3><p id="tier-high-help" class="muted">A larger model for architecture and deeper analysis.</p><label for="tier-high">Local model</label><select id="tier-high" aria-describedby="tier-high-help model-discovery"></select></div></div>
 <p id="model-discovery" role="status" aria-live="polite" class="muted">Reading the local Ollama model catalog.</p><p id="model-suggestions" class="muted"></p><button id="use-model-defaults" disabled>Use discovered defaults</button><button id="save-model-tiers">Save choices</button><button id="refresh-models">Retry model discovery</button><p id="model-save-status" role="status" class="muted"></p>
 </details>
+<section id="strata-manager" aria-labelledby="strata-heading" aria-busy="false">
+<div class="section-heading"><h2 id="strata-heading">Strata High runtime</h2><span id="strata-runtime-state" class="pill">Not checked</span></div>
+<p class="muted">Manage Strata’s native runtime here, then choose Strata for High above. Low and Mid keep their saved models.</p>
+<p id="strata-status" role="status" aria-live="polite">Refresh to find installed Strata profiles.</p>
+<label for="strata-profile">Native runtime profile</label>
+<select id="strata-profile" aria-describedby="strata-profile-info strata-status" disabled><option value="">No profile discovered</option></select>
+<p id="strata-profile-info" class="muted">A profile selects the model and its runtime context size.</p>
+<button id="strata-load" disabled>Load selected</button><button id="strata-unload" class="secondary" disabled>Unload</button><button id="strata-refresh" class="secondary">Refresh runtime</button>
+<label class="check" for="strata-autostart"><input id="strata-autostart" type="checkbox" aria-describedby="strata-autostart-help" disabled>Start the selected native profile when VS Code opens</label><p id="strata-autostart-help" class="footer-note muted">Applies when High is set to Strata. Startup still checks fresh system resources.</p>
+<details><summary>Installed models &amp; setup</summary>
+<p id="strata-installed-note" class="muted">Installed files are checked separately from whether a model is loaded.</p><ul id="strata-installed-models"></ul>
+<button id="strata-add-config" class="secondary" disabled>Add installed model…</button><button id="strata-setup" class="secondary" disabled>Set up / download a model…</button><button id="strata-locate" class="secondary">Locate Strata…</button>
+<p class="footer-note muted">Setup previews Strata’s recommended model and download size before you confirm. Its bundled installer prepares files in VS Code’s terminal. Use Load selected here to start a model after installation.</p>
+</details>
+</section>
 <section id="reasoning-section"><h2>Reasoning &amp; runtime</h2>
 <label for="thinking-mode">Shared reasoning</label>
 <select id="thinking-mode" aria-describedby="thinking-mode-help">

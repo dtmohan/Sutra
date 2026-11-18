@@ -63,7 +63,8 @@ browser_suites() {
   fi
   "$KARMA_NODE" test/dashboard-browser.cjs &&
     "$KARMA_NODE" test/diagram-browser.cjs &&
-    "$KARMA_NODE" test/usage-browser.cjs
+    "$KARMA_NODE" test/usage-browser.cjs &&
+    "$KARMA_NODE" test/strata-manager-browser.cjs
 }
 
 if [ -z "$KARMA_NODE" ]; then
@@ -74,7 +75,7 @@ fi
 gate "release metadata" python3 -B scripts/check-release.py
 gate "python harness" python_suite
 
-for suite in capabilities model-activity native-provider workspace-authorization workspace-authorization-store hardening panel-entry model-selection bridge-worker strata-startup branding host-tokens runtime-integrity; do
+for suite in capabilities model-activity native-provider workspace-authorization workspace-authorization-store hardening panel-entry model-selection bridge-worker strata-startup strata-management strata-setup strata-manager-ui branding host-tokens runtime-integrity; do
   gate "node $suite" node_suite "$suite"
 done
 
