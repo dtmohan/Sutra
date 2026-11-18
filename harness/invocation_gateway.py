@@ -66,12 +66,16 @@ class InvocationLedger(GovernedContext):
                     'request_hash': request_hash(call_id, model, system, payload, schema),
                     'model_identity': model_identity, 'charge': charge, 'budget_profile':budget or {'context_limit':8192,'response_reserve':1024,'template_reserve':256}, 'created_at': time.time()}
         if model_interface is not None:
-            from model_packet import build, descriptor
+            from model_packet import REFERENCE_VERSIONS, build, descriptor
             packet = build(system, payload, schema)
             if packet is None or model_interface != descriptor(packet, envelope['budget_profile']['template_reserve']):
                 raise InvalidUpdate('Model interface does not match committed request')
             if model_interface['role'] != role or charge != model_interface['input_reservation']:
                 raise InvalidUpdate('Model packet charge or role changed')
+            if model_interface['version'] in REFERENCE_VERSIONS:
+                from strata_model import MODEL
+                if model != MODEL:
+                    raise InvalidUpdate('Citation reference packet requires the routed Strata model')
             envelope['model_interface'] = model_interface
         with self.db:
             self.db.execute('BEGIN IMMEDIATE')
@@ -197,9 +201,10 @@ class InvocationLedger(GovernedContext):
                 for p in payload.get('pages', []):
                     page = self.read_page(session, p['id'], p['version'])
                     if page.content_hash != p['hash']: raise PageFault('Delivered page changed')
-                if envelope.get('model_interface'):
+                if interface := envelope.get('model_interface'):
                     from model_packet import bind_output
-                    proposal, host_fields = bind_output(envelope['role'], payload, envelope['schema'], proposal)
+                    proposal, host_fields = bind_output(envelope['role'], payload, envelope['schema'], proposal,
+                                                        interface['version'])
                 elif envelope['role'] == 'conversation' and payload.get('response_contract') == 2:
                     from conversation import bind_output
                     proposal = bind_output(payload, proposal)
@@ -335,10 +340,21 @@ class InvocationLedger(GovernedContext):
                     envelope = json.loads(env[0])
                     if envelope.get('model_interface'):
                         from model_packet import host_fields
-                        if fields != host_fields(r['role'], delivered, envelope['schema']): return False
+                        try:
+                            expected = host_fields(r['role'], delivered, envelope['schema'],
+                                                   envelope['model_interface']['version'], original)
+                        except (KeyError, TypeError, AttributeError):
+                            return False
+                        if fields != expected: return False
                     elif r['role'] != 'conversation' or fields != {'context_binding': delivered['context_binding']}: return False
                     if not isinstance(original, dict) or any(original.get(k) != v for k, v in fields.items()): return False
                     for key in fields: original.pop(key)
+                    from model_packet import REFERENCE_VERSIONS, recover_citation_references
+                    if (envelope.get('model_interface') or {}).get('version') in REFERENCE_VERSIONS:
+                        try:
+                            original['citations'] = recover_citation_references(envelope['schema'], original['citations'])
+                        except (KeyError, TypeError, ValueError):
+                            return False
                 observed = r.get('observation_fields', {})
                 if observed:
                     from task_observations import FIELD, ROLES

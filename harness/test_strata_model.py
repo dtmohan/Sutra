@@ -100,10 +100,10 @@ class StrataTests(unittest.TestCase):
         guard.start()
         self.addCleanup(guard.stop)
 
-    def ask(self):
+    def ask(self, prompt='Hello', provider=None):
         with patch('vscode_bridge.ollama', side_effect=AssertionError('Unexpected Ollama RPC from Strata')):
             return conversation.answer(self.ledger, {}, self.root,
-                                       {'prompt': 'Hello', 'models': MODELS, 'tier': 'high'})
+                                       {'prompt': prompt, 'models': MODELS, 'tier': 'high'}, provider=provider)
 
     def test_explicit_high_uses_gateway_and_charges_measured_usage(self):
         result = self.ask()
@@ -133,7 +133,33 @@ class StrataTests(unittest.TestCase):
         self.assertEqual(gate['decision'], 'ALLOW')
         trace = json.loads(next((self.root / 'calls').glob('*.json')).read_text())
         self.assertEqual(trace['response']['timings']['predicted_per_second'], 25.0)
+        self.assertEqual(trace['generation_limits'], {'max_tokens': 2048})
         self.assertNotIn('fixture-token', json.dumps(trace))
+
+    def test_positive_adaptive_reasoning_leaves_budget_for_the_answer(self):
+        from paging import Budget
+        prompt = 'Compare the alternatives and explain the trade-offs.'
+        with patch.dict(os.environ, SUTRA_THINKING='adaptive', SUTRA_STRATA_CONTEXT='32768'):
+            provider = StrataModel(self.root / 'calls')
+            provider.budget = Budget(32768, 8192)
+            result = self.ask(prompt, provider)
+        self.assertTrue(result['result']['admission']['admitted'])
+        request, _ = self.server.posts[0]
+        self.assertEqual(request['reasoning_effort'], 'low')
+        self.assertEqual(request['max_tokens'], 3072)
+        self.assertEqual(request['reasoning_budget_tokens'], 768)
+        self.assertEqual(provider.budget.response_reserve, 8192)
+        self.assertEqual(usage(self.ledger, result['session'])['used']['tokens'], 154)
+        trace = json.loads(next((self.root / 'calls').glob('*.json')).read_text())
+        self.assertEqual(trace['generation_limits'], {'max_tokens': 3072, 'reasoning_budget_tokens': 768})
+
+    def test_adaptive_budget_does_not_override_explicit_thinking(self):
+        with patch.dict(os.environ, SUTRA_THINKING='on'):
+            self.assertTrue(self.ask()['result']['admission']['admitted'])
+        request, _ = self.server.posts[0]
+        self.assertEqual(request['reasoning_effort'], 'low')
+        self.assertEqual(request['max_tokens'], 2048)
+        self.assertNotIn('reasoning_budget_tokens', request)
 
     def test_backend_schema_rejection_has_one_governed_repair_and_no_credit(self):
         self.server.frames = [[{'error': {'code': 'structured_output_failed',

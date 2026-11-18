@@ -1,8 +1,9 @@
 """Bounded review generation controls. No new permissions, budget or kernel policy.
 
 Adaptive reviews can use one higher control for multi-file report synthesis.
-Output-limit repair uses an already allocated attempt and keeps the same input
-pins and output reserve. Partial generations remain quarantined and charged.
+Output-limit repair and positive Strata Adaptive synthesis timeouts use an
+already allocated attempt and keep the same input pins and output reserve.
+Partial generations remain quarantined and charged.
 """
 import os
 from context_manager import InvalidUpdate
@@ -40,13 +41,18 @@ def check(payload, *, synthesis=False):
 
 def repair(result, payload, used, attempts_left, *, synthesis=False):
     plan = payload.get('reasoning') or {}
-    if (used or not attempts_left or result.get('failure_kind') != 'output_limit'
-            or plan.get('preference') != 'adaptive'):
+    if used or not attempts_left or plan.get('preference') != 'adaptive':
         return None
-    if plan.get('requested') is not False and not (synthesis and plan.get('step') == 1):
+    positive_synthesis = synthesis and plan.get('step') == 1
+    failure = result.get('failure_kind')
+    if failure == 'timeout' and positive_synthesis and (result.get('record') or {}).get('provider') == 'strata':
+        reason = 'The previous generation stopped before delivering a complete answer.'
+    elif failure == 'output_limit' and (plan.get('requested') is False or positive_synthesis):
+        reason = 'The previous output exhausted its allowance.'
+    else:
         return None
     check(payload, synthesis=synthesis)
     return {'errors': [
-        'The previous output exhausted its allowance. Return a compact complete JSON answer; keep every required field and exact constraint.',
+        reason + ' Return compact JSON with every required field and exact constraint.',
         'Use fewer supported findings and shorter prose. Do not repeat the analysis. Partial output is not available or accepted.'
     ]}

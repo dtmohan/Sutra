@@ -16,6 +16,43 @@ import test_orchestration as fixtures
 from vscode_bridge import handle
 
 
+class EvidenceFocusTests(unittest.TestCase):
+    def test_qualified_symbols_select_the_relevant_source_excerpt(self):
+        from review_context import ordered_sources
+
+        prompt = 'Explain the architecture, especially KernelBoundary.evaluate and orchestration.join.'
+        sources = {
+            'extension.js': 'function main() { return 0 }\n',
+            'policy_check.py': 'def check():\n    return True\n',
+            'harness/kernel_boundary.py': 'def check():\n    return True\n\n'
+                                          'def evaluate():\n    return CanonicalKernel().evaluate()\n',
+            'harness/orchestration.py': 'def check():\n    return True\n\n'
+                                        'def join():\n    return accepted_children()\n',
+        }
+        graph = {'calls': [{'path': 'policy_check.py'}] * 20,
+                 'nodes': [{'path': 'harness/kernel_boundary.py', 'name': 'KernelBoundary.evaluate', 'line': 4},
+                           {'path': 'harness/orchestration.py', 'name': 'join', 'line': 4}]}
+        relevant = {'harness/kernel_boundary.py', 'harness/orchestration.py'}
+        self.assertEqual(set(ordered_sources(sources, None, prompt)[:2]), relevant)
+        self.assertEqual(set(ordered_sources(sources, graph, prompt)[:2]), relevant)
+        snippets = chat_runtime.excerpts(sources, prompt, 512, graph)
+        self.assertTrue(snippets['harness/kernel_boundary.py'].startswith('def evaluate():'))
+        self.assertTrue(snippets['harness/orchestration.py'].startswith('def join():'))
+
+    def test_named_architecture_preserves_body_spans_over_unrelated_followups(self):
+        case = 'Review the architecture of orchestration.complete, orchestration.join and report_review.published.'
+        code = {'orchestration.py': 'def complete():\n    save_checkpoint()\n\ndef join():\n    check_child_results()\n',
+                'report_review.py': 'def published():\n    require_all_review_pages()\n'}
+        p = {'contract': {'goal': case}, 'request': case, 'excerpt_bytes': 1024,
+             'route': {'record': {'choice': {'model': 'strata:high'}}}}
+        graph = {'nodes': [{'path': 'orchestration.py', 'name': 'complete', 'line': 1},
+                           {'path': 'orchestration.py', 'name': 'join', 'line': 4},
+                           {'path': 'report_review.py', 'name': 'published', 'line': 1}]}
+        data = {'sources': code, 'graph': graph, 'followups': {
+            'orchestration.py': {'text': code['orchestration.py'].split('def join')[1]}}}
+        self.assertEqual(chat_runtime.packet_excerpts(p, data), code)
+
+
 class Reader:
     """Propose source targets without bypassing transport admission."""
 

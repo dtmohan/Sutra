@@ -23,7 +23,8 @@ class WireModel(fixture.Fake):
         self.packet = packet
         with patch('test_chat.consume_dispatch', side_effect=lambda *args: consume_dispatch(*args, packet=packet)):
             result, record = super().call(cid, system, p, schema)
-        for k in host_fields(packet['role'], p, schema): result.pop(k, None)
+        for k in host_fields(packet['role'], p, schema, packet['version'], result):
+            result.pop(k, None)
         record['response'] = {'done': self.completed, 'prompt_eval_count': self.counts[0], 'eval_count': self.counts[1]}
         if getattr(self, 'after', None): self.after(result, p)
         return result, record
@@ -33,6 +34,74 @@ class PacketTests(unittest.TestCase):
     setUp = fixture.ChatTests.setUp
     tearDown = fixture.ChatTests.tearDown
     ask = fixture.ChatTests.ask
+
+    def ask_strata(self, provider):
+        return chat.answer(self.s, self.meta, self.ws, self.storage,
+                           {'prompt': 'Explain start.', 'models': dict(fixture.MODELS, high=provider.model),
+                            'tier': 'high'}, provider=provider)
+
+    def test_strata_citation_reference_binds_the_exact_indented_quote(self):
+        from strata_model import MODEL
+        from model_packet import DERIVED_REVIEW_SUMMARY_VERSION
+
+        (self.ws / 'entry.py').write_text('from leaf import run\ndef start():\n    return run()\n')
+        chat.auto.step(self.s, self.meta, self.ws, self.storage, {'explain': False}, provider=fixture.Fake())
+        provider = WireModel(MODEL)
+        expected = {'path': 'entry.py', 'quote': '    return run()'}
+
+        def reference(reply, payload):
+            choices = json.loads(provider.packet['messages'][1]['content'])['citation_choices']
+            ref = next(item['id'] for item in choices if item['path'] == expected['path']
+                       and item['line_in_excerpt'] == 2)
+            reply['citations'] = [ref]
+
+        provider.after = reference
+        result = self.ask_strata(provider)['result']
+        self.assertTrue(result['admission']['admitted'], result)
+        self.assertEqual(result['accepted_output']['citations'], [expected])
+        self.assertEqual(provider.packet['version'], DERIVED_REVIEW_SUMMARY_VERSION)
+        self.assertEqual(provider.packet['schema']['properties']['citations']['items']['type'], 'integer')
+        self.assertNotIn('summary', provider.packet['schema']['properties'])
+        self.assertEqual(result['accepted_output']['summary'], result['accepted_output']['answer'][:320])
+        self.assertIn('return integer IDs from citation_choices', provider.packet['messages'][0]['content'])
+        self.assertIn('array must contain 1 to 4 IDs', provider.packet['messages'][0]['content'])
+        self.assertTrue(self.s.verify_invocations(self.sid))
+        self.assertEqual(self.s.load_result(self.sid, result['invocation_id'])['citations'], [expected])
+
+    def test_strata_citation_reference_withholds_unknown_or_model_written_quotes(self):
+        from strata_model import MODEL
+        provider = WireModel(MODEL)
+        for supplied in ([0], [999], [True], [{'path': 'entry.py', 'quote': 'return run()'}]):
+            provider.after = lambda reply, payload: reply.update(citations=supplied)
+            result = self.ask_strata(provider)['result']
+            self.assertFalse(result['admission']['admitted'], supplied)
+            self.assertTrue(any('response.citations[]' in error for error in result['admission']['errors']))
+        self.assertTrue(self.s.verify_invocations(self.sid))
+
+    def test_v1_strata_receipt_still_verifies_with_verbatim_citation_objects(self):
+        from strata_model import MODEL
+        provider = WireModel(MODEL)
+        with patch('model_packet.citation_references', return_value=False):
+            result = self.ask_strata(provider)['result']
+        self.assertTrue(result['admission']['admitted'], result)
+        self.assertEqual(provider.packet['version'], 1)
+        self.assertTrue(self.s.verify_invocations(self.sid))
+
+    def test_strata_child_checkpoint_and_report_share_current_citation_references(self):
+        import subagent_runtime as child
+        from strata_model import MODEL
+        payload = {'contract': self.s.pinned(self.sid), 'request': 'Explain this architecture.',
+                   'branch': {'id': 'branch-1', 'objective': 'Explain the entry point.'},
+                   'route': {'model': MODEL}, 'child_slice': {'ordinal': 2}, 'child_checkpoint': [],
+                   'constraint_echo': [], 'excerpts': {'entry.py': 'def start():\n    return run()'}}
+        schema = child.schema(payload)
+        wire = build(child.SYSTEM, payload, schema)
+        data = json.loads(wire['messages'][1]['content'])
+        self.assertEqual(data['citation_choices'][1], {'id': 2, 'path': 'entry.py', 'line_in_excerpt': 2})
+        self.assertEqual(wire['schema']['properties']['citations']['items']['enum'], [1, 2])
+        self.assertIn('Include report whenever slice_status is complete', wire['messages'][0]['content'])
+        self.assertIn('check within this branch', wire['messages'][0]['content'])
+        self.assertNotIn('report', wire['schema']['required'])
 
     def test_only_task_semantics_cross_boundary_with_source_verbatim(self):
         m = WireModel(); result = self.ask(provider=m)

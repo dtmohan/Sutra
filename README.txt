@@ -1,3 +1,10 @@
+Sutra 0.45.1 — Strata review reliability
+
+Strata selects citation IDs, which Sutra checks against exact source.
+Adaptive caps Strata's reasoning and generation within the existing
+transport deadline. Architecture requests can name functions to prioritize
+their source in the review packet.
+
 Sutra 0.45.0 — Opt-in Strata High
 
 Ollama supplies the default model choices. To opt in, start Strata on

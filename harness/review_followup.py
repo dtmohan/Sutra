@@ -212,12 +212,12 @@ def expand(s, sid, p, data, root, provider, real):
 
 
 def _symbols(graph, paths, prompt):
-    import re
-    words = set(re.findall('[a-zA-Z_][a-zA-Z_0-9]{3,}', prompt.lower()))
+    from review_context import EvidenceFocus
+    focus = EvidenceFocus(prompt)
     result = {}
     for path in paths[:30]:
         choices = [n for n in graph['nodes'] if n['path'] == path and n['name'] != '<module>']
-        choices.sort(key=lambda n: (-sum(w in n['name'].lower() for w in words), n['line']))
+        choices.sort(key=lambda n: (focus.symbol(path, n['name']), -n['line']), reverse=True)
         if choices:
             result[path] = [[n['name'][:64], n['line']] for n in choices[:4]]
     return result

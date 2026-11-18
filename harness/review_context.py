@@ -1,6 +1,7 @@
 """Bounded structural context from fresh source, never model-created authority."""
 import ast
 from pathlib import Path
+import re
 from context_manager import InvalidUpdate, ContextBudgetExceeded, canonical
 from paging import Budget
 
@@ -20,20 +21,89 @@ def query(p):
     return p['contract']['goal'] + '\n' + p['request']
 
 
+_WORD = re.compile(r'[a-zA-Z][a-zA-Z0-9]+')
+_CAMEL = re.compile(r'(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])')
+_NOISE = frozenset({
+    'about', 'also', 'and', 'architecture', 'architectural', 'before', 'check', 'checked', 'checks', 'code', 'codebase',
+    'each', 'entire', 'explain', 'file', 'flows', 'from', 'give', 'have', 'identify', 'including',
+    'into', 'maintainer', 'only', 'overview', 'path', 'please', 'project', 'request', 'review', 'same',
+    'show', 'source', 'supplied', 'that', 'the', 'through', 'use', 'what', 'where', 'whole',
+    'with', 'work', 'workspace', 'works', 'your',
+})
+_ALIASES = {
+    'published': 'publish', 'publishing': 'publish', 'publication': 'publish',
+    'citations': 'citation', 'cite': 'citation',
+}
+_RELATED = {
+    'stp': {'kernel', 'boundary', 'adapter'},
+    'checkpoint': {'slice', 'resume', 'join'},
+    'branch': {'fork', 'child', 'join', 'subagent', 'orchestration'},
+    'publish': {'report', 'claim', 'receipt'},
+}
+
+
+def evidence_words(text):
+    words = set()
+    for token in _WORD.findall(_CAMEL.sub(' ', text)):
+        word = token.lower()
+        if word not in _NOISE and len(word) >= 3:
+            if word in _ALIASES:
+                word = _ALIASES[word]
+            elif word.endswith('ies'):
+                word = word[:-3] + 'y'
+            elif word.endswith('ches'):
+                word = word[:-2]
+            elif len(word) > 4:
+                word = word.removesuffix('s')
+            words.add(word)
+    return words
+
+
+class EvidenceFocus:
+    """Rank in-scope files and declarations by the question they can answer."""
+
+    def __init__(self, request):
+        self.request = request.lower()
+        self.words = evidence_words(request)
+        self.related = set().union(*(_RELATED.get(word, ()) for word in self.words))
+        self.references = set(re.findall(r'\b[a-zA-Z_][\w]*(?:\.[a-zA-Z_][\w]*)+\b', request))
+        self.modules = {ref.split('.')[-2].replace('_', '').lower() for ref in self.references}
+
+    def strength(self, label):
+        words = evidence_words(label)
+        return 3 * len(words & self.words) + len(words & (self.related - self.words))
+
+    def symbol(self, path, name):
+        qualified = Path(path).stem + '.' + name
+        exact = name in self.references or qualified in self.references
+        return (exact, self.strength(name))
+
+    def mentions_module(self, path):
+        return Path(path).stem.replace('_', '').lower() in self.modules
+
+
 def ordered_sources(sources, graph, request):
     from auto_review import ranked
-    import re
     names = ranked(sources, request)
     if not re.search(r'architecture|architectural|overview', request, re.I): return names
+    focus = EvidenceFocus(request)
     counts = {p: 0 for p in names}
     for call in (graph or {}).get('calls', []):
         if call['path'] in counts: counts[call['path']] += 1
+    symbols = {}
+    for node in (graph or {}).get('nodes', []):
+        path, name = node['path'], node['name']
+        if path in counts and name != '<module>':
+            symbols[path] = max(symbols.get(path, (False, 0)), focus.symbol(path, name))
     positions = {p: i for i, p in enumerate(names)}
     entry = {'main', 'index', 'app', 'server', 'extension', '__main__'}
     def score(name):
         p = Path(name)
         auxiliary = bool(set(p.parts) & {'test', 'tests', 'examples', 'fixtures'}) or p.stem.startswith(('test_', 'test-'))
-        return (name.lower() not in request.lower(), auxiliary, p.stem not in entry, -counts[name], positions[name])
+        exact, symbol_strength = symbols.get(name, (False, 0))
+        explicit_file = name.lower() in focus.request or focus.mentions_module(name)
+        match = 2 * focus.strength(p.as_posix()) + symbol_strength
+        return (not (explicit_file or exact), auxiliary, -match, p.stem not in entry, -counts[name], positions[name])
     return sorted(names, key=score)
 
 

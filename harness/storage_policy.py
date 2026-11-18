@@ -65,6 +65,10 @@ def write_trace(directory, call_id, record):
              'privacy':'Prompt, source excerpts and response bodies omitted; committed deliveries remain in the ledger'}
     if record.get('provider') == 'strata':
         compact['provider'] = 'strata'
+        request = record.get('request') or {}
+        compact['generation_limits'] = {
+            key: request[key] for key in ('max_tokens', 'reasoning_budget_tokens')
+            if type(request.get(key)) is int and 0 < request[key] <= 65536}
         compact['response']['first_answer_chunk_s'] = response.get('first_answer_chunk_s')
         timings = response.get('timings')
         if isinstance(timings, dict):

@@ -35,6 +35,15 @@ class Exhausted(Fake):
         return answer, record
 
 
+class StrataTimedOut(Exhausted):
+    def call(self, cid, system, p, schema):
+        try:
+            return super().call(cid, system, p, schema)
+        except TimeoutError as exc:
+            exc.call_record = {'call_id': cid, 'ok': False, 'provider': 'strata'}
+            raise
+
+
 class ControlsTests(unittest.TestCase):
     def test_supported_adaptive_defaults_and_user_overrides(self):
         for values, expected in [([True], False), (['low', 'medium'], False),
@@ -137,6 +146,32 @@ class ReviewRecoveryTests(unittest.TestCase):
                 plan = writer.payloads[0]['reasoning']
                 self.assertEqual(plan['preference'], preference)
                 self.assertIs(plan['requested'], False)
+
+    def test_adaptive_strata_synthesis_timeout_retries_off_and_retains_spent_budget(self):
+        writer = StrataTimedOut(error=TimeoutError)
+        writer.budget = Budget(32384, 8192, 256)
+        writer.context_metadata = {'thinking': {'values': ['low', 'high'], 'default': 'high'}}
+        before = usage(self.s, self.sid)['used']['tokens']
+        with patch.dict('os.environ', SUTRA_THINKING='adaptive'):
+            out = self.architecture(writer, Fake())
+        self.assertTrue(out['result']['admission']['admitted'], out)
+        first, retry = writer.payloads
+        self.assertEqual(first['reasoning']['requested'], 'low')
+        self.assertIs(retry['reasoning']['requested'], False)
+        self.assertEqual(first['contract'], retry['contract'])
+        self.assertEqual(first['excerpts'], retry['excerpts'])
+        calls = out['result']['token_usage']['calls']
+        failed = next(c for c in calls if c['status'] == 'quarantined')
+        self.assertIsNone(failed['output_tokens'])
+        reserved = 0
+        for call in calls:
+            raw, = self.s.db.execute('SELECT record_json FROM invocations WHERE id=?', (call['invocation_id'],)).fetchone()
+            env = json.loads(raw)
+            reserved += env['charge'] + env['budget_profile']['response_reserve']
+        self.assertEqual(usage(self.s, self.sid)['used']['tokens'] - before, reserved)
+        self.assertTrue(any(row['kind'] == 'BRIDGE' and row['data']['reason'] == 'bounded_timeout_repair'
+                            for row in self.s.run(failed['run_id'])['events']))
+        self.assertTrue(self.s.verify_invocations(self.sid))
 
     def test_recovery_then_model_switch_retains_pins_and_charges_failure(self):
         before = usage(self.s, self.sid)

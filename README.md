@@ -1,4 +1,13 @@
-# Sutra 0.45.0 — Opt-in Strata High
+# Sutra 0.45.1 — Strata review reliability
+
+Strata selects IDs for source citations. Sutra resolves each ID to its exact
+quotation before validating and recording the review. Adaptive requests carry
+a reasoning and generation allowance within the existing transport deadline.
+An eligible synthesis timeout can use an existing repair attempt with thinking
+off. Architecture requests can name functions to prioritize their source in
+the review packet.
+
+## Sutra 0.45.0 — Opt-in Strata High
 
 Ollama supplies the default model choices and the Low and Mid tiers. Strata
 is an experimental option for High in native chat and read-only workspace

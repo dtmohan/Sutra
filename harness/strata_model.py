@@ -14,6 +14,12 @@ from token_usage import count
 
 MODEL = 'strata:high'
 MAX_METADATA_BYTES = 65536
+TRANSPORT_SECONDS = 150
+# The installed Flash-Next model decoded at ~34 tokens/s. Keep an adaptive
+# generation below that call's measured wall time with room for prefill and
+# leave most of its allowance for the structured answer.
+ADAPTIVE_MAX_GENERATION = 3072
+ADAPTIVE_THINKING_LIMITS = {'low': 768, 'medium': 896, 'high': 1024}
 
 
 def _configured_int(key, lower, upper, default=None):
@@ -108,7 +114,7 @@ def _stream(response, transport_socket, started, byte_limit, on_thinking):
     total, final, ended, first_answer_s = 0, None, False, None
     frame_limit = 6 * byte_limit + MAX_METADATA_BYTES  # One buffered JSON value plus escaping.
     while True:
-        remaining = 150 - (time.monotonic() - started)
+        remaining = TRANSPORT_SECONDS - (time.monotonic() - started)
         if remaining <= 0:
             raise TimeoutError('Strata High transport deadline reached')
         transport_socket.settimeout(timeout(remaining))
@@ -237,13 +243,17 @@ class StrataModel(LocalModel):
                 'stream': True, 'max_tokens': self.budget.response_reserve, 'temperature': 0, 'seed': 42}
         if self.thinking is not None:
             body['reasoning_effort'] = 'none' if self.thinking is False else self.thinking
+        thinking_limit = ADAPTIVE_THINKING_LIMITS.get(self.thinking)
+        if (payload.get('reasoning') or {}).get('preference') == 'adaptive' and thinking_limit is not None:
+            body['max_tokens'] = min(body['max_tokens'], ADAPTIVE_MAX_GENERATION)
+            body['reasoning_budget_tokens'] = min(thinking_limit, body['max_tokens'] // 3)
         record = {'call_id': call_id, 'request': body, 'provider': 'strata',
                   'conservative_input_charge': charge}
         activity = ACTIVE.get()
         if activity:
             activity.emit('control', requested=self.thinking, policy=payload.get('reasoning'))
         started = time.monotonic()
-        connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=timeout(150))
+        connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=timeout(TRANSPORT_SECONDS))
         response = None
         try:
             connection.request('POST', '/v1/chat/completions', json.dumps(body), _headers())
@@ -263,7 +273,7 @@ class StrataModel(LocalModel):
             if result['done_reason'] != 'stop' or result['prompt_eval_count'] is None or result['eval_count'] is None:
                 raise RuntimeError('Strata High did not report a complete generation and token usage')
             if (result['prompt_eval_count'] + self.budget.response_reserve > self.runtime_context_tokens
-                    or result['eval_count'] > self.budget.response_reserve):
+                    or result['eval_count'] > body['max_tokens']):
                 raise RuntimeError('Strata High usage exceeds the admitted context or output budget')
             answer = json.loads(result['message']['content'])
             record.update(answer=answer, ok=True)

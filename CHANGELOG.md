@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.45.1
+
+- Use source citation IDs in Strata workspace and child reviews. Resolve IDs to exact quotations through the gateway and derive the working summary from the review text.
+- Bound positive Strata Adaptive reasoning and generation. A timed-out synthesis may use an existing repair attempt with thinking off and retain its original spending.
+- Prioritize named function bodies in Strata architecture reviews so the final report can trace the requested mechanisms to source.
+
 ## 0.45.0
 
 - Add a machine-local Strata High opt-in for native chat and read-only reviews. Keep Ollama as the source of suggested tier defaults and use the existing gateway and hardware admission for Strata dispatch.

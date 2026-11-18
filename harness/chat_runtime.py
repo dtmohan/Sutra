@@ -47,42 +47,64 @@ def schema(p):
     from task_observations import add_schema
     return add_schema(result, 'assessment', p)
 
-def excerpts(sources,prompt,limit,graph=None):
+def excerpts(sources,prompt,limit,graph=None,*,include_named_sequence=False):
     # Read declaration bodies, not just the same import preamble on every turn.
-    words=set(re.findall('[a-zA-Z_][a-zA-Z_0-9]{3,}',prompt.lower()))-{
-        'review','explain','architecture','codebase','please','whole','with','this','that',
-        'request','tools','attempt','original','retry','source','workspace','overview'}
+    focus = context.EvidenceFocus(prompt)
     result={};remaining=limit
     names=context.ordered_sources(sources,graph,prompt)
-    per_file=max(128,min(2400,limit//min(8,max(1,len(names)))))
+    per_file=max(128,min(2400,limit//min(6,max(1,len(names)))))
     for name in names:
         if remaining<=0:break
         lines=sources[name].splitlines(keepends=True)
         declarations=[n for n in (graph or {}).get('nodes',[]) if n['path']==name and n['name']!='<module>']
         def score(n):
-            label=n['name'].lower()
-            return (sum(w in label for w in words)*10 +
-                    (8 if label.split('.')[-1] in {'dispatch','handle','invoke','answer','execute','request'} else 5 if label.split('.')[-1] in {'run','activate','main'} else 0))
-        selected=max(declarations,key=score,default=None)
-        at=max(0,selected['line']-1) if selected and score(selected)>0 else next(
-            (i for i,line in enumerate(lines) if any(w in line.lower() for w in words)),0)
+            label=n['name'].rsplit('.',1)[-1].lower()
+            exact, relevance = focus.symbol(name, n['name'])
+            return exact, relevance, label in {'request','dispatch','handle','invoke','run','activate','main'}
+        named = [node for node in declarations if score(node)[0]] if include_named_sequence else []
+        selected=min(named,key=lambda node:node['line']) if named else max(declarations,key=score,default=None)
+        at=max(0,selected['line']-1) if selected and any(score(selected)) else next(
+            (i for i,line in enumerate(lines) if focus.strength(line) >= 3),0)
         quote=''.join(lines[at:]).encode()[:min(remaining,per_file)].decode('utf-8','ignore')
         if quote:result[name]=quote;remaining-=len(quote.encode())
     return result
+
+
+def focused_architecture(p):
+    from strata_model import MODEL
+    return ((p.get('route') or {}).get('record',{}).get('choice',{}).get('model') == MODEL
+            and report.requested(p) and context.EvidenceFocus(context.query(p)).modules)
+
 
 def packet_excerpts(p, data):
     limit = p['excerpt_bytes']
     followups = data.get('followups', {})
     selected = {}
+    prompt = context.query(p)
+    if focused_architecture(p):
+        focus = context.EvidenceFocus(prompt)
+        paths = [path for path in context.ordered_sources(data['sources'], data['graph'], prompt)
+                 if focus.mentions_module(path)]
+        weights = {path: max(1, sum(focus.symbol(path, n['name'])[0]
+                                    for n in data['graph']['nodes'] if n['path'] == path)) for path in paths}
+        if weights:
+            available = limit * 9 // 10
+            shares = sum(weights.values())
+            for path,weight in weights.items():
+                size = available * weight // shares
+                selected.update(excerpts({path: data['sources'][path]}, prompt, size, data['graph'],
+                                         include_named_sequence=True))
+            limit -= sum(len(text.encode()) for text in selected.values())
+            followups = {path: entry for path,entry in followups.items() if path not in selected}
     if followups:
-        each = max(1, min(1200, limit * 2 // (3 * len(followups))))
+        each = max(1, min(1500, limit // (2 * len(followups))))
         for path in sorted(followups):
             excerpt = followups[path]['text'].encode()[:each].decode('utf-8', 'ignore')
             if excerpt:
                 selected[path] = excerpt
                 limit -= len(excerpt.encode())
     base = {name: source for name, source in data['sources'].items() if name not in selected}
-    return dict(selected, **excerpts(base, context.query(p), limit, data['graph']))
+    return dict(selected, **excerpts(base, prompt, limit, data['graph']))
 
 
 def compact(previous,iid,model):
@@ -200,6 +222,8 @@ def fit_packet(s, sid, p, data, provider, real):
         p['memory_budget'] = vars(provider.budget).copy()
         p['excerpt_bytes'] = max(64, min(65536, provider.budget.context_limit//3))
         p['map_bytes'] = max(512, min(65536, provider.budget.context_limit//3))
+        if focused_architecture(p):
+            p['map_bytes'] = min(p['map_bytes'], 1024)
         while True:
             p['excerpts'] = packet_excerpts(p, data)
             context.evidence(p, data)
@@ -395,7 +419,10 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
             try:request_check(s,sid,p)
             except (InvalidUpdate,PageFault) as exc:
                 s.event(run,'FIN',{'reason':'chat_context_changed','error':str(exc)});break
-            s.event(run,'BRIDGE',{'reason':'bounded_output_repair' if recovery else 'bounded_chat_repair'})
+            reason = 'bounded_chat_repair'
+            if recovery:
+                reason = 'bounded_timeout_repair' if out.get('failure_kind') == 'timeout' else 'bounded_output_repair'
+            s.event(run,'BRIDGE',{'reason':reason})
             if recovery and p['reasoning']['step'] > 0:
                 bind(provider, p, preference='adaptive')
             p['repair'] = recovery or {'errors':[e[:140] for e in out['admission']['errors'][:2]]}
