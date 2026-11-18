@@ -2,7 +2,7 @@ const vscode = require('vscode');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const {spawn} = require('node:child_process');
+const {spawn,execFile} = require('node:child_process');
 
 const FIXED_TIERS = ['low', 'mid', 'high'];
 const REASONING_PREFERENCES = ['adaptive', 'off', 'on', 'model-default'];
@@ -39,13 +39,38 @@ function activate(context) {
   const capabilityUI=require('./capabilities');
   const strataStartup=require('./strata_startup');
   const output = vscode.window.createOutputChannel('Sutra');
+  function providerStartupAdmission(coldMemoryBytes){
+    const config=vscode.workspace.getConfiguration('karma');
+    const python=config.inspect?.('pythonPath')?.globalValue||(process.platform==='win32'?'python':'python3');
+    return new Promise(resolve=>{
+      execFile(python,['-B',path.join(context.extensionPath,'harness','provider_startup.py'),
+        '--cold-memory-bytes',String(coldMemoryBytes)],
+        {timeout:8000,maxBuffer:65536,env:{...process.env,KARMA_NODE:process.execPath,ELECTRON_RUN_AS_NODE:'1'}},
+        (error,stdout)=>{
+          try{
+            const admission=JSON.parse(stdout);
+            if(error||typeof admission?.admitted!=='boolean')throw new Error('Startup admission unavailable');
+            resolve(admission);
+          }catch{resolve({admitted:false,reason:'Startup resource admission is unavailable. Check the Sutra output.'});}
+        });
+    });
+  }
   async function startStrata(manual=false){
-    const result=await strataStartup.start(()=>vscode.workspace.getConfiguration('karma'),{remote:!!vscode.env?.remoteName});
+    const result=await strataStartup.start(()=>vscode.workspace.getConfiguration('karma'),
+      {remote:!!vscode.env?.remoteName,automatic:!manual,admit:providerStartupAdmission});
     if(manual||!['disabled','unsupported','changed'].includes(result.status))output.appendLine('Strata High: '+result.message);
     if(manual){
-      const show=['failed','invalid','unavailable','setup','mismatch'].includes(result.status)?vscode.window.showWarningMessage:vscode.window.showInformationMessage;
+      const show=['failed','invalid','unavailable','setup','mismatch','paused','uncertain'].includes(result.status)?vscode.window.showWarningMessage:vscode.window.showInformationMessage;
       void show(result.message);
     }
+    return result;
+  }
+  async function stopStrata(){
+    const result=await strataStartup.stop(()=>vscode.workspace.getConfiguration('karma'),
+      {remote:!!vscode.env?.remoteName,busy:busy||sequence||!!nativeController?.status().working});
+    output.appendLine('Strata High: '+result.message);
+    const show=result.status==='stopped'?vscode.window.showInformationMessage:vscode.window.showWarningMessage;
+    void show(result.message);
     return result;
   }
   let nativeController, usage, panel, panelReady=false, panelSection, busy = false, sequence = false, telemetry, telemetryDir, dashboardTimer, dashboardInFlight=false, stopAuto=false, chatCancellation;
@@ -600,6 +625,7 @@ function activate(context) {
   context.subscriptions.push(status,output,previewChanges,vscode.commands.registerCommand('karma.open',open),
     vscode.commands.registerCommand('karma.configureModels',()=>configureModels()),
     vscode.commands.registerCommand('karma.startStrata',()=>startStrata(true)),
+    vscode.commands.registerCommand('karma.stopStrata',()=>stopStrata()),
     vscode.commands.registerCommand('karma.configureReasoning',()=>showPanelSection('reasoning')),
     vscode.commands.registerCommand('karma.openAdvanced',()=>showPanelSection('advanced')),
     vscode.commands.registerCommand('karma.newChatReview',()=>newChatReview()),

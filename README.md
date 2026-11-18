@@ -1,18 +1,32 @@
-# Sutra 0.45.3 — Strata High startup
+# Sutra 0.45.4 — Native Strata runtime management
 
-On macOS, Sutra can start a registered Strata High user service when VS Code
-activates the extension. Startup is off by default. In **User Settings**, set
+Sutra uses Strata's native runtime management for background startup, status
+and stopping. Strata owns its processes, readiness checks and recovery of
+interrupted runtimes. Sutra checks the selected model, local profile and fresh
+hardware before starting a cold provider. Startup is off by default.
+In **User Settings**, set
 `karma.strata.port` and `karma.strata.model`, choose `strata:high` for High,
 and enable **Karma › Strata: Start On Startup**. Low and Mid are available
 while Strata loads.
 
-Register a user LaunchAgent with label `io.sutra.strata-high` whose foreground
-program starts your configured local Strata profile and enforces its startup
-memory requirements. Put a `startup.json` record with `port` and `model` in
-`~/Library/Application Support/Sutra/Strata` matching the profile. The service
-can run independently of VS Code. Leave `KeepAlive` off so a guarded stop does
-not continually reload the model under pressure. After resources recover,
-run **Sutra: Start Strata High** from the Command Palette.
+Create a named Strata serving profile with `strata profile create NAME
+--from-config /absolute/path/config.json`. On this Mac, put a `startup.json`
+record in `~/Library/Application Support/Sutra/Strata` with the selected
+`port` and `model`, an absolute native CLI `executable`, the saved `profile`
+name, its measured `cold_memory_bytes`, and any required `environment`
+overrides for the installed Strata files. These are machine-local settings.
+Sutra checks Strata's launch plan against the selected local model and port.
+
+Use **Sutra: Start Strata High** after resources recover, and
+**Sutra: Stop Strata High** to drain an idle managed provider. The native
+runtime can serve independently of VS Code. Stopping requires its current
+owner and instance identities. Requests still pass through Sutra's existing
+invocation gateway, resource checks and task budgets.
+
+## Sutra 0.45.3 — Strata High startup
+
+Added optional startup for a locally registered Strata service and a Command
+Palette action for manual recovery.
 
 ## Sutra 0.45.2 — Model availability
 

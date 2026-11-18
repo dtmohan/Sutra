@@ -1,9 +1,16 @@
+Sutra 0.45.4 — Native Strata runtime management
+
+Sutra uses Strata's native runtime for background startup, status and stopping.
+Enable Karma › Strata: Start On Startup in User Settings with Strata selected
+for High. Configure the native CLI, saved profile and measured cold memory in
+the local startup.json record. Sutra checks the model, port and fresh hardware.
+Use Sutra: Start Strata High for recovery and Sutra: Stop Strata High to drain
+an idle managed provider. Existing task context and spending are retained.
+
 Sutra 0.45.3 — Strata High startup
 
-On macOS, enable Karma › Strata: Start On Startup in User Settings to start
-the registered io.sutra.strata-high LaunchAgent when High is set to Strata.
-The service profile must match the configured local port and model. Run
-Sutra: Start Strata High in the Command Palette to recover after a stop.
+Added optional startup for a locally registered Strata service and a Command
+Palette action for manual recovery.
 
 Sutra 0.45.2 — Model availability
 

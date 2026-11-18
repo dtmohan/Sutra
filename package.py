@@ -9,7 +9,7 @@ import zipfile
 def runtime_files(source):
     tree=ast.parse((source/'harness/governance.py').read_text())
     policies=next(ast.literal_eval(n.value) for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='POLICY_FILES' for t in n.targets))
-    files={source/'harness'/name for name in policies}|{source/'THIRD_PARTY_NOTICES.md'}
+    files={source/'harness'/name for name in policies}|{source/'THIRD_PARTY_NOTICES.md',source/'harness/provider_startup.py'}
     pending=[p for p in files if p.suffix=='.py'];seen=set()
     while pending:
         p=pending.pop()

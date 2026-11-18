@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.45.4
+
+- Delegate Strata startup, status and stopping to its native managed runtime, including native ownership and interrupted-process recovery.
+- Check the saved native profile, loopback endpoint and fresh cold-memory allocation before startup. Keep the existing gateway and task spending across recovery and model switches.
+
 ## 0.45.3
 
 - Add opt-in macOS startup for a configured Strata High user service and a Command Palette action for manual recovery.
