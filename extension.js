@@ -38,6 +38,7 @@ function activate(context) {
   const usageView=require('./usage_view');
   const capabilityUI=require('./capabilities');
   const strataStartup=require('./strata_startup');
+  const {BridgeWorker}=require('./bridge_worker');
   const output = vscode.window.createOutputChannel('Sutra');
   function providerStartupAdmission(coldMemoryBytes){
     const config=vscode.workspace.getConfiguration('karma');
@@ -84,7 +85,7 @@ function activate(context) {
     }
   }
   const processes = new Set();
-  let dashboardWorker;
+  let dashboardWorker, requestWorker, requestWorkerKey, ramCompartments;
   function runtimeEnvironment(cwd) {
     const config = vscode.workspace.getConfiguration('karma');
     const strataPort = config.inspect?.('strata.port')?.globalValue;
@@ -180,6 +181,7 @@ function activate(context) {
     dashboardInFlight=true;
     try{
       const data=await request({op:'dashboard'});
+      if(ramCompartments)data.ram_compartments=ramCompartments;
       panel?.webview.postMessage({type:'dashboard',data});
       usage?.setData(data,path.basename(workspace()));
     }catch(e){output.appendLine('Dashboard: '+e.message);panel?.webview.postMessage({type:'dashboard-error',message:e.message});usage?.setError(e.message);}
@@ -203,38 +205,36 @@ function activate(context) {
     if(!diagnostic){busy = true;panel?.webview.postMessage({type:'busy',value:true});}
     try {
       if(message.op==='conversation')await waitForTelemetry(stateDir,token);
-      return await new Promise((resolve,reject) => {
-        const config=vscode.workspace.getConfiguration('karma');
-        const python=config.get('pythonPath','')||(process.platform==='win32'?'python':'python3');
-        const fixedTier=internal&&TIERED_REQUESTS.includes(payload.op)?payload.tier:undefined;
-        const thinking=thinkForTurn?'on':reasoningPreference(config,fixedTier);
-        const child = spawn(python,['-B',path.join(context.extensionPath,'harness','vscode_bridge.py'),
-          '--workspace',cwd,'--storage',stateDir],{cwd,stdio:['pipe','pipe','pipe'],env:{...process.env,...runtimeEnvironment(cwd),KARMA_STORAGE_LIMIT_MIB:String(vscode.workspace.getConfiguration('karma').get('storageLimitMiB',512)),SUTRA_LOGIT_SENSOR:({'off':'','numbers':'1','tokens':'tokens'})[vscode.workspace.getConfiguration('karma').get('logitSensor','off')]||'',SUTRA_ACTIVITY:"1",SUTRA_THINKING:thinking,KARMA_NODE:process.execPath,KARMA_TYPESCRIPT:path.join(context.extensionPath,'vendor','typescript','typescript.js')}});
-        processes.add(child); let stdout='',stderr='';
-        const events=require('./model_activity').decoder(e=>{usage?.activity(e);onActivity?.(e);},s=>{stderr=(stderr+s).slice(-10000);});
-        let stopReason,killTimer;const cancel=reason=>{if(stopReason)return;stopReason=reason;child.kill('SIGTERM');killTimer=setTimeout(()=>child.kill('SIGKILL'),10000);};
-        const cancellation=token?.onCancellationRequested(()=>cancel('Sutra request cancelled. Interrupted work will be reconciled.'));
-        // Three attempts each have a 150 second transport deadline.
-        const timer=setTimeout(()=>cancel('Sutra bridge exceeded its deadline. Interrupted work will be reconciled.'),480000);
-        child.stdout.on('data',d=>{stdout+=d;if(stdout.length>4_000_000)child.kill();});
-        child.stderr.on('data',d=>events.write(d));
-        child.on('error',e=>{events.end();events.close();clearTimeout(timer);clearTimeout(killTimer);cancellation?.dispose();processes.delete(child);reject(e);});
-        child.on('close',(code,signal)=>{
-          events.end();events.close();clearTimeout(timer);clearTimeout(killTimer);cancellation?.dispose();processes.delete(child);
-          try {
-            if(stopReason)throw new Error(stopReason);
-            if(!stdout.trim())throw new Error(`Bridge exited without a response (code ${code}, signal ${signal||'none'}). Pending calls remain withheld.`);
-            const result=JSON.parse(stdout);
-            if(code!==0||!result.ok)throw new Error(result.error||stderr||'Bridge failed');
-            if(!diagnostic)output.appendLine(`${new Date().toISOString()} ${message.op} completed`);
-            updateReports(result.data);
-            if(result.data?.result?.token_usage){usage?.recordResponse(result.data.result.token_usage);void refreshDashboard();}
-            resolve(result.data);
-          } catch(e) {reject(new Error(`${e.message}${stderr?'\n'+stderr:''}`));}
-        });
-        child.stdin.on('error',()=>{});
-        child.stdin.end(JSON.stringify(payload));
-      });
+      const config=vscode.workspace.getConfiguration('karma');
+      const python=config.get('pythonPath','')||(process.platform==='win32'?'python':'python3');
+      const fixedTier=internal&&TIERED_REQUESTS.includes(payload.op)?payload.tier:undefined;
+      const thinking=thinkForTurn?'on':reasoningPreference(config,fixedTier);
+      const key=JSON.stringify([cwd,stateDir,python]);
+      if(!requestWorker||requestWorker.closed||requestWorkerKey!==key){
+        requestWorker?.dispose();requestWorkerKey=key;ramCompartments=undefined;
+        requestWorker=new BridgeWorker({spawn,command:python,
+          args:['-B',path.join(context.extensionPath,'harness','vscode_bridge.py'),
+            '--workspace',cwd,'--storage',stateDir,'--request-stream'],
+          options:{cwd,stdio:['pipe','pipe','pipe'],env:{...process.env}},
+          activity:require('./model_activity').decoder,
+          onSpawn:child=>processes.add(child),onClose:child=>{processes.delete(child);if(requestWorker?.child===child)ramCompartments=undefined;}});
+      }
+      const ramSetting=config.inspect?.('ramMemoryMiB')?.globalValue;
+      const ramMiB=ramSetting===undefined?64:ramSetting;
+      if(!Number.isInteger(ramMiB)||ramMiB<0||ramMiB>1024)throw new Error('Sutra RAM allocation must be 0..1024 MiB in User Settings.');
+      const environment={...runtimeEnvironment(cwd),
+        KARMA_STORAGE_LIMIT_MIB:String(config.get('storageLimitMiB',512)),
+        SUTRA_LOGIT_SENSOR:({'off':'','numbers':'1','tokens':'tokens'})[config.get('logitSensor','off')]||'',
+        SUTRA_ACTIVITY:'1',SUTRA_THINKING:thinking,KARMA_NODE:process.execPath,
+        KARMA_TYPESCRIPT:path.join(context.extensionPath,'vendor','typescript','typescript.js'),
+        SUTRA_RAM_CACHE_MIB:String(ramMiB)};
+      const result=await requestWorker.send(payload,environment,{token,onActivity:event=>{usage?.activity(event);onActivity?.(event);}});
+      if(result.host_memory)ramCompartments=result.host_memory;
+      if(!result.ok)throw new Error(result.error||'Bridge request failed');
+      output.appendLine(new Date().toISOString()+' '+message.op+' completed');
+      updateReports(result.data);
+      if(result.data?.result?.token_usage){usage?.recordResponse(result.data.result.token_usage);void refreshDashboard();}
+      return result.data;
     } finally {if(!diagnostic){busy=false;panel?.webview.postMessage({type:'busy',value:sequence});}}
   }
   function publishReview(data) {
@@ -665,7 +665,7 @@ function activate(context) {
     vscode.commands.registerCommand('karma.selectCalibrations',()=>selectCalibrations()),
     vscode.commands.registerCommand('karma.revokeCalibration',()=>revokeCalibration()),
     vscode.commands.registerCommand('karma.evaluateCalibration',()=>evaluateCalibration()),
-    vscode.commands.registerCommand('karma.switchModel',switchModel),{dispose(){clearInterval(dashboardTimer);telemetry?.kill();for(const p of processes)p.kill('SIGTERM');}});
+    vscode.commands.registerCommand('karma.switchModel',switchModel),{dispose(){clearInterval(dashboardTimer);requestWorker?.dispose();telemetry?.kill();for(const p of processes)p.kill('SIGTERM');}});
   const diagrams=diagramView.install(vscode,context,id=>request({op:'conversation_read',invocation_id:id}));
   usage=usageView.install(vscode,context,{refresh:refreshDashboard,storage,activityChanged:uri=>previewChanges.fire(uri)});
   dashboardTimer=setInterval(refreshDashboard,2000);

@@ -47,10 +47,27 @@ function renderLogicalMemory(m){
  const retention=document.getElementById('memory-retention');retention.replaceChildren();
  for(const [kind,rule] of Object.entries(m?.retention||{}))retention.append(node('p',kind.replaceAll('_',' ')+': '+rule,'plot-note'));
 }
+function renderRamMemory(memory){
+ const amount=value=>finite(value)?(value/1048576).toLocaleString(undefined,{maximumFractionDigits:2})+' MiB':'—';
+ setText('ram-active',amount(memory?.active_bytes));
+ setText('ram-warm',amount(memory?.warm_bytes));
+ setText('ram-limit',amount(memory?.max_bytes));
+ const last=memory?.last_request;
+ setText('ram-compartments-summary',memory
+  ? `${memory.enabled?'Retaining decoded pages':'RAM retention paused or disabled'} · ${memory.active_entries||0} active items · ${memory.warm_entries||0} warm items`
+  : 'Waiting for a host request.');
+ setText('ram-compartments-hits',last
+  ? `Last request · ${last.active_hits||0} active hits · ${last.warm_hits||0} warm promotions · ${last.misses||0} decoded reloads · ${last.evictions||0} evictions`
+  : '');
+ setText('ram-compartments-time',last
+  ? `JSON decoding ${((last.decode_ns||0)/1000000).toFixed(2)} ms · copy ${((last.copy_ns||0)/1000000).toFixed(2)} ms · lookup ${((last.lookup_ns||0)/1000000).toFixed(2)} ms`
+  : '');
+}
 function renderMonitor(){
  const d=snapshot?.monitor||{},h=d.hardware||{},s=h.sample||{},now=Date.now(),elapsed=(now-Date.parse(snapshot?.updatedAt))/1000;
  renderTaskObservations(d.task_observations);
  renderLogicalMemory(d.logical_memory);
+ renderRamMemory(d.ram_compartments);
  const snapshotFresh=!!snapshot&&!error&&finite(elapsed)&&elapsed>=0&&elapsed<=8;
  const hwFresh=snapshotFresh&&h.available===true&&T.freshAge(h.age_seconds,elapsed);
  const why=error?'Readings unavailable':!snapshotFresh&&snapshot?'Readings expired':h.reason||'Waiting for system readings';

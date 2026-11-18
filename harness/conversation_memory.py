@@ -9,6 +9,7 @@ import re
 from context_manager import InvalidUpdate, ContextBudgetExceeded, canonical, sha
 from paging import Budget, PageFault
 from review_targets import document_file_target
+from ram_compartments import decode as decode_json
 
 # Explicit compatibility for data-only conversations from known released policies.
 # Old executable proposals, workspace checkpoints and permissions remain stale.
@@ -17,6 +18,7 @@ LEGACY_POLICIES = {'2319f693bfd23c67bda96909572c6a5646d1a299497aa3ab9c23fc990721
                    'd71f0acf70b42a1d0cb1332c1413bfb85b90156d5820d590cdb19b41ea79ce04'}
 # Recomputed from the released VSIX policy manifests; never from an untrusted receipt.
 RELEASE_POLICIES = {
+    '0.45.4': '671ba69d370161a334e31636051a68565379a7fc7f84000172aff3428ae72983',
     '0.44.0': '71134890bb8b191ebef91385f5f170aff1f04f26b35d5b663f8eebd2f68185a2',
     '0.43.0': '42edde7c6b8f06cc3f21d5e19b7a20360b1ca1ec0702deccfddfa787bb654a3d',
     '0.42.1': '1e0c7f1e07bfa7a77552d08799920a3b167cea0e8e2a6a1203efed2b25a68f89',
@@ -73,6 +75,12 @@ PIN = re.compile(r'\b(remember|must|never|always|constraint|prefer|do not|don.t|
 WORDS = re.compile(r'[^\W_]{3,}', re.UNICODE)
 STOP = {'the', 'and', 'this', 'that', 'what', 'with', 'please', 'about', 'could', 'would', 'tell', 'have', 'were'}
 
+
+def _decode(s, sid, kind, raw):
+    database = ('memory', id(s.db)) if s.path == ':memory:' else (
+        str(s.path), s._audit_file_identity)
+    return decode_json((database, sid, s.logic_hash, kind), raw)
+
 def check_routing_ancestry(s,sid,payload):
     """Intermediate routing drafts never become memory, but remain dependencies."""
     previous=payload.get('routing_state',{}).get('previous');seen=set()
@@ -82,7 +90,8 @@ def check_routing_ancestry(s,sid,payload):
         row=s.db.execute('SELECT i.record_json,r.record_json,d.payload_json,d.payload_hash FROM invocations i JOIN invocation_receipts r ON r.invocation_id=i.id JOIN deliveries d ON d.id=i.delivery_id WHERE i.id=? AND i.session=?',(previous,sid)).fetchone()
         if not row or s.db.execute('SELECT 1 FROM invocation_quarantine WHERE invocation_id=?',(previous,)).fetchone():
             raise PageFault('Routing ancestor is unavailable or quarantined', code='corrupt')
-        env,receipt,prior=json.loads(row[0]),json.loads(row[1]),json.loads(row[2])
+        env,receipt,prior=(_decode(s,sid,kind,raw) for kind,raw in
+                         zip(('invocation','receipt','delivery'), row[:3]))
         if (env['role']!='conversation' or receipt['status']!='accepted' or receipt['logic_hash'] not in LEGACY_POLICIES|{s.logic_hash}
                 or sha(row[2])!=row[3] or row[3]!=receipt['payload_hash'] or prior.get('pages')
                 or any(prior[k]!=payload[k] for k in ('contract','workspace_context','request','context_binding'))
@@ -108,7 +117,8 @@ def history(s, sid, parent):
         receipt = s.db.execute('SELECT record_json FROM invocation_receipts WHERE session=? AND invocation_id=?', (sid, parent)).fetchone()
         if not row or not receipt:
             raise PageFault('Conversation receipt unavailable', code='missing')
-        env, r = json.loads(row[0]), json.loads(receipt[0])
+        env = _decode(s, sid, 'invocation', row[0])
+        r = _decode(s, sid, 'receipt', receipt[0])
         if env['role'] != 'conversation' or r['status'] != 'accepted' or s.db.execute('SELECT 1 FROM invocation_quarantine WHERE invocation_id=?', (parent,)).fetchone():
             raise PageFault('Conversation or ancestor is quarantined', code='corrupt')
         if r['logic_hash'] not in LEGACY_POLICIES | {s.logic_hash}:
@@ -120,7 +130,7 @@ def history(s, sid, parent):
         delivery = s.db.execute('SELECT payload_json,payload_hash FROM deliveries WHERE id=? AND session=?', (env['delivery_id'], sid)).fetchone()
         if not delivery or sha(delivery[0]) != delivery[1] or delivery[1] != r['payload_hash']:
             raise PageFault('Conversation delivery is corrupt', code='corrupt')
-        p = json.loads(delivery[0])
+        p = _decode(s, sid, 'delivery', delivery[0])
         if p.get('document_review_version') == 2:
             from document_stages import publication
             publication(s, p, parent)

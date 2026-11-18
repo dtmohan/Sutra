@@ -3,11 +3,12 @@
 Authority is assigned by the trusted host adapters, never by model output.
 Provenance and freshness are structural properties, not semantic confidence.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib, json, math, pathlib, sqlite3, time, uuid
 from context_manager import ContextStore, Conflict, InvalidUpdate, ContextBudgetExceeded, canonical, sha
 from smriti_adapter import SmritiAdapter
 from memory_layer import PageFault, eviction_closure
+from ram_compartments import decode as decode_json
 
 @dataclass(frozen=True)
 class Page:
@@ -23,11 +24,13 @@ class Page:
     ttl_s: float
     dependencies_json: str
     source_json: str
+    cache_scope: object = field(default=None, compare=False, repr=False)
 
     @property
-    def payload(self): return json.loads(self.payload_json)
+    def payload(self): return decode_json(('page_payload', self.cache_scope), self.payload_json)
     @property
-    def dependencies(self): return tuple(tuple(x) for x in json.loads(self.dependencies_json))
+    def dependencies(self):
+        return tuple(tuple(x) for x in decode_json(('page_dependencies', self.cache_scope), self.dependencies_json))
 
 @dataclass(frozen=True)
 class Budget:
@@ -145,7 +148,10 @@ class PagedContext(ContextStore):
             version=row[0]
         row=self.db.execute('SELECT * FROM pages WHERE session=? AND key=? AND version=?',(session,key,version)).fetchone()
         if row is None: raise PageFault('Missing page version: '+key, code='missing', key=key)
-        return Page(*row)
+        database = ('memory', id(self.db)) if self.path == ':memory:' else (
+            str(pathlib.Path(self.path).resolve()), self._audit_file_identity)
+        scope = (database, session, key, version, getattr(self, 'logic_hash', None))
+        return Page(*row, cache_scope=scope)
 
     def put_page(self, session, key, group, subject, text, *, authority='model', facts=None,
                  dependencies=(), ttl_s=3600, source=None, expected_version=0):

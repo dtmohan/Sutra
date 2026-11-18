@@ -1,4 +1,24 @@
-# Sutra 0.45.4 — Native Strata runtime management
+# Sutra 0.46.0 — Persistent host memory
+
+Normal requests reuse a workspace-scoped Python worker. Active RAM holds decoded
+pages and receipt data used by the current request. Recently used entries move
+to warm RAM and can be promoted on reuse. The shared retention limit defaults
+to 64 MiB. Set **Karma › Ram Memory MiB** (`karma.ramMemoryMiB`) in User Settings,
+or set it to `0` to disable retention. Hardware and memory admission can clear
+retained copies under pressure.
+
+Durable writes, source freshness, receipt integrity, permissions and task
+allocations keep their existing checks. Worker termination discards RAM copies
+and the next request recovers saved work. Sutra Monitor shows retained bytes,
+active and warm hits, reloads, evictions and JSON processing time.
+
+The local 20-run host benchmark measured median round trips of 106.8 ms with
+fresh processes, 26.5 ms with persistent processes and retention disabled, and
+27.0 ms with active/warm retention. Process reuse supplied the measured gain.
+The RAM layer showed no additional overall gain on the tested corpora.
+Reproduce the measurements with `scripts/measure-ram-compartments.py`.
+
+## Sutra 0.45.4 — Native Strata runtime management
 
 Sutra uses Strata's native runtime management for background startup, status
 and stopping. Strata owns its processes, readiness checks and recovery of

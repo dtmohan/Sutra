@@ -1,9 +1,12 @@
-"""One request per fresh process; governed models, edits, tests and diagnostics."""
+"""Governed requests with isolated operations and an optional host RAM worker."""
 import argparse
+from contextlib import contextmanager
 import http.client
 import json
+import os
 from pathlib import Path
 import sys
+import time
 import uuid
 from context_manager import InvalidUpdate, canonical, sha, CONSTRAINT_KEYS
 from invocation_gateway import InvocationLedger, InvocationGateway
@@ -495,9 +498,121 @@ def _handle(root,workspace,request,metadata=None,prepare_catalog=True):
     finally:s.close()
 
 
+REQUEST_ENVIRONMENT = frozenset((
+    'SUTRA_STRATA_PORT', 'SUTRA_STRATA_MODEL', 'SUTRA_CAPABILITIES_MODE',
+    'SUTRA_RUNTIME_DIR', 'SUTRA_MEMORY_OWNERSHIP', 'SUTRA_WORKSPACE_ALLOCATION',
+    'KARMA_STORAGE_LIMIT_MIB', 'SUTRA_LOGIT_SENSOR', 'SUTRA_ACTIVITY',
+    'SUTRA_THINKING', 'KARMA_NODE', 'KARMA_TYPESCRIPT', 'SUTRA_RAM_CACHE_MIB',
+))
+
+
+@contextmanager
+def request_environment(values, baseline):
+    if not isinstance(values, dict) or set(values) - REQUEST_ENVIRONMENT:
+        raise InvalidUpdate('Unsupported worker request environment')
+    if any(value is not None and (not isinstance(value, str) or len(value) > 16384)
+           for value in values.values()):
+        raise InvalidUpdate('Invalid worker request environment')
+    try:
+        for key in REQUEST_ENVIRONMENT:
+            value = values.get(key, baseline.get(key))
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        yield
+    finally:
+        for key in REQUEST_ENVIRONMENT:
+            value = baseline.get(key)
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def cache_allocation(root, compartments):
+    from karma_adapter import KarmaAdapter
+    from monitoring import resource_state
+    from runtime_memory import HEADROOM
+    raw = os.environ.get('SUTRA_RAM_CACHE_MIB', '64')
+    if not 1 <= len(raw) <= 4 or not raw.isascii() or not raw.isdecimal() or not 0 <= int(raw) <= 1024:
+        raise InvalidUpdate('Host RAM allocation must be 0..1024 MiB')
+    limit = int(raw) * 1024**2
+    if not limit:
+        compartments.resize(0)
+        return {'admitted': False, 'decision': None, 'reason': 'Host RAM retention is disabled'}
+    hardware = resource_state(root, refresh=True)
+    if not hardware.get('admitted'):
+        compartments.clear('hardware_unavailable_or_pressure')
+        compartments.resize(0)
+        return {'admitted': False, 'decision': hardware.get('decision'),
+                'reason': hardware.get('reason', 'Fresh resource admission unavailable')}
+    sample = hardware['sample']
+    available = (sample['available_bytes'] if sample.get('profile') == 'portable-memory-v1'
+                 else sample['free_bytes'] + sample['inactive_bytes'])
+    allocation = KarmaAdapter().memory_allocation(limit, available, HEADROOM)
+    admitted = allocation['decision'] == 'ALLOW'
+    if not admitted:
+        compartments.clear('memory_allocation')
+    compartments.resize(limit if admitted else 0)
+    return {'admitted': admitted, 'decision': allocation['decision'],
+            'requested_bytes': limit, 'available_bytes': available,
+            'system_reserve_bytes': HEADROOM}
+
+
+def request_stream(root, workspace, stream=None, output=None):
+    from lifecycle import deadline, Interrupted
+    from ram_compartments import Compartments
+    stream = sys.stdin if stream is None else stream
+    output = sys.stdout if output is None else output
+    baseline = {key: os.environ.get(key) for key in REQUEST_ENVIRONMENT}
+    compartments = Compartments(0)
+    scope = (str(workspace), str(root))
+    while True:
+        raw = stream.readline(200002)
+        if not raw:
+            return
+        started = time.perf_counter()
+        fatal = len(raw) > 200000
+        allocation = None
+        try:
+            if fatal:
+                raise InvalidUpdate('Worker request is too large')
+            envelope = json.loads(raw)
+            if not isinstance(envelope, dict) or set(envelope) != {'request', 'environment'}:
+                raise InvalidUpdate('Worker requests require request and environment')
+            request = envelope['request']
+            if not isinstance(request, dict):
+                raise InvalidUpdate('Worker request must be an object')
+            with request_environment(envelope['environment'], baseline), deadline():
+                allocation = cache_allocation(root, compartments)
+                with compartments.request(scope):
+                    result = handle(root, workspace, request)
+            answer = {'ok': True, 'data': result}
+        except (Exception, Interrupted, KeyboardInterrupt) as exc:
+            compartments.clear('operation_failed')
+            fatal = fatal or isinstance(exc, (Interrupted, KeyboardInterrupt))
+            answer = {'ok': False, 'error': type(exc).__name__ + ': ' + str(exc)}
+        memory = compartments.snapshot()
+        memory.update(request_elapsed_ms=round((time.perf_counter() - started) * 1000, 3),
+                      admission=allocation, worker_pid=os.getpid())
+        answer['host_memory'] = memory
+        if fatal:
+            answer['fatal'] = True
+        print(json.dumps(answer), file=output, flush=True)
+        print('SUTRA_BRIDGE_REQUEST_END', file=sys.stderr, flush=True)
+        if fatal:
+            return
+
+
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--storage',required=True);p.add_argument('--workspace',required=True);p.add_argument('--dashboard-stream',action='store_true');args=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--storage',required=True);p.add_argument('--workspace',required=True);p.add_argument('--dashboard-stream',action='store_true');p.add_argument('--request-stream',action='store_true');args=p.parse_args()
     root=Path(args.storage).resolve();workspace=Path(args.workspace).resolve();root.mkdir(parents=True,exist_ok=True)
+    if args.request_stream:
+        if args.dashboard_stream or not workspace.is_dir():
+            raise InvalidUpdate('A request worker requires one local workspace')
+        request_stream(root, workspace)
+        return
     if args.dashboard_stream:
         # Persistent diagnostics worker: no model, source reads, mutation or
         # recovery. Each sample opens/closes a read-only SQLite connection.

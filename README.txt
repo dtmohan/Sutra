@@ -1,3 +1,14 @@
+Sutra 0.46.0 — Persistent host memory
+
+Workspace requests reuse a persistent host worker with bounded active and warm
+RAM compartments for decoded pages and receipt data. Karma › Ram Memory MiB
+defaults to 64 MiB; set 0 to disable retention. Sutra Monitor shows retained
+bytes, hits, reloads, evictions and JSON processing times.
+
+Source freshness, integrity, permission and budget checks run on reuse. Worker
+recovery reloads durable task data. Local measurements show a host latency gain
+from process reuse; RAM retention supplied no further overall gain in the tests.
+
 Sutra 0.45.4 — Native Strata runtime management
 
 Sutra uses Strata's native runtime for background startup, status and stopping.

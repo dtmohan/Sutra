@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Governed local AI chat, codebase reviews, and diagnostics in VS Code.",
-  "version": "0.45.4",
+  "version": "0.46.0",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -349,6 +349,14 @@
           "scope": "machine",
           "default": false,
           "description": "Start the configured Strata native runtime profile when Sutra activates with Strata selected for High. Set only in User Settings."
+        },
+        "karma.ramMemoryMiB": {
+          "type": "integer",
+          "scope": "machine",
+          "default": 64,
+          "minimum": 0,
+          "maximum": 1024,
+          "description": "Maximum decoded page and receipt data retained in active and warm host RAM compartments. Fresh hardware admission can reduce retention. Set 0 to disable RAM retention."
         },
         "karma.nativeEnabled": {
           "type": "boolean",

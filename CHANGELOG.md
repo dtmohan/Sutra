@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.46.0
+
+- Reuse a workspace-scoped host worker with isolated request environments, deadlines, activity streams and durable recovery.
+- Retain decoded pages and receipt data in bounded active and warm RAM compartments while preserving freshness, integrity, permission and budget checks.
+- Add Monitor counters and reproducible host/local-model measurements. Preserve compatible 0.45.4 conversation data across the policy upgrade.
+
 ## 0.45.4
 
 - Delegate Strata startup, status and stopping to its native managed runtime, including native ownership and interrupted-process recovery.

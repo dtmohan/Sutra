@@ -104,6 +104,16 @@ function monitorHost(){
  assert.equal(await page.locator('#reasoning-preference').textContent(),'Shared reasoning: Model default');
  assert(await page.locator('#tier-reasoning-summary').isHidden());
  assert((await page.locator('#memory-summary').textContent()).includes('3 evictions · 2 refaults'));
+ await send({snapshot:{...snapshot,monitor:{...monitor,ram_compartments:{
+  enabled:true,max_bytes:64*1048576,active_bytes:1048576,warm_bytes:3*1048576,
+  active_entries:6,warm_entries:14,last_request:{active_hits:4,warm_hits:7,misses:2,
+   evictions:1,decode_ns:1200000,copy_ns:400000,lookup_ns:100000}
+ }}}});
+ assert.equal(await page.locator('#ram-active').textContent(),'1 MiB');
+ assert.equal(await page.locator('#ram-warm').textContent(),'3 MiB');
+ assert((await page.locator('#ram-compartments-hits').textContent()).includes('7 warm promotions'));
+ assert((await page.locator('#ram-compartments-time').textContent()).includes('1.20 ms'));
+ await send({snapshot});
  assert((await page.locator('#memory-events').textContent()).includes('refresh source and dependents'));
  assert.equal(await page.locator('#memory-events img').count(),0);
  assert((await page.locator('#memory-retention').textContent()).includes('never automatically evicted'));
