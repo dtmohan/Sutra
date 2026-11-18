@@ -1,9 +1,12 @@
-# Sutra 0.44.0 — Resume child reviews
+# Sutra 0.44.1 — Recover child allocations
 
 Read-only workspace reviews can save a child's findings and next step before
-continuing its partition. On a timeout or output-limit pause, use **Resume**
-in Sutra Monitor. You can select a different tier to finish the saved slice.
-The original permissions, sources and charged work remain bound to the review.
+continuing its partition. On a timeout or output-limit pause, select a tier
+and send `continue` in the same chat to finish the saved slice. If the packet
+only fits with one attempt reserved, Sutra can run that attempt within the
+existing child allocation. **Increase allocation** in Sutra Monitor can add a
+measured shortfall to a paused child and its parent execution. Checkpoints,
+read scope and recorded spending stay with the review.
 
 # Stage long document reviews
 

@@ -353,8 +353,11 @@ function install(vscode,context,deps){
       const labels={tokens:'Model budget units',calls:'Model calls',operations:'Repository operations',source_bytes:'Source bytes',seconds:'Execution seconds'};
       const fmt=x=>Number(x).toLocaleString(undefined,{maximumFractionDigits:1});
       const rows=Object.entries(p.additions).map(([key,add])=>labels[key]+': '+fmt(p.before[key])+' + '+fmt(add)+' = '+fmt(p.after[key])+' total. Spent '+fmt(p.used[key])+'; '+fmt(p.remaining_after[key])+' remains.');
+      const target = p.child_allocation
+        ? 'This adds capacity to the saved child and its parent execution. Its checkpoint, context, permissions and recorded spending are retained.'
+        : 'This adds capacity to the task. A new bounded execution can use the added capacity. Context, constraints, permissions and spending are retained.';
       const yes=await vscode.window.showWarningMessage('Increase this task’s allocation?',{modal:true,detail:
-        p.goal+'\n\n'+rows.join('\n')+'\n\nThis adds capacity; it does not reset spending. A new bounded execution can use the added capacity. Context, constraints and permissions are retained. Model context and memory limits still apply. Approval does not start a model call. Continue the saved request afterward.'},'Increase allocation');
+        p.goal+'\n\n'+rows.join('\n')+'\n\n'+target+' Model context and memory limits still apply. Continue the saved request after approval.'},'Increase allocation');
       if(yes!=='Increase allocation')return;
       if(deps.workspace()!==workspace||running||routing?.active||deps.isBusy())throw new Error('The workspace or request changed. Review a fresh allocation proposal.');
       const next=await deps.request({op:'orchestrate',event:'allocation_grant',flow_id:preview.flow_id,cursor:preview.cursor,confirmed:true,proposal:p,...scope});
@@ -422,6 +425,14 @@ function install(vscode,context,deps){
       const page=Number.isInteger(stop.review_page)&&Number.isInteger(stop.total_pages)
         ? `claim-review page ${stop.review_page} of ${stop.total_pages}` : 'the unfinished claim-review page';
       guidance='The draft and completed claim-review pages are saved. Sutra will request thinking off when it retries '+page+'.';
+    }else if(stop.child_allocation_granted){
+      guidance='Child capacity was increased. Resume the saved checkpoint in this chat.';
+    }else if(stop.resume_phase==='CHILDREN'&&stop.memory_fault?.code==='capacity'){
+      guidance=stop.child_context?.task_allocation_need
+        ? 'Choose **Increase allocation…** in Sutra Monitor to add the measured child capacity and keep its checkpoint.'
+        : 'Select a Sutra model with a larger context window and send **continue**.';
+    }else if(stop.resume_phase==='CHILDREN'&&allocationStop){
+      guidance='Inspect the child allocation limit in Sutra Monitor. Its last checkpoint and spending are saved.';
     }else if(automatic?.status==='model_context'){
       guidance='Select a Sutra tier with a larger context window and send **continue** to use that tier.';
     }else if(allocationStop){

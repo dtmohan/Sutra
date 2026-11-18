@@ -95,7 +95,9 @@ function renderMonitor(){
  setText('recovery-status',pending?[...new Set([recovery,automatic?.message||automatic?.reason].filter(Boolean))].join(' ')||
    'The saved request keeps its context and spent budget. Open its original chat, then choose Resume.':'');
  for(const id of ['resume-workflow','discard-workflow','increase-allocation'])el(id).disabled=!!native?.working;
+ const childStop=stop?.resume_phase==='CHILDREN';
  el('increase-allocation').hidden=pending?.state!=='PAUSED'||automatic?.status==='model_context'||
+   (childStop&&(!stop.child_context?.task_allocation_need||!!stop.child_allocation_granted))||
    !(['context_budget','task_budget','budget_stopped'].includes(stop?.status)||stop?.memory_fault?.code==='capacity');
  const budget=stop?.status==='evidence_bridge'?stop.budget:pending?.stackChat?pending.task_budget:d.review_budget;
  el('task-allocation').textContent=budget?.limits&&budget?.used

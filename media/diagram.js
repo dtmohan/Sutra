@@ -1,10 +1,18 @@
 'use strict';
 const vscode=acquireVsCodeApi(),el=id=>document.getElementById(id);let source='',svg='',sequence=0,scale=1,natural={width:1,height:1};
-mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:'base',htmlLabels:false,flowchart:{htmlLabels:false,useMaxWidth:false,nodeSpacing:36,rankSpacing:60,curve:'basis'},themeVariables:{fontFamily:'Arial, Helvetica, sans-serif',fontSize:'16px',background:'#f6f8fc',primaryTextColor:'#17263e',lineColor:'#677b9b',edgeLabelBackground:'#f6f8fc'},maxEdges:24,maxTextSize:16000,suppressErrorRendering:true});
+let renderer;
+function getRenderer(){
+  if(renderer)return renderer;
+  const mermaid=globalThis.mermaid;
+  if(!mermaid)throw Error('The offline renderer did not load');
+  mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:'base',htmlLabels:false,flowchart:{htmlLabels:false,useMaxWidth:false,nodeSpacing:36,rankSpacing:60,curve:'basis'},themeVariables:{fontFamily:'Arial, Helvetica, sans-serif',fontSize:'16px',background:'#f6f8fc',primaryTextColor:'#17263e',lineColor:'#677b9b',edgeLabelBackground:'#f6f8fc'},maxEdges:24,maxTextSize:16000,suppressErrorRendering:true});
+  renderer=mermaid;
+  return renderer;
+}
 function zoom(){const node=el('canvas').querySelector('svg');if(node){node.style.width=natural.width*scale+'px';node.style.height=natural.height*scale+'px';}}
 function fit(){scale=Math.min(1,(el('viewport').clientWidth-70)/natural.width,(el('viewport').clientHeight-70)/natural.height);zoom();}
 async function render(value){const run=++sequence;source=value;svg='';el('export').disabled=true;el('error').textContent='';el('source').textContent=source;
- try{const result=await mermaid.render('karma_graph_'+run,value);if(run!==sequence)return;const doc=new DOMParser().parseFromString(result.svg,'image/svg+xml');if(doc.querySelector('parsererror,script,foreignObject,iframe,image,use'))throw Error('Diagram renderer produced unsupported SVG');
+ try{const result=await getRenderer().render('karma_graph_'+run,value);if(run!==sequence)return;const doc=new DOMParser().parseFromString(result.svg,'image/svg+xml');if(doc.querySelector('parsererror,script,foreignObject,iframe,image,use'))throw Error('Diagram renderer produced unsupported SVG');
   const node=document.importNode(doc.documentElement,true);for(const element of [node,...node.querySelectorAll('*')])for(const attr of [...element.attributes])if(/^on/i.test(attr.name)||(/href$|^src$/i.test(attr.name)&&!attr.value.startsWith('#')))throw Error('Diagram renderer produced an external reference');
   const walker=document.createTreeWalker(node,NodeFilter.SHOW_TEXT);while(walker.nextNode()){const text=walker.currentNode;if(text.parentElement?.closest('text,tspan'))text.nodeValue=text.nodeValue.replace(/&#(\d+);/g,(_,code)=>String.fromCodePoint(Number(code)));}
   node.setAttribute('role','img');node.setAttribute('aria-label',el('title').textContent+'. '+el('note').textContent);node.setAttribute('xmlns','http://www.w3.org/2000/svg');node.style.background='#f6f8fc';svg=new XMLSerializer().serializeToString(node);const box=node.viewBox.baseVal;natural={width:box.width||1000,height:box.height||500};el('canvas').replaceChildren(node);el('export').disabled=false;fit();

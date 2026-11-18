@@ -92,11 +92,52 @@ def eligible(s, fid, meta):
     return n, data, sid
 
 
+def child_increase(s, data):
+    """Measure an in-place token amendment for the paused, settled child."""
+    import orchestration as m
+    stop = data.get('workflow_stop') or {}
+    if stop.get('resume_phase') != 'CHILDREN':
+        return None
+    sizing = stop.get('child_context') or {}
+    need = sizing.get('task_allocation_need') or {}
+    required = need.get('required_context')
+    if (need.get('dimension') != 'tokens' or need.get('slots') != 1
+            or type(required) is not int or not 0 < required <= sizing.get('effective_context_tokens', 0)):
+        raise InvalidUpdate('This child stop has no measured task allocation increase. Select a model with a larger context or address the reported limit.')
+    child = m.checked(s, sizing['branch_id'])
+    root = m.checked(s, data['root_node'])
+    if (child['id'] not in data.get('children', ()) or child['kind'] != 'branch'
+            or child['parent_id'] != root['id'] or m.state(s, child['id']) != 'READY'
+            or root['kind'] != 'execution' or m.state(s, root['id']) != 'WAITING_CHILDREN'):
+        raise InvalidUpdate('The saved child no longer owns this allocation stop')
+    frames = m.gates(s, child['id'], {})
+    left = min(frame['limits']['tokens'] - frame['used']['tokens'] for frame in frames)
+    extra = math.ceil(required - left)
+    if extra <= 0:
+        raise InvalidUpdate('This child already has the measured capacity. Resume the saved review.')
+    cost = {'tokens': required}
+    gates = {}
+    for frame in frames:
+        limit = dict(frame['limits'], tokens=frame['limits']['tokens'] + extra)
+        gate = KarmaAdapter().allocations(frame['used'], limit, cost)
+        if gate['decision'] != 'ALLOW':
+            raise InvalidUpdate('The child allocation cannot cover the measured request')
+        gates[frame['node_id']] = gate
+    return {'branch': child['id'], 'execution': root['id'], 'tokens': extra,
+            'minimum_context': required, 'kernel': gates}
+
+
 def preview(s, fid, meta, additions=None):
     import orchestration as m
     from review_budget import usage
     n, data, sid = eligible(s, fid, meta)
     budget = usage(s, sid)
+    child = child_increase(s, data)
+    if child:
+        permitted = {'tokens': child['tokens']}
+        if additions is not None and additions != permitted:
+            raise InvalidUpdate('Only the measured child token increase can be approved for this stop')
+        additions = permitted
     # Offer enough *additional* headroom to reach the initial allocation's
     # remaining capacity again. Usage stays charged; totals visibly increase.
     if additions is None:
@@ -115,6 +156,8 @@ def preview(s, fid, meta, additions=None):
          'permissions': m.permissions(s, sid),
          'allocation_gate': KarmaAdapter().allocations(budget['used'], after),
          'context_policy': 'Fresh model capability, packet sizing and memory admission still apply. No inference is started by approval.'}
+    if child:
+        p['child_allocation'] = child
     p['proposal_id'] = proposal_hash(p)
     return p
 
@@ -141,10 +184,21 @@ def _append(s, fid, expected, workspace_policy=None):
     digest = sha('allocation-amendment-v1:' + raw)
     s.db.execute('INSERT INTO allocation_amendments VALUES(?,?,?,?,?)',
                  (expected['session'], expected['binding']['contract_hash'], version + 1, raw, digest))
-    renew_after_grant(s, fid)
-    m.transition(s, fid, 'PAUSED', 'ALLOCATION_INCREASED',
-                 {'allocation_receipt': digest, 'allocation_version': version + 1,
-                  'allocation_authority': authority}, expected['allocation_gate'])
+    child = expected.get('child_allocation')
+    if child:
+        for nid in (child['execution'], child['branch']):
+            m.transition(s, nid, m.state(s, nid), 'CHILD_ALLOCATION_INCREASED',
+                         {'tokens': child['tokens'], 'allocation_receipt': digest},
+                         child['kernel'][nid])
+    else:
+        renew_after_grant(s, fid)
+    evidence = {'allocation_receipt': digest, 'allocation_version': version + 1,
+                'allocation_authority': authority}
+    if child:
+        from orchestration_flow import info
+        stop = info(s, fid)[1]['workflow_stop']
+        evidence['workflow_stop'] = dict(stop, child_allocation_granted=child['tokens'])
+    m.transition(s, fid, 'PAUSED', 'ALLOCATION_INCREASED', evidence, expected['allocation_gate'])
     s._audit('ALLOCATION_INCREASED', {'session': expected['session'], 'receipt': digest,
                                      'version': version + 1, 'proposal_id': expected['proposal_id'],
                                      'authority': authority})

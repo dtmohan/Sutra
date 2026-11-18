@@ -996,7 +996,7 @@ function setup(saved={}){
   const callsBefore=tight.calls.length,chatBefore=tight.uiCalls.length;
   await tight.commands['karma.increaseAllocation']({confirmed:true,proposal:{after:{tokens:999999}}});
   assert.equal(grants.length,0);assert.equal(previewCount,1);
-  assert(detail.includes('250,000 + 228,975 = 478,975'));assert(detail.includes('does not reset spending'));
+  assert(detail.includes('250,000 + 228,975 = 478,975'));assert(detail.includes('spending are retained'));
   tight.v.window.showWarningMessage=async(_m,_o,label)=>label;
   await tight.commands['karma.increaseAllocation']();
   assert.equal(grants.length,1);assert.deepEqual(grants[0].proposal,proposal);assert.equal(grants[0].confirmed,true);

@@ -153,7 +153,8 @@ def gates(s,nid,cost):
         for child, in s.db.execute('SELECT id FROM orchestration_nodes WHERE parent_id=?',(n['id'],)):
             if child==excluded or state(s,child) in TERMINAL:continue
             c=node(s,child);actual=spent(s,child)
-            for key in reserved:reserved[key]+=max(0,c['limits'][key]-actual[key])
+            child_limits=effective_limits(s,c)
+            for key in reserved:reserved[key]+=max(0,child_limits[key]-actual[key])
         effective={k:used[k]+reserved[k] for k in used}
         k=KarmaAdapter().allocations(effective,effective_limits(s,n),cost)
         frames.append(dict(k,node_id=n['id'],consumed=used,reserved_for_other_children=reserved))
@@ -161,10 +162,16 @@ def gates(s,nid,cost):
     return frames
 
 def effective_limits(s,n):
-    if n['kind'] != 'task': return n['limits']
-    from review_budget import usage
-    budget = usage(s,n['session'])
-    return dict(n['limits'], **budget['limits']) if budget else n['limits']
+    if n['kind'] == 'task':
+        from review_budget import usage
+        budget = usage(s,n['session'])
+        return dict(n['limits'], **budget['limits']) if budget else n['limits']
+    if n['kind'] in ('execution', 'branch'):
+        amendments = [event['data']['tokens'] for event in events(s, n['id'])
+                      if event['kind'] == 'CHILD_ALLOCATION_INCREASED']
+        if amendments:
+            return dict(n['limits'], tokens=n['limits']['tokens'] + sum(amendments))
+    return n['limits']
 
 class OrchestrationStop(InvalidUpdate):
     def __init__(self,frames):

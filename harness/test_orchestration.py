@@ -367,6 +367,85 @@ class OrchestrationTests(unittest.TestCase):
         self.assertTrue(self.s.verify_invocations(sid))
         self.assertTrue(self.s.audit_valid())
 
+    def test_child_resume_reuses_context_in_one_attempt_when_repair_share_cannot_fit(self):
+        from budget_accounting import reserved
+        from invocation_gateway import consume_dispatch
+
+        fork = m.fork
+
+        def tight_child_allocation(s, nid, proposals, signals, context):
+            proposals[0]['limits']['tokens'] = 27500
+            return fork(s, nid, proposals, signals, context)
+
+        with patch.object(m, 'fork', tight_child_allocation):
+            out = self.children()
+        child = out['children'][0]['id']
+        node = m.node(self.s, child)
+        sid = node['session']
+        call = Child.call
+
+        def checkpoint(worker, *args):
+            proposal, record = call(worker, *args)
+            proposal['slice_status'] = 'continue'
+            return proposal, record
+
+        def timeout(worker, call_id, system, packet, schema):
+            consume_dispatch(call_id, worker.model, system, packet, schema)
+            worker.payloads.append(copy.deepcopy(packet))
+            raise TimeoutError('Model transport deadline reached')
+
+        with patch.object(Child, 'call', checkpoint):
+            out = self.step(out)
+        with patch.object(Child, 'call', timeout):
+            paused = self.step(out)
+        self.assertEqual(paused['stop']['status'], 'child_slice_timeout')
+        stopped_packet = self.models[-1][1].payloads[0]
+        charged = m.spent(self.s, child)
+        task_budget = review_budget.usage(self.s, sid)
+        remaining = node['limits']['tokens'] - charged['tokens']
+
+        self.s.close()
+        self.s = InvocationLedger(self.root / 'state.sqlite')
+        self.tier = 'high'
+        resumed = self.step(paused, event='resume')
+        self.assertEqual(m.spent(self.s, child), charged)
+        self.assertEqual(review_budget.usage(self.s, sid), task_budget)
+
+        provider = self.provider
+        worker = Child(MODELS['high'])
+        worker.context_metadata = {'model_info': {'fixture.context_length': 32768}}
+        self.provider = lambda stage: None if stage == 'subagent' else provider(stage)
+        with patch('api_runtime.provider_for', return_value=worker), patch('monitoring.require_resources', return_value={}):
+            finished = self.step(resumed)
+        self.provider = provider
+        self.assertEqual(m.state(self.s, child), 'DONE')
+        self.assertEqual(len(worker.payloads), 1)
+        packet = worker.payloads[0]
+        self.assertEqual(packet['child_slice'], stopped_packet['child_slice'])
+        self.assertEqual(packet['child_checkpoint'], stopped_packet['child_checkpoint'])
+        self.assertEqual(packet['contract'], stopped_packet['contract'])
+        self.assertEqual(packet['branch'], stopped_packet['branch'])
+        self.assertEqual(packet['snapshot_receipts'], stopped_packet['snapshot_receipts'])
+        self.assertEqual(packet['memory']['recent_turns'], stopped_packet['memory']['recent_turns'])
+        self.assertEqual(packet['memory']['pinned_user_statements'], stopped_packet['memory']['pinned_user_statements'])
+        self.assertEqual(packet['memory_budget']['context_limit'], remaining)
+
+        invocation = finished['child']['result']['invocation_id']
+        raw, run_id = self.s.db.execute('SELECT record_json,run_id FROM invocations WHERE id=?', (invocation,)).fetchone()
+        envelope = json.loads(raw)
+        self.assertEqual(envelope['model'], MODELS['high'])
+        self.assertEqual(self.s.run(run_id)['config']['max_repairs'], 0)
+        self.assertLess(remaining // 2, reserved(envelope))
+        self.assertLessEqual(reserved(envelope), remaining)
+        self.assertEqual(m.spent(self.s, child)['tokens'], charged['tokens'] + reserved(envelope))
+        self.assertEqual(m.spent(self.s, child)['calls'], charged['calls'] + 1)
+        self.assertEqual(m.spent(self.s, child)['source_bytes'], charged['source_bytes'])
+        self.assertEqual(review_budget.usage(self.s, sid)['limits'], task_budget['limits'])
+        completed = self.until('DONE', finished)
+        self.assertTrue(completed['data']['result']['admission']['admitted'])
+        self.assertTrue(self.s.verify_invocations(sid))
+        self.assertTrue(self.s.audit_valid())
+
     def test_accepted_child_slice_recovers_before_checkpoint_commit_without_repeating_call(self):
         out = self.children()
         child = out['children'][0]['id']

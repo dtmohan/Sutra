@@ -116,6 +116,67 @@ class AllocationTests(unittest.TestCase):
         self.assertFalse(m.permissions(self.s, sid)['network_allowed'])
         self.assertEqual(m.permissions(self.s, sid)['write_paths'], [])
 
+    def test_child_increase_keeps_checkpoint_reservations_and_spending(self):
+        from paging import Budget
+        from review_context import ReviewContextExceeded
+
+        out = self.until('CHILDREN'); sid = self.meta['active']
+        child, sibling = [row['id'] for row in out['children']]
+        execution = out['execution_id']
+        original_call = fixtures.Child.call
+
+        def checkpoint(worker, *args):
+            result, receipt = original_call(worker, *args)
+            result['slice_status'] = 'continue'
+            return result, receipt
+
+        with patch.object(fixtures.Child, 'call', checkpoint):
+            out = self.step(out)
+        cursor = m.slice_cursor(self.s, child)
+        checkpoint = m.slice_history(self.s, child, cursor)
+        spent = {ident: m.spent(self.s, ident) for ident in (child, sibling, execution)}
+        limits = {ident: m.effective_limits(self.s, m.node(self.s, ident)) for ident in spent}
+        contract = self.s.pinned(sid)
+        left = int(limits[child]['tokens'] - spent[child]['tokens'])
+        required = left + 300
+        sizing = {'available_tokens': left, 'effective_context_tokens': required + 1000,
+                  'branch_id': child, 'task_allocation_need': {
+                      'dimension': 'tokens', 'required_context': required, 'slots': 1}}
+        error = ReviewContextExceeded(sizing, Budget(left, 2048, 384), 'Measured minimum')
+        with patch('subagent_runtime.run', side_effect=error):
+            out = self.step(out)
+        self.assertEqual(out['stop']['child_context']['branch_id'], child)
+        with self.assertRaisesRegex(InvalidUpdate, 'Only the measured child token'):
+            self.preview(out, additions={'calls': 1})
+        preview = self.preview(out)
+        amount = preview['allocation_proposal']['additions']['tokens']
+        self.assertEqual(amount, 300)
+        approved = self.grant(preview, confirmed=True)
+        self.assertEqual(approved['execution_id'], execution)
+        self.assertEqual(approved['stop']['child_allocation_granted'], amount)
+        self.assertEqual([row['id'] for row in approved['children']], [child, sibling])
+        for ident in spent:
+            expected = dict(limits[ident])
+            if ident != sibling:
+                expected['tokens'] += amount
+            self.assertEqual(m.effective_limits(self.s, m.node(self.s, ident)), expected)
+            self.assertEqual(m.spent(self.s, ident), spent[ident])
+        self.assertEqual(m.slice_history(self.s, child, cursor), checkpoint)
+        with self.assertRaisesRegex(InvalidUpdate, 'already has the measured capacity'):
+            self.preview(approved)
+        self.s.close()
+        self.s = InvocationLedger(self.root / 'state.sqlite')
+        self.tier = 'high'
+        resumed = self.step(approved, event='resume')
+        done = self.until('DONE', resumed)
+        worker = next(worker for stage, worker in self.models
+                      if stage == 'subagent' and worker.model == fixtures.MODELS['high'])
+        self.assertEqual(worker.payloads[0]['child_slice'], cursor)
+        self.assertEqual(self.s.pinned(sid), contract)
+        self.assertTrue(done['data']['result']['admission']['admitted'])
+        self.assertTrue(self.s.verify_invocations(sid))
+        self.assertTrue(self.s.audit_valid())
+
     def test_invalid_additions_active_work_and_nonbudget_stops_rejected(self):
         out = self.pause(); budget = review_budget.usage(self.s, self.meta['active'])
         for changes in ({'tokens': -1}, {'tokens': True}, {'tokens': 1.5}, {'tokens': 1000000},

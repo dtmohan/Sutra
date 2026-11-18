@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.44.1
+
+- Let a saved child review use its available capacity for one admitted attempt when reserving a repair would prevent the packet from fitting. Keep checkpoints, read scope and consumed budgets across model switches.
+- Apply a confirmed, measured child allocation increase to the existing child and execution when more task capacity is needed.
+- Restore the source diagram preview and saved-diagram reopening in VS Code.
+
 ## 0.44.0
 
 - Save evidence-backed child review slices as checkpoints. Resume the same slice after a transport timeout or output limit, with the original read scope, checkpoint history and remaining budget. Join a branch after its final slice is accepted.

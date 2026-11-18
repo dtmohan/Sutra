@@ -1,8 +1,11 @@
-Sutra 0.44.0 — Resume child reviews
+Sutra 0.44.1 — Recover child allocations
 
 Read-only workspace reviews save child findings between slices. After a timeout
-or output-limit pause, use Resume in Sutra Monitor. You can switch model tiers
-while retaining the checkpoint, scope and consumed budget.
+or output-limit pause, select a model tier and send continue in the same chat.
+Sutra can use one admitted attempt when a repair reserve would prevent the
+saved packet from fitting. When the Monitor offers Increase allocation, a
+confirmed increase adds measured capacity to the existing child execution.
+The saved checkpoint, read scope and recorded spending carry forward.
 
 Long document reviews
 

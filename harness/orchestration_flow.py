@@ -362,6 +362,10 @@ def run(s,meta,workspace,root,req,providers=None):
         detail=fault_details(exc)
         stop={'status':'memory_fault','stage':target,'resume_phase':target,'error':str(exc),
               'memory_fault':detail,'automatic_retry':False}
+        if target == 'CHILDREN' and isinstance(exc, ContextBudgetExceeded):
+            sizing = getattr(exc, 'details', {})
+            if sizing.get('branch_id') in (data.get('children') or []):
+                stop['child_context'] = sizing
         observe_fault(s,(data.get('binding') or {}).get('session',''),exc)
         kind = 'MEMORY_STOPPED'
         if target == 'SYNTHESIS' and detail['code'] == 'source_changed':
