@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Governed local AI chat, codebase reviews, and diagnostics in VS Code.",
-  "version": "0.44.1",
+  "version": "0.45.0",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -316,10 +316,25 @@
             },
             "high": {
               "type": "string",
-              "description": "High tier installed local Ollama model."
+              "description": "High tier installed Ollama model or opt-in Strata High for chat and read-only reviews."
             }
           },
-          "description": "Saved tier choices. For dropdowns populated from Ollama, run Sutra: Configure Local Models from the Command Palette (or @sutra /models). Use discovered defaults, then Save choices, to replace existing selections."
+          "description": "Saved tier choices. Run Sutra: Configure Local Models from the Command Palette (or @sutra /models). Use discovered Ollama defaults, then Save choices, to replace existing selections."
+        },
+        "karma.strata.port": {
+          "type": "integer",
+          "scope": "machine",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "Loopback port of a running Strata server. Set in User Settings to opt in, or explicitly set 0 to disable Strata."
+        },
+        "karma.strata.model": {
+          "type": "string",
+          "scope": "machine",
+          "default": "",
+          "maxLength": 200,
+          "description": "Exact loaded model ID reported by the local Strata server."
         },
         "karma.nativeEnabled": {
           "type": "boolean",

@@ -66,6 +66,9 @@ def from_metadata(name, tag, metadata, root=None):
 
 
 def observe(name, ollama=None):
+    from strata_model import MODEL, observe as observe_strata
+    if name == MODEL:
+        return observe_strata()
     if ollama is None:
         from vscode_bridge import ollama
     tags = ollama('/api/tags').get('models', [])

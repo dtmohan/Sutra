@@ -149,8 +149,12 @@ def check_provider(provider, payload, fresh=False):
     validate(plan)
     info = getattr(provider, 'context_metadata', {})
     if fresh:
-        from vscode_bridge import ollama
-        info = ollama('/api/show', {'model': provider.model})
+        metadata = getattr(provider, 'fresh_context_metadata', None)
+        if metadata is not None:
+            info = metadata()
+        else:
+            from vscode_bridge import ollama
+            info = ollama('/api/show', {'model': provider.model})
     if (capabilities(info) != plan['capabilities'] or
             type(getattr(provider, 'thinking', None)) is not type(plan['requested']) or
             provider.thinking != plan['requested']):

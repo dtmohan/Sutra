@@ -1,7 +1,7 @@
 'use strict';
 const tiers=['low','mid','high'];
 function prefill(current,catalog){
- const names=new Set((catalog.models||[]).filter(m=>m.eligible===true).map(m=>m.name));
+ const names=new Set((catalog.models||[]).filter(m=>m.eligible===true&&!m.tier).map(m=>m.name));
  const result={};
  for(const tier of tiers){
   const saved=typeof current?.[tier]==='string'?current[tier].trim():'';
@@ -11,8 +11,8 @@ function prefill(current,catalog){
 }
 function validate(selected,catalog){
  if(!selected||typeof selected!=='object'||Object.keys(selected).sort().join(',')!=='high,low,mid')throw Error('Choose all three model tiers.');
- const names=new Set(catalog.models.filter(m=>m.eligible===true).map(m=>m.name));
- for(const tier of tiers)if(!names.has(selected[tier]))throw Error(`The ${tier} tier model is unavailable or not a local chat model. Refresh the list and choose a replacement.`);
+ const models=catalog.models.filter(m=>m.eligible===true);
+ for(const tier of tiers)if(!models.some(m=>m.name===selected[tier]&&(!m.tier||m.tier===tier)))throw Error(`The ${tier} tier model is unavailable or not a local chat model. Refresh the list and choose a replacement.`);
  return Object.fromEntries(tiers.map(t=>[t,selected[t]]));
 }
 module.exports={prefill,validate};

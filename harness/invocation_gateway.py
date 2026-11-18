@@ -366,8 +366,7 @@ class InvocationGateway:
         from reasoning_policy import check_provider
         check_provider(self.provider, payload, fresh=isinstance(self.provider, LocalModel))
         if isinstance(self.provider, LocalModel):
-            from runtime_memory import dispatch
-            with dispatch(self.provider,Path(self.db).parent,call_id,system,payload,schema) as plan:
+            with self.provider.dispatch_gate(Path(self.db).parent,call_id,system,payload,schema) as plan:
                 self.provider.memory_plan=plan
                 return self._invoke(role,call_id,system,payload,schema,delivery_id)
         return self._invoke(role,call_id,system,payload,schema,delivery_id)
@@ -401,6 +400,7 @@ class InvocationGateway:
         permit = {'hash': envelope['request_hash'], 'used': False, 'packet_hash': (envelope.get('model_interface') or {}).get('packet_hash')}
         token = _permit.set(permit); error = None; proposal = None; record = None;started=time.monotonic()
         failure_kind = None
+        repairable = False
         from model_activity import scope
         try:
             with scope(envelope) as activity:
@@ -408,11 +408,12 @@ class InvocationGateway:
                 if isinstance(self.provider,LocalModel) and observe(name)!=identity:
                     raise InvalidUpdate('Model identity changed during inference')
         except Exception as exc:
-            from local_model import OutputLimitExceeded
+            from local_model import OutputLimitExceeded, StructuredOutputRejected
             if isinstance(exc, OutputLimitExceeded):
                 failure_kind = 'output_limit'
             elif isinstance(exc, (TimeoutError, socket.timeout)):
                 failure_kind = 'timeout'
+            repairable = isinstance(exc, StructuredOutputRejected)
             error = type(exc).__name__ + ': ' + str(exc)
             record = getattr(exc, 'call_record', None) or record or {'call_id': call_id, 'ok': False, 'error': error}
         finally: _permit.reset(token)
@@ -425,7 +426,7 @@ class InvocationGateway:
                                      measured(record), settlement(envelope, record), failure_kind)
             activity.finish(result['admission']['admitted'], measured(record))
             result['token_usage'] = history(ledger.db, run_id=self.run_id)
-            if error: result['blocked'] = error
+            if error and not repairable: result['blocked'] = error
             if failure_kind is not None: result['failure_kind'] = failure_kind
             result['record'] = record
             return result

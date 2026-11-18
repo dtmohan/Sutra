@@ -243,22 +243,25 @@ function showModelChoices(m){
  const candidates=m.catalog.models.filter(x=>x.eligible===true);modelCandidates=candidates;
  for(const tier of ['low','mid','high']){
   const select=el('tier-'+tier);select.replaceChildren();
-  for(const model of candidates){const o=document.createElement('option');o.value=model.name;o.textContent=model.name+(model.parameter_size?' · '+model.parameter_size:'')+(model.moe?' · MoE':'');select.append(o);}
-  const saved=m.models[tier];if(!candidates.some(x=>x.name===saved)){const missing=document.createElement('option');missing.value=saved||'';missing.textContent=saved?saved+' (unavailable — choose a replacement)':'No local chat model available';select.append(missing);}
+  const available=candidates.filter(model=>!model.tier||model.tier===tier);
+  for(const model of available){const o=document.createElement('option');o.value=model.name;o.textContent=model.name+(model.parameter_size?' · '+model.parameter_size:'')+(model.moe?' · MoE':'');select.append(o);}
+  const saved=m.models[tier];if(!available.some(x=>x.name===saved)){const missing=document.createElement('option');missing.value=saved||'';missing.textContent=saved?saved+' (unavailable — choose a replacement)':'No local chat model available';select.append(missing);}
   select.value=saved||'';
-  select.setAttribute('aria-invalid',String(!!saved&&!candidates.some(x=>x.name===saved)));
+  select.setAttribute('aria-invalid',String(!!saved&&!available.some(x=>x.name===saved)));
  }
  const defaults=m.catalog.suggested_tiers;
- suggestedModels=defaults&&['low','mid','high'].every(t=>candidates.some(c=>c.name===defaults[t]))?defaults:null;
+ suggestedModels=defaults&&['low','mid','high'].every(t=>candidates.some(c=>!c.tier&&c.name===defaults[t]))?defaults:null;
  el('use-model-defaults').disabled=busy||!suggestedModels;
  const differs=suggestedModels&&['low','mid','high'].some(t=>m.models[t]!==suggestedModels[t]);
  el('model-suggestions').textContent=suggestedModels?'Discovered defaults — '+['low','mid','high'].map(t=>t+': '+suggestedModels[t]).join(' · ')+(differs?'. Your saved choices were preserved. Use discovered defaults, then Save choices, to replace them.':'. These match your saved choices.'):'No complete defaults available; refresh after starting Ollama.';
- setText('model-discovery',(m.catalog.error||candidates.length+' eligible installed models.')+' '+(m.catalog.selection_note||'')+(m.catalog.errors?.length?' Some model metadata could not be read; refresh to retry.':''));
+ const strataIssue=m.catalog.errors?.find(entry=>entry.model==='strata:high');
+ const discoveryIssue=m.catalog.errors?.some(entry=>entry.model!=='strata:high');
+ setText('model-discovery',(m.catalog.error||candidates.length+' eligible local models.')+' '+(m.catalog.selection_note||'')+(discoveryIssue?' Some Ollama metadata could not be read; refresh to retry.':'')+(strataIssue?' '+strataIssue.error:''));
  el('model-save-status').textContent='';el('save-model-tiers').disabled=busy||!candidates.length;
 }
 el('use-model-defaults').onclick=()=>{if(!suggestedModels)return;for(const tier of ['low','mid','high']){const select=el('tier-'+tier);select.value=suggestedModels[tier];select.setAttribute('aria-invalid','false');}setText('model-save-status','Suggested choices selected. Click Save choices to apply.');};
 for(const tier of ['low','mid','high'])el('tier-'+tier).onchange=()=>{
- const select=el('tier-'+tier),invalid=!modelCandidates.some(m=>m.name===select.value);
+ const select=el('tier-'+tier),invalid=!modelCandidates.some(m=>m.name===select.value&&(!m.tier||m.tier===tier));
  select.setAttribute('aria-invalid',String(invalid));
  setText('model-save-status',invalid?'Choose an installed local model.':'Unsaved model choices. Click Save choices to apply.');
 };

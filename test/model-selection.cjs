@@ -7,4 +7,10 @@ assert.deepEqual(prefill({}, {models:[],suggested_tiers:catalog.suggested_tiers}
 assert.deepEqual(validate({low:'custom',mid:'moe',high:'large'},catalog),{low:'custom',mid:'moe',high:'large'});
 for(const selected of [{low:'autocomplete',mid:'moe',high:'large'},{low:'missing',mid:'moe',high:'large'},{low:'small',mid:'moe',high:'large',extra:'bad'}])assert.throws(()=>validate(selected,catalog));
 assert.deepEqual(prefill(prefill({},catalog),{...catalog,suggested_tiers:{low:'custom',mid:'custom',high:'custom'}}),catalog.suggested_tiers);
+const beta={...catalog,models:[...catalog.models,{name:'strata:high',eligible:true,tier:'high'}]};
+const optedIn={low:'small',mid:'moe',high:'strata:high'};
+assert.deepEqual(validate(prefill(optedIn,beta),beta),optedIn);
+assert.deepEqual(prefill({},beta),catalog.suggested_tiers);
+assert.equal(prefill({}, {...beta, suggested_tiers:{...catalog.suggested_tiers,high:'strata:high'}}).high,'');
+assert.throws(()=>validate({...optedIn,low:'strata:high'},beta));
 console.log(JSON.stringify({passed:true,checks:['prefill empty tiers from installed metadata','preserve saved and missing choices','never invent unavailable defaults','reject ineligible models','keep explicit choices across discovery refreshes']}));

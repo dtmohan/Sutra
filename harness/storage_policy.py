@@ -1,5 +1,6 @@
 """Bounded disposable diagnostics; immutable evidence is never silently pruned."""
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -62,6 +63,15 @@ def write_trace(directory, call_id, record):
              'conservative_input_charge':record.get('conservative_input_charge'),
              'response':{k:response[k] for k in ('model','done','done_reason','load_duration','prompt_eval_count','eval_count','total_duration') if k in response},
              'privacy':'Prompt, source excerpts and response bodies omitted; committed deliveries remain in the ledger'}
+    if record.get('provider') == 'strata':
+        compact['provider'] = 'strata'
+        compact['response']['first_answer_chunk_s'] = response.get('first_answer_chunk_s')
+        timings = response.get('timings')
+        if isinstance(timings, dict):
+            compact['response']['timings'] = {key: timings[key] for key in
+                ('cache_n', 'prompt_n', 'prompt_ms', 'prompt_per_second',
+                 'predicted_n', 'predicted_ms', 'predicted_per_second')
+                if type(timings.get(key)) in (int, float) and 0 <= timings[key] < 2 ** 53 and math.isfinite(timings[key])}
     compatibility = record.get('decoder_compatibility')
     if isinstance(compatibility, dict):
         compact['decoder_compatibility'] = {k: compatibility[k] for k in

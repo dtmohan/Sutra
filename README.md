@@ -1,4 +1,30 @@
-# Sutra 0.44.1 — Recover child allocations
+# Sutra 0.45.0 — Opt-in Strata High
+
+Ollama supplies the default model choices and the Low and Mid tiers. Strata
+is an experimental option for High in native chat and read-only workspace
+reviews. Sutra uses its existing invocation gateway, source and budget checks,
+and local resource gate. The Strata server must already have its model loaded.
+
+1. Start your Strata server on `127.0.0.1`. Open its `/v1/status` endpoint and
+   note the server port and the exact `model` value.
+2. In VS Code **User Settings**, set **Karma › Strata: Port** (`karma.strata.port`)
+   and **Karma › Strata: Model** (`karma.strata.model`). Leave authentication
+   tokens in the extension host's `SUTRA_STRATA_API_KEY` environment variable
+   if your local server requires one.
+3. Run **Sutra: Configure Local Models** and refresh the models. Select
+   **strata:high** in High, then save. Pick **Sutra High** in chat for a fixed
+   route, or **Sutra Auto** to use the configured tiers when the workflow routes
+   to them. Use an Ollama tier for edits or tests.
+4. To return High to Ollama, select an Ollama model and save. Set the Strata
+   port to `0` to disable Strata discovery.
+
+For launch-time configuration, `SUTRA_STRATA_PORT` and `SUTRA_STRATA_MODEL`
+apply when the corresponding User Settings are unset.
+`SUTRA_STRATA_CONTEXT` can cap Sutra's context allocation. Strata's buffered
+structured replies still undergo Sutra's schema and role checks, and
+incremental Strata memory use is uncalibrated.
+
+## Sutra 0.44.1 — Recover child allocations
 
 Read-only workspace reviews can save a child's findings and next step before
 continuing its partition. On a timeout or output-limit pause, select a tier

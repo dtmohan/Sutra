@@ -2,10 +2,11 @@
 import re
 
 def catalog(ollama):
+    from strata_model import MODEL as STRATA_HIGH
     rows=[];errors=[]
     for tag in ollama('/api/tags').get('models',[]):
         name=tag.get('name')
-        if not isinstance(name,str) or not name or 'cloud' in name.lower():continue
+        if not isinstance(name,str) or not name or name == STRATA_HIGH or 'cloud' in name.lower():continue
         row={k:tag[k] for k in ('name','digest','size') if k in tag}
         try:
             data=ollama('/api/show',{'model':name})

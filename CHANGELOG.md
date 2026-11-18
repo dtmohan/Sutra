@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.45.0
+
+- Add a machine-local Strata High opt-in for native chat and read-only reviews. Keep Ollama as the source of suggested tier defaults and use the existing gateway and hardware admission for Strata dispatch.
+- Verify the loaded Strata server identity before dispatch. Record its reported usage, reasoning control, and timing when available.
+
 ## 0.44.1
 
 - Let a saved child review use its available capacity for one admitted attempt when reserving a repair would prevent the packet from fitting. Keep checkpoints, read scope and consumed budgets across model switches.

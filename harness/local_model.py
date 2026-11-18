@@ -6,11 +6,17 @@ from legacy_model import EXTRACTOR, PATCH_SCHEMA, source_units, resolve_operatio
 class OutputLimitExceeded(RuntimeError):
     """A completed transport reported exhaustion, not a usable final answer."""
 
+class StructuredOutputRejected(RuntimeError):
+    """The backend rejected the generated proposal; bounded repair is possible."""
+
 class LocalModel:
     model_interface = 1
     def __init__(self, log_dir, port=11435, model='qwen3:4b', health=None, budget=Budget(), thinking=False):
         self.log_dir=pathlib.Path(log_dir); self.log_dir.mkdir(parents=True,exist_ok=True)
         self.port=port; self.model=model; self.health=health; self.budget=budget; self.thinking=thinking
+    def dispatch_gate(self, root, call_id, system, payload, schema):
+        from runtime_memory import dispatch
+        return dispatch(self, root, call_id, system, payload, schema)
     def messages(self, system, payload):
         return [{'role':'system','content':system},
                 {'role':'user','content':json.dumps(payload,sort_keys=True,separators=(',',':'))}]

@@ -52,6 +52,8 @@ function activate(context) {
   let dashboardWorker;
   function runtimeEnvironment(cwd) {
     const config = vscode.workspace.getConfiguration('karma');
+    const strataPort = config.inspect?.('strata.port')?.globalValue;
+    const strataModel = config.inspect?.('strata.model')?.globalValue;
     // Only user settings can authorize automatic grants. A repository setting
     // or a model tool payload cannot set or widen these limits.
     const userAllocation = config.inspect?.('workspaceAllocation')?.globalValue;
@@ -64,6 +66,8 @@ function activate(context) {
       workspaceAllocation = isObject(byFolder) && isObject(overrides) ? {...limits, ...overrides} : null;
     }
     return {
+      ...(strataPort === undefined ? {} : {SUTRA_STRATA_PORT: strataPort === 0 ? undefined : String(strataPort)}),
+      ...(strataModel === undefined ? {} : {SUTRA_STRATA_MODEL: typeof strataModel === 'string' ? strataModel.trim() : ''}),
       SUTRA_CAPABILITIES_MODE: config.get('tools.mode', 'ask'),
       SUTRA_RUNTIME_DIR: path.join(context.globalStorageUri.fsPath, 'runtime-memory'),
       SUTRA_MEMORY_OWNERSHIP: config.get('memoryOwnership', 'shared'),
@@ -387,7 +391,7 @@ function activate(context) {
   async function refresh() {
     const state=await request({op:'state'});
     panel?.webview.postMessage({type:'state',data:state});
-    try {const models=await discoverModels();panel?.webview.postMessage({type:'models',data:models.models});}
+    try {const models=await discoverModels();panel?.webview.postMessage({type:'models',data:models.models.filter(model=>!model.tier)});}
     catch(e){panel?.webview.postMessage({type:'error',message:e.message});}
     return state;
   }
@@ -513,7 +517,7 @@ function activate(context) {
     let model=options.model;
     if(explain&&!model){
       const {models}=await request({op:'models'}),preferred=st.static?.model||vscode.workspace.getConfiguration('karma').get('explanationModel','qwen3.6:35b');
-      model=await vscode.window.showQuickPick(models.map(m=>m.name).sort((a,b)=>(b===preferred)-(a===preferred)),{title:'Sutra: local model to explain source facts'});
+      model=await vscode.window.showQuickPick(models.filter(m=>!m.tier).map(m=>m.name).sort((a,b)=>(b===preferred)-(a===preferred)),{title:'Sutra: local model to explain source facts'});
       if(!model)return;
     }
     const data=await request({op:explain?'static_explain':'static_build',files,...(options.offset!==undefined?{offset:options.offset}:{}),...(model?{model}:{})});
@@ -557,7 +561,7 @@ function activate(context) {
   }
   async function switchModel() {
     const {models}=await request({op:'models'});
-    const chosen=await vscode.window.showQuickPick(models.map(m=>m.name),{title:'Sutra: choose the model for the next turn'});
+    const chosen=await vscode.window.showQuickPick(models.filter(m=>!m.tier).map(m=>m.name),{title:'Sutra: choose the model for the next turn'});
     if(chosen){const state=await request({op:'switch',model:chosen});panel?.webview.postMessage({type:'state',data:state});}
   }
   const status=vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right,20);

@@ -170,6 +170,9 @@ def dispatch(s,meta,workspace,root,request,provider=None):
     if not isinstance(chosen,list) or not 1<=len(chosen)<=4 or len(set(chosen))!=len(chosen) or not set(chosen)<=ids:
         raise InvalidUpdate('Select 1..4 current source pages from the table of contents')
     model_name=request.get('model',meta.get('model','local-assistant:latest'))
+    from strata_model import MODEL as STRATA_HIGH
+    if model_name == STRATA_HIGH:
+        raise InvalidUpdate('Strata High is available for chat and read-only reviews. Choose an Ollama tier for coding.')
     if request.get('op')=='work' and request.get('mode') in ('edit','test'):
         if st['execution'].get('pending_actions'):raise InvalidUpdate('An earlier action is pending; inspect it before continuing')
         from karma_adapter import budget_decision
@@ -261,7 +264,8 @@ def handle(root,workspace,request):
             if notice:return {'request_notice':notice}
         if request.get('op')=='models':
             from model_catalog import catalog
-            return catalog(ollama)
+            from strata_model import append_catalog
+            return append_catalog(catalog(ollama))
         s=InvocationLedger(root/'state.sqlite')
         try:
             if request.get('chat_key') and request.get('op') in ('state','native_preview','native_execute'):
@@ -374,9 +378,6 @@ def _handle(root,workspace,request,metadata=None,prepare_catalog=True):
                 try:repo.execute(s,meta['active'],workspace,root,'catalog',resource_check=False)
                 except InvalidUpdate:
                     if op!='state':raise
-        if op=='models':
-            from model_catalog import catalog
-            return catalog(ollama)
         if str(op).startswith('calibration_'):
             import calibration
             if op=='calibration_register':result={'registered':calibration.register(s,request['profile'])}

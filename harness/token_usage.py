@@ -1,6 +1,6 @@
 """Host-observed token usage. Completed counts can settle a prior reservation.
 
-Ollama counts describe whole model calls, including structured output. They do
+Provider counts describe whole model calls, including structured output. They do
 not attribute tokens to individual prompt components or visible answer text.
 Older receipts are intentionally not backfilled from prunable trace files.
 """
@@ -16,7 +16,8 @@ def count(value):
 def measured(record):
     response = record.get('response') if isinstance(record, dict) else None
     response = response if isinstance(response, dict) else {}
-    return {'source': 'ollama_response' if response else 'unavailable',
+    source = 'strata_response' if isinstance(record, dict) and record.get('provider') == 'strata' else 'ollama_response'
+    return {'source': source if response else 'unavailable',
             'input_tokens': count(response.get('prompt_eval_count')),
             'output_tokens': count(response.get('eval_count'))}
 

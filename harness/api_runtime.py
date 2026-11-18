@@ -18,6 +18,8 @@ def provider_for(root,model,review=False,model_class=LocalModel):
  from vscode_bridge import ollama
  from runtime_memory import fresh_resources
  fresh_resources(root)
+ from strata_model import MODEL,StrataModel
+ if model==MODEL:return StrataModel(root/'calls',review=review)
  tags=ollama('/api/tags')['models']
  if model not in {x['name'] for x in tags} or 'cloud' in model.lower():raise InvalidUpdate('Choose an installed local model')
  info=ollama('/api/show',{'model':model})

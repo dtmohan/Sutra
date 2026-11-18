@@ -1,3 +1,16 @@
+Sutra 0.45.0 — Opt-in Strata High
+
+Ollama supplies the default model choices. To opt in, start Strata on
+127.0.0.1 with its model loaded. Set karma.strata.port and karma.strata.model
+in VS Code User Settings to the server port and the exact model ID reported
+by /v1/status. Run Sutra: Configure Local Models, refresh, select strata:high
+in the High tier, and save. Use Sutra High for a fixed chat or read-only
+review. Use an Ollama tier for edits and tests.
+
+Choose and save an Ollama model in High to switch back. Set the Strata port
+to 0 to disable discovery. If your server requires authentication, set
+SUTRA_STRATA_API_KEY in the VS Code extension host's environment.
+
 Sutra 0.44.1 — Recover child allocations
 
 Read-only workspace reviews save child findings between slices. After a timeout
