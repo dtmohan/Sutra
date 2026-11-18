@@ -1,4 +1,26 @@
-# Sutra 0.45.1 — Strata review reliability
+# Sutra 0.45.3 — Strata High startup
+
+On macOS, Sutra can start a registered Strata High user service when VS Code
+activates the extension. Startup is off by default. In **User Settings**, set
+`karma.strata.port` and `karma.strata.model`, choose `strata:high` for High,
+and enable **Karma › Strata: Start On Startup**. Low and Mid are available
+while Strata loads.
+
+Register a user LaunchAgent with label `io.sutra.strata-high` whose foreground
+program starts your configured local Strata profile and enforces its startup
+memory requirements. Put a `startup.json` record with `port` and `model` in
+`~/Library/Application Support/Sutra/Strata` matching the profile. The service
+can run independently of VS Code. Leave `KeepAlive` off so a guarded stop does
+not continually reload the model under pressure. After resources recover,
+run **Sutra: Start Strata High** from the Command Palette.
+
+## Sutra 0.45.2 — Model availability
+
+Low and Mid remain available during a High provider outage. Auto reports
+which available configured model it can use for work routed to High.
+Fixed High reports how to recover Strata and retains the configured model.
+
+## Sutra 0.45.1 — Strata review reliability
 
 Strata selects IDs for source citations. Sutra resolves each ID to its exact
 quotation before validating and recording the review. Adaptive requests carry

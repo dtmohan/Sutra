@@ -1,3 +1,16 @@
+Sutra 0.45.3 — Strata High startup
+
+On macOS, enable Karma › Strata: Start On Startup in User Settings to start
+the registered io.sutra.strata-high LaunchAgent when High is set to Strata.
+The service profile must match the configured local port and model. Run
+Sutra: Start Strata High in the Command Palette to recover after a stop.
+
+Sutra 0.45.2 — Model availability
+
+An unavailable High provider leaves Low and Mid usable. Auto reports
+which available configured model it can use for work routed to High.
+Fixed High reports how to recover Strata and retains the configured model.
+
 Sutra 0.45.1 — Strata review reliability
 
 Strata selects citation IDs, which Sutra checks against exact source.

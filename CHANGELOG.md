@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.45.3
+
+- Add opt-in macOS startup for a configured Strata High user service and a Command Palette action for manual recovery.
+
+## 0.45.2
+
+- Keep Low and Mid available during a High provider outage. Auto can fall back to an available configured model, and fixed High reports provider recovery steps. Saved model selections are retained.
+
 ## 0.45.1
 
 - Use source citation IDs in Strata workspace and child reviews. Resolve IDs to exact quotations through the gateway and derive the working summary from the review text.

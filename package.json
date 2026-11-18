@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Governed local AI chat, codebase reviews, and diagnostics in VS Code.",
-  "version": "0.45.1",
+  "version": "0.45.3",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -146,6 +146,10 @@
       {
         "command": "karma.openLastDiagram",
         "title": "Sutra: Open Last Diagram"
+      },
+      {
+        "command": "karma.startStrata",
+        "title": "Sutra: Start Strata High"
       },
       {
         "command": "karma.openUsage",
@@ -335,6 +339,12 @@
           "default": "",
           "maxLength": 200,
           "description": "Exact loaded model ID reported by the local Strata server."
+        },
+        "karma.strata.startOnStartup": {
+          "type": "boolean",
+          "scope": "machine",
+          "default": false,
+          "description": "Start the installed io.sutra.strata-high macOS LaunchAgent when Sutra activates with Strata selected for High. Set only in User Settings."
         },
         "karma.nativeEnabled": {
           "type": "boolean",

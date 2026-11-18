@@ -5,6 +5,7 @@ const {NativeMemory,isCompaction}=require('./native_memory');
 const hostTokens=require('./host_tokens');
 const {profiles}=require('./workspace_authorization');
 const {chatActivity}=require('./model_activity');
+const {ModelUnavailable,fallbackMessage}=require('./model_selection');
 const ACTION='karma_native_action';
 const THINK_NEXT='sutraThinkingForNextRequest';
 const MODEL_IDS={auto:'karma-auto',low:'karma-low',mid:'karma-mid',high:'karma-high'};
@@ -366,9 +367,9 @@ function install(vscode,context,deps){
     }finally{allocationPending=false;publish();}
   }
   let activityProgress;
-  async function flowEvent(flow,event,tier,token,extra,thinkForTurn,chatKey,stackChat){
+  async function flowEvent(flow,event,tier,token,extra,thinkForTurn,chatKey,stackChat,onFallback){
     const access=refreshAccess();
-    const models=['inspect','pending','cancel','locate_document','approve_document'].includes(event)?undefined:await deps.configureModels(false,token);
+    const models=['inspect','pending','cancel','locate_document','approve_document'].includes(event)?undefined:await deps.configureModels(false,token,{tier,onFallback});
     const workspaceStep=['step','resume','grant','capability_grant','restart_review','accept_provenance'].includes(event) && !classifying(flow);
     if(workspaceStep){
       assertCurrent(access,token);
@@ -493,7 +494,20 @@ function install(vscode,context,deps){
       // Live routing is shown in the status bar and dashboard; keep audit IDs out of the answer body.
       await invoke(audit);
       if(audit.stage==='received')audit.stage='stopped';
-    }catch(error){audit.stage=token.isCancellationRequested||/cancel|revoked/i.test(error.message)?'cancelled':'blocked';audit.message=error.message;if(/Ollama|model.*unavailable|model.*discover|No local chat model/i.test(error.message))void vscode.window.showErrorMessage?.(error.message,'Model settings')?.then(choice=>{if(choice==='Model settings')return deps.configureModels(true);}).catch(()=>{});throw error;}
+    }catch(error){
+      audit.stage=token.isCancellationRequested||/cancel|revoked/i.test(error.message)?'cancelled':'blocked';
+      audit.message=error.message;
+      if(error instanceof ModelUnavailable||/Ollama|model.*unavailable|model.*discover|No local chat model/i.test(error.message)){
+        void vscode.window.showErrorMessage?.(error.message,'Model settings')?.then(choice=>{
+          if(choice==='Model settings')return deps.configureModels(true);
+        }).catch(()=>{});
+      }
+      if(error instanceof ModelUnavailable){
+        if(!token.isCancellationRequested)progress.report(new vscode.LanguageModelTextPart(error.message));
+        return;
+      }
+      throw error;
+    }
     finally{audit.active=false;audit.finishedAt=new Date().toISOString();publish();deps.onRoute?.({...audit});}
   }
   function ticket(input){
@@ -610,9 +624,18 @@ function install(vscode,context,deps){
       if(!stackChat&&!request.results)stackChat=crypto.randomBytes(32).toString('hex');
       const rememberMemory=id=>memory.remember(id,options,stackChat);
       let legacyResume=false,managed=false;
+      const reportModelFallbacks=rows=>{
+        const observed=audit.modelFallbacks??=[];
+        for(const row of rows){
+          if(observed.some(saved=>saved.tier===row.tier&&saved.model===row.model&&saved.availableModel===row.availableModel))continue;
+          observed.push(row);
+          progress.report(new vscode.LanguageModelTextPart(fallbackMessage(row)+'\n\n'));
+        }
+      };
       const advance=async(flow,event,extra)=>{
         const next=await flowEvent(flow,event,tier,activeCancel.token,extra,
-          classifying(flow)?savedClassifierThinking??thinkForTurn:thinkForTurn,chatKey,legacyResume?undefined:flow?.stackChat||stackChat);
+          classifying(flow)?savedClassifierThinking??thinkForTurn:thinkForTurn,chatKey,legacyResume?undefined:flow?.stackChat||stackChat,
+          reportModelFallbacks);
         managed ||= !!next.task_stack;
         return next;
       };

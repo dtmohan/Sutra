@@ -37,7 +37,17 @@ function activate(context) {
   const diagramView=require('./diagram_view');
   const usageView=require('./usage_view');
   const capabilityUI=require('./capabilities');
+  const strataStartup=require('./strata_startup');
   const output = vscode.window.createOutputChannel('Sutra');
+  async function startStrata(manual=false){
+    const result=await strataStartup.start(()=>vscode.workspace.getConfiguration('karma'),{remote:!!vscode.env?.remoteName});
+    if(manual||!['disabled','unsupported','changed'].includes(result.status))output.appendLine('Strata High: '+result.message);
+    if(manual){
+      const show=['failed','invalid','unavailable','setup','mismatch'].includes(result.status)?vscode.window.showWarningMessage:vscode.window.showInformationMessage;
+      void show(result.message);
+    }
+    return result;
+  }
   let nativeController, usage, panel, panelReady=false, panelSection, busy = false, sequence = false, telemetry, telemetryDir, dashboardTimer, dashboardInFlight=false, stopAuto=false, chatCancellation;
   let lastReview;
   const previewDocuments=new Map(), previewChanges=new vscode.EventEmitter();
@@ -232,11 +242,13 @@ function activate(context) {
   }
   function focusPanelSection(){if(panelReady&&panelSection){panel?.webview.postMessage({type:'show-section',section:panelSection});panelSection=undefined;}}
   async function showPanelSection(section){panelSection=section;await open();focusPanelSection();}
-  async function configureModels(force=true,token,internal=false){
+  async function configureModels(force=true,token,internal=false,{tier='auto',onFallback}={}){
     if(force){await showPanelSection('models');return modelSettings();}
     const catalog=await discoverModels(token,internal);
-    if(!catalog.models.some(m=>m.eligible))throw new Error('No local chat models found. Start Ollama, then refresh the model list.');
-    return modelSelection.validate(modelSettings(),catalog);
+    if(tier==='auto'&&!catalog.models.some(m=>m.eligible))throw new Error('No local chat models found. Start Ollama, then refresh the model list.');
+    const {models,fallbacks}=modelSelection.forRequest(modelSettings(),catalog,tier);
+    if(fallbacks.length)onFallback?.(fallbacks);
+    return models;
   }
   const helpMessage='Sutra is ready. Ask about the open workspace, or use /new followed by a review request to start a separate read-only task. Open Model settings for installed-model dropdowns; open the dashboard for CPU/GPU temperatures. Existing task constraints stay in force.';
   function notice(kind,message){const data={notice:{kind,message}};panel?.webview.postMessage({type:'chat-notice',data:data.notice});return data;}
@@ -267,7 +279,9 @@ function activate(context) {
         panel?.webview.postMessage({type:'state',data:st});
         return notice('workflow','An existing task is active in Advanced controls. Open current task controls to continue with its scope and permissions, or start a separate read-only review. No model call was made and the active task was not replaced.');
       }
-      const models=await configureModels(false,token,true);if(!models)return null;
+      const models=await configureModels(false,token,true,{tier,onFallback:rows=>{
+        for(const row of rows)progress(modelSelection.fallbackMessage(row));
+      }});
       if(fresh||!st.session){
         st=await request({op:'auto_new',goal:prompt,roots:['.']},token,true);
       }
@@ -585,6 +599,7 @@ function activate(context) {
   }
   context.subscriptions.push(status,output,previewChanges,vscode.commands.registerCommand('karma.open',open),
     vscode.commands.registerCommand('karma.configureModels',()=>configureModels()),
+    vscode.commands.registerCommand('karma.startStrata',()=>startStrata(true)),
     vscode.commands.registerCommand('karma.configureReasoning',()=>showPanelSection('reasoning')),
     vscode.commands.registerCommand('karma.openAdvanced',()=>showPanelSection('advanced')),
     vscode.commands.registerCommand('karma.newChatReview',()=>newChatReview()),
@@ -654,7 +669,7 @@ function activate(context) {
   if(vscode.lm.registerLanguageModelChatProvider){
     nativeController=nativeProvider.install(vscode,context,{authorization:require('./workspace_authorization').createStore(vscode,context),request:(m,t,a)=>request(m,t,true,a),workspace,isBusy:()=>busy||sequence,
       approveCapability:(p,t)=>toolController.approve(p,t),capabilityReport:capabilityUI.report,
-      activityLink:event=>usage?.activityLink(event),modelSettings,configureModels:(force,t)=>configureModels(force,t,true),simpleChat,publishReview,
+      activityLink:event=>usage?.activityLink(event),modelSettings,configureModels:(force,t,options)=>configureModels(force,t,true,options),simpleChat,publishReview,
       async presentReview(data){await diagrams.openReview(data);},
       async presentConversation(data){if(data.result.accepted_output.diagram)await diagrams.open(data);},
       async showDiff(change,iid){const before=vscode.Uri.parse('karma-preview:/'+iid+'/before.py'),after=vscode.Uri.parse('karma-preview:/'+iid+'/after.py');previewDocuments.set(before.toString(),change.before);previewDocuments.set(after.toString(),change.after);await vscode.commands.executeCommand('vscode.diff',before,after,'Sutra proposed edit: '+change.target);},
@@ -662,6 +677,11 @@ function activate(context) {
       onStatus(value){status.text=(value.routing?.active?'$(sync~spin) ':'$(shield) ')+value.label;status.tooltip=value.explanation+' '+value.reason+(value.routing?' Last Sutra request: '+value.routing.id+' · '+value.routing.stage:'');status.command='karma.openMonitor';panel?.webview.postMessage({type:'native-status',data:value});usage?.setStatus(value);}
     });context.subscriptions.push(nativeController);
   }
+  const strataConfiguration=vscode.workspace.onDidChangeConfiguration?.(event=>{
+    if(strataStartup.settingKeys.some(key=>event.affectsConfiguration('karma.'+key)))void startStrata();
+  });
+  if(strataConfiguration)context.subscriptions.push(strataConfiguration);
+  void startStrata();
   // Public extension API cannot create contracts, widen scope, edit, or execute.
   return Object.freeze({open,getRoutingStatus:()=>structuredClone(nativeController?.status()||null),getState:async()=>({...await request({op:'state'}),native:nativeController?.status()}),version:context.extension.packageJSON.version});
 }

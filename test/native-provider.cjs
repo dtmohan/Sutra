@@ -1,6 +1,7 @@
 'use strict';
 const assert=require('node:assert/strict');
 const {install,latestRequest}=require('../native_provider');
+const {forRequest}=require('../model_selection');
 const noop=()=>{},disposable=()=>({dispose:noop});
 class EventEmitter{event=()=>disposable();fire(){}dispose(){}}
 class Text{constructor(value){this.value=value;}}
@@ -850,6 +851,63 @@ function setup(saved={}){
  shouldPause=false;await paused.send('high',[{role:1,content:[new Text('continue')]}]);
  const afterPause=paused.calls.find(c=>c.op==='native_work');assert.equal(afterPause.prompt,'Fix retry');assert.equal(afterPause.tier,'high');assert.equal(afterPause.contract_hash,'contract-1');
  checks.push('mapping pauses return actionable details without a client error; original context and permission binding resume on another model');
+ {
+  const review=setup();review.kind('report');await review.arm();
+  const configured={low:'model-a',mid:'model-b',high:'strata:high'};
+  let highOnline=true,saved,resumed;
+  review.deps.configureModels=async(force,_token,{tier,onFallback}={})=>{
+   if(force)return configured;
+   const models=[configured.low,configured.mid].map(name=>({name,eligible:true}));
+   if(highOnline)models.push({name:configured.high,eligible:true,tier:'high'});
+   const result=forRequest(configured,{models},tier);
+   if(result.fallbacks.length)onFallback(result.fallbacks);
+   return result.models;
+  };
+  const backend=review.deps.backendRequest;
+  review.deps.backendRequest=async(m,t)=>{
+   const result=await backend(m,t);
+   if(m.op==='native_work')result.route={tier:'high',model:m.models.high};
+   return result;
+  };
+  const request=review.deps.request;
+  review.deps.request=async(m,t)=>{
+   if(m.op==='orchestrate'&&m.flow_id===saved?.flow_id){
+    if(m.event==='inspect')return saved;
+    if(m.event==='resume'){
+     resumed=m;
+     return {...saved,state:'SYNTHESIS',stop:undefined};
+    }
+   }
+   const result=await request(m,t);
+   if(m.op==='orchestrate'&&result.state==='CODING'){
+    saved={...result,state:'PAUSED',stop:{status:'child_slice_timeout',resume_phase:'CHILDREN',
+      slice_ordinal:2,error:'Child checkpoint saved',budget:{used:{calls:2}}}};
+    return saved;
+   }
+   return result;
+  };
+  const first=await review.send('auto');
+  assert.equal(review.flowRequests.find(m=>m.event==='start').models.high,'strata:high');
+  assert.equal(review.controller.status().pending.stop.budget.used.calls,2);
+  highOnline=false;
+  const followup=[{role:2,content:first},...chatUser('continue')];
+  const blocked=await review.send('high',followup);
+  assert(blocked.some(part=>part.value?.includes('Strata High is unavailable. Start your configured local Strata server')));
+  assert.equal(review.controller.status().pending.flow_id,saved.flow_id);
+  assert.equal(review.controller.status().routing.stage,'blocked');
+  assert.equal(resumed,undefined);
+  const completed=await review.send('auto',followup);
+  assert.equal(completed.filter(part=>part.value?.includes('High (strata:high) is unavailable')).length,1);
+  assert(completed.some(part=>part.value?.includes('Sutra routing confirmed · model-b')));
+  assert.equal(resumed.flow_id,saved.flow_id);
+  assert.equal(resumed.cursor,saved.cursor);
+  assert.deepEqual(resumed.binding,saved.binding);
+  assert.equal(resumed.models.high,'model-b');
+  assert.equal(review.calls.filter(m=>m.op==='conversation').length,1);
+  assert.equal(review.calls.find(m=>m.op==='native_work').prompt,'Fix retry');
+  assert.equal(configured.high,'strata:high');
+  checks.push('High going offline leaves a saved request intact on fixed High and lets Auto resume the original cursor and binding on Mid');
+ }
  {
   const sliced=setup();sliced.kind('report');await sliced.arm();let saved,resumed;
   const original=sliced.deps.request;
