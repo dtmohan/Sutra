@@ -366,6 +366,16 @@ def recover(root, audit=None):
     if not enabled(): return None
     with lease():
         data = read_state(); before = resource_state(root, refresh=True)
+        if os.environ.get('SUTRA_STRATA_ONLY') == '1' or os.environ.get('SUTRA_ENGINE_ONLY') == '1':
+            after = stable_resources(root)
+            result = {'profile': PROFILE, 'action': 'observe_native_runtime',
+                      'before': before, 'after': after, 'admitted': after['admitted'],
+                      'max_release_actions': 0, 'automatic_inference': False,
+                      'release_kernel': None}
+            if audit:
+                audit('MEMORY_RECOVERY_OBSERVED', result)
+            note(data, 'recovery', action=result['action'], admitted=after['admitted'])
+            return result
         rows = running(); data['resident_models'] = rows
         owned = data.get('owned')
         candidate = next((m for m in rows if owned and m['name']==owned.get('name') and m['digest']==owned.get('digest')), None)
@@ -395,6 +405,79 @@ def snapshot():
     data = read_state()
     result = {k:data.get(k) for k in ('profile','updated_at','active','plan','events')}
     result.update(enabled=True, ownership=ownership())
+    if os.environ.get('SUTRA_ENGINE_ONLY') == '1':
+        import engine_client
+        result.update(backend='sutra_engine', ownership='sutra_owned')
+        if (result.get('plan') or {}).get('provider') != 'sutra_engine':
+            result['plan'] = None
+        try:
+            worker = engine_client.status()
+            row = worker.get('profile')
+            result.update(resident_models=[{'name': row, 'size': None,
+                'context_length': worker['context_tokens'], 'runner': 'sutra_engine'}] if row else [],
+                inventory_available=True, inventory_at=time.time(), engine_worker=worker)
+        except Exception:
+            result.update(resident_models=[], inventory_available=False)
+        return result
+    if os.environ.get('SUTRA_STRATA_ONLY') == '1':
+        result.update(backend='strata', ownership='native_owner')
+        if (result.get('plan') or {}).get('provider') != 'strata':
+            result['plan'] = None
+        try:
+            result.update(resident_models=native_inventory(), inventory_available=True,
+                          inventory_at=time.time())
+        except (OSError, ValueError, InvalidUpdate, http.client.HTTPException):
+            result.update(resident_models=[], inventory_available=False)
+        return result
     try: result.update(resident_models=running(), inventory_available=True, inventory_at=time.time())
     except Exception: result.update(resident_models=[], inventory_available=False)
     return result
+
+
+def native_inventory():
+    """Observe the active local endpoint without spawning native catalog scans."""
+    import re
+    path = Path.home() / 'Library/Application Support/Sutra/Strata/startup.json'
+    with path.open('rb') as stream:
+        raw = stream.read(8193)
+    if len(raw) > 8192:
+        raise InvalidUpdate('Native runtime record exceeds the observation bound')
+    record = json.loads(raw)
+    if not isinstance(record, dict):
+        raise InvalidUpdate('Invalid native runtime record')
+    port, model, profile = record.get('port'), record.get('model'), record.get('profile')
+    if (type(port) is not int or not 1 <= port <= 65535 or not isinstance(model, str)
+            or not isinstance(profile, str) or not re.fullmatch('[a-z][a-z0-9_-]{0,63}', profile)):
+        raise InvalidUpdate('Native runtime observation needs a configured local profile')
+    from strata_model import _headers
+    connection = http.client.HTTPConnection('127.0.0.1', port, timeout=1)
+    response = None
+    try:
+        connection.request('GET', '/v1/status', headers=_headers())
+        response = connection.getresponse()
+        body = response.read(65537)
+        if response.status != 200 or len(body) > 65536:
+            raise InvalidUpdate('Native runtime status is unavailable')
+        status = json.loads(body)
+    except ConnectionRefusedError:
+        return []
+    finally:
+        if response is not None:
+            response.close()
+        connection.close()
+    if not isinstance(status, dict) or status.get('service') != 'strata' or status.get('model') != model:
+        raise InvalidUpdate('Native runtime status differs from the active profile')
+    if status.get('loaded') is not True:
+        return []
+    context = (status.get('context') or {}).get('max_positions')
+    if type(context) is not int or context < 1:
+        raise InvalidUpdate('Native runtime context is unavailable')
+    return [{'name': 'strata:profile/' + profile, 'size': None,
+             'context_length': context, 'runner': 'strata'}]
+
+
+def note_native_plan(plan):
+    if enabled():
+        data = read_state()
+        data['plan'] = dict(plan, provider=plan.get('provider', 'strata'))
+        note(data, 'native_dispatch', model=plan['model'])

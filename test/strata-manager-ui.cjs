@@ -75,4 +75,27 @@ assert(el('strata-load').disabled);assert(el('strata-unload').disabled);
 assert.equal(el('strata-runtime-state').textContent,'Unloaded');
 assert.match(html,/<p id="strata-status" role="status" aria-live="polite">/);
 assert.match(html,/<label for="strata-profile">/);
+const nativeCatalog={models:[
+ {name:'strata:profile/native-small',display_name:'Strata · Small native',eligible:true,active:true,ready:false,load_on_demand:true},
+ {name:'strata:profile/native-large',display_name:'Strata · Large native',eligible:true,ready:true,load_on_demand:true}
+],suggested_tiers:{},errors:[{model:'ollama',error:'Ollama is unavailable.'}]};
+const savedModels={low:'old-low',mid:'old-mid',high:'strata:high'};
+receive({type:'tier-settings',models:savedModels,catalog:nativeCatalog});
+assert.equal(el('tier-low').value,'old-low','Discovery must preserve existing tier choices');
+for(const tier of ['low','mid','high']){
+ assert.equal(el('tier-'+tier).children[0].value,'strata:profile/native-small');
+ assert.match(el('tier-'+tier).children[0].textContent,/Small native · loads on demand/);
+ assert.match(el('tier-'+tier).children[1].textContent,/Large native · loaded/);
+}
+const beforeDraft=sent.length;el('use-native-profile').onclick();
+assert.equal(sent.length,beforeDraft,'Using a native profile changes only the draft');
+for(const tier of ['low','mid','high'])assert.equal(el('tier-'+tier).value,'strata:profile/native-small');
+assert.match(el('model-save-status').textContent,/same model weights.*Save choices/);
+el('save-model-tiers').onclick();
+assert.equal(sent.at(-1).op,'save_model_tiers');
+for(const tier of ['low','mid','high'])assert.equal(sent.at(-1).models[tier],'strata:profile/native-small');
+receive({type:'busy',value:true});assert(el('use-native-profile').disabled);
+receive({type:'busy',value:false});assert(!el('use-native-profile').disabled);
+receive({type:'tier-settings',models:savedModels,catalog:{models:[],errors:[],suggested_tiers:{}}});
+assert(el('use-native-profile').disabled,'A missing native profile cannot be assigned');
 console.log('PASS Strata management UI selection, host-only intents, text safety, loading feedback and shared busy controls');

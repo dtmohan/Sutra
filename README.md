@@ -1,4 +1,60 @@
-# Sutra 0.47.0 — Native model management
+# Sutra 0.49.0 — Sutra-owned engine worker
+
+Sutra can now load a compatible inference engine directly, without Strata
+Control, a Strata HTTP server or Ollama on this execution path. A persistent
+Sutra worker owns the engine child, tokenizer, chat template, generation stream
+and cancellation. The existing invocation gateway still governs model calls,
+source evidence, permissions and consumed task budgets. The canonical STP
+kernel is unchanged.
+
+Open **Sutra → Settings → Models → Sutra engine worker**, or run **Sutra: Manage
+Owned Engine Worker**. Choose **Set up worker** to install the pinned tokenizer and
+template dependencies in Sutra's own Python environment. Registered models use
+`sutra:engine/<profile>` references and can be assigned to Low, Mid and High.
+Loading a model changes the worker's active profile. **Save choices** is the
+explicit step that changes tier assignments.
+
+The VSIX contains the worker and codec code. The user-owned Python environment,
+model registry, native engine binary, adjacent Metal/shader assets and model
+files live outside the VSIX. They must be provisioned locally; setup does not
+download model weights. Existing compatible assets on this Mac have been staged
+under Sutra's Engine directory, with no runtime imports from Strata Control.
+
+The current native architecture is the existing Flash-Next Metal model on this
+Apple Silicon Mac. The 16K/24K/32K profiles use the same weights and validate
+context allocation and switching, not different model capabilities. Other
+architectures need a compatible engine adapter.
+
+See [worker setup and boundaries](docs/owned-engine-worker.md) for registration,
+recovery and validation details. Optional older provider integrations remain
+available; selecting a Sutra worker model does not silently replace saved tiers.
+
+## Sutra 0.48.0 — Native profiles for every tier
+
+Low, Mid and High can each select a named native Strata profile. Stopped profiles
+remain selectable and are loaded on demand at the invocation boundary. Native
+activation and inference share an OS lease across Sutra windows. The same host
+resource, role, permission, evidence and budget checks apply to all tiers.
+The canonical STP kernel is unchanged.
+
+In **Settings → Models**, choose native profiles for each tier and save. **Use
+active native profile for all tiers** changes the draft selections first. When
+all tiers use native profiles, model discovery, review selection, coding and
+runtime monitoring do not require Ollama. Ollama remains an optional backend.
+Loading a native profile manually changes the active runtime without rewriting
+any tier assignment. The legacy `strata:high` selection remains compatible.
+
+Different profiles of the same model share weights. Changing context or reasoning
+does not make them different model capabilities. This Mac currently has only the
+large Flash-Next native weight set; its installed 4B Ollama model is not supported
+by that native Metal engine. No additional weights are downloaded automatically.
+
+This release still uses Strata's native control/serving backend. It does not yet
+embed the inference engine or remove Strata Control. Tier selection is separate
+from backend execution, so a Sutra-owned direct engine worker can be added below
+this boundary. Runtime management currently supports a local macOS host.
+
+## Sutra 0.47.0 — Native model management
 
 Open **Sutra → Settings → Models → Strata High runtime**, or run
 **Sutra: Manage Native Models**. Discover installed native profiles, load or

@@ -1,3 +1,30 @@
+## 0.49.0
+
+- Added a Sutra-owned persistent worker that runs the compatible native engine
+  through its process protocol without Strata Control, HTTP serving or Ollama.
+- Added independent pack tokenization, sandboxed chat templates, separate
+  reasoning/content streams, output accounting and bounded cancellation/draining.
+- Added trusted local engine descriptors, owned Python dependency setup and
+  settings controls for catalog, load and unload. Tier changes remain explicit.
+- Kept context, constraints and consumed budgets in the invocation gateway;
+  native loading and switching use host resource checks and the shared runtime slot.
+- Kept the native binary, shaders, Python environment and model data outside
+  the VSIX. Current architecture support is the installed Flash-Next Metal path;
+  profiles of the same weights are not distinct model capabilities.
+- Preserved the existing 0.48 provider choices and unchanged canonical STP kernel.
+
+## 0.48.0
+
+- Named native profiles can serve every tier, with kernel-admitted activation
+  inside the same OS slot as inference and manual runtime operations.
+- Added on-demand profile loading, stable identity across native restarts,
+  interrupted-target reconciliation and legacy High binding preservation.
+- All-native catalog, reviewer selection, coding and monitoring work without
+  Ollama; existing host permissions and cumulative spending still apply.
+- Tier selection is explicit. Manual runtime loading preserves assignments,
+  and shared-weight profiles are labelled without capability claims.
+- Retained the native backend dependency and unchanged canonical STP kernel.
+
 ## 0.47.0
 
 - Added a native Strata model manager in Settings → Models and the Command Palette.

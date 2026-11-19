@@ -169,19 +169,22 @@ function renderRuntimeMemory(m,s,hwFresh,snapshotFresh){
  const gib=n=>finite(n)&&n>=0?(n/(1024**3)).toFixed(1)+' GiB':'Unavailable';
  el('compressed-memory').textContent=hwFresh?gib(s.compressed_bytes):'—';
  el('swap-memory').textContent=hwFresh?gib(s.swap_used_bytes):'—';
- el('memory-policy').textContent=m?.enabled?(m.ownership==='exclusive'?'Dedicated Ollama · bounded idle-model release authorized':'Shared Ollama · explicit model unloading disabled'):'Runtime manager is not active in this snapshot';
+ const nativeBackend=['strata','sutra_engine'].includes(m?.backend);
+ el('memory-policy').textContent=m?.enabled?(m.backend==='sutra_engine'?'Sutra-owned engine worker · loading and profile switching managed by Sutra':m.backend==='strata'?'Native Strata · profile switching and idle stops managed by Sutra':m.ownership==='exclusive'?'Dedicated Ollama · bounded idle-model release authorized':'Shared Ollama · explicit model unloading disabled'):'Runtime manager is not active in this snapshot';
  const rows=m?.resident_models||[],inventoryFresh=snapshotFresh&&m?.inventory_available&&finite(m.inventory_at)&&Date.now()/1000-m.inventory_at<=8;
  el('resident-models').replaceChildren();
  if(!inventoryFresh)el('resident-models').append(node('p','Resident model inventory unavailable or stale.','muted'));
  else if(!rows.length)el('resident-models').append(node('p','No models currently loaded.','muted'));
  else for(const r of rows){
-  const card=node('div',undefined,'gate');card.append(node('strong',r.name),node('div',gib(r.size)+' reported · '+T.number(r.context_length)+' context tokens'+(r.runner?' · '+r.runner:'')));el('resident-models').append(card);
+  const memory=finite(r.size)&&r.size>=0?gib(r.size)+' reported':nativeBackend?'Memory unmeasured':'Memory unavailable';
+  const card=node('div',undefined,'gate');card.append(node('strong',r.name),node('div',memory+' · '+T.number(r.context_length)+' context tokens'+(r.runner?' · '+r.runner:'')));el('resident-models').append(card);
  }
  const p=m?.plan;
  const allocation=el('model-allocation');
  setText('model-allocation',p?'Last model allocation: '+p.decision:'No model allocation yet');
  allocation.dataset.decision=decisions.has(p?.decision)?p.decision:'';
- el('memory-plan').textContent=p?'Last runtime plan: '+p.model+' · '+T.number(p.context_tokens)+' context tokens · '+gib(p.estimated_increment_bytes)+' memory reservation · '+gib(p.system_reserve_bytes)+' system reserve. '+p.estimate_scope+'. Peak memory is not verified. This is the last dispatch check, not a live fit guarantee; Resume checks again.':'No runtime allocation recorded yet.';
+ const reservation=nativeBackend&&!finite(p?.estimated_increment_bytes)?'incremental memory unmeasured':gib(p?.estimated_increment_bytes)+' memory reservation';
+ el('memory-plan').textContent=p?'Last runtime plan: '+p.model+' · '+T.number(p.context_tokens)+' context tokens · '+reservation+' · '+gib(p.system_reserve_bytes)+' system reserve. '+p.estimate_scope+'. Peak memory is not verified. This is the last dispatch check, not a live fit guarantee; Resume checks again.':'No runtime allocation recorded yet.';
  if(p?.calibration)el('memory-plan').append(node('div','MLX calibration '+p.calibration.profile_sha256.slice(0,12)+' · measured workload ceiling '+T.number(p.calibration.covered_tokens)+' tokens · '+gib(p.calibration.margin_bytes)+' uncertainty margin.'));
  else if(p?.calibration_status)el('memory-plan').append(node('div',p.calibration_status));
  if(p&&finite(p.resident_weight_credit_bytes))el('memory-plan').append(node('div','Cold estimate '+gib(p.cold_estimate_bytes)+' · reusable resident weights '+gib(p.resident_weight_credit_bytes)+'. '+p.resident_credit_basis+'. This is reuse, not newly freed memory.'));

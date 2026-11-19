@@ -27,5 +27,6 @@ def allocation(metadata):
     return budget, {'model_context_tokens': maximum, 'configured_context_tokens': configured,
                     'runtime_context_cap': 65536, 'memory_context_cap':runtime_cap, 'effective_context_tokens': limit,
                     'output_reserve_tokens': budget.response_reserve,
-                    'source': ('strata_metadata' if metadata.get('_sutra_provider') == 'strata'
+                    'source': ('sutra_engine_metadata' if metadata.get('_sutra_provider') == 'sutra_engine'
+                               else 'strata_metadata' if metadata.get('_sutra_provider') == 'strata'
                                else 'ollama_metadata' if maximum is not None else 'metadata_missing_conservative_fallback')}

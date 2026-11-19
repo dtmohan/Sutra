@@ -15,7 +15,10 @@ const identity = value => typeof value === 'string' && /^[0-9a-f]{32}$/.test(val
 
 function selection(config, automatic = true) {
   const user = key => config.inspect?.(key)?.globalValue;
-  if ((automatic && user('strata.startOnStartup') !== true) || user('models')?.high !== 'strata:high') return {};
+  const models=user('models')||{};
+  if ((automatic && user('strata.startOnStartup') !== true) ||
+      !Object.values(models).some(name=>name==='strata:high'||
+        typeof name==='string'&&/^strata:profile\/[a-z][a-z0-9_-]{0,63}$/.test(name))) return {};
   const port = user('strata.port'), model = user('strata.model');
   if (!Number.isInteger(port) || port < 1 || port > 65535 ||
       typeof model !== 'string' || !model.trim() || model.length > 200 || /[\x00-\x1f\x7f]/.test(model)) {

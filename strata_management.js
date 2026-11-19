@@ -311,34 +311,78 @@ function create({readProfile = startup.readStartupProfile, writeProfile = atomic
       const legacy = exactPrevious && entry.legacy && same(entry.record, record);
       if (!exactPrevious) { profile.cold_memory_bytes = null; delete profile.memory_binding; }
       const server = await inspect(profile.port);
-      let existing;
+      let existing, targetOwnsServer = false;
       if (server) {
         existing = await runtime(profile, 'status');
-        if (!exactPrevious || !serverMatches(server, profile, existing)) {
+        targetOwnsServer = existing.ok === true && existing.profile === profile.profile &&
+          ['ready', 'starting'].includes(existing.state) && serverMatches(server, profile, existing);
+        if (!targetOwnsServer) {
           // A different selected profile may legitimately own this same port.
           const previous = selectedValid(record) && record.port === profile.port ? await runtime(record, 'status') : null;
           if (!previous || !serverMatches(server, record, previous)) return failure('mismatch', 'That loopback port has an unowned server. No process was stopped.');
         }
         if (!Number.isInteger(server.activity?.in_flight) || server.activity.in_flight !== 0) return failure('busy', 'The native model has active requests or unavailable activity data.');
       }
-      const alreadyReady = exactPrevious && serverMatches(server, profile, existing) && existing.state === 'ready';
-      const memory = await admission(profile, plan, legacy, alreadyReady);
-      if (memory.check?.admitted !== true) return failure('paused', 'Model loading paused. '+(memory.check?.reason || 'Resource admission was denied.'), {decision:memory.check?.decision});
-      const latest = await getPlan(profile);
-      if (planIdentity(latest) !== entry.identity || !await unchanged(record)) return failure('changed', 'The native profile or saved selection changed before loading.');
+      const alreadyReady = targetOwnsServer && existing.state === 'ready';
       let stoppedPrevious = false;
       let previousPlan;
-      if (!exactPrevious && selectedValid(record)) {
-        const oldServer = record.port === profile.port ? server : await inspect(record.port);
+      let resourceRecovery;
+      let memory = await admission(profile, plan, legacy, alreadyReady);
+      if (memory.check?.admitted !== true && !exactPrevious && !targetOwnsServer && selectedValid(record)) {
+        // One bounded recovery may release an owned idle predecessor. The
+        // denied allocation never authorizes inference, and a fresh check must
+        // allow the target after the old runtime has actually stopped.
+        const latest = await getPlan(profile);
+        if (planIdentity(latest) !== entry.identity || !await unchanged(record)) {
+          return failure('changed', 'The native profile or saved selection changed before resource recovery.');
+        }
+        const oldServer = await inspect(record.port);
         const current = await runtime(record, 'status');
         if (oldServer) {
-          if (!serverMatches(oldServer, record, current)) return failure('mismatch', 'The current server does not match the saved native Strata owner. No process was stopped.');
+          if (current.profile !== record.profile || !serverMatches(oldServer, record, current)) {
+            return failure('mismatch', 'Resource recovery could not verify the previous native owner. No process was stopped.');
+          }
+          if (!Number.isInteger(oldServer.activity?.in_flight) || oldServer.activity.in_flight !== 0) {
+            return failure('busy', 'The previous native model has active requests or unavailable activity data. No process was stopped.');
+          }
           previousPlan = await getPlan(record);
-          const stopped = await stopExact(record);
+          const beforeStop = await getPlan(profile);
+          if (planIdentity(beforeStop) !== entry.identity || !await unchanged(record)) {
+            return failure('changed', 'The native profile or saved selection changed before releasing the previous model.');
+          }
+          const stopped = await stopExact(record, current.owner_id);
           if (stopped.status !== 'stopped') return stopped;
           stoppedPrevious = true;
-        } else if (!['stopped', 'stale', 'failed'].includes(current.state)) {
-          return failure('unavailable', 'The previous native model is not stopped, and its server identity could not be verified.');
+          resourceRecovery = {status:'released_previous',profile:record.profile};
+          memory = await admission(profile, plan, legacy, false);
+        }
+      }
+      if (memory.check?.admitted !== true) return failure('paused',
+        'Model loading paused. '+(memory.check?.reason || 'Resource admission was denied.')+
+        (stoppedPrevious ? ' The previous idle native model was released; its saved selection and task spending were retained.' : ''),
+        {decision:memory.check?.decision,...(resourceRecovery ? {resource_recovery:resourceRecovery} : {})});
+      const latest = await getPlan(profile);
+      if (planIdentity(latest) !== entry.identity || !await unchanged(record)) return failure('changed', 'The native profile or saved selection changed before loading.');
+      if (!stoppedPrevious && !exactPrevious && selectedValid(record)) {
+        const current = await runtime(record, 'status');
+        if (targetOwnsServer && record.port === profile.port) {
+          // A timed-out coordinator may leave the authorized target running
+          // before it saves the new selection. Its exact native owner can be
+          // resumed, but the old profile must already be inactive at this port.
+          if (current.profile !== record.profile || !['stopped', 'stale', 'failed'].includes(current.state)) {
+            return failure('mismatch', 'The target owns this port, but the previous native profile is not confirmed inactive. No process was stopped.');
+          }
+        } else {
+          const oldServer = record.port === profile.port ? server : await inspect(record.port);
+          if (oldServer) {
+            if (!serverMatches(oldServer, record, current)) return failure('mismatch', 'The current server does not match the saved native Strata owner. No process was stopped.');
+            previousPlan = await getPlan(record);
+            const stopped = await stopExact(record, current.owner_id);
+            if (stopped.status !== 'stopped') return stopped;
+            stoppedPrevious = true;
+          } else if (current.profile !== record.profile || !['stopped', 'stale', 'failed'].includes(current.state)) {
+            return failure('unavailable', 'The previous native model is not stopped, and its server identity could not be verified.');
+          }
         }
       }
       let loaded;

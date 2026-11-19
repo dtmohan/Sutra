@@ -66,11 +66,12 @@ def citation_references(role, payload):
     """Use citation references for the Strata roles that commit exact choices."""
     if role not in ('chat_reviewer', 'subagent'):
         return False
-    from strata_model import MODEL
+    from strata_model import is_strata
+    from engine_profiles import is_engine
     route = payload.get('route', {})
     if role == 'chat_reviewer':
         route = route.get('record', {}).get('choice', {})
-    return route.get('model') == MODEL
+    return is_strata(route.get('model')) or is_engine(route.get('model'))
 
 
 def citation_choices(schema):

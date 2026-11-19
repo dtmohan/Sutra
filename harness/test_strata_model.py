@@ -211,11 +211,11 @@ class StrataTests(unittest.TestCase):
             provider.call('no-permit', 'system', {}, {})
         self.assertEqual(self.server.posts, [])
         row, = append_catalog({'models': [], 'errors': []})['models']
-        self.assertEqual((row['name'], row['tier']), (MODEL, 'high'))
+        self.assertEqual((row['name'], row['provider']), (MODEL, 'strata'))
         with patch.dict(os.environ, clear=True):
             self.assertEqual(append_catalog({'models': [], 'errors': []})['models'], [])
-        with self.assertRaisesRegex(InvalidUpdate, 'only for the High'):
-            choose('Hello', dict(MODELS, low=MODEL), 'low', {})
+        self.assertEqual(choose('Hello', dict(MODELS, low=MODEL), 'low',
+                                {'source_files':0,'selected_files':0,'unresolved_calls':0})['model'], MODEL)
 
     def test_reserved_provider_name_cannot_become_an_ollama_default(self):
         from vscode_bridge import handle

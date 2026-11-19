@@ -150,6 +150,24 @@ function monitorHost(){
  assert((await page.locator('#memory-plan').textContent()).includes('Cold estimate 6.0 GiB · reusable resident weights 3.0 GiB'));
  assert((await page.locator('#memory-plan').textContent()).includes('This is reuse, not newly freed memory'));
  assert.equal(await page.locator('#memory-plan img').count(),0);
+ const nativeMemory={enabled:true,backend:'strata',ownership:'native_owner',inventory_available:true,inventory_at:Date.now()/1000,
+  resident_models:[{name:'strata:profile/native-small',size:null,context_length:4096,runner:'strata'}],
+  plan:{model:'strata:profile/native-small',context_tokens:4096,estimated_increment_bytes:null,system_reserve_bytes:4*1024**3,decision:'ALLOW',estimate_scope:'Native hardware admission; model peak unmeasured'},events:[]};
+ await send({snapshot:{...snapshot,monitor:{...monitor,runtime_memory:nativeMemory}}});
+ assert.equal(await page.locator('#memory-policy').textContent(),'Native Strata · profile switching and idle stops managed by Sutra');
+ const nativeInventory=await page.locator('#resident-models').textContent();
+ assert(nativeInventory.includes('Memory unmeasured · 4,096 context tokens · strata'));
+ assert(!nativeInventory.includes('Unavailable reported'));
+ assert((await page.locator('#memory-plan').textContent()).includes('incremental memory unmeasured'));
+ const ownedMemory={...nativeMemory,backend:'sutra_engine',ownership:'sutra_owned',
+  resident_models:[{name:'sutra:engine/registered <img>',size:null,context_length:16384,runner:'sutra_engine'}],
+  plan:{...nativeMemory.plan,model:'sutra:engine/registered',context_tokens:16384}};
+ await send({snapshot:{...snapshot,monitor:{...monitor,runtime_memory:ownedMemory}}});
+ assert((await page.locator('#memory-policy').textContent()).includes('Sutra-owned engine worker'));
+ assert((await page.locator('#resident-models').textContent()).includes('Memory unmeasured · 16,384'));
+ assert.equal(await page.locator('#resident-models img').count(),0);
+ assert((await page.locator('#memory-plan').textContent()).includes('incremental memory unmeasured'));
+ await send({snapshot});
  await send({snapshot:{...snapshot,monitor:{...monitor,runtime_memory:{...monitor.runtime_memory,plan:{...monitor.runtime_memory.plan,decision:'BRIDGE'}}}}});
  assert.equal(await page.locator('#resource').textContent(),'System pressure: ALLOW');
  assert.equal(await page.locator('#model-allocation').textContent(),'Last model allocation: BRIDGE');

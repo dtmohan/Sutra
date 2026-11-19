@@ -13,7 +13,9 @@ def settlement(envelope, record):
     response = record.get('response') if isinstance(record, dict) else None
     response = response if isinstance(response, dict) else {}
     inp, out = count(response.get('prompt_eval_count')), count(response.get('eval_count'))
-    measured = response.get('done') is True and inp is not None and out is not None
+    drained = (isinstance(record, dict) and record.get('provider') == 'sutra_engine' and response.get('done') is False and
+               response.get('usage_finalized') is True)
+    measured = (response.get('done') is True or drained) and inp is not None and out is not None
     actual = inp + out if measured else reservation
     return {'version': 1, 'basis': 'runtime_measured' if measured else 'reserved_unmeasured',
             'reserved_tokens': reservation, 'used_tokens': actual,

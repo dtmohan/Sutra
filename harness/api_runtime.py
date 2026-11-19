@@ -17,9 +17,16 @@ def initialize(s):
 def provider_for(root,model,review=False,model_class=LocalModel):
  from vscode_bridge import ollama
  from runtime_memory import fresh_resources
+ from engine_profiles import is_engine
+ if is_engine(model):
+  from engine_model import EngineModel
+  return EngineModel(root/'calls',model=model,review=review)
+ from strata_model import is_strata,StrataModel
+ # Native profiles can be inspected while cold. Their leased dispatch gate
+ # performs activation and fresh admission, allowing release of an idle older
+ # native instance before measuring the new allocation.
+ if is_strata(model):return StrataModel(root/'calls',review=review,model=model)
  fresh_resources(root)
- from strata_model import MODEL,StrataModel
- if model==MODEL:return StrataModel(root/'calls',review=review)
  tags=ollama('/api/tags')['models']
  if model not in {x['name'] for x in tags} or 'cloud' in model.lower():raise InvalidUpdate('Choose an installed local model')
  info=ollama('/api/show',{'model':model})

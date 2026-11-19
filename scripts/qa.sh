@@ -75,7 +75,7 @@ fi
 gate "release metadata" python3 -B scripts/check-release.py
 gate "python harness" python_suite
 
-for suite in capabilities model-activity native-provider workspace-authorization workspace-authorization-store hardening panel-entry model-selection bridge-worker strata-startup strata-management strata-setup strata-manager-ui branding host-tokens runtime-integrity; do
+for suite in capabilities model-activity native-provider workspace-authorization workspace-authorization-store hardening panel-entry model-selection bridge-worker strata-startup strata-management strata-runtime strata-setup strata-manager-ui provider-slot engine-management engine-manager-ui branding host-tokens runtime-integrity; do
   gate "node $suite" node_suite "$suite"
 done
 

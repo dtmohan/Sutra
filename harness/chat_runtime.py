@@ -71,8 +71,10 @@ def excerpts(sources,prompt,limit,graph=None,*,include_named_sequence=False):
 
 
 def focused_architecture(p):
-    from strata_model import MODEL
-    return ((p.get('route') or {}).get('record',{}).get('choice',{}).get('model') == MODEL
+    from strata_model import is_strata
+    from engine_profiles import is_engine
+    model = (p.get('route') or {}).get('record',{}).get('choice',{}).get('model')
+    return ((is_strata(model) or is_engine(model))
             and report.requested(p) and context.EvidenceFocus(context.query(p)).modules)
 
 

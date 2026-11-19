@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Governed local AI chat, codebase reviews, and diagnostics in VS Code.",
-  "version": "0.47.0",
+  "version": "0.49.0",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -117,7 +117,7 @@
       },
       {
         "command": "karma.armNative",
-        "title": "Sutra: Workspace Permissions…"
+        "title": "Sutra: Workspace Permissions\u2026"
       },
       {
         "command": "karma.disarmNative",
@@ -149,11 +149,11 @@
       },
       {
         "command": "karma.startStrata",
-        "title": "Sutra: Start Strata High"
+        "title": "Sutra: Start Native Runtime"
       },
       {
         "command": "karma.stopStrata",
-        "title": "Sutra: Stop Strata High"
+        "title": "Sutra: Stop Native Runtime"
       },
       {
         "command": "karma.openUsage",
@@ -197,6 +197,10 @@
       {
         "command": "karma.manageStrata",
         "title": "Sutra: Manage Native Models"
+      },
+      {
+        "command": "karma.manageEngine",
+        "title": "Sutra: Manage Owned Engine Worker"
       }
     ],
     "configuration": {
@@ -320,18 +324,18 @@
           "properties": {
             "low": {
               "type": "string",
-              "description": "Low tier installed local Ollama model."
+              "description": "Low tier installed local model, Sutra-owned engine profile or legacy native Strata profile."
             },
             "mid": {
               "type": "string",
-              "description": "Mid tier installed local Ollama model."
+              "description": "Mid tier installed local model, Sutra-owned engine profile or legacy native Strata profile."
             },
             "high": {
               "type": "string",
-              "description": "High tier installed Ollama model or opt-in Strata High for chat and read-only reviews."
+              "description": "High tier installed local model, Sutra-owned engine profile or legacy native Strata profile."
             }
           },
-          "description": "Saved tier choices. Run Sutra: Configure Local Models from the Command Palette (or @sutra /models). Use discovered Ollama defaults, then Save choices, to replace existing selections."
+          "description": "Saved tier choices. Run Sutra: Configure Local Models. Choose installed local models, Sutra-owned engine profiles or legacy native Strata profiles, then save. Discovery preserves your existing choices."
         },
         "karma.strata.port": {
           "type": "integer",
@@ -352,7 +356,7 @@
           "type": "boolean",
           "scope": "machine",
           "default": false,
-          "description": "Start the configured Strata native runtime profile when Sutra activates with Strata selected for High. Set only in User Settings."
+          "description": "Start the configured Strata native runtime profile when Sutra activates with any tier using Strata. Set only in User Settings."
         },
         "karma.ramMemoryMiB": {
           "type": "integer",
@@ -387,24 +391,46 @@
         },
         "karma.tierReasoning": {
           "type": "object",
-          "default": {"low": "inherit", "mid": "inherit", "high": "inherit"},
+          "default": {
+            "low": "inherit",
+            "mid": "inherit",
+            "high": "inherit"
+          },
           "scope": "application",
           "additionalProperties": false,
           "description": "Reasoning for explicitly selected Sutra Low, Mid and High. Inherit uses the shared reasoning setting. Sutra Auto uses the shared setting.",
           "properties": {
             "low": {
               "type": "string",
-              "enum": ["inherit", "adaptive", "on", "off", "model-default"],
+              "enum": [
+                "inherit",
+                "adaptive",
+                "on",
+                "off",
+                "model-default"
+              ],
               "description": "Reasoning when Sutra Low is selected."
             },
             "mid": {
               "type": "string",
-              "enum": ["inherit", "adaptive", "on", "off", "model-default"],
+              "enum": [
+                "inherit",
+                "adaptive",
+                "on",
+                "off",
+                "model-default"
+              ],
               "description": "Reasoning when Sutra Mid is selected."
             },
             "high": {
               "type": "string",
-              "enum": ["inherit", "adaptive", "on", "off", "model-default"],
+              "enum": [
+                "inherit",
+                "adaptive",
+                "on",
+                "off",
+                "model-default"
+              ],
               "description": "Reasoning when Sutra High is selected."
             }
           }
@@ -471,6 +497,18 @@
             }
           },
           "description": "Operations to preapprove per tool, e.g. ruff: [install, check]. Sutra asks before trusting a new or changed workspace policy."
+        },
+        "karma.engine.pythonPath": {
+          "type": "string",
+          "scope": "application",
+          "default": "",
+          "description": "Python executable in Sutra\u2019s owned engine environment. Empty uses the Engine/python environment in Sutra\u2019s application support directory. User Settings only; repository settings cannot choose an executable."
+        },
+        "karma.engine.registryPath": {
+          "type": "string",
+          "scope": "application",
+          "default": "",
+          "description": "Absolute path to the user-owned engine profile registry. Empty uses Engine/models.json in Sutra\u2019s application support directory. Profile assets are local and are not downloaded automatically."
         }
       }
     },

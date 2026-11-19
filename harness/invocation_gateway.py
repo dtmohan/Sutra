@@ -73,9 +73,10 @@ class InvocationLedger(GovernedContext):
             if model_interface['role'] != role or charge != model_interface['input_reservation']:
                 raise InvalidUpdate('Model packet charge or role changed')
             if model_interface['version'] in REFERENCE_VERSIONS:
-                from strata_model import MODEL
-                if model != MODEL:
-                    raise InvalidUpdate('Citation reference packet requires the routed Strata model')
+                from strata_model import is_strata
+                from engine_profiles import is_engine
+                if not is_strata(model) and not is_engine(model):
+                    raise InvalidUpdate('Citation reference packet requires the routed native model')
             envelope['model_interface'] = model_interface
         with self.db:
             self.db.execute('BEGIN IMMEDIATE')

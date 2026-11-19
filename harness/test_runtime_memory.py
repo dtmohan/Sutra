@@ -52,6 +52,28 @@ class RuntimeMemoryTests(unittest.TestCase):
             self.assertEqual(a.memory_allocation(cost,10,4)['decision'],expected)
         self.assertEqual(a.memory_allocation(0,4,4)['decision'],'BRIDGE')
 
+    def test_owned_engine_monitoring_and_recovery_never_contact_foreign_runtimes(self):
+        self.owned()
+        worker = {'ok': True, 'running': True, 'profile': 'sutra:engine/small',
+                  'context_tokens': 16384, 'instance_id': 'a' * 32}
+        with patch.dict(os.environ, SUTRA_ENGINE_ONLY='1', SUTRA_STRATA_ONLY='0'), \
+                patch('engine_client.status', return_value=worker), \
+                patch.object(rm, 'api', side_effect=AssertionError('Ollama access')), \
+                patch.object(rm, 'native_inventory', side_effect=AssertionError('Strata access')), \
+                patch.object(rm, 'running', side_effect=AssertionError('Ollama inventory')), \
+                patch('monitoring.resource_state', return_value=self.blocked), \
+                patch.object(rm, 'stable_resources', return_value=self.healthy):
+            snapshot = rm.snapshot()
+            recovered = rm.recover(self.root)
+        self.assertEqual(snapshot['backend'], 'sutra_engine')
+        self.assertEqual(snapshot['ownership'], 'sutra_owned')
+        self.assertIsNone(snapshot['resident_models'][0]['size'])
+        self.assertEqual(snapshot['resident_models'][0]['name'], worker['profile'])
+        self.assertTrue(recovered['admitted'])
+        self.assertEqual(recovered['max_release_actions'], 0)
+        self.assertFalse(recovered['automatic_inference'])
+        self.assertEqual(rm.read_state()['owned']['digest'], 'weights1')
+
     def test_configure_reduces_optional_context_cap_before_paging(self):
         p=self.provider();hardware=dict(self.healthy,sample={'free_bytes':16*rm.GIB,'inactive_bytes':0})
         with patch('monitoring.require_resources',return_value=hardware),patch.object(rm,'running',return_value=[]):
@@ -148,6 +170,33 @@ class RuntimeMemoryTests(unittest.TestCase):
         with patch.object(rm.http.client.HTTPConnection,'request',side_effect=OSError('offline')):
             with self.assertRaisesRegex(ResourceWait,'unavailable'):rm.running()
         with patch.object(rm,'running',side_effect=ResourceWait(self.blocked)):
+            self.assertFalse(rm.snapshot()['inventory_available'])
+
+    def test_all_native_monitor_and_recovery_never_query_ollama(self):
+        rows = [{'name': 'strata:profile/native', 'size': None,
+                 'context_length': 8192, 'runner': 'strata'}]
+        with patch.dict(os.environ, {'SUTRA_STRATA_ONLY': '1'}), \
+                patch.object(rm, 'running', side_effect=AssertionError('Ollama dependency')), \
+                patch.object(rm, 'native_inventory', return_value=rows), \
+                patch('monitoring.resource_state', return_value=self.healthy), \
+                patch.object(rm, 'stable_resources', return_value=self.healthy):
+            observed = rm.snapshot()
+            self.assertEqual(observed['backend'], 'strata')
+            self.assertEqual(observed['ownership'], 'native_owner')
+            self.assertEqual(observed['resident_models'], rows)
+            recovery = rm.recover(self.root)
+            self.assertTrue(recovery['admitted'])
+            self.assertEqual(recovery['action'], 'observe_native_runtime')
+            self.assertEqual(recovery['max_release_actions'], 0)
+
+    def test_native_plan_retains_existing_runtime_evidence(self):
+        rm.write_state({'owned': {'name': 'previous-ollama'}, 'events': []})
+        rm.note_native_plan({'model': 'strata:profile/native', 'decision': 'ALLOW'})
+        saved = rm.read_state()
+        self.assertEqual(saved['plan']['provider'], 'strata')
+        self.assertEqual(saved['owned']['name'], 'previous-ollama')
+        with patch.dict(os.environ, {'SUTRA_STRATA_ONLY': '1'}), \
+                patch.object(rm, 'native_inventory', side_effect=OSError('unavailable')):
             self.assertFalse(rm.snapshot()['inventory_available'])
 
 

@@ -1,0 +1,11 @@
+{
+  "project": "Strata",
+  "license": "MIT",
+  "origin": "https://github.com/Niko1221/Strata",
+  "installed_control_version": "0.1.61",
+  "sources": {
+    "tools/strata_tokenizer.py": "9717b4eb4ef0b84a59c416ac917b8be66bb6c0bdd521abf08a1dca1d481ed463",
+    "serve/frontend.py": "61acd944df6664926203d06030e7044c9018dc8075a3634337c30fe3a238d9f1"
+  },
+  "scope": "Pack BPE tokenizer core, literal special-token spans; no server/control runtime imports"
+}

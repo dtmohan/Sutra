@@ -32,12 +32,15 @@ exports.run=async()=>{
   assert.equal(api.version,extension.packageJSON.version);assert.deepEqual(Object.keys(api).sort(),['getRoutingStatus','getState','open','version']);report.checks.push('packaged extension activates with restricted API');
   assert.equal(typeof vscode.chat?.createChatParticipant,'function');
   assert(extension.packageJSON.contributes.chatParticipants.some(p=>p.id==='karma.local'&&p.name==='sutra'));
-  for(const name of ['karma.configureModels','karma.openAdvanced','karma.newChatReview','karma.resumeWorkflow','karma.discardWorkflow'])assert((await vscode.commands.getCommands(true)).includes(name));
+  for(const name of ['karma.manageEngine','karma.configureModels','karma.openAdvanced','karma.newChatReview','karma.resumeWorkflow','karma.discardWorkflow'])assert((await vscode.commands.getCommands(true)).includes(name));
   for(const command of ['help','models','dashboard','status','new'])assert(extension.packageJSON.contributes.chatParticipants[0].commands.some(c=>c.name===command));
   const html=fs.readFileSync(path.join(extension.extensionPath,'media/panel.html'),'utf8');
   assert(html.indexOf('id="chat-prompt"')<html.indexOf('id="advanced"'));assert(!/<details id="advanced"[^>]*\bopen\b/.test(html));
   for(const id of ['workflow-notice','open-current-task','use-model-defaults','model-suggestions'])assert(html.includes('id="'+id+'"'));
   for(const id of ['nav-dashboard','nav-chat','nav-settings','nav-tools','settings-section','troubleshooting','save-runtime'])assert(html.includes('id="'+id+'"'));
+  for(const id of ['engine-manager','engine-profile','engine-setup','engine-load','engine-unload'])assert(html.includes('id="'+id+'"'));
+  for(const name of ['engine_management.js','harness/engine_service.py','harness/engine_process.py','requirements-engine.txt'])assert(fs.existsSync(path.join(extension.extensionPath,name)),name);
+  report.checks.push('Sutra-owned engine manager and direct worker ship with the runtime package');
   assert(!html.includes('id="extra"'));report.checks.push('tabbed overview, labelled settings and troubleshooting ship without a JSON constraint editor');
   report.checks.push('recovery commands and discover-defaults controls ship in the packaged extension');
   report.checks.push('native chat API registers @sutra; model setup command available','simple prompt precedes collapsed advanced controls');
@@ -46,8 +49,14 @@ exports.run=async()=>{
   // Fixture setup is a direct host request; no public extension mutation API.
   const setup=path.join(process.env.KARMA_SMOKE_DRIVER,'prepare.py');
   await exec(process.env.KARMA_SMOKE_PYTHON||'python3',[setup,extension.extensionPath,storage,workspace]);
-  await api.open();await new Promise(resolve=>setTimeout(resolve,2000));
-  const configured=vscode.workspace.getConfiguration('karma').get('models');
+  await api.open();
+  let configured;
+  const discoveryDeadline=Date.now()+15000;
+  do{
+    configured=vscode.workspace.getConfiguration('karma').get('models');
+    if(['low','mid','high'].every(t=>typeof configured?.[t]==='string'&&configured[t].length>0))break;
+    await new Promise(resolve=>setTimeout(resolve,100));
+  }while(Date.now()<discoveryDeadline);
   assert(['low','mid','high'].every(t=>typeof configured[t]==='string'&&configured[t].length>0));
   report.model_defaults=configured;report.checks.push('installed local model metadata prefills all three tier settings in the isolated profile');
   assert((await vscode.commands.getCommands(true)).includes('karma.manageStrata'));
@@ -56,6 +65,12 @@ exports.run=async()=>{
   assert(html.includes('id="strata-manager"')&&html.includes('id="strata-autostart"'));
   report.native_model_catalog={available:managed.available,profiles:managed.profiles.length};
   report.checks.push('native model-management command opens Settings and discovers profiles with the packaged controller');
+  const owned=await vscode.commands.executeCommand('karma.manageEngine');
+  assert(Array.isArray(owned.models));
+  for(const entry of owned.models)assert(/^sutra:engine\/[a-z][a-z0-9_-]{0,63}$/.test(entry.name));
+  assert.deepEqual(vscode.workspace.getConfiguration('karma').get('models'),configured);
+  report.owned_engine_catalog={registered:owned.models.length,environment_ready:owned.environment_ready};
+  report.checks.push('owned engine command discovers registered models without loading a child or rewriting tier choices');
   const startCommand=extension.packageJSON.contributes.commands.find(command=>command.command==='karma.useNativeChat');
   assert.equal(startCommand.title,'Sutra: Open Chat (Sutra Auto)');
   await vscode.commands.executeCommand(startCommand.command);

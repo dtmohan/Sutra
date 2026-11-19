@@ -24,4 +24,25 @@ assert.deepEqual(forRequest(saved,offline,'auto'),{models:{...optedIn,high:'moe'
 assert.deepEqual(forRequest(saved,beta,'auto'),{models:optedIn,fallbacks:[]});
 assert.deepEqual(saved,optedIn);
 assert.throws(()=>forRequest({...saved,low:'missing'},beta,'auto'),/low tier model is unavailable/);
+const nativeNames=['small','balanced','deep'].map(name=>'strata:profile/'+name);
+const nativeCatalog={models:nativeNames.map((name,index)=>({name,eligible:true,ready:index===0,
+ active:index===0,load_on_demand:true,provider:'strata'})),suggested_tiers:{},errors:[{model:'ollama',error:'Ollama is not running'}]};
+const allNative={low:nativeNames[0],mid:nativeNames[1],high:nativeNames[2]};
+assert.deepEqual(validate(allNative,nativeCatalog),allNative,'Stopped native profiles remain eligible for governed on-demand loading');
+for(const tier of ['low','mid','high','auto'])assert.deepEqual(forRequest(allNative,nativeCatalog,tier),{models:allNative,fallbacks:[]});
+assert.deepEqual(prefill(allNative,nativeCatalog),allNative,'Native discovery cannot replace saved selections');
+assert.deepEqual(prefill({low:'custom',mid:'moe',high:'large'},nativeCatalog),{low:'custom',mid:'moe',high:'large'},'Missing Ollama selections stay saved until the user replaces them');
+const sameNative=Object.fromEntries(['low','mid','high'].map(tier=>[tier,nativeNames[0]]));
+assert.deepEqual(forRequest(sameNative,nativeCatalog,'auto'),{models:sameNative,fallbacks:[]},'Reusing one native profile does not invent three model identities');
+assert.throws(()=>validate({...allNative,mid:'strata:profile/missing'},nativeCatalog),/native Strata profile for mid.*installed configuration/);
+const {nativeProfile}=require('../model_selection');
+assert.equal(nativeProfile(nativeNames[0]),'small');
+for(const invalid of ['strata:high','strata:profile/../escape','strata:profile/Uppercase','strata:profile/a/extra',null])assert(!nativeProfile(invalid));
+const {engineProfile}=require('../model_selection');
+const owned=Object.fromEntries(['low','mid','high'].map(tier=>[tier,'sutra:engine/'+tier]));
+const ownedCatalog={models:Object.values(owned).map(name=>({name,eligible:true,provider:'sutra_engine',load_on_demand:true})),errors:[]};
+assert.deepEqual(forRequest(owned,ownedCatalog,'auto'),{models:owned,fallbacks:[]});
+assert.throws(()=>validate({...owned,mid:'sutra:engine/missing'},ownedCatalog),/Sutra-owned engine profile for mid.*registry and environment/);
+assert.equal(engineProfile(owned.low),'low');
+for(const invalid of ['sutra:engine/../escape','sutra:engine/A','sutra:engine/a/extra',null])assert(!engineProfile(invalid));
 console.log(JSON.stringify({passed:true,checks:['prefill empty tiers from installed metadata','preserve saved and missing choices','never invent unavailable defaults','reject ineligible models on save','allow fixed available tiers during a High outage','block fixed unavailable High with recovery details','fallback and restore Auto High as readiness changes without editing settings']}));

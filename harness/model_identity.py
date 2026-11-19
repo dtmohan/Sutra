@@ -66,9 +66,12 @@ def from_metadata(name, tag, metadata, root=None):
 
 
 def observe(name, ollama=None):
-    from strata_model import MODEL, observe as observe_strata
-    if name == MODEL:
-        return observe_strata()
+    from engine_profiles import is_engine, identity
+    if is_engine(name):
+        return identity(name)
+    from strata_model import is_strata, observe as observe_strata
+    if is_strata(name):
+        return observe_strata(name)
     if ollama is None:
         from vscode_bridge import ollama
     tags = ollama('/api/tags').get('models', [])
@@ -109,8 +112,14 @@ def choose(mapper, requested='auto', models=None):
     if not isinstance(requested, str) or not requested: raise InvalidUpdate('reviewer_model must be a model name or auto')
     if models is None:
         from vscode_bridge import ollama
-        from model_catalog import catalog
-        models = [m for m in catalog(ollama)['models'] if m.get('eligible')]
+        from model_catalog import combined
+        from strata_model import assigned_models, is_strata
+        from engine_profiles import assigned_models as engine_assignments, is_engine
+        approved = assigned_models() if os.environ.get('SUTRA_ENGINE_ONLY') != '1' else set()
+        approved_engines = engine_assignments()
+        models = [m for m in combined(ollama)['models'] if m.get('eligible') and
+                  (not is_strata(m['name']) or m['name'] in approved or m['name'] == 'strata:high' and not approved) and
+                  (not is_engine(m['name']) or m['name'] in approved_engines)]
         for row in models: row['identity'] = observe(row['name'], ollama)
     by = {m['name']: m for m in models if m.get('eligible', True)}
     if requested != 'auto' and requested not in by: raise InvalidUpdate('Reviewer must be an eligible installed local chat model')

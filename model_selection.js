@@ -1,5 +1,7 @@
 'use strict';
 const tiers=['low','mid','high'];
+const nativeProfile=name=>typeof name==='string'&&/^strata:profile\/([a-z][a-z0-9_-]{0,63})$/.exec(name)?.[1];
+const engineProfile=name=>typeof name==='string'&&/^sutra:engine\/([a-z][a-z0-9_-]{0,63})$/.exec(name)?.[1];
 function prefill(current,catalog){
  const names=new Set((catalog.models||[]).filter(m=>m.eligible===true&&!m.tier).map(m=>m.name));
  const result={};
@@ -24,7 +26,11 @@ class ModelUnavailable extends Error{
   const detail=(catalog.errors||[]).find(row=>row.model===name)?.error;
   super(name==='strata:high'&&tier==='high'
    ? `Strata High is unavailable. Start your configured local Strata server and load its model, then retry.${detail?' '+detail+'.':''}`
-   : message);
+   : engineProfile(name)
+    ? `The Sutra-owned engine profile for ${tier} (${engineProfile(name)}) is unavailable. Refresh the engine worker in Sutra model settings and check its registry and environment.${detail?' '+detail+'.':''}`
+   : nativeProfile(name)
+    ? `The native Strata profile for ${tier} (${nativeProfile(name)}) is unavailable. Refresh Native Strata runtime in Sutra model settings and check its installed configuration.${detail?' '+detail+'.':''}`
+    : message);
  }
 }
 
@@ -61,4 +67,4 @@ function fallbackMessage(fallback){
  return `Sutra Auto: ${label(fallback.tier)} (${fallback.model||'unconfigured'}) is unavailable. Work routed to ${label(fallback.tier)} will use ${label(fallback.availableTier)} (${fallback.availableModel}). Your saved model choices are unchanged.`;
 }
 
-module.exports={prefill,validate,forRequest,ModelUnavailable,fallbackMessage};
+module.exports={prefill,validate,forRequest,ModelUnavailable,fallbackMessage,nativeProfile,engineProfile};

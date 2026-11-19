@@ -1,3 +1,35 @@
+Sutra 0.49.0 — Sutra-owned engine worker
+
+Sutra directly owns a compatible native engine process, its tokenizer and chat
+template, streamed generation and cancellation. This path requires neither
+Strata Control nor an Ollama service. The existing invocation gateway retains
+context, evidence, permission and task-spending checks. The STP kernel is unchanged.
+
+Open Sutra > Settings > Models > Sutra engine worker, or run Sutra: Manage Owned Engine
+Worker. Set up worker installs the pinned codec dependencies in Sutra's owned
+Python environment. Registered sutra:engine/<profile> models can serve all tiers.
+Load selected model changes the active worker; Save choices changes tier assignments.
+
+The Python environment, registry, native binary and Metal/shader assets, tokenizer
+and weights remain local assets outside this VSIX. Setup does not download model
+weights. Current support targets the installed Flash-Next Metal architecture on
+Apple Silicon. Context profiles sharing one set of weights are not distinct
+model capabilities. See docs/owned-engine-worker.md in the source archive.
+
+Sutra 0.48.0 — Native profiles for every tier
+
+Select named native profiles for Low, Mid and High in Settings > Models. Stopped
+profiles load on demand inside the shared invocation slot. Saving selections is
+the only action that changes tier assignments. With all three tiers native,
+Ollama is optional. Constraints, context and spending retain their existing checks.
+The canonical STP kernel is unchanged.
+
+Profiles of the same weights are not distinct model capabilities. This Mac has
+one large native weight set, with no supported native 4B replacement installed.
+No new weights are downloaded automatically. Native Strata Control and its engine
+remain runtime dependencies; direct embedded engine execution is future work.
+Management currently supports local macOS.
+
 Sutra 0.47.0 — Native model management
 
 Open Sutra > Settings > Models > Strata High runtime, or run Sutra: Manage

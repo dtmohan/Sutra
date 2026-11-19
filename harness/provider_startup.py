@@ -1,6 +1,7 @@
 """Measure cold provider admission without changing task or provider state."""
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
@@ -64,8 +65,12 @@ def main(argv=None):
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--cold-memory-bytes', type=int)
     mode.add_argument('--native-fit', action='store_true')
+    mode.add_argument('--hold-slot', action='store_true')
     parser.add_argument('--storage', type=Path)
+    parser.add_argument('--runtime-directory', type=Path)
     args = parser.parse_args(argv)
+    if args.hold_slot:
+        return hold_slot(args.runtime_directory)
     try:
         if args.storage is None:
             with TemporaryDirectory(prefix='sutra-provider-startup-') as directory:
@@ -77,6 +82,30 @@ def main(argv=None):
                           'at': time.time()}, allow_nan=False))
         return 2
     print(json.dumps(result, allow_nan=False))
+    return 0
+
+
+def hold_slot(directory):
+    """Let a trusted JS operation hold the same OS lease as model inference."""
+    from monitoring import ResourceWait
+    from runtime_memory import lease
+    if directory is None or not directory.is_absolute():
+        print(json.dumps({'held': False, 'reason': 'The native runtime directory must be absolute'}), flush=True)
+        return 2
+    previous = os.environ.get('SUTRA_RUNTIME_DIR')
+    os.environ['SUTRA_RUNTIME_DIR'] = str(directory)
+    try:
+        with lease():
+            print(json.dumps({'held': True}), flush=True)
+            sys.stdin.buffer.read(1)
+    except (ResourceWait, OSError) as error:
+        print(json.dumps({'held': False, 'reason': str(error)[:600]}), flush=True)
+        return 2
+    finally:
+        if previous is None:
+            os.environ.pop('SUTRA_RUNTIME_DIR', None)
+        else:
+            os.environ['SUTRA_RUNTIME_DIR'] = previous
     return 0
 
 

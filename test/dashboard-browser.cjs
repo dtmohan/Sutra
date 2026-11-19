@@ -64,7 +64,7 @@ const dashboard={token_usage:{calls:usageRows,total_calls:4,limit:250},hardware:
  await page.click('#review-auto');
  assert.equal((await page.evaluate(()=>sent.at(-1))).mode,'guided');
  await send({type:'state',data:fixture});
- await page.click('#nav-settings');await send({type:'tier-settings',models:{low:'',mid:'',high:''}});assert((await page.locator('#model-discovery').textContent()).includes('Start Ollama'));await send({type:'busy',value:false});assert(await page.locator('#save-model-tiers').isDisabled());
+ await page.click('#nav-settings');await send({type:'tier-settings',models:{low:'',mid:'',high:''}});assert((await page.locator('#model-discovery').textContent()).includes('connect the native runtime'));await send({type:'busy',value:false});assert(await page.locator('#save-model-tiers').isDisabled());
  await send({type:'tier-settings',models:catalog.suggested_tiers,catalog});assert(!(await page.locator('#save-model-tiers').isDisabled()));
  await send({type:'dashboard',data:{...dashboard,hardware:{...dashboard.hardware,temperatures:{...dashboard.hardware.temperatures,age_seconds:99}}}});assert.equal(await page.locator('#cpu-temperature').textContent(),'—');await send({type:'dashboard',data:dashboard});await page.click('#nav-dashboard');
  const idle={enabled:true,armed:true,accessProfile:'read_only',label:'Sutra · Read only',explanation:'Current chat selection is unverified. Check for Sutra Auto beneath the prompt.',defaultsReady:true,reason:'Saved workspace permissions restored.',routing:null};

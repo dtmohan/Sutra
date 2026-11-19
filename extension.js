@@ -59,18 +59,26 @@ function activate(context) {
   async function startStrata(manual=false){
     if(manual)return manageStrata('load-selected');
     const config=vscode.workspace.getConfiguration('karma');
-    if(config.inspect?.('strata.startOnStartup')?.globalValue!==true||config.inspect?.('models')?.globalValue?.high!=='strata:high'){
+    const assigned=config.inspect?.('models')?.globalValue||{};
+    const native=FIXED_TIERS.map(tier=>assigned[tier]).filter(name=>name==='strata:high'||modelSelection.nativeProfile(name));
+    if(config.inspect?.('strata.startOnStartup')?.globalValue!==true||!native.length){
       return {status:'disabled',message:'Native Strata startup is not selected.'};
     }
-    if(strataChanging||strataSetupRunning||busy||sequence||nativeController?.status().working){
+    if(strataChanging||strataSetupRunning||engineChanging||busy||sequence||nativeController?.status().working){
       return {status:'busy',message:'Native model management or a Sutra request is in progress.'};
     }
     strataChanging=true;
     try{
-      const result=await strataStartup.start(()=>vscode.workspace.getConfiguration('karma'),
-        {remote:!!vscode.env?.remoteName,automatic:true,admit:providerStartupAdmission});
-      if(!['disabled','unsupported','changed'].includes(result.status))output.appendLine('Strata High: '+result.message);
+      const result=await withNativeSlot(async()=>{
+        const named=native.find(name=>modelSelection.nativeProfile(name));
+        if(named)return require('./strata_runtime').create({environment:{...process.env,...runtimeEnvironment('')},
+          remote:!!vscode.env?.remoteName,admit:providerStartupAdmission}).activate(named);
+        return strataStartup.start(()=>vscode.workspace.getConfiguration('karma'),
+          {remote:!!vscode.env?.remoteName,automatic:true,admit:providerStartupAdmission});
+      });
+      if(!['disabled','unsupported','changed'].includes(result.status))output.appendLine('Native runtime: '+(result.message||result.error||result.status));
       return result;
+    }catch(error){output.appendLine('Native startup: '+error.message);return {status:'paused',message:error.message};
     }finally{strataChanging=false;publishStrata();}
   }
   async function stopStrata(){
@@ -78,6 +86,7 @@ function activate(context) {
   }
   let nativeController, usage, panel, panelReady=false, panelSection, busy = false, sequence = false, telemetry, telemetryDir, dashboardTimer, dashboardInFlight=false, stopAuto=false, chatCancellation;
   let strataManager, strataState, strataChanging=false, strataSetupRunning=false;
+  let engineState, engineChanging=false;
   let lastReview;
   const previewDocuments=new Map(), previewChanges=new vscode.EventEmitter();
   function updateReports(data){
@@ -93,6 +102,10 @@ function activate(context) {
     const config = vscode.workspace.getConfiguration('karma');
     const strataPort = config.inspect?.('strata.port')?.globalValue;
     const strataModel = config.inspect?.('strata.model')?.globalValue;
+    const userModels=config.inspect?.('models')?.globalValue||{};
+    const nativeNames=FIXED_TIERS.map(tier=>userModels[tier]).filter(name=>name==='strata:high'||modelSelection.nativeProfile(name));
+    const engineNames=FIXED_TIERS.map(tier=>userModels[tier]).filter(name=>/^sutra:engine\/[a-z][a-z0-9_-]{0,63}$/.test(name||''));
+    const engineBase=path.join(require('node:os').homedir(),'Library','Application Support','Sutra','Engine');
     // Only user settings can authorize automatic grants. A repository setting
     // or a model tool payload cannot set or widen these limits.
     const userAllocation = config.inspect?.('workspaceAllocation')?.globalValue;
@@ -107,6 +120,12 @@ function activate(context) {
     return {
       ...(strataPort === undefined ? {} : {SUTRA_STRATA_PORT: strataPort === 0 ? undefined : String(strataPort)}),
       ...(strataModel === undefined ? {} : {SUTRA_STRATA_MODEL: typeof strataModel === 'string' ? strataModel.trim() : ''}),
+      SUTRA_STRATA_MODELS:JSON.stringify(nativeNames),
+      SUTRA_STRATA_ONLY:nativeNames.length===FIXED_TIERS.length?'1':undefined,
+      SUTRA_ENGINE_MODELS:JSON.stringify(engineNames),
+      SUTRA_ENGINE_ONLY:engineNames.length===FIXED_TIERS.length?'1':undefined,
+      SUTRA_ENGINE_PYTHON:config.inspect?.('engine.pythonPath')?.globalValue||path.join(engineBase,'python','bin','python'),
+      SUTRA_ENGINE_REGISTRY:config.inspect?.('engine.registryPath')?.globalValue||path.join(engineBase,'models.json'),
       SUTRA_CAPABILITIES_MODE: config.get('tools.mode', 'ask'),
       SUTRA_RUNTIME_DIR: path.join(context.globalStorageUri.fsPath, 'runtime-memory'),
       SUTRA_MEMORY_OWNERSHIP: config.get('memoryOwnership', 'shared'),
@@ -200,7 +219,7 @@ function activate(context) {
     const diagnostic=message?.op==='dashboard';
     if(diagnostic)return requestDashboard();
     const managementRead=['state','models','conversation_read','capability_list','calibration_list'].includes(message?.op);
-    if ((((strataChanging||strataSetupRunning)&&!managementRead) || busy || ((sequence || nativeController?.status().working) && !internal)) && !diagnostic) throw new Error('A Sutra request or native model operation is running. Switch models after it finishes.');
+    if ((((strataChanging||strataSetupRunning||engineChanging)&&!managementRead) || busy || ((sequence || nativeController?.status().working) && !internal)) && !diagnostic) throw new Error('A Sutra request or native model operation is running. Switch models after it finishes.');
     if (!['capability_list','capability_preview','capability_execute','orchestrate','conversation_read','conversation','native_permissions','native_work','native_preview','native_execute','chat_answer','calibration_register','calibration_list','calibration_bind','calibration_revoke','calibration_evaluate','models','state','new','save','switch','review','work','preview','execute','dashboard','quarantine','review_new','architecture','repository_tool','api_build','api_verify','static_build','static_explain','auto_new','auto_step','auto_report'].includes(message?.op)) throw new Error('Unknown Sutra request.');
     if((['native_work','chat_answer','static_build','static_explain','auto_step','auto_report'].includes(message.op)||(message.op==='orchestrate'&&!conversationStep&&!documentEvidence&&!['start','inspect','pending','cancel','task_list','task_focus','task_close','supply_evidence'].includes(message.event)))&&hasDirtyFiles())throw new Error('Save or discard unsaved workspace buffers before mapping current source.');
     if(['execute','native_execute'].includes(message.op) && hasDirtyFiles())throw new Error('Save or discard unsaved workspace buffers before applying an edit or running tests.');
@@ -263,6 +282,7 @@ function activate(context) {
     panel?.webview.postMessage({type:'tier-settings',models:modelSettings(),catalog:modelCatalog});
     const config=vscode.workspace.getConfiguration('karma');panel?.webview.postMessage({type:'runtime-settings',settings:{storageLimitMiB:config.get('storageLimitMiB',512),pythonPath:config.get('pythonPath',''),thinking:config.get('thinking','adaptive'),tierReasoning:tierReasoning(config),logitSensor:config.get('logitSensor','off'),memoryOwnership:config.get('memoryOwnership','shared')}});
     if(strataState)publishStrata();
+    if(engineState)publishEngines();
   }
   function publishStrata(){
     const config=vscode.workspace.getConfiguration('karma');
@@ -275,7 +295,67 @@ function activate(context) {
       admit:providerStartupAdmission,remote:!!vscode.env?.remoteName,
       busy:()=>busy||sequence||!!nativeController?.status().working||strataSetupRunning});
   }
+  function engineManager(approved=[]){
+    const config=vscode.workspace.getConfiguration('karma'),environment=runtimeEnvironment('');
+    return require('./engine_management').create({
+      bootstrapPython:config.inspect?.('pythonPath')?.globalValue||(process.platform==='win32'?'python':'python3'),
+      python:environment.SUTRA_ENGINE_PYTHON,registryPath:environment.SUTRA_ENGINE_REGISTRY,
+      runtimeDir:environment.SUTRA_RUNTIME_DIR,extensionPath:context.extensionPath,
+      models:approved,environment:{...process.env,...environment}});
+  }
+  function publishEngines(){
+    panel?.webview.postMessage({type:'engine-state',data:{...engineState,busy:engineChanging}});
+  }
+  async function refreshEngines(){
+    try{
+      const manager=engineManager();
+      const [catalog,status]=await Promise.all([manager.command('catalog'),manager.command('status')]);
+      engineState={models:catalog.models||[],status,environment_ready:catalog.environment_ready===true,
+        message:catalog.ok?'Sutra owns the engine worker and its model process.':catalog.error};
+    }catch(error){engineState={...engineState,message:error.message,error:error.message};}
+    publishEngines();return engineState;
+  }
+  async function manageEngine(operation,ref){
+    if(vscode.env?.remoteName||process.platform!=='darwin')throw new Error('This engine worker currently requires a local macOS window.');
+    if(engineChanging||strataChanging||strataSetupRunning||busy||sequence||nativeController?.status().working){
+      throw new Error('Wait for the active request or runtime operation before changing the engine worker.');
+    }
+    engineChanging=true;publishEngines();
+    try{
+      let result;
+      if(operation==='setup'){
+        const approved=await vscode.window.showInformationMessage('Set up the Sutra-owned engine environment?',
+          {modal:true,detail:'This installs the pinned regex, Jinja2 and MarkupSafe packages in Sutra’s own Python environment. Model weights are not downloaded.'},'Set up worker');
+        if(approved!=='Set up worker')return;
+        result=await engineManager().command('setup',undefined,{approved:true});
+      }else if(operation==='load'){
+        const catalog=await engineManager().command('catalog');
+        if(typeof ref!=='string'||!catalog.models?.some(model=>model.name===ref))throw new Error('Choose a registered Sutra engine model.');
+        result=await engineManager([ref]).command('load',ref);
+      }else if(operation==='unload')result=await engineManager().command('unload');
+      else throw new Error('Unknown engine worker operation.');
+      await refreshEngines();
+      engineState={...engineState,message:result.message||result.error||'Engine operation completed.',
+        error:result.ok===false?result.error:undefined};publishEngines();
+      return result;
+    }finally{
+      engineChanging=false;publishEngines();
+      try{await discoverModels();}catch(error){output.appendLine('Engine model discovery: '+error.message);}
+    }
+  }
+  function withNativeSlot(action){
+    const config=vscode.workspace.getConfiguration('karma');
+    const python=config.inspect?.('pythonPath')?.globalValue||(process.platform==='win32'?'python':'python3');
+    return require('./provider_slot').withSlot({python,
+      helper:path.join(context.extensionPath,'harness','provider_startup.py'),
+      runtimeDir:path.join(context.globalStorageUri.fsPath,'runtime-memory'),
+      environment:{...process.env,KARMA_NODE:process.execPath,ELECTRON_RUN_AS_NODE:'1'}},action);
+  }
   async function refreshStrata(){
+    if(runtimeEnvironment('').SUTRA_ENGINE_ONLY==='1'){
+      strataState={available:false,profiles:[],models:[],message:'The selected tiers use Sutra’s owned engine worker. Legacy runtimes are optional.'};
+      publishStrata();return strataState;
+    }
     try{strataState=await nativeManager().discover();}
     catch(error){strataState={available:false,message:error.message,profiles:[],models:[]};}
     publishStrata();return strataState;
@@ -341,11 +421,12 @@ function activate(context) {
     if(process.platform!=='darwin'||vscode.env?.remoteName){
       throw new Error('Native Strata model management currently requires a local macOS VS Code window.');
     }
-    if(strataChanging||strataSetupRunning||busy||sequence||nativeController?.status().working){
+    if(strataChanging||strataSetupRunning||engineChanging||busy||sequence||nativeController?.status().working){
       throw new Error('Wait for the current Sutra request or native model operation to finish.');
     }
     strataChanging=true;publishStrata();
     try{
+      const perform=async()=>{
       let result;
       if(action==='locate')result=await locateStrata();
       else if(action==='setup')result=await setupStrata();
@@ -368,18 +449,21 @@ function activate(context) {
           if(!id){await showPanelSection('models');return;}
         }
         if(typeof id!=='string'||id.length>200)throw new Error('Choose an installed native profile.');
-        result=await nativeManager().load(id);
-        if(result.status==='ready'&&result.selected){
-          const config=vscode.workspace.getConfiguration('karma');
-          await config.update('strata.port',result.selected.port,vscode.ConfigurationTarget.Global);
-          await config.update('strata.model',result.selected.model,vscode.ConfigurationTarget.Global);
-          await config.update('models',{...modelSettings(),high:'strata:high'},vscode.ConfigurationTarget.Global);
-        }
+        const catalog=await nativeManager().discover();
+        const target=catalog.profiles?.find(profile=>profile.id===id);
+        if(!target)throw new Error('Refresh the native profile list and choose an installed profile.');
+        const ref='strata:profile/'+target.name;
+        const environment={...process.env,...runtimeEnvironment('')};
+        environment.SUTRA_STRATA_MODELS=JSON.stringify([...JSON.parse(environment.SUTRA_STRATA_MODELS),ref]);
+        result=await require('./strata_runtime').create({environment,admit:providerStartupAdmission}).activate(ref);
       }
       if(result?.message)output.appendLine('Strata management: '+result.message);
       const observed=await refreshStrata();
       if(result?.message){strataState={...observed,message:result.message};publishStrata();}
+      else if(result?.error){strataState={...observed,message:result.error,error:result.error};publishStrata();}
       return result;
+      };
+      return ['load','load-selected','unload'].includes(action)?await withNativeSlot(perform):await perform();
     }catch(error){strataState={...strataState,message:error.message,error:error.message};publishStrata();throw error;}
     finally{
       strataChanging=false;publishStrata();
@@ -389,7 +473,7 @@ function activate(context) {
     }
   }
   async function discoverModels(token,internal=false){
-    let catalog;try{catalog=await request({op:'models'},token,internal);}catch(error){modelCatalog={models:[],suggested_tiers:{},error:'Cannot discover local models. Start Ollama, then choose Retry model discovery. '+error.message};publishSettings();throw new Error(modelCatalog.error);}
+    let catalog;try{catalog=await request({op:'models'},token,internal);}catch(error){modelCatalog={models:[],suggested_tiers:{},error:'Cannot discover configured local runtimes. Open Model settings and refresh their catalogs. '+error.message};publishSettings();throw new Error(modelCatalog.error);}
     const current=modelSettings(),next=modelSelection.prefill(current,catalog);
     if(JSON.stringify(current)!==JSON.stringify(next))await vscode.workspace.getConfiguration('karma').update('models',next,vscode.ConfigurationTarget.Global);
     modelCatalog=catalog;publishSettings();return catalog;
@@ -399,7 +483,7 @@ function activate(context) {
   async function configureModels(force=true,token,internal=false,{tier='auto',onFallback}={}){
     if(force){await showPanelSection('models');return modelSettings();}
     const catalog=await discoverModels(token,internal);
-    if(tier==='auto'&&!catalog.models.some(m=>m.eligible))throw new Error('No local chat models found. Start Ollama, then refresh the model list.');
+    if(tier==='auto'&&!catalog.models.some(m=>m.eligible))throw new Error('No local chat models found. Open Model settings to connect a native runtime or Ollama.');
     const {models,fallbacks}=modelSelection.forRequest(modelSettings(),catalog,tier);
     if(fallbacks.length)onFallback?.(fallbacks);
     return models;
@@ -576,7 +660,11 @@ function activate(context) {
     panel.onDidDispose(()=>{panel=undefined;panelReady=false;},null,context.subscriptions);
     panel.webview.onDidReceiveMessage(async message=>{
       try {
-        if(message.type==='ready'){panelReady=true;publishSettings();void refreshStrata();if(!busy&&!sequence)await refresh();focusPanelSection();return;}
+        if(message.type==='ready'){panelReady=true;publishSettings();void refreshStrata();void refreshEngines();if(!busy&&!sequence)await refresh();focusPanelSection();return;}
+        if(message.op==='engine_refresh'){await refreshEngines();return;}
+        if(message.op==='engine_setup'){await manageEngine('setup');return;}
+        if(message.op==='engine_load'){await manageEngine('load',message.ref);return;}
+        if(message.op==='engine_unload'){await manageEngine('unload');return;}
         if(message.op==='strata_refresh'){await refreshStrata();return;}
         if(message.op==='strata_load'){await manageStrata('load',message.id);return;}
         if(message.op==='strata_unload'){await manageStrata('unload');return;}
@@ -584,7 +672,7 @@ function activate(context) {
         if(message.op==='strata_setup'){await manageStrata('setup');return;}
         if(message.op==='strata_locate'){await manageStrata('locate');return;}
         if(message.op==='strata_autostart'){
-          if(typeof message.enabled!=='boolean'||strataChanging||strataSetupRunning||busy||sequence||nativeController?.status().working){
+          if(typeof message.enabled!=='boolean'||strataChanging||strataSetupRunning||engineChanging||busy||sequence||nativeController?.status().working){
             throw new Error('Wait for current work, then choose whether to start the selected native profile.');
           }
           await vscode.workspace.getConfiguration('karma').update('strata.startOnStartup',message.enabled,vscode.ConfigurationTarget.Global);
@@ -675,6 +763,9 @@ function activate(context) {
       }catch(e){
         if(typeof message.op==='string'&&message.op.startsWith('strata_')){
           strataState={...strataState,message:e.message,error:e.message};publishStrata();
+        }
+        if(typeof message.op==='string'&&message.op.startsWith('engine_')){
+          engineState={...engineState,message:e.message,error:e.message};publishEngines();
         }
         panel?.webview.postMessage({type:'error',message:e.message});output.appendLine(e.message);
       }
@@ -772,6 +863,7 @@ function activate(context) {
   context.subscriptions.push(status,output,previewChanges,vscode.commands.registerCommand('karma.open',open),
     vscode.commands.registerCommand('karma.configureModels',()=>configureModels()),
     vscode.commands.registerCommand('karma.manageStrata',async()=>{await showPanelSection('models');return refreshStrata();}),
+    vscode.commands.registerCommand('karma.manageEngine',async()=>{await showPanelSection('models');return refreshEngines();}),
     vscode.commands.registerCommand('karma.startStrata',()=>startStrata(true)),
     vscode.commands.registerCommand('karma.stopStrata',()=>stopStrata()),
     vscode.commands.registerCommand('karma.configureReasoning',()=>showPanelSection('reasoning')),
@@ -841,7 +933,7 @@ function activate(context) {
       if(data.tool_receipt)output.appendLine('KARMA_TOOL_RECEIPT '+data.tool_receipt.id);return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify(data))]);}
   }));
   if(vscode.lm.registerLanguageModelChatProvider){
-    nativeController=nativeProvider.install(vscode,context,{authorization:require('./workspace_authorization').createStore(vscode,context),request:(m,t,a)=>request(m,t,true,a),workspace,isBusy:()=>busy||sequence||strataChanging||strataSetupRunning,
+    nativeController=nativeProvider.install(vscode,context,{authorization:require('./workspace_authorization').createStore(vscode,context),request:(m,t,a)=>request(m,t,true,a),workspace,isBusy:()=>busy||sequence||strataChanging||strataSetupRunning||engineChanging,
       approveCapability:(p,t)=>toolController.approve(p,t),capabilityReport:capabilityUI.report,
       activityLink:event=>usage?.activityLink(event),modelSettings,configureModels:(force,t,options)=>configureModels(force,t,true,options),simpleChat,publishReview,
       async presentReview(data){await diagrams.openReview(data);},

@@ -1,12 +1,17 @@
 """Read installed Ollama metadata; no inference, downloads or cloud dispatch."""
+import os
 import re
 
 def catalog(ollama):
-    from strata_model import MODEL as STRATA_HIGH
+    from strata_model import is_strata
     rows=[];errors=[]
-    for tag in ollama('/api/tags').get('models',[]):
+    try:
+        tags=[] if os.environ.get('SUTRA_STRATA_ONLY') == '1' or os.environ.get('SUTRA_ENGINE_ONLY') == '1' else ollama('/api/tags').get('models',[])
+    except Exception as exc:
+        tags=[];errors.append({'provider':'ollama','error':str(exc)[:160]})
+    for tag in tags:
         name=tag.get('name')
-        if not isinstance(name,str) or not name or name == STRATA_HIGH or 'cloud' in name.lower():continue
+        if not isinstance(name,str) or not name or name.startswith(('strata:','sutra:')) or 'cloud' in name.lower():continue
         row={k:tag[k] for k in ('name','digest','size') if k in tag}
         try:
             data=ollama('/api/show',{'model':name})
@@ -37,3 +42,15 @@ def catalog(ollama):
     return {'models':rows,'suggested_tiers':suggested,'selection_policy':'local-metadata-prefill-v1',
             'selection_note':'Editable defaults: smallest chat model, MoE/middle model, largest dense model. Metadata is not a capability benchmark.',
             'errors':errors}
+
+
+def combined(ollama):
+    result = catalog(ollama)
+    if os.environ.get('SUTRA_ENGINE_ONLY') != '1':
+        from strata_model import append_catalog
+        result = append_catalog(result)
+    if ('SUTRA_ENGINE_MODELS' in os.environ or 'SUTRA_ENGINE_REGISTRY' in os.environ or
+            os.environ.get('SUTRA_ENGINE_ONLY') == '1'):
+        from engine_model import append_catalog as append_engines
+        result = append_engines(result)
+    return result

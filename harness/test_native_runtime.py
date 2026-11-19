@@ -95,6 +95,52 @@ class NativeTests(unittest.TestCase):
         self.assertFalse(m.calls)
         self.assertEqual(usage(self.s,self.session)['used']['calls'],1)
 
+    def test_native_profiles_can_code_in_each_tier_without_widening_permissions(self):
+        self.models={tier:'strata:profile/native-'+tier for tier in ('low','mid','high')}
+        original=self.s.current_contract(self.session)
+        with patch('vscode_bridge.ollama',side_effect=AssertionError('No Ollama RPC for a native coding tier')):
+            for tier in ('low','mid','high'):
+                model=NativeModel(self.models[tier])
+                result=self.call(model,tier=tier)
+                self.assertTrue(result['result']['admission']['admitted'],result)
+                self.assertEqual(result['route']['model'],self.models[tier])
+                self.assertEqual(self.s.current_contract(self.session),original)
+        self.assertEqual(usage(self.s,self.session)['used']['calls'],3)
+        self.assertTrue(self.s.verify_invocations(self.session))
+
+    def test_native_profile_switch_cannot_reset_a_consumed_call_limit(self):
+        self.models={tier:'strata:profile/native-'+tier for tier in ('low','mid','high')}
+        constraints={**self.request['constraints'],**DEFAULTS,'native_task':True,'review_calls':1}
+        handle(self.storage,self.workspace,{'op':'save','goal':self.request['goal'],'constraints':constraints})
+        self.assertTrue(self.call(NativeModel(self.models['low']))['result']['admission']['admitted'])
+        second=NativeModel(self.models['high'])
+        with self.assertRaises(InvalidUpdate):self.call(second,tier='high')
+        self.assertFalse(second.calls)
+        self.assertEqual(usage(self.s,self.session)['used']['calls'],1)
+
+    def test_sutra_owned_engine_tiers_keep_coding_permissions_and_call_limits(self):
+        self.models={tier:'sutra:engine/owned-'+tier for tier in ('low','mid','high')}
+        original=self.s.current_contract(self.session)
+        with patch('vscode_bridge.ollama',side_effect=AssertionError('No Ollama for owned engines')), \
+             patch('strata_model.native_command',side_effect=AssertionError('No Strata Control for owned engines')):
+            for tier in ('low','mid','high'):
+                model=NativeModel(self.models[tier])
+                result=self.call(model,tier=tier)
+                self.assertTrue(result['result']['admission']['admitted'],result)
+                self.assertEqual(self.s.current_contract(self.session),original)
+        self.assertEqual(usage(self.s,self.session)['used']['calls'],3)
+        self.assertTrue(self.s.verify_invocations(self.session))
+
+    def test_owned_engine_switch_cannot_refund_a_spent_call(self):
+        self.models={tier:'sutra:engine/owned-'+tier for tier in ('low','mid','high')}
+        constraints={**self.request['constraints'],**DEFAULTS,'native_task':True,'review_calls':1}
+        handle(self.storage,self.workspace,{'op':'save','goal':self.request['goal'],'constraints':constraints})
+        self.assertTrue(self.call(NativeModel(self.models['low']))['result']['admission']['admitted'])
+        next_model=NativeModel(self.models['high'])
+        with self.assertRaises(InvalidUpdate):self.call(next_model,tier='high')
+        self.assertFalse(next_model.calls)
+        self.assertEqual(usage(self.s,self.session)['used']['calls'],1)
+
     def test_conversation_note_reaches_coder_without_changing_task_permissions(self):
         import conversation
         from test_conversation import Fake

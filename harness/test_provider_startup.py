@@ -1,8 +1,10 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -158,6 +160,34 @@ class ProviderStartupTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertFalse(json.loads(stream.getvalue())['admitted'])
         self.collect.assert_not_called()
+
+    def test_native_control_and_inference_share_one_os_slot(self):
+        command = [sys.executable, '-B', str(Path(provider_startup.__file__)),
+                   '--hold-slot', '--runtime-directory', str(self.storage / 'runtime')]
+        child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(json.loads(child.stdout.readline()), {'held': True})
+            blocked = subprocess.run(command, input='\n', capture_output=True, text=True, timeout=5)
+            self.assertEqual(blocked.returncode, 2)
+            self.assertFalse(json.loads(blocked.stdout)['held'])
+            from runtime_memory import lease
+            from monitoring import ResourceWait
+            with patch.dict(os.environ, {'SUTRA_RUNTIME_DIR': str(self.storage / 'runtime')}):
+                with self.assertRaises(ResourceWait), lease():
+                    self.fail('Native control must exclude inference')
+            child.stdin.write('\n')
+            child.stdin.flush()
+            self.assertEqual(child.wait(timeout=5), 0)
+            released = subprocess.run(command, input='\n', capture_output=True, text=True, timeout=5)
+            self.assertEqual(released.returncode, 0)
+            self.assertTrue(json.loads(released.stdout)['held'])
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait()
+            for stream in (child.stdin, child.stdout, child.stderr):
+                stream.close()
 
 
 if __name__ == '__main__':

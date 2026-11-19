@@ -16,11 +16,25 @@ const root=path.resolve(__dirname,'..');
   const send=data=>page.evaluate(value=>window.dispatchEvent(new MessageEvent('message',{data:value})),data);
   await send({type:'show-section',section:'models'});
   const state={available:true,busy:false,runtime_state:'ready',selected_profile:'native-1',start_on_startup:true,
-   message:'Native Strata is ready. High keeps the selected profile.',
+   message:'Native Strata is ready. Tier assignments remain saved.',
    profiles:[{id:'native-1',name:'Sutra High · 32K',model:'qwen-native',context_tokens:32768,selected:true},
     {id:'native-2',name:'<img src=x onerror=alert(1)>',model:'other-native',context_tokens:8192}],
    models:[{id:'disk-1',name:'Installed native model',context_tokens:32768}]};
   await send({type:'strata-state',data:state});
+  const profiles=[
+   {name:'strata:profile/native-small',display_name:'Strata · Native small',eligible:true,active:true,ready:false,load_on_demand:true},
+   {name:'strata:profile/native-large',display_name:'Strata · Native large',eligible:true,ready:true,load_on_demand:true}
+  ];
+  await send({type:'tier-settings',models:{low:'old-low',mid:'old-mid',high:'strata:high'},
+   catalog:{models:profiles,suggested_tiers:{},errors:[{model:'ollama',error:'Ollama is unavailable.'}]}});
+  assert.equal(await page.locator('#tier-low').inputValue(),'old-low');
+  assert.match(await page.locator('#tier-mid option').first().textContent(),/loads on demand/);
+  const beforeDraft=await page.evaluate(()=>sent.length);
+  await page.getByRole('button',{name:'Use active native profile for all tiers',exact:true}).click();
+  assert.equal(await page.evaluate(()=>sent.length),beforeDraft,'Draft-only native assignment cannot persist settings');
+  for(const tier of ['low','mid','high'])assert.equal(await page.locator('#tier-'+tier).inputValue(),'strata:profile/native-small');
+  await page.getByRole('button',{name:'Save choices',exact:true}).click();
+  assert.deepEqual(await page.evaluate(()=>sent.at(-1)),{op:'save_model_tiers',models:{low:'strata:profile/native-small',mid:'strata:profile/native-small',high:'strata:profile/native-small'}});
   await page.locator('#strata-profile').scrollIntoViewIfNeeded();
   assert.equal(await page.getByRole('combobox',{name:'Native runtime profile'}).inputValue(),'native-1');
   assert(await page.getByLabel('Start the selected native profile when VS Code opens').isChecked());

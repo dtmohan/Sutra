@@ -89,9 +89,31 @@ class VSCodeBridgeTests(unittest.TestCase):
     def test_switching_model_changes_neither_contract_nor_checkpoint(self):
         result=self.review();meta=self.meta.copy();(self.storage/'workspace.json').write_text(json.dumps(meta))
         before=self.s.current_contract(self.session)
-        with patch('vscode_bridge.ollama',return_value={'models':[{'name':'second-model'}]}):
+        def metadata(endpoint,payload=None):
+            if endpoint=='/api/tags':return {'models':[{'name':'second-model'}]}
+            self.assertEqual((endpoint,payload),('/api/show',{'model':'second-model'}))
+            return {'capabilities':['completion']}
+        with patch('vscode_bridge.ollama',side_effect=metadata):
             after=handle(self.storage,self.workspace,{'op':'switch','model':'second-model'})
         self.assertEqual(before,after['contract']);self.assertEqual(after['checkpoint'],result['result']['invocation_id'])
+
+    def test_switch_refuses_a_model_without_completion_metadata_and_keeps_the_task(self):
+        result=self.review();(self.storage/'workspace.json').write_text(json.dumps(self.meta))
+        before=self.s.current_contract(self.session)
+        saved=(self.storage/'workspace.json').read_bytes()
+        count=self.s.db.execute('SELECT COUNT(*) FROM invocations').fetchone()[0]
+        for capabilities in ([],['embedding']):
+            def metadata(endpoint,payload=None):
+                if endpoint=='/api/tags':return {'models':[{'name':'non-chat-model'}]}
+                self.assertEqual((endpoint,payload),('/api/show',{'model':'non-chat-model'}))
+                return {'capabilities':capabilities}
+            with self.subTest(capabilities=capabilities),patch('vscode_bridge.ollama',side_effect=metadata):
+                with self.assertRaisesRegex(InvalidUpdate,'Unknown local model'):
+                    handle(self.storage,self.workspace,{'op':'switch','model':'non-chat-model'})
+            self.assertEqual(self.s.current_contract(self.session),before)
+            self.assertEqual((self.storage/'workspace.json').read_bytes(),saved)
+            self.assertEqual(state(self.s,self.meta,self.workspace)['checkpoint'],result['result']['invocation_id'])
+            self.assertEqual(self.s.db.execute('SELECT COUNT(*) FROM invocations').fetchone()[0],count)
     def test_fresh_process_state_uses_persisted_checkpoint(self):
         result=self.review();(self.storage/'workspace.json').write_text(json.dumps(self.meta))
         other=handle(self.storage,self.workspace,{'op':'state'})

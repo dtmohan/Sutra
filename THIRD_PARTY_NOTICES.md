@@ -17,3 +17,17 @@
   inferred from the supplied archive.
 
 The Sutra rebrand does not change these components or their license notices.
+
+
+## Sutra direct-engine codec
+
+Selected byte-level BPE and literal-special-token helpers are adapted from
+Strata, Copyright (c) 2026 Niko1221 and the Strata contributors, under the MIT
+License. Full license and source SHA-256 provenance are in
+`vendor/sutra_engine/LICENSE` and `vendor/sutra_engine/SOURCE.json`.
+Strata Control and server modules are not imported or required at runtime.
+
+The separately provisioned engine environment uses pinned regex, Jinja2 and
+MarkupSafe distributions. Their distribution licenses remain in that environment.
+Native engine binaries, GPU support files and model weights are separate local
+assets and are not bundled in this VSIX.

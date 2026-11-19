@@ -13,7 +13,7 @@
   function markdown(group){
     const calls=group?.calls||[];if(!calls.length)return 'No token measurements recorded.';
     const escape=v=>String(v).replace(/[\r\n|]/g,' ').replace(/</g,'&lt;');
-    return '**Measured tokens: '+compact(group)+'**\n\n| Stage | Model | Result | Input | Output |\n| --- | --- | --- | ---: | ---: |\n'+calls.map(c=>`| ${escape(stage(c.stage))} | ${escape(c.model)} | ${escape(c.status)} | ${number(c.input_tokens)} | ${number(c.output_tokens)} |`).join('\n')+'\n\nCounts are reported by Ollama for model calls, including structured output and repairs. Missing measurements are unknown, not zero. They are separate from conservative budget charges.\n';
+    return '**Measured tokens: '+compact(group)+'**\n\n| Stage | Model | Result | Input | Output |\n| --- | --- | --- | ---: | ---: |\n'+calls.map(c=>`| ${escape(stage(c.stage))} | ${escape(c.model)} | ${escape(c.status)} | ${number(c.input_tokens)} | ${number(c.output_tokens)} |`).join('\n')+'\n\nCounts are reported by each provider for model calls, including structured output and repairs. Missing measurements are unknown, not zero. They are separate from conservative budget charges.\n';
   }
   const freshAge=(age,elapsed=0)=>typeof age==='number'&&Number.isFinite(age)&&age>=0&&Number.isFinite(elapsed)&&elapsed>=0&&age+elapsed<=8;
   const api={freshAge,valid,number,stage,merge,totals,metric,compact,markdown};

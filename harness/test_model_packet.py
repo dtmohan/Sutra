@@ -78,6 +78,28 @@ class PacketTests(unittest.TestCase):
             self.assertTrue(any('response.citations[]' in error for error in result['admission']['errors']))
         self.assertTrue(self.s.verify_invocations(self.sid))
 
+    def test_named_native_profile_uses_the_same_citation_reference_gate(self):
+        provider = WireModel('strata:profile/low-native')
+        def reference(reply, payload):
+            choices = json.loads(provider.packet['messages'][1]['content'])['citation_choices']
+            reply['citations'] = [choices[0]['id']]
+        provider.after = reference
+        result = self.ask_strata(provider)['result']
+        self.assertTrue(result['admission']['admitted'], result)
+        self.assertEqual(provider.packet['schema']['properties']['citations']['items']['type'], 'integer')
+        self.assertTrue(self.s.verify_invocations(self.sid))
+
+    def test_sutra_owned_engine_uses_checked_citation_ids(self):
+        provider = WireModel('sutra:engine/owned')
+        def reference(reply, payload):
+            choices = json.loads(provider.packet['messages'][1]['content'])['citation_choices']
+            reply['citations'] = [choices[0]['id']]
+        provider.after = reference
+        result = self.ask_strata(provider)['result']
+        self.assertTrue(result['admission']['admitted'], result)
+        self.assertEqual(provider.packet['schema']['properties']['citations']['items']['type'], 'integer')
+        self.assertTrue(self.s.verify_invocations(self.sid))
+
     def test_v1_strata_receipt_still_verifies_with_verbatim_citation_objects(self):
         from strata_model import MODEL
         provider = WireModel(MODEL)

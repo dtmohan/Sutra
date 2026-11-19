@@ -173,9 +173,8 @@ def dispatch(s,meta,workspace,root,request,provider=None):
     if not isinstance(chosen,list) or not 1<=len(chosen)<=4 or len(set(chosen))!=len(chosen) or not set(chosen)<=ids:
         raise InvalidUpdate('Select 1..4 current source pages from the table of contents')
     model_name=request.get('model',meta.get('model','local-assistant:latest'))
-    from strata_model import MODEL as STRATA_HIGH
-    if model_name == STRATA_HIGH:
-        raise InvalidUpdate('Strata High is available for chat and read-only reviews. Choose an Ollama tier for coding.')
+    from strata_model import is_strata
+    from engine_profiles import is_engine
     if request.get('op')=='work' and request.get('mode') in ('edit','test'):
         if st['execution'].get('pending_actions'):raise InvalidUpdate('An earlier action is pending; inspect it before continuing')
         from karma_adapter import budget_decision
@@ -185,6 +184,9 @@ def dispatch(s,meta,workspace,root,request,provider=None):
         if measured['decision']!='ALLOW':
             with s.db:s._audit('ACTION_PLAN_DENIED',{'session':session,'budget_kernel':measured})
             raise InvalidUpdate('Action budget exhausted: '+measured['decision'])
+    if provider is None and (is_strata(model_name) or is_engine(model_name)):
+        from api_runtime import provider_for
+        provider=provider_for(root,model_name,review=True)
     if provider is None:
         from monitoring import require_resources
         hardware=require_resources(root)
@@ -266,9 +268,8 @@ def handle(root,workspace,request):
             notice=document_workspace_notice(request['review_prompt'])
             if notice:return {'request_notice':notice}
         if request.get('op')=='models':
-            from model_catalog import catalog
-            from strata_model import append_catalog
-            return append_catalog(catalog(ollama))
+            from model_catalog import combined
+            return combined(ollama)
         s=InvocationLedger(root/'state.sqlite')
         try:
             if request.get('chat_key') and request.get('op') in ('state','native_preview','native_execute'):
@@ -478,7 +479,8 @@ def _handle(root,workspace,request,metadata=None,prepare_catalog=True):
         elif op=='state':result=state(s,meta,workspace)
         elif op=='switch':
             model=request['model']
-            if model not in {m['name'] for m in ollama('/api/tags')['models']} or 'cloud' in model.lower():raise InvalidUpdate('Unknown local model')
+            from model_catalog import combined
+            if model not in {m['name'] for m in combined(ollama)['models'] if m.get('eligible')}:raise InvalidUpdate('Unknown local model')
             with s.db:s._audit('MODEL_SWITCH',{'session':meta.get('active'),'from':meta.get('model'),'to':model})
             meta['model']=model;result=state(s,meta,workspace)
         elif op in ('review','work'):result=dispatch(s,meta,workspace,root,request)
@@ -499,7 +501,9 @@ def _handle(root,workspace,request,metadata=None,prepare_catalog=True):
 
 
 REQUEST_ENVIRONMENT = frozenset((
-    'SUTRA_STRATA_PORT', 'SUTRA_STRATA_MODEL', 'SUTRA_CAPABILITIES_MODE',
+    'SUTRA_ENGINE_MODELS', 'SUTRA_ENGINE_ONLY', 'SUTRA_ENGINE_PYTHON', 'SUTRA_ENGINE_REGISTRY',
+    'SUTRA_ENGINE_CONTEXT',
+    'SUTRA_STRATA_PORT', 'SUTRA_STRATA_MODEL', 'SUTRA_STRATA_MODELS', 'SUTRA_STRATA_ONLY', 'SUTRA_CAPABILITIES_MODE',
     'SUTRA_RUNTIME_DIR', 'SUTRA_MEMORY_OWNERSHIP', 'SUTRA_WORKSPACE_ALLOCATION',
     'KARMA_STORAGE_LIMIT_MIB', 'SUTRA_LOGIT_SENSOR', 'SUTRA_ACTIVITY',
     'SUTRA_THINKING', 'KARMA_NODE', 'KARMA_TYPESCRIPT', 'SUTRA_RAM_CACHE_MIB',
