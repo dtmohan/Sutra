@@ -1,5 +1,10 @@
 # Live native-engine session — Sutra 0.49.0
 
+Status: **resolved and independently re-verified in 0.50.0** — see
+[VERIFY-0.50.0.md](VERIFY-0.50.0.md) and the resolution register
+[RESOLUTION-0.49.1.md](RESOLUTION-0.49.1.md). The session below is retained as
+the original evidence.
+
 Date: 2026-11-18, 16:38–16:55 PT
 Reviewer: QA and UX validation lead
 Build: `HEAD fa245d7` + uncommitted 0.49.0 tree, packaged VSIX

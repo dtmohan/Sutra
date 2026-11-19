@@ -1,3 +1,13 @@
+Sutra 0.50.1 — Concurrent receipt verification
+
+WAL read snapshots keep receipt verification from blocking concurrent receipts.
+FULL durability and default strict verification after unknown external changes remain.
+Session/run indexes and same-connection audit-tail checks remove repeated work.
+Host callers can retain their explicitly selected seal/audit profile through the
+gateway. See docs/receipt-verification.md for the trust boundary and deep audits.
+The STP kernel, saved model tiers, context, permissions and spending are preserved.
+See the source validation record for measured costs and remaining limits.
+
 Sutra 0.50.0 — Accounting recovery and idle checkpoints
 
 Accounting seals carry pending reservations and scope state across batch closure.

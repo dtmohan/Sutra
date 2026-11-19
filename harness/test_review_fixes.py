@@ -206,6 +206,9 @@ class AuditVerificationTests(unittest.TestCase):
                 self.s._audit('NEXT', {'value': 2})
             digest.reset_mock()
             self.assertTrue(self.s.audit_valid())
+            self.assertEqual(digest.call_count, 1)
+            digest.reset_mock()
+            self.assertTrue(self.s.audit_valid(deep=True))
             self.assertEqual(digest.call_count, 2)
 
     def test_same_connection_tampering_invalidates_verified_view(self):

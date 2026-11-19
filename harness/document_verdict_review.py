@@ -148,7 +148,7 @@ def review(s, sid, root, flow_id, provider=None):
     for attempt in range(2):
         s.reserve(run, 'ATTEMPT', {'attempt': attempt})
         delivery = s.prepare_delivery(sid, payload, charge)
-        result = InvocationGateway(s.path, run, provider).invoke(ROLE, uuid.uuid4().hex, SYSTEM, payload, fmt, delivery)
+        result = InvocationGateway(s.path, run, provider, ledger=s).invoke(ROLE, uuid.uuid4().hex, SYSTEM, payload, fmt, delivery)
         if result['admission']['admitted']:
             s.event(run, 'ALLOW', {'reason': 'document_verdict_assessment', 'invocation_id': result['invocation_id']})
             break

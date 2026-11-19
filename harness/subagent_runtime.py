@@ -268,7 +268,7 @@ def run(s,meta,workspace,root,nid,models,tier='auto',provider=None):
                 h=require_resources(root)
                 with s.db:s._audit('RESOURCE_GATE',{'run_id':rid,'measurement':h,'orchestration_node':nid})
             d=s.prepare_delivery(sid,p,provider.budget.check(SYSTEM,p,fmt))
-            out=InvocationGateway(s.path,rid,provider).invoke('subagent',uuid.uuid4().hex,SYSTEM,p,fmt,d)
+            out=InvocationGateway(s.path, rid, provider, ledger=s).invoke('subagent',uuid.uuid4().hex,SYSTEM,p,fmt,d)
             out.pop('record',None)
             out.pop('model_proposal',None)
             if out['admission']['admitted']:

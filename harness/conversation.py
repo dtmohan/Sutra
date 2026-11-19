@@ -590,7 +590,7 @@ def _answer_step(s,meta,root,request,provider,axis):
             with s.db:
                 s._audit('RESOURCE_GATE', {'run_id': run, 'measurement': hardware})
         delivery = s.prepare_delivery(sid, p, provider.budget.check(SYSTEM, p, fmt))
-        out = InvocationGateway(s.path, run, provider).invoke('conversation', uuid.uuid4().hex, SYSTEM, p, fmt, delivery)
+        out = InvocationGateway(s.path, run, provider, ledger=s).invoke('conversation', uuid.uuid4().hex, SYSTEM, p, fmt, delivery)
         if out['admission']['admitted']:
             next_step=routing.followup(out['accepted_output'],p)
             if next_step:s.event(run,'BRIDGE',dict(next_step,invocation_id=out['invocation_id']))

@@ -56,7 +56,7 @@ def invoke(s,session,root,role,payload,provider,real):
    h=require_resources(root)
    with s.db:s._audit('RESOURCE_GATE',{'run_id':run,'measurement':h})
   charge=provider.budget.check(system,payload,schema);delivery=s.prepare_delivery(session,payload,charge)
-  result=InvocationGateway(s.path,run,provider).invoke(role,uuid.uuid4().hex,system,payload,schema,delivery)
+  result=InvocationGateway(s.path, run, provider, ledger=s).invoke(role,uuid.uuid4().hex,system,payload,schema,delivery)
   if result['admission']['admitted']:
    s.event(run,'ALLOW',{'reason':'provisional_api_output','invocation_id':result['invocation_id']});break
   s.event(run,'NACK',{'reason':'api_protocol_rejected','errors':result['admission']['errors']})

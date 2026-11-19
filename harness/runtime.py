@@ -9,7 +9,7 @@ def ingest(store, session, message, model, call_id=None):
     ledger = InvocationLedger(store.path)
     calls, receipts, error = [], [], None
     run_id = ledger.begin_run(session, message, [], None, purpose='parser', max_repairs=1, max_calls=2)
-    gateway = InvocationGateway(store.path, run_id, model)
+    gateway = InvocationGateway(store.path, run_id, model, ledger=ledger)
     try:
         for attempt in range(2):
             ledger.reserve(run_id, 'ATTEMPT', {'attempt': attempt})

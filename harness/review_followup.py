@@ -183,7 +183,7 @@ def expand(s, sid, p, data, root, provider, real):
             run = s.begin_run(sid, p['request'], [], None, max_calls=1, max_repairs=0)
             s.reserve(run, 'ATTEMPT', {'attempt': 0})
             delivery = s.prepare_delivery(sid, packet, charge)
-            out = InvocationGateway(s.path, run, provider).invoke(
+            out = InvocationGateway(s.path, run, provider, ledger=s).invoke(
                 ROLE, uuid.uuid4().hex, SYSTEM, packet, schema(packet), delivery)
             usage = out.get('token_usage')
             if not out['admission']['admitted']:

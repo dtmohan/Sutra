@@ -196,8 +196,66 @@ def set_trusted_anchor(s, anchor):
     if not row or row[0] != anchor['digest']:
         raise InvalidUpdate('Trusted accounting anchor differs from this ledger')
     s._accounting_trusted_anchor = dict(anchor)
+    # Accounting recovery alone never opts a caller into trusting a page-audit
+    # prefix. Its stronger profile is deliberately connection-local and explicit.
+    s._accounting_audit_prefix_enabled = False
+    s._accounting_audit_prefix_profile = None
     s._accounting_cache = None
     return dict(anchor)
+
+
+def _audit_profile_binding(s, anchor, config):
+    path = ('memory', id(s.db)) if s.path == ':memory:' else os.path.realpath(s.path)
+    return (path, _identity(s), id(s.db), getattr(s, 'logic_hash', None),
+            anchor['seq'], anchor['digest'], config['version'], config['batch_size'])
+
+
+def _select_audit_prefix(s):
+    """Bind only the original caller-authenticated V2 seal, not the DB head."""
+    anchor = s._accounting_trusted_anchor
+    config = _config(s)
+    row = s.db.execute('SELECT seq,record_json,digest FROM orchestration_accounting_checkpoints '
+                       'WHERE seq=?', (anchor['seq'],)).fetchone()
+    if not row or row[2] != anchor['digest']:
+        raise InvalidUpdate('Trusted audit-prefix seal differs from selected anchor')
+    value = _check_body(s, row, config)
+    if value['version'] != VERSION:
+        raise InvalidUpdate('Trusted audit prefix requires a V2 seal')
+    cursor = value['audit_cursor']
+    audit = s.db.execute('SELECT event,payload_json,previous_hash,event_hash FROM page_audit '
+                         'WHERE seq=?', (cursor['seq'],)).fetchone()
+    # _check_body authenticated the raw body, header, cursor and canonical audit
+    # event. Retain the exact verified bytes; later checks compare, not reparse a
+    # potentially large recovery payload for every receipt in this connection.
+    return {'binding': _audit_profile_binding(s, anchor, config), 'anchor': dict(anchor),
+            'raw': row[1], 'header_raw': canonical(_header(value)),
+            'audit_row': audit, 'head': (cursor['seq'], audit[3])}
+
+
+def trusted_audit_prefix(s):
+    """Explicit host profile only; absence always means strict page auditing.
+
+    The same externally supplied seal digest commits audit_cursor in its header.
+    This authenticates a historical prefix, not the current source bytes. A full
+    audit still re-derives those bytes; later seals are never auto-promoted.
+    """
+    if not getattr(s, '_accounting_audit_prefix_enabled', False):
+        return None
+    profile = getattr(s, '_accounting_audit_prefix_profile', None)
+    anchor = getattr(s, '_accounting_trusted_anchor', None)
+    if (profile is None or anchor != profile['anchor'] or
+            _audit_profile_binding(s, anchor, _config(s)) != profile['binding']):
+        raise InvalidUpdate('Trusted audit-prefix binding changed')
+    row = s.db.execute('SELECT record_json,digest FROM orchestration_accounting_checkpoints '
+                       'WHERE seq=?', (anchor['seq'],)).fetchone()
+    header = s.db.execute('SELECT record_json,digest FROM orchestration_accounting_seal_headers '
+                          'WHERE seq=?', (anchor['seq'],)).fetchone()
+    audit = s.db.execute('SELECT event,payload_json,previous_hash,event_hash FROM page_audit '
+                         'WHERE seq=?', (profile['head'][0],)).fetchone()
+    if (row != (profile['raw'], anchor['digest']) or
+            header != (profile['header_raw'], anchor['digest']) or audit != profile['audit_row']):
+        raise InvalidUpdate('Trusted audit-prefix source differs from authenticated seal')
+    return {'head': profile['head'], 'binding': profile['binding']}
 
 
 def _number(value):
@@ -551,7 +609,7 @@ def _verify_checkpoint_rows(s, projection, rows):
 
 
 def _rebuild_impl(s, compact=True):
-    if not s.audit_valid():
+    if not s.audit_valid(deep=True):
         raise InvalidUpdate('Accounting audit chain corrupted')
     for table, _ in SOURCES.values():
         minimum = s.db.execute('SELECT MIN(rowid) FROM ' + table).fetchone()[0]
@@ -665,18 +723,24 @@ def _refresh(s, projection):
         return projection
 
 
-def recover(s, trusted_anchor=None):
+def recover(s, trusted_anchor=None, *, audit_prefix=False):
     """Strict replay by default, or an explicitly caller-trusted seal + tail.
 
     An older trusted anchor authenticates only its prefix. Newer seals are
     re-derived from their canonical source suffix; they are never trusted merely
-    because their previous hash names the anchor.
+    because their previous hash names the anchor. audit_prefix=True additionally
+    selects the audit cursor authenticated by that SAME supplied V2 seal; the
+    default retains strict page-audit replay. No profile is persisted in SQLite.
     """
+    if type(audit_prefix) is not bool or audit_prefix and trusted_anchor is None:
+        raise InvalidUpdate('Audit-prefix recovery requires an explicit trusted anchor')
     _blocked(s)
     if trusted_anchor is not None:
         set_trusted_anchor(s, trusted_anchor)
     else:
         s._accounting_trusted_anchor = None
+        s._accounting_audit_prefix_enabled = False
+        s._accounting_audit_prefix_profile = None
     owned = not s.db.in_transaction
     if owned:
         s.db.execute('BEGIN')
@@ -698,11 +762,16 @@ def recover(s, trusted_anchor=None):
                 projection.checkpoint_anchor = projection.checkpoint_rows[-1]
                 _refresh(s, projection)
                 s._accounting_cache = projection
+        profile = _select_audit_prefix(s) if audit_prefix else None
         if owned:
             s.db.execute('COMMIT')
+        s._accounting_audit_prefix_profile = profile
+        s._accounting_audit_prefix_enabled = audit_prefix
         return status(s)
     except BaseException as exc:
         s._accounting_cache = None
+        s._accounting_audit_prefix_enabled = False
+        s._accounting_audit_prefix_profile = None
         if owned:
             s.db.execute('ROLLBACK')
         if isinstance(exc, Exception):
@@ -721,7 +790,7 @@ def _projection_unlocked(s):
     if cached is None or cached.connection is not s.db:
         anchor = getattr(s, '_accounting_trusted_anchor', None)
         if anchor is not None:
-            recover(s, anchor)
+            recover(s, anchor, audit_prefix=getattr(s, '_accounting_audit_prefix_enabled', False))
             return s._accounting_cache
         return _rebuild(s)
     if cached.schema != schema:

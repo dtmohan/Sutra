@@ -7,6 +7,7 @@ import copy
 from contextvars import ContextVar
 import json
 import socket
+import sqlite3
 import time
 import uuid
 from context_manager import canonical, sha, InvalidUpdate, Conflict
@@ -50,6 +51,8 @@ class InvocationLedger(GovernedContext):
             PRIMARY KEY(session,seq));
           CREATE TABLE IF NOT EXISTS invocation_quarantine(invocation_id TEXT PRIMARY KEY,
             reason TEXT, created_at REAL);
+          CREATE INDEX IF NOT EXISTS receipt_invocations_session
+            ON invocations(session,id);
         ''')
         for table in ('invocations','invocation_receipts','invocation_quarantine'):
             for op in ('UPDATE','DELETE'):
@@ -325,9 +328,29 @@ class InvocationLedger(GovernedContext):
         return receipt['proposal']  # Derived context only; never source authority.
 
     def verify_invocations(self, session, complete=True):
+        from accounting_metrics import record
+        started = time.perf_counter_ns()
+        stats = {'receipt_rows': 0, 'invocation_count': 0}
+        owns_transaction = not self.db.in_transaction
+        ok = False
+        try:
+            if owns_transaction:
+                self.db.execute('BEGIN')
+            ok = self._verify_invocations(session, complete, stats)
+            return ok
+        except (KeyError, TypeError, ValueError, sqlite3.DatabaseError):
+            return False
+        finally:
+            if owns_transaction and self.db.in_transaction:
+                self.db.execute('ROLLBACK')
+            record(self, 'invocation_verification', time.perf_counter_ns() - started,
+                   session=session, ok=ok, complete=complete, **stats)
+
+    def _verify_invocations(self, session, complete, stats):
         if not self.verify_protocol(session): return False
         previous = 'GENESIS'; seq = 0
         for n, iid, digest, raw in self.db.execute('SELECT seq,invocation_id,id,record_json FROM invocation_receipts WHERE session=? ORDER BY seq', (session,)):
+            stats['receipt_rows'] += 1
             r = json.loads(raw); seq += 1
             env = self.db.execute('SELECT record_json,digest,delivery_id FROM invocations WHERE id=? AND session=?', (iid,session)).fetchone()
             if not env or sha('invocation-v1:' + env[0]) != env[1] or r['invocation_hash'] != env[1]: return False
@@ -370,14 +393,95 @@ class InvocationLedger(GovernedContext):
             if not payload or payload[0] != r['payload_hash']: return False
             previous = digest
         count = self.db.execute('SELECT COUNT(*) FROM invocations WHERE session=?', (session,)).fetchone()[0]
+        stats['invocation_count'] = count
         return not complete or count == seq
 
 
 class InvocationGateway:
-    def __init__(self, db, run_id, provider):
+    def __init__(self, db, run_id, provider, *, ledger=None):
         self.db, self.run_id, self.provider = db, run_id, provider
+        if ledger is not None and not isinstance(ledger, InvocationLedger):
+            raise InvalidUpdate('Gateway borrowing requires an InvocationLedger')
+        self._borrowed = ledger
+        self._borrow_proof = None
+
+    def _scope_record(self, ledger, nid, session):
+        row = ledger.db.execute('SELECT record_json,digest FROM orchestration_nodes WHERE id=?',
+                                (nid,)).fetchone()
+        if (not row or sha('orchestration-node-v1:' + row[0]) != row[1]
+                or json.loads(row[0])['session'] != session):
+            raise InvalidUpdate('Borrowed gateway orchestration scope differs')
+        return tuple(row)
+
+    def _borrow_state(self):
+        from pathlib import Path
+        from governance import policy_hash
+        from orchestration import ACTIVE
+        ledger = self._borrowed
+        try:
+            if ledger.db.in_transaction:
+                raise InvalidUpdate('Borrowed gateway requires no outstanding caller transaction')
+            path = Path(self.db).resolve()
+            if str(ledger.path) == ':memory:' or path != Path(ledger.path).resolve():
+                raise InvalidUpdate('Borrowed gateway database path differs')
+            identity = ledger._audit_identity()
+            if identity != ledger._audit_file_identity:
+                raise InvalidUpdate('Borrowed gateway database identity changed')
+            if ledger.logic_hash != policy_hash():
+                raise InvalidUpdate('Borrowed gateway policy changed')
+            run = ledger.db.execute('SELECT session,config_json FROM protocol_runs WHERE id=?',
+                                    (self.run_id,)).fetchone()
+            if not run:
+                raise InvalidUpdate('Borrowed gateway run is unavailable')
+            active = ACTIVE.get()
+            audit_prefix = getattr(ledger, '_accounting_audit_prefix_enabled', False)
+            if type(audit_prefix) is not bool:
+                raise InvalidUpdate('Borrowed gateway audit profile is invalid')
+            return {'path': str(path), 'identity': identity, 'logic_hash': ledger.logic_hash,
+                    'run': tuple(run), 'active': active,
+                    'accounting_anchor': copy.deepcopy(getattr(ledger, '_accounting_trusted_anchor', None)),
+                    'audit_prefix': audit_prefix,
+                    'scope': self._scope_record(ledger, active, run[0]) if active else None}
+        except (sqlite3.Error, OSError) as exc:
+            raise InvalidUpdate('Borrowed gateway connection is unavailable: ' + str(exc)) from None
+
+    def _phase_ledger(self, phase):
+        if self._borrowed is None:
+            return InvocationLedger(self.db)
+        current = self._borrow_state()
+        if current != self._borrow_proof:
+            raise InvalidUpdate('Borrowed gateway binding changed during invocation')
+        ledger = self._borrowed
+        owner = getattr(self, '_borrow_owner', None)
+        if owner and self._scope_record(ledger, owner[0], current['run'][0]) != owner[1]:
+            raise InvalidUpdate('Borrowed gateway charge owner changed')
+        # Preserve only the profile explicitly selected by the host caller.
+        # An unanchored ledger does not acquire trust from a stored DB digest.
+        if getattr(ledger, '_accounting_trusted_anchor', None) is not None:
+            from accounting_batches import recover, status
+            from accounting_metrics import measure
+            with measure(ledger, 'gateway_prewarm', phase=phase):
+                cached = getattr(ledger, '_accounting_cache', None)
+                if getattr(cached, 'recovery_mode', None) != 'trusted_seal':
+                    # An explicit deep audit may have replaced the projection
+                    # with its strict reconstruction. Reapply the caller's
+                    # original selection, never a newer DB-derived seal.
+                    recover(ledger, trusted_anchor=self._borrow_proof['accounting_anchor'],
+                            audit_prefix=self._borrow_proof['audit_prefix'])
+                else:
+                    status(ledger)
+                if getattr(ledger, '_accounting_audit_prefix_enabled', False) and not ledger.audit_valid():
+                    raise InvalidUpdate('Borrowed gateway audit prefix verification failed')
+        return ledger
+
+    def _release_ledger(self, ledger):
+        if self._borrowed is None:
+            ledger.close()
 
     def invoke(self, role, call_id, system, payload, schema, delivery_id):
+        if self._borrowed is not None:
+            self._borrow_proof = self._borrow_state()
+            self._borrow_owner = None
         from local_model import LocalModel
         from pathlib import Path
         from reasoning_policy import check_provider
@@ -397,7 +501,7 @@ class InvocationGateway:
         # Copy to prevent provider-side mutations of the committed request.
         payload, schema = copy.deepcopy(payload), copy.deepcopy(schema)
         name = getattr(self.provider, 'model', 'test-adapter')
-        ledger = InvocationLedger(self.db)
+        ledger = self._phase_ledger('register')
         try:
             charge = self.provider.budget.check(system, payload, schema)
             from local_model import LocalModel
@@ -413,7 +517,12 @@ class InvocationGateway:
             packet = build(system, payload, schema) if getattr(self.provider, 'model_interface', None) == 1 else None
             interface = descriptor(packet, self.provider.budget.template_reserve) if packet else None
             envelope = ledger.register(self.run_id, call_id, role, payload, system, schema, delivery_id, name, charge, budget={'context_limit':self.provider.budget.context_limit,'response_reserve':self.provider.budget.response_reserve,'template_reserve':self.provider.budget.template_reserve},resource=resource,model_identity=identity,model_interface=interface)
-        finally: ledger.close()
+            if self._borrowed is not None and envelope.get('orchestration'):
+                nid = envelope['orchestration']['node_id']
+                self._borrow_owner = (nid, self._scope_record(ledger, nid, envelope['session']))
+        finally: self._release_ledger(ledger)
+        if self._borrowed is not None and self._borrow_state() != self._borrow_proof:
+            raise InvalidUpdate('Borrowed gateway binding changed before inference')
         permit = {'hash': envelope['request_hash'], 'used': False, 'packet_hash': (envelope.get('model_interface') or {}).get('packet_hash')}
         token = _permit.set(permit); error = None; proposal = None; record = None;started=time.monotonic()
         failure_kind = None
@@ -434,7 +543,7 @@ class InvocationGateway:
             error = type(exc).__name__ + ': ' + str(exc)
             record = getattr(exc, 'call_record', None) or record or {'call_id': call_id, 'ok': False, 'error': error}
         finally: _permit.reset(token)
-        ledger = InvocationLedger(self.db)
+        ledger = self._phase_ledger('finalize')
         try:
             if not error: ledger.confirm_delivery(delivery_id)
             from token_usage import measured, history
@@ -447,4 +556,4 @@ class InvocationGateway:
             if failure_kind is not None: result['failure_kind'] = failure_kind
             result['record'] = record
             return result
-        finally: ledger.close()
+        finally: self._release_ledger(ledger)

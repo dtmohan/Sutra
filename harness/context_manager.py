@@ -49,6 +49,12 @@ class ContextStore:
     def __init__(self, path):
         self.path = str(path)
         self.db = sqlite3.connect(self.path)
+        from ledger_sqlite import initialize
+        try:
+            initialize(self)
+        except Exception:
+            self.db.close()
+            raise
         self.db.execute('PRAGMA foreign_keys=ON')
         self.db.executescript('''
           CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0);

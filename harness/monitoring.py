@@ -118,7 +118,8 @@ def dashboard(root):
     data['storage']=usage(root)
     path=root/'state.sqlite'
     if not path.exists():return data
-    db=sqlite3.connect('file:'+str(path)+'?mode=ro',uri=True,timeout=.2)
+    from ledger_sqlite import read_connection
+    db=read_connection(path, timeout=.2)
     try:
         tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         from memory_layer import snapshot as memory_snapshot

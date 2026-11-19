@@ -333,7 +333,7 @@ def run(s, sid, root, candidate_id, provider=None, requested='auto', strict=Fals
         for attempt in range(count):
             s.reserve(run_id, 'ATTEMPT', {'attempt': attempt, 'review_plan': plan['id'], 'page': index})
             delivery = s.prepare_delivery(sid, p, provider.budget.check(SYSTEM, p, fmt))
-            final = InvocationGateway(s.path, run_id, provider).invoke('report_reviewer', uuid.uuid4().hex, SYSTEM, p, fmt, delivery)
+            final = InvocationGateway(s.path, run_id, provider, ledger=s).invoke('report_reviewer', uuid.uuid4().hex, SYSTEM, p, fmt, delivery)
             seen = {c['invocation_id'] for c in measured}
             measured.extend(c for c in final['token_usage']['calls'] if c['invocation_id'] not in seen)
             if final['admission']['admitted']:

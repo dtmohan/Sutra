@@ -24,7 +24,7 @@ POLICY_FILES = ('engine_profiles.py','engine_model.py','engine_client.py','engin
                 'review_role.py', 'vscode_bridge.py', 'coding_role.py', 'host_actions.py',
                 'monitoring.py', 'unittest_entry.py', 'telemetry.m', 'lifecycle.py', 'storage_policy.py',
                 'repository_tools.py', 'architecture_role.py', 'architecture_runtime.py','api_extract.py','api_extract.js','api_facts.py','api_roles.py','api_runtime.py',
-                'static_typescript.js','static_analysis.py','static_role.py','static_runtime.py','platform_support.py','telemetry_portable.js','review_budget.py','accounting_batches.py','accounting_metrics.py','accounting_audit.py','auto_review.py')
+                'static_typescript.js','static_analysis.py','static_role.py','static_runtime.py','platform_support.py','telemetry_portable.js','review_budget.py','accounting_batches.py','accounting_metrics.py','accounting_audit.py','ledger_sqlite.py','auto_review.py')
 
 
 def policy_hash():
@@ -51,6 +51,14 @@ class GovernedContext(EvidenceContext):
             run_id TEXT, record_json TEXT NOT NULL, digest TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS quarantine_events(checkpoint_id TEXT PRIMARY KEY,
             reason TEXT NOT NULL, created_at REAL NOT NULL);
+          CREATE INDEX IF NOT EXISTS receipt_protocol_runs_session
+            ON protocol_runs(session,id);
+          CREATE INDEX IF NOT EXISTS receipt_run_commits_session
+            ON page_audit(json_extract(payload_json,'$.session'),seq)
+            WHERE event='RUN_COMMIT';
+          CREATE INDEX IF NOT EXISTS receipt_protocol_events_run
+            ON page_audit(json_extract(payload_json,'$.run_id'),seq)
+            WHERE event='PROTOCOL_EVENT';
         ''')
         for table in ('contract_epochs', 'protocol_runs', 'protocol_events', 'assertion_receipts', 'checkpoints', 'quarantine_events'):
             for op in ('UPDATE', 'DELETE'):
@@ -344,54 +352,74 @@ class GovernedContext(EvidenceContext):
         return checkpoint_id
 
     def verify_protocol(self, session):
-        # The audit chain and its materialized protocol rows must be checked
-        # against the same snapshot, including when a writer is still active.
+        # Scope materialized rows and their audit mirrors to one read snapshot.
+        # The indexes below avoid replaying unrelated sessions' audit payloads;
+        # all checks within this session remain part of verification.
+        from accounting_metrics import record
+        started = time.perf_counter_ns()
+        stats = {'contract_rows': 0, 'assertion_rows': 0, 'run_rows': 0,
+                 'audit_event_rows': 0, 'protocol_event_rows': 0}
         owns_transaction = not self.db.in_transaction
+        ok = False
         try:
             if owns_transaction:
                 self.db.execute('BEGIN')
-            return self._verify_protocol(session)
+            ok = self._verify_protocol(session, stats)
+            return ok
         except (KeyError, TypeError, ValueError, sqlite3.DatabaseError):
             return False
         finally:
             if owns_transaction and self.db.in_transaction:
-                self.db.rollback()
+                # SQL transaction control does not reset an unrelated caller's
+                # active SELECT cursor on Python 3.9's sqlite3 wrapper.
+                self.db.execute('ROLLBACK')
+            record(self, 'protocol_verification', time.perf_counter_ns() - started,
+                   session=session, ok=ok, **stats)
 
-    def _verify_protocol(self, session):
+    def _verify_protocol(self, session, stats=None):
+        stats = stats if stats is not None else {'contract_rows': 0,
+            'assertion_rows': 0, 'run_rows': 0, 'audit_event_rows': 0,
+            'protocol_event_rows': 0}
         if not self.db.execute('SELECT 1 FROM sessions WHERE id=?', (session,)).fetchone(): return False
         if not self.validate_chain(session) or not self.audit_valid(): return False
         for record, digest in self._contract_history(session):
+            stats['contract_rows'] += 1
             row = self.db.execute('SELECT record_json,digest FROM contract_epochs WHERE session=? AND epoch=?', (session, record['epoch'])).fetchone()
             if row != (canonical(record), digest): return False
         previous, seq = 'GENESIS', 0
         for n, digest, raw in self.db.execute('SELECT seq,id,record_json FROM assertion_receipts WHERE session=? ORDER BY seq', (session,)):
+            stats['assertion_rows'] += 1
             body = json.loads(raw); seq += 1
             if n != seq or body['previous_hash'] != previous or sha('assertion-v1:' + raw) != digest: return False
             delivery = self.db.execute('SELECT payload_hash FROM deliveries WHERE id=? AND session=?', (body['delivery_id'], session)).fetchone()
             if not delivery or delivery[0] != body['payload_hash']: return False
             previous = digest
         runs = dict(self.db.execute('SELECT id,config_json FROM protocol_runs WHERE session=?', (session,)))
-        mirrored = {}
+        stats['run_rows'] = len(runs)
+        mirrored = set()
         for raw, in self.db.execute("""SELECT payload_json FROM page_audit
-            WHERE event='RUN_COMMIT' AND json_extract(payload_json,'$.session')=?""", (session,)):
+            WHERE event='RUN_COMMIT' AND json_extract(payload_json,'$.session')=?
+            ORDER BY seq""", (session,)):
+            stats['audit_event_rows'] += 1
             commit = json.loads(raw)
             run_id = commit['run_id']
             if run_id in mirrored or runs.get(run_id) != canonical(commit['config']): return False
-            mirrored[run_id] = []
-        if mirrored.keys() != runs.keys(): return False
-        # PROTOCOL_EVENT already commits each row in page_audit. Reuse that
-        # chain for old and new runs, including older events without a clock.
-        for raw, in self.db.execute("""SELECT a.payload_json FROM page_audit a
-            JOIN protocol_runs r ON r.id=json_extract(a.payload_json,'$.run_id')
-            WHERE a.event='PROTOCOL_EVENT' AND r.session=? ORDER BY a.seq""", (session,)):
-            event = json.loads(raw)
-            events = mirrored[event.pop('run_id')]
-            if event.pop('seq') != len(events) + 1: return False
-            events.append(event)
+            mirrored.add(run_id)
+        if mirrored != runs.keys(): return False
+        # Resolve each run through its indexed audit slice. A global join over
+        # page_audit used to decode the entire ledger for every receipt check.
         for run_id, raw_config in runs.items():
             config = json.loads(raw_config)
-            events = mirrored[run_id]
+            events = []
+            for raw, in self.db.execute("""SELECT payload_json FROM page_audit
+                WHERE event='PROTOCOL_EVENT' AND json_extract(payload_json,'$.run_id')=?
+                ORDER BY seq""", (run_id,)):
+                stats['audit_event_rows'] += 1
+                event = json.loads(raw)
+                if event.pop('run_id') != run_id or event.pop('seq') != len(events) + 1: return False
+                events.append(event)
             rows = list(self.db.execute('SELECT seq,record_json FROM protocol_events WHERE run_id=? ORDER BY seq', (run_id,)))
+            stats['protocol_event_rows'] += len(rows)
             if rows != [(seq, canonical(e)) for seq, e in enumerate(events, 1)]: return False
             if not events or events[0]['kind'] != 'START': return False
             if sum(e['kind'] == 'DISPATCH' for e in events) > config['max_calls']: return False

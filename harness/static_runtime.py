@@ -91,7 +91,7 @@ def explain(s,meta,workspace,root,receipt,model,sites=None,mode='compact',provid
    with s.db:s._audit('RESOURCE_GATE',{'run_id':run,'measurement':h})
   charge=provider.budget.check(role.SYSTEM,payload,schema);delivery=s.prepare_delivery(sid,payload,charge)
   from review_budget import BudgetStop
-  try:out=InvocationGateway(s.path,run,provider).invoke('static_explainer',uuid.uuid4().hex,role.SYSTEM,payload,schema,delivery)
+  try:out=InvocationGateway(s.path, run, provider, ledger=s).invoke('static_explainer',uuid.uuid4().hex,role.SYSTEM,payload,schema,delivery)
   except BudgetStop as exc:
    s.event(run,'FIN',{'reason':'task_allocation_stopped_dispatch','kernel':exc.frame});raise
   if out['admission']['admitted']:

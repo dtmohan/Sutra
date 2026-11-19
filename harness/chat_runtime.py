@@ -411,7 +411,7 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
                 hardware=require_resources(root)
                 with s.db:s._audit('RESOURCE_GATE',{'run_id':run,'measurement':hardware})
             delivery=s.prepare_delivery(sid,p,provider.budget.check(SYSTEM,p,fmt))
-            out=InvocationGateway(s.path,run,provider).invoke('chat_reviewer',uuid.uuid4().hex,SYSTEM,p,fmt,delivery)
+            out=InvocationGateway(s.path, run, provider, ledger=s).invoke('chat_reviewer',uuid.uuid4().hex,SYSTEM,p,fmt,delivery)
             if out['admission']['admitted']:
                 s.event(run,'ALLOW',{'reason':'chat_review_admitted','invocation_id':out['invocation_id']})
                 break

@@ -1,3 +1,14 @@
+# Sutra 0.50.1 — Concurrent receipt verification
+
+Local ledgers use SQLite WAL snapshots so receipt verification can run alongside
+committed work. FULL durability is retained. Protocol audit lookups target the
+current session and run; an already verified connection rehashes only its own
+new audit tail. Unanchored calls and explicit deep audits remain fully verified.
+Host callers can retain their ledger and explicitly selected seal/audit profile
+through the gateway; see [verification and trust](docs/receipt-verification.md).
+The STP kernel, saved model tiers, context, permissions and spending
+are unchanged. See the source validation record for measured costs and limits.
+
 # Sutra 0.50.0 — Accounting recovery and idle checkpoints
 
 Accounting seals retain explicit pending reservations and scope state, so work

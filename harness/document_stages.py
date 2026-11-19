@@ -355,7 +355,7 @@ def extract(s, sid, root, flow_id, plan, receipt_ids, provider=None):
         charge = provider.budget.check(SYSTEM, payload, fmt)
         s.reserve(run, 'ATTEMPT', {'attempt': attempt})
         delivery = s.prepare_delivery(sid, payload, charge)
-        result = InvocationGateway(s.path, run, provider).invoke(ROLE, uuid.uuid4().hex, SYSTEM, payload, fmt, delivery)
+        result = InvocationGateway(s.path, run, provider, ledger=s).invoke(ROLE, uuid.uuid4().hex, SYSTEM, payload, fmt, delivery)
         if result['admission']['admitted']:
             s.event(run, 'ALLOW', {'reason': 'document_section_evidence', 'invocation_id': result['invocation_id']})
             break

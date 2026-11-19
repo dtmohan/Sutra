@@ -55,6 +55,10 @@ class BackgroundAudit:
                         live.execute('PRAGMA query_only=ON')
                         with closing(sqlite3.connect(snapshot)) as copied:
                             live.backup(copied, pages=128, sleep=.001)
+                            # Backup can preserve the WAL header. This private,
+                            # closed-over snapshot must be independently readable
+                            # without writable sidecars on every SQLite runtime.
+                            copied.execute('PRAGMA journal_mode=DELETE')
                     store = object.__new__(InvocationLedger)
                     store.path = str(snapshot)
                     store.db = sqlite3.connect(snapshot.as_uri() + '?mode=ro', uri=True, timeout=5)

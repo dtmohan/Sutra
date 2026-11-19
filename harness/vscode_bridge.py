@@ -241,7 +241,7 @@ def dispatch(s,meta,workspace,root,request,provider=None):
                 raise
         charge=provider.budget.check(system,payload,schema)
         delivery=s.prepare_delivery(session,payload,charge)
-        last=InvocationGateway(s.path,run,provider).invoke(role,uuid.uuid4().hex,system,payload,schema,delivery)
+        last=InvocationGateway(s.path, run, provider, ledger=s).invoke(role,uuid.uuid4().hex,system,payload,schema,delivery)
         if last['admission']['admitted']:
             s.event(run,'ALLOW',{'reason':'validated_review','invocation_id':last['invocation_id']})
             meta['checkpoint']=last['invocation_id'];break

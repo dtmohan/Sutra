@@ -80,7 +80,38 @@ class PagedContext(ContextStore):
         from memory_layer import initialize
         initialize(self.db)
         self._audit_verified = None
+        self._audit_prefix = None
+        self._audit_guard_epoch = 0
+        self._audit_guard_installed = True
+        # This is an invalidation sensor, not authorization. Keep raw SQL usable
+        # for the explicit verifier and fault-injection tests, but never reuse a
+        # prefix after this connection could have changed its immutable guards.
+        self.db.set_authorizer(self._audit_authorizer)
         self._audit_file_identity = self._audit_identity()
+
+    def _audit_authorizer(self, action, first, second, database, trigger):
+        ddl = {sqlite3.SQLITE_ALTER_TABLE, sqlite3.SQLITE_CREATE_INDEX,
+               sqlite3.SQLITE_CREATE_TABLE, sqlite3.SQLITE_CREATE_TRIGGER,
+               sqlite3.SQLITE_CREATE_VIEW, sqlite3.SQLITE_DROP_INDEX,
+               sqlite3.SQLITE_DROP_TABLE, sqlite3.SQLITE_DROP_TRIGGER,
+               sqlite3.SQLITE_DROP_VIEW, sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH}
+        if (action in ddl or
+                action in (sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE) and first == 'page_audit' or
+                action == sqlite3.SQLITE_PRAGMA and first.lower() in ('schema_version', 'writable_schema')
+                and second is not None):
+            self._audit_guard_epoch += 1
+        return sqlite3.SQLITE_OK
+
+    def _audit_guards_present(self):
+        rows = dict(self.db.execute("SELECT name,sql FROM sqlite_master WHERE type='trigger' "
+                                    "AND name IN ('immutable_page_audit_UPDATE','immutable_page_audit_DELETE')"))
+        for op in ('UPDATE', 'DELETE'):
+            name = 'immutable_page_audit_' + op
+            expected = ("CREATE TRIGGER " + name + " BEFORE " + op + " ON page_audit "
+                        "BEGIN SELECT RAISE(ABORT,'immutable record'); END")
+            if ' '.join((rows.get(name) or '').split()).lower() != expected.lower():
+                return False
+        return True
 
     def _audit_identity(self):
         if self.path == ':memory:':
@@ -110,36 +141,121 @@ class PagedContext(ContextStore):
         digest=sha(canonical([seq,event,data,prev]))
         self.db.execute('INSERT INTO page_audit VALUES(?,?,?,?,?)',(seq,event,data,prev,digest))
 
-    def audit_valid(self):
-        # Reuse only an unchanged, already verified view on this connection.
-        # No persistent trusted-prefix marker: every reopened ledger is scanned.
-        # Writes, schema changes and commits on other connections invalidate it.
+    def audit_valid(self, deep=False):
+        # Unknown external commits retain strict replay by default. A host may
+        # explicitly select the SAME externally authenticated V2 accounting seal
+        # as its page-audit prefix; that seal commits its original audit cursor.
+        # Later DB seals and previously replayed tails never promote that trust.
+        # No profile or self-trusted marker is persisted in the database.
+        from accounting_metrics import record
+        started = time.perf_counter_ns()
+        stage, scanned, reason, ok = 'page_audit_full', 0, 'cold', False
+        previous_seq, head_seq = 0, 0
+        trusted, trust = None, None
         owns_transaction = not self.db.in_transaction
         try:
             if self._audit_identity() != self._audit_file_identity:
+                reason = 'file_identity'
                 return False
             if owns_transaction:
                 self.db.execute('BEGIN')
             stamp = self._audit_stamp()
-            if stamp == self._audit_verified:
+            head_seq = stamp[3][0] if stamp[3] else 0
+            epoch = getattr(self, '_audit_guard_epoch', None)
+            if not deep and getattr(self, '_accounting_audit_prefix_enabled', False):
+                from accounting_batches import trusted_audit_prefix
+                trusted = trusted_audit_prefix(self)
+                trust = trusted['binding']
+            if (not deep and stamp == self._audit_verified and
+                    getattr(self, '_audit_verified_epoch', None) == epoch and
+                    getattr(self, '_audit_verified_trust', None) == trust):
+                stage, reason, ok = 'page_audit_cache', 'unchanged', True
                 return True
             self._audit_verified = None
+            prefix = getattr(self, '_audit_prefix', None)
             prev = 'GENESIS'
             expected = 1
-            for seq,event,data,old,digest in self.db.execute('SELECT * FROM page_audit ORDER BY seq'):
+            guards = self._audit_guards_present()
+            can_reuse = (not deep and prefix is not None and guards and
+                         getattr(self, '_audit_guard_installed', False) and
+                         prefix.get('trust') == trust and
+                         prefix['data_version'] == stamp[1] and prefix['schema'] == stamp[2] and
+                         prefix['guard_epoch'] == epoch)
+            if can_reuse:
+                # Every position in the verified positive prefix is occupied,
+                # so a raw INSERT can only append or add a nonpositive row.
+                # MAX/head checks alone miss the latter. MIN uses the integer
+                # primary-key B-tree and does not scan historical records.
+                minimum = self.db.execute('SELECT MIN(seq) FROM page_audit').fetchone()[0]
+                if minimum != (1 if stamp[3] else None):
+                    self._audit_prefix = None
+                    stage, reason = 'page_audit_tail', 'nonpositive_position'
+                    return False
+                position = prefix['head']
+                observed = self.db.execute('SELECT seq,event_hash FROM page_audit WHERE seq=?',
+                                           (position[0],)).fetchone() if position else None
+                if observed == position and head_seq >= (position[0] if position else 0):
+                    stage, reason = 'page_audit_tail', 'verified_immutable_prefix'
+                    if position:
+                        previous_seq, prev = position
+                        expected = previous_seq + 1
+                else:
+                    reason = 'prefix_mismatch_or_rollback'
+            elif deep:
+                reason = 'explicit_deep'
+            elif prefix is not None:
+                reason = ('external_commit' if prefix['data_version'] != stamp[1] else
+                          'schema_or_guard_change')
+            unsafe_local_change = prefix is not None and prefix['guard_epoch'] != epoch
+            if stage == 'page_audit_full' and trusted is not None and guards and not unsafe_local_change:
+                # Re-check every canonical row after the ORIGINAL trusted seal
+                # on an external commit. A later verified suffix is not a new
+                # trust root, and clear/change-anchor invalidates this proof.
+                minimum = self.db.execute('SELECT MIN(seq) FROM page_audit').fetchone()[0]
+                if minimum != 1:
+                    self._audit_prefix = None
+                    reason = 'nonpositive_position'
+                    return False
+                previous_seq, prev = trusted['head']
+                if head_seq < previous_seq:
+                    self._audit_prefix = None
+                    reason = 'trusted_prefix_missing'
+                    return False
+                expected = previous_seq + 1
+                stage, reason = 'page_audit_anchored_tail', 'caller_trusted_seal'
+            rows = (self.db.execute('SELECT * FROM page_audit WHERE seq>? ORDER BY seq', (previous_seq,))
+                    if stage in ('page_audit_tail', 'page_audit_anchored_tail') else
+                    self.db.execute('SELECT * FROM page_audit ORDER BY seq'))
+            for seq,event,data,old,digest in rows:
+                scanned += 1
                 if seq != expected or old != prev or sha(canonical([seq,event,data,old])) != digest:
+                    self._audit_prefix = None
+                    reason = 'malformed_chain'
                     return False
                 expected += 1
                 prev = digest
             if self._audit_stamp() == stamp:
                 self._audit_verified = stamp
+                self._audit_verified_epoch = epoch
+                self._audit_verified_trust = trust
+                self._audit_prefix = {'head': stamp[3], 'schema': stamp[2],
+                                      'data_version': stamp[1], 'guard_epoch': epoch,
+                                      'trust': trust} if guards else None
+            ok = True
             return True
-        except (OSError, sqlite3.DatabaseError):
+        except (OSError, sqlite3.DatabaseError, InvalidUpdate):
             self._audit_verified = None
+            self._audit_prefix = None
+            reason = 'sqlite_or_file_error'
             return False
         finally:
             if owns_transaction and self.db.in_transaction:
-                self.db.rollback()
+                # SQL ROLLBACK avoids invalidating active outer cursors on the
+                # Apple Python 3.9 sqlite wrapper's Connection.rollback path.
+                self.db.execute('ROLLBACK')
+            record(self, stage, time.perf_counter_ns() - started, rows_scanned=scanned,
+                   previous_seq=previous_seq, head_seq=head_seq, reason=reason, ok=ok,
+                   trusted_prefix_seq=trusted['head'][0] if trusted is not None else None)
 
     def page(self, session, key, version=None):
         if version is None:

@@ -206,7 +206,7 @@ def dispatch(s,meta,workspace,root,request,provider=None):
     s.event(run,'RESOURCE_WAIT',{'reason':str(exc),'measurement':exc.state,'architecture_stop':previous_stop});raise
    with s.db:s._audit('RESOURCE_GATE',{'run_id':run,'measurement':hardware})
   charge=provider.budget.check(role.SYSTEM,payload,schema);delivery=s.prepare_delivery(session,payload,charge)
-  last=InvocationGateway(s.path,run,provider).invoke('architect',uuid.uuid4().hex,role.SYSTEM,payload,schema,delivery)
+  last=InvocationGateway(s.path, run, provider, ledger=s).invoke('architect',uuid.uuid4().hex,role.SYSTEM,payload,schema,delivery)
   if last['admission']['admitted']:
    s.event(run,'ALLOW',{'reason':'validated_architecture','invocation_id':last['invocation_id']});meta['checkpoint']=last['invocation_id'];break
   s.event(run,'NACK',{'reason':'invalid_architecture','errors':last['admission']['errors']})

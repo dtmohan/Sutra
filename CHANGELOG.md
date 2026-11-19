@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.50.1
+
+- Let consistent receipt-verification snapshots coexist with receipt writes through local SQLite WAL, retaining FULL synchronization and deferring busy legacy migration.
+- Index protocol audit mirrors by session/run and verify invocation receipts in one consistent read snapshot.
+- Borrow the host caller's ledger through the invocation gateway, retaining context and its explicitly selected recovery profile without holding a transaction during inference.
+- Let an explicit caller-trusted V2 accounting seal also authenticate its committed page-audit cursor; deep and unanchored verification remain strict.
+- Revalidate only appended page-audit rows on an already verified connection; unknown external writes, schema changes, rollbacks and explicit deep audits remain fully checked.
+- Add separate page-audit, protocol, invocation and SQLite timings without changing the STP kernel, task context, permissions or consumed budgets.
+
 ## 0.50.0
 
 - Carry explicit pending reservations and active scope state in versioned accounting seals, preserving parent spending across late settlement and recovery.
