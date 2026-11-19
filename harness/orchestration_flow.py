@@ -391,7 +391,9 @@ def run(s,meta,workspace,root,req,providers=None):
         target=(data.get('workflow_stop') or {}).get('resume_phase') if phase=='PAUSED' else phase
         if target not in ('CLASSIFYING','MAPPING','CHILDREN','SYNTHESIS','CODING','WORKSPACE','NEED_TOOL_APPROVAL'):raise
         from resource_routing import propose
-        fallback=propose(s,fid,data,req,exc.state,target) if target not in ('WORKSPACE','NEED_TOOL_APPROVAL') else None
+        category=exc.category
+        hardware_wait=category in ('hardware_pressure','model_admission')
+        fallback=propose(s,fid,data,req,exc.state,target) if hardware_wait and target not in ('WORKSPACE','NEED_TOOL_APPROVAL') else None
         if fallback:
             with s.db:
                 m.transition(s,fid,target,'RESOURCE_MODEL_FALLBACK',
@@ -400,11 +402,13 @@ def run(s,meta,workspace,root,req,providers=None):
             return response(s,fid,progress='Memory admission blocked '+fallback['from_model']+'. Auto will try '+
                 fallback['model']+' with fresh paging and the same task, permissions and remaining budget.')
         stop={'status':'resource_wait','stage':target,'resume_phase':target,'error':str(exc),
-              'measurement':exc.state,'automatic_retry':False}
+              'blocker':category,'measurement':exc.state,'automatic_retry':False}
         # Bounded host recovery never retries inference or changes task grants.
         # Persist the original stop before any optional idle-model release.
         move(s,fid,'PAUSED','RESOURCE_STOPPED',workflow_stop=stop)
         save(root,meta)
+        if not hardware_wait:
+            return response(s,fid)
         try:
             from runtime_memory import recover
             def audit(kind,value):

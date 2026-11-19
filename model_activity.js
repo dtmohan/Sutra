@@ -19,13 +19,10 @@ function controlLabel(requested){
 // Keep metadata out of VS Code's thinking UI until actual reasoning arrives.
 function chatActivity(vscode,progress,activityLink){
   const calls=new Map();
-  const text=value=>progress.report(new vscode.LanguageModelTextPart(value));
   return e=>{
     if(e.kind==='start'){
       if(calls.has(e.id))return;
       calls.set(e.id,{...e,opened:false,done:false});
-      const uri=activityLink?.(e),label=callLabel(e.role)+' · '+e.model+' · call details';
-      if(uri)text(`\n\n[${label}](${uri})\n\n`);
       return;
     }
     const c=calls.get(e.id);if(!c||c.done)return;
@@ -50,12 +47,6 @@ function chatActivity(vscode,progress,activityLink){
       progress.report(new vscode.LanguageModelThinkingPart('\nProtocol: '+status+' · '+(e.usage?.input_tokens??'?')+
         ' input / '+(e.usage?.output_tokens??'?')+' output tokens (reasoning included).'+shortened+'\n',e.id));
       progress.report(new vscode.LanguageModelThinkingPart('',e.id,{vscode_reasoning_done:true}));
-    }else{
-      const reasoning=e.thinking_chars>0||c.received
-        ? (canThink?'Reasoning was reported but no text was received for inline display.':'Reasoning details are available in Sutra Monitor.')
-        : e.status==='interrupted'?'No separate reasoning text was received before interruption.':'No separate reasoning text received.';
-      text('\n\n'+callLabel(c.role)+' · '+c.model+' · '+(e.status==='accepted'?'call finished':e.status)+'. '+reasoning+
-        ' Reasoning control: '+controlLabel(c.requested)+'.'+shortened+'\n\n');
     }
   };
 }

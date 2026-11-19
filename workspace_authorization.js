@@ -7,7 +7,10 @@ const crypto = require('node:crypto');
 const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const profiles = Object.freeze({read_only: 'Read only', workspace_agent: 'Workspace agent'});
 
-function createStore(vscode, context) {
+function createStore(vscode, context, dependencies = {}) {
+  const watch = dependencies.watch || fs.watch;
+  const schedule = dependencies.setInterval || setInterval;
+  const cancelSchedule = dependencies.clearInterval || clearInterval;
   const directory = path.join(context.globalStorageUri.fsPath, 'workspace-permissions');
   function location() {
     const uri = vscode.workspace.workspaceFile || vscode.workspace.workspaceFolders?.[0]?.uri;
@@ -49,24 +52,24 @@ function createStore(vscode, context) {
   function onDidChange(listener) {
     fs.mkdirSync(directory, {recursive: true, mode: 0o700});
     let watcher;
-    let poll;
-    function fallback() {
+    // File notifications may be coalesced or silently missed. Reconcile active
+    // grants periodically as well, so a missed event cannot retain authority.
+    const poll = schedule(listener, 500);
+    poll.unref?.();
+    function closeWatcher() {
       watcher?.close();
-      // Some extension hosts cannot create native file watchers.
-      poll = setInterval(listener, 500);
-      poll.unref();
     }
     try {
-      watcher = fs.watch(directory, {persistent: false}, (_event, name) => {
-        if (!name || name.endsWith('.json')) listener();
+      watcher = watch(directory, {persistent: false}, (_event, name) => {
+        if (!name || String(name).endsWith('.json')) listener();
       });
-      watcher.once('error', fallback);
+      watcher.once('error', closeWatcher);
     } catch {
-      fallback();
+      // Polling remains active when this host cannot create native watchers.
     }
     return {dispose() {
       watcher?.close();
-      clearInterval(poll);
+      cancelSchedule(poll);
     }};
   }
   return {scope, read, write, onDidChange};

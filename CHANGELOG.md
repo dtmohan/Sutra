@@ -1,3 +1,23 @@
+# Changelog
+
+## 0.50.0
+
+- Carry explicit pending reservations and active scope state in versioned accounting seals, preserving parent spending across late settlement and recovery.
+- Add idle checkpointing to persistent request workers and separate kernel, budget-gate, seal and recovery timings.
+- Keep strict source verification as the default; expose externally anchored recovery and read-only background audits to trusted host callers.
+- Retain bounded accounting batches, cumulative checkpoints and ledger indexes without changing the canonical STP kernel.
+- Preserve saved model tiers, context, permissions and consumed budgets; include the pending native-workflow stabilization fixes.
+
+## 0.49.1
+
+- Stabilize native workspace permission and saved-request recovery flows, preserving task context and spending.
+- Require user-approved engine profile fingerprints and strengthen worker ownership, lifecycle and frame validation.
+- Clarify native loading, readiness, admission and tier-selection states without silently changing saved models.
+- Make diagram previews and exports follow the editor theme.
+- Verify complete VSIX runtime contents and current release metadata; add negative omission tests.
+- Reconcile workspace revocation even if file notifications are missed, and isolate installed-pack codec checks behind an explicit opt-in.
+- Preserve the canonical STP kernel and retain historical validation as historical evidence.
+
 ## 0.49.0
 
 - Added a Sutra-owned persistent worker that runs the compatible native engine
@@ -34,8 +54,6 @@
 - Bound cold estimates to profile/configuration/environment identity; monitor
   fresh hardware during first loads without labelling estimates as measured peaks.
 - Preserve Ollama Low/Mid, task ledgers, permissions and canonical STP kernel.
-
-# Changelog
 
 ## 0.46.0
 

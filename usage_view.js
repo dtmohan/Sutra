@@ -60,6 +60,8 @@ function install(vscode,context,deps){
       else if(message?.type==='refresh')void refresh();
       else if(message?.type==='open_tasks'&&!native?.working)void vscode.commands.executeCommand('karma.openTasks');
       else if(message?.type==='resume')void vscode.commands.executeCommand('karma.resumeWorkflow');
+      else if(message?.type==='workspace_access'&&native?.permissionCanChoose)
+        void vscode.commands.executeCommand('karma.armNative');
       else if(message?.type==='discard')void vscode.commands.executeCommand('karma.discardWorkflow');
       else if(message?.type==='increase_allocation')void vscode.commands.executeCommand('karma.increaseAllocation');
       else if(message?.type==='architecture_read_and_retry'){
@@ -103,8 +105,10 @@ function install(vscode,context,deps){
     setError(message){error=message;publish();},
     setStatus(value){
       const r=value?.routing;
-      routing=r?{active:!!r.active,workspaceAccess:r.workspaceAccess,stage:r.stage,model:r.model,memoryUsed:r.memoryUsed,memorySource:r.memorySource,memoryAllocation:r.memoryAllocation,memoryStatus:r.memoryStatus,modelCapacity:r.modelCapacity,conversationBudget:r.conversationBudget,invocationId:r.invocationId}:undefined;
-      native=value?{enabled:value.enabled,armed:value.armed,accessProfile:value.accessProfile,label:value.label,compaction:value.compaction,pending:value.pending,working:value.working,openTaskCount:value.openTaskCount}:undefined;publish();
+      routing=r?{active:!!r.active,workspaceAccess:r.workspaceAccess,stage:r.stage,progress:r.progress,model:r.model,memoryUsed:r.memoryUsed,memorySource:r.memorySource,memoryAllocation:r.memoryAllocation,memoryStatus:r.memoryStatus,modelCapacity:r.modelCapacity,conversationBudget:r.conversationBudget,invocationId:r.invocationId}:undefined;
+      native=value?{enabled:value.enabled,armed:value.armed,accessProfile:value.accessProfile,label:value.label,
+        permissionPending:value.permissionPending,permissionCanChoose:value.permissionCanChoose,
+        compaction:value.compaction,pending:value.pending,working:value.working,openTaskCount:value.openTaskCount}:undefined;publish();
     },
     recordResponse(group){if(group?.calls?.length)item.tooltip='Latest completed stage / response: '+tokens.compact(group)+'\nClick for workspace history and per-stage counts.';},
     reset(){snapshot=undefined;routing=undefined;native=undefined;error=undefined;item.tooltip='Open tokens, system telemetry and kernel decisions';publish();}

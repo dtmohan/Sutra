@@ -62,7 +62,7 @@ function observationText(observations, final=false){
 function install(vscode,context,deps){
 
   let allocationPending=false,thinkingForNextRequest=false,resumeSubmission;
-  let armPromise,accessEpoch=0,armingStep='',armed,activeCancel,arming=false,running=false,selecting=false,lastRoute='',routing,reason='Open Sutra chat to talk. Choose workspace permissions on first use.';
+  let armPromise,accessEpoch=0,armingStep='',armed,activeCancel,arming=false,running=false,selecting=false,lastRoute='',routing,reason='Open Sutra chat to talk. Choose workspace access on first use.';
   const memory=new NativeMemory(context);let lastCompaction;
   const tickets=new Map(),completed=new Map(),changed=new vscode.EventEmitter();
   const enabled=()=>vscode.workspace.getConfiguration('karma').get('nativeEnabled',true);
@@ -104,7 +104,7 @@ function install(vscode,context,deps){
     const valid=grant?.scope===scope && typeof scope==='string' &&
       typeof grant.id==='string' && Object.hasOwn(profiles,grant.profile);
     if(armed && (!valid || grant.id!==armed.generation || scope!==armed.scope || grant.profile!==armed.profile)){
-      clearAccess('Workspace permissions changed. The saved request and budget are retained.');
+      clearAccess('Workspace access changed. The saved request and budget are retained.');
     }
     if(valid && !armed){
       armed={scope,workspace:deps.workspace(),generation:grant.id,profile:grant.profile};
@@ -117,11 +117,16 @@ function install(vscode,context,deps){
     const chat=vscode.workspace.getConfiguration('chat');
     const defaultsReady=Object.entries(CHAT_DEFAULTS).every(([key,value])=>chat.get(key)===value);
     const live=!!routing?.active;
-    const label=!enabled()?'Sutra: off':arming?'Sutra: awaiting permission choice':selecting?'Sutra: opening chat':live?'Sutra: request received':running?'Sutra: action running':
+    const label=!enabled()?'Sutra: off':arming?'Sutra: awaiting workspace access':selecting?'Sutra: opening chat':live?'Sutra: request received':running?'Sutra: action running':
       'Sutra · '+(access?profiles[access.profile]:'chat only')+' · routing unverified';
     const explanation=arming?armingStep:selecting?'Opening Local chat with Sutra Auto. No prompt is being sent.':live?'This request reached Sutra. Protocol admission is checked before model dispatch.':
       'No Sutra request is in flight. The current chat selection is unverified; check for Sutra Auto beneath the prompt. Direct Ollama and other chats bypass Sutra.';
-    return {enabled:enabled(),arming,armingStep,selecting,armed:!!access,accessProfile:access?.profile||null,working:allocationPending||running||live,session:routing?.session,scope:'Sutra native chat and its workspace tools',defaultModel:chat.get('defaultModel',''),defaultsReady,reason,lastRoute,label,explanation,routing:routing?{...routing}:null,compaction:lastCompaction,pending:context.workspaceState.get('sutra.pendingOrchestration')||null,openTaskCount:context.workspaceState.get('sutra.openTaskCount')};
+    const pending=context.workspaceState.get(pendingKey)||null;
+    const permissionPending=!!pending?.needsWorkspaceAccess&&pending.workspace===deps.workspace()&&
+      (!access||pending.requestedAccessProfile==='workspace_agent'&&access.profile!=='workspace_agent');
+    return {enabled:enabled(),arming,armingStep,selecting,armed:!!access,accessProfile:access?.profile||null,
+      permissionPending,permissionCanChoose:permissionPending&&!arming&&!selecting&&!running&&!live&&!deps.isBusy(),
+      working:allocationPending||running||live,session:routing?.session,scope:'Sutra native chat and its workspace tools',defaultModel:chat.get('defaultModel',''),defaultsReady,reason,lastRoute,label,explanation,routing:routing?{...routing}:null,compaction:lastCompaction,pending,openTaskCount:context.workspaceState.get('sutra.openTaskCount')};
   }
   function publish(){deps.onStatus(status());}
   function revoke(){
@@ -133,7 +138,7 @@ function install(vscode,context,deps){
   function assertArmed(){
     const access=refreshAccess();
     if(arming)throw new Error('A workspace permission choice is in progress.');
-    if(!access)throw new Error('Sutra workspace access is required. Open Sutra: Workspace Permissions.');
+    if(!access)throw new Error('Workspace access is required. Choose Sutra: Workspace Access…');
     return access;
   }
   function assertCurrent(access,token){
@@ -154,7 +159,7 @@ function install(vscode,context,deps){
   }
   async function arm(owner,agentOnly){
     const ownsRequest=()=>owner&&routing===owner.audit&&routing.active&&running&&activeCancel?.token===owner.token;
-    if(arming||selecting||deps.isBusy()||((running||routing?.active)&&!ownsRequest()))throw new Error('Wait for the active Sutra request before changing workspace permissions.');
+    if(arming||selecting||deps.isBusy()||((running||routing?.active)&&!ownsRequest()))throw new Error('Wait for the active Sutra request before changing workspace access.');
     if(!enabled())throw new Error('Enable Sutra native chat first.');
     const previous=refreshAccess(),epoch=accessEpoch,workspace=deps.workspace();
     const scope=authorization.scope(),record=authorization.read();
@@ -165,7 +170,7 @@ function install(vscode,context,deps){
       if(deps.isBusy())throw new Error('Workspace became busy during the permission choice.');
     };
     arming=true;
-    armingStep='Choose Sutra workspace permissions in the dialog.';
+    armingStep='Choose workspace access in the dialog.';
     const access={id:crypto.randomUUID(),workspace,state:'requested',requestedAt:new Date().toISOString(),source:'vscode_modal'};
     const recordAccess=state=>{
       access.state=state;
@@ -180,7 +185,7 @@ function install(vscode,context,deps){
       publish();
       recordAccess('requested');
       const choices=agentOnly?[profiles.workspace_agent]:Object.values(profiles);
-      const choice=await vscode.window.showWarningMessage('Workspace permissions for Sutra',{modal:true,detail:
+      const choice=await vscode.window.showWarningMessage('Workspace access for Sutra',{modal:true,detail:
         workspace+'\n\n'+(previous?'Current access: '+profiles[previous.profile]+'\n':'')+
         'Read only lets Sutra read the scoped project files. Workspace agent also enables scoped edits and sandboxed tests. Sutra requests action confirmation through VS Code and confirms actions separately for tool calls outside chat. Your choice is saved for this workspace. Optional tools keep their separate approval rules.'},...choices);
       stillValid();
@@ -239,6 +244,32 @@ function install(vscode,context,deps){
       (Object.hasOwn(allocationReasons,automatic.reason)?allocationReasons[automatic.reason]:automatic.reason);
   }
   const resumeUri=id=>`${vscode.env?.uriScheme||'vscode'}://${EXTENSION_ID}/resume/${id}`;
+  const accessUri=id=>`${vscode.env?.uriScheme||'vscode'}://${EXTENSION_ID}/access/${id}`;
+  async function chooseWorkspaceAccess(link){
+    const pending=context.workspaceState.get(pendingKey);
+    if(link&&(!pending||pending.workspace!==deps.workspace()||pending.resumeLink!==link))
+      throw new Error('This workspace access action is stale. Use the current request in Sutra Monitor.');
+    const granted=await beginArm(undefined,pending?.requestedAccessProfile==='workspace_agent');
+    if(pending&&context.workspaceState.get(pendingKey)?.flow_id===pending.flow_id){
+      const message=granted?'Workspace access saved. Return to the original Sutra chat and send continue.':
+        'Workspace access was not granted. The request, context and consumed budget are saved.';
+      reason=message;publish();
+      void vscode.window.showInformationMessage(message);
+    }
+    return granted;
+  }
+  async function requestWorkspaceAccess(flow,audit,progress,agentOnly=false){
+    const pending=context.workspaceState.get(pendingKey);
+    if(!pending||pending.flow_id!==flow.flow_id)throw new Error('The saved request changed before workspace access could be requested.');
+    await context.workspaceState.update(pendingKey,{...pending,needsWorkspaceAccess:true,
+      requestedAccessProfile:agentOnly?'workspace_agent':undefined});
+    audit.stage='awaiting_workspace_permission';audit.message='Workspace access is required; no model call is waiting for consent.';publish();
+    const action=vscode.window.registerUriHandler
+      ?'[Choose workspace access]('+accessUri(pending.resumeLink)+')':'Choose **Workspace access** in Sutra Monitor.';
+    progress.report(new vscode.LanguageModelTextPart('**Workspace access needed**\n\n'+action+
+      (agentOnly?' Scoped edits and tests need Workspace agent access.':' No workspace files have been read.')+
+      '\n\nYour request, context and consumed budget are saved. After choosing access, send **continue** in this chat.'));
+  }
   function resumeAction(flow){
     const pending=context.workspaceState.get(pendingKey);
     return vscode.window.registerUriHandler&&pending?.flow_id===flow.flow_id&&pending.resumeLink
@@ -265,6 +296,7 @@ function install(vscode,context,deps){
     // Finishing a conversational turn must not erase another saved review.
     if(!terminal||saved?.flow_id===flow.flow_id)
       await context.workspaceState.update(pendingKey,terminal?undefined:{...flow,stop,resumeThinking,workspace:deps.workspace(),
+        needsWorkspaceAccess:prior?.needsWorkspaceAccess,requestedAccessProfile:prior?.requestedAccessProfile,
         nativeChat:prior?.nativeChat||chatKey,resumeLink:prior?.resumeLink||crypto.randomBytes(16).toString('hex'),
         conversation:undefined,routing_step:undefined,child:undefined,data:undefined,mapping:undefined,claim_review_usage:undefined,allocation_proposal:undefined,allocation_amendment:undefined});
     publish();
@@ -282,7 +314,8 @@ function install(vscode,context,deps){
     const rows=list.task_stack.open_tasks;
     if(!rows.length){void vscode.window.showInformationMessage('No open tasks in the current Sutra chat.');return;}
     const item=await vscode.window.showQuickPick(rows.map(row=>({
-      label:row.prompt.replace(/\s+/g,' ').trim(),description:row.focused?'Focused':'Parked',detail:row.state,row
+      label:row.prompt.replace(/\s+/g,' ').trim(),description:row.focused?'Current request':'Parked request',
+      detail:row.state+' · '+row.flow_id.slice(0,12),row
     })),{title:'Open Sutra tasks for the last active chat',placeHolder:'Choose a task to focus, resume, or close'});
     if(!item)return;
     const action=await vscode.window.showQuickPick([
@@ -330,12 +363,25 @@ function install(vscode,context,deps){
         return;
       }
       submission.cursor=current.cursor;
-      // VS Code targets its current chat panel. The provider checks the originating chat
-      // and the inspected cursor before sending any resume event to the host.
-      await vscode.commands.executeCommand('workbench.action.chat.open',{
-        modelSelector:{vendor:'karma',id:MODEL_IDS.auto,family:'karma'},
-        query:`Resume saved Sutra request [${submission.id}]`,preserveInput:true
-      });
+      // The generic Open Chat command cannot target a session in this host.
+      // Never open a potentially unrelated/cloud chat or submit into it.
+      // An explicit copied instruction is checked against the original axis
+      // and inspected cursor when the user submits it in that conversation.
+      submission.expires=Date.now()+5*60_000;
+      const instruction=`Resume saved Sutra request [${submission.id}]`;
+      const choice=await vscode.window.showInformationMessage(
+        'Saved request: '+String(pending.prompt||'Sutra request').replace(/\s+/g,' ').slice(0,100)+
+        '. Return to its original Local Sutra chat and send continue. This VS Code interface cannot address that chat directly.',
+        'Copy resume instruction');
+      if(choice==='Copy resume instruction'){
+        if(!sameRequest()||resumeSubmission!==submission)throw new Error('The saved request changed before copying.');
+        if(!vscode.env?.clipboard?.writeText)throw new Error('Clipboard access is unavailable. Send continue in the original Sutra chat.');
+        await vscode.env.clipboard.writeText(instruction);
+      }else if(resumeSubmission===submission){
+        // Dismissing guidance did not deliver a continuation token. Let the
+        // next explicit Resume action offer the notice again immediately.
+        resumeSubmission=undefined;
+      }
     }catch(error){
       if(resumeSubmission===submission)resumeSubmission=undefined;
       throw error;
@@ -384,7 +430,7 @@ function install(vscode,context,deps){
   }
   function showHostProgress(flow, progress){
     if(flow.progress){
-      progress.report(new vscode.LanguageModelTextPart('Host workflow · '+flow.progress+'\n\n'));
+      if(routing){routing.progress=flow.progress;publish();}
     }
   }
   function showPause(flow,audit,progress){
@@ -404,7 +450,13 @@ function install(vscode,context,deps){
     const details=[stop.error,...failures.map(f=>f.path+': '+f.error)].filter(Boolean);
     if(stop.status==='resource_wait'){
       const stage={CLASSIFYING:'Conversation routing',MAPPING:'Source mapping',CHILDREN:'Child review',SYNTHESIS:'Workspace synthesis',CODING:'Workspace coding'}[stop.resume_phase]||'Workflow';
-      details.unshift('Host resource check · '+stage+' paused. This is host status, not a model response.');
+      const blocker=stop.blocker||stop.measurement?.blocker;
+      const label={runtime_busy:'Runtime is busy',runtime_timeout:'Runtime readiness timed out',runtime_uncertain:'Runtime ownership needs inspection',
+        runtime_starting:'Runtime is starting',model_admission:'Model allocation blocked',measurement_unavailable:'Fresh measurement unavailable',
+        hardware_pressure:'Hardware pressure'}[blocker]||'Host admission check';
+      details.unshift(label+' · '+stage+' paused.');
+      const observed=stop.measurement?.observed_at||stop.measurement?.sample?.wall_time;
+      if(Number.isFinite(observed))details.push('Blocking observation: '+new Date(observed*1000).toLocaleString()+'. Monitor readings show the current state and can differ.');
     }
     const allocationStop=['context_budget','task_budget','budget_stopped'].includes(stop.status)||stop.status==='memory_fault'&&stop.memory_fault?.code==='capacity';
     if(allocationStop)details.unshift('Host allocation check paused the workflow before the next model call. No reasoning stream was generated for that call.');
@@ -418,7 +470,11 @@ function install(vscode,context,deps){
     audit.stage='paused';audit.message=reason;publish();
     let guidance='Resolve the reported cause before resuming.';
     if(stop.status==='resource_wait'){
-      guidance='Check **System pressure** and **Last model allocation** in Sutra Monitor. Resume checks fresh measurements and the model allocation before dispatch.';
+      const blocker=stop.blocker||stop.measurement?.blocker;
+      guidance=blocker==='runtime_busy'?'Wait for the active runtime operation to finish, then continue here. No model switch or memory release was attempted.':
+        ['runtime_timeout','runtime_uncertain','runtime_starting'].includes(blocker)?'Refresh the engine worker status in Sutra model settings. Readiness or ownership must be verified before retrying.':
+        blocker==='measurement_unavailable'?'Refresh the engine and telemetry status. A fresh admission measurement is required; this does not establish memory or thermal pressure.':
+        'Check the saved blocking observation and **Last model allocation** in Sutra Monitor. Resume checks fresh measurements; healthy current pressure alone does not establish that this model fits.';
     }else if(stop.status==='child_slice_timeout'){
       const checkpoint=stop.slice_ordinal>1?'Resume from the last completed child checkpoint.':'Resume to retry the first child slice.';
       guidance=checkpoint+' You can select a different Sutra model tier before resuming.';
@@ -477,7 +533,7 @@ function install(vscode,context,deps){
         }
         throw error;
       }
-      reason='Local chat and Sutra Auto saved for new sessions. Workspace permissions are managed separately.';
+      reason='Local chat and Sutra Auto saved for new sessions. Workspace access are managed separately.';
       publish();
     }finally{selecting=false;publish();}
   }
@@ -508,7 +564,19 @@ function install(vscode,context,deps){
       }
       throw error;
     }
-    finally{audit.active=false;audit.finishedAt=new Date().toISOString();publish();deps.onRoute?.({...audit});}
+    finally{
+      audit.active=false;audit.finishedAt=new Date().toISOString();publish();deps.onRoute?.({...audit});
+      if(audit.stage==='awaiting_workspace_permission'){
+        const pending=context.workspaceState.get(pendingKey),link=pending?.resumeLink;
+        // Consent runs outside the model response, so dismissing its dialog
+        // cannot be reported by VS Code as an interrupted model generation.
+        void Promise.resolve(vscode.window.showInformationMessage('Workspace access is needed for the saved Sutra request.',
+          'Choose workspace access')).then(choice=>{
+          if(choice==='Choose workspace access'&&context.workspaceState.get(pendingKey)?.resumeLink===link)
+            return chooseWorkspaceAccess(link);
+        }).catch(error=>vscode.window.showErrorMessage?.(error.message));
+      }
+    }
   }
   function ticket(input){
     const t=tickets.get(input?.ticket),access=assertArmed();
@@ -541,7 +609,7 @@ function install(vscode,context,deps){
     }
   };
   const provider={onDidChangeLanguageModelChatInformation:changed.event,
-    provideLanguageModelChatInformation(){if(!enabled())return [];const models=deps.modelSettings();return ['auto','low','mid','high'].filter(id=>id==='auto'||models[id]).map(id=>({id:MODEL_IDS[id],name:id==='auto'?'Sutra Auto':'Sutra '+id[0].toUpperCase()+id.slice(1),family:'karma',version:MANIFEST.version,maxInputTokens:64000,maxOutputTokens:4096,detail:id==='auto'?'Governed local routing':models[id]||'Configure this tier',tooltip:'Chat normally with saved workspace permissions. Every local call uses the invocation gateway.',capabilities:{toolCalling:true,imageInput:false}}));},
+    provideLanguageModelChatInformation(){if(!enabled())return [];const models=deps.modelSettings();return ['auto','low','mid','high'].filter(id=>id==='auto'||models[id]).map(id=>({id:MODEL_IDS[id],name:id==='auto'?'Sutra Auto':'Sutra '+id[0].toUpperCase()+id.slice(1),family:'karma',version:MANIFEST.version,maxInputTokens:64000,maxOutputTokens:4096,detail:id==='auto'?'Governed local routing':models[id]||'Configure this tier',tooltip:'Chat normally with saved workspace access. Every local call uses the invocation gateway.',capabilities:{toolCalling:true,imageInput:false}}));},
     provideTokenCount(model,input,token){if(token?.isCancellationRequested)throw new Error('Token count cancelled.');return hostTokens.count(input);},
     async provideLanguageModelChatResponse(model,messages,options,progress,token){
       if(isCompaction(vscode,messages)){
@@ -680,7 +748,7 @@ function install(vscode,context,deps){
           progress.report(new vscode.LanguageModelTextPart('Enable the Sutra action tool in native Agent chat to review the saved proposal.'));
           return;
         }
-        if(!await allowActionProfile())return;
+        if(!await allowActionProfile(flow))return;
         assertCurrent(a,activeCancel.token);
         const binding=flow.binding;
         const scope=managed?{chat_key:stackChat,flow_id:flow.flow_id}:{};
@@ -703,15 +771,11 @@ function install(vscode,context,deps){
         // The host-generated pause link can bind a conversation without a session ID or receipt.
         return hasFlowLink(pending);
       }
-      async function allowActionProfile(){
+      async function allowActionProfile(flow){
         assertCurrent(a,activeCancel.token);
         if(a.profile==='workspace_agent')return true;
-        if(!await beginArm({audit,token:activeCancel.token},true)){
-          progress.report(new vscode.LanguageModelTextPart('Sutra remains in Read only mode. Edits and tests require Workspace agent permissions.'));
-          return false;
-        }
-        a=assertArmed();
-        return true;
+        await requestWorkspaceAccess(flow,audit,progress,true);
+        return false;
       }
       const activityToken=activeCancel.token;let activityOpen=true;
       const renderActivity=chatActivity(vscode,progress,deps.activityLink);
@@ -867,17 +931,13 @@ function install(vscode,context,deps){
           if(p.diagram){try{await deps.presentConversation?.(chat);progress.report(new vscode.LanguageModelTextPart('Diagram opened beside the chat. Use **Sutra: Open Last Diagram** to reopen it.\n\n'));}catch(error){progress.report(new vscode.LanguageModelTextPart('Diagram preview could not open: '+error.message+'\n\n'));}}
           if(flow.state==='DONE')return;
           const commitmentText=observationText(flow.task_observations);
-          if(commitmentText)progress.report(new vscode.LanguageModelTextPart(commitmentText));
+          if(commitmentText){audit.taskObservations=flow.task_observations;publish();}
           conversationId=r.invocation_id;audit.conversationInvocationId=r.invocation_id;
           }
           if(!a){
             audit.stage='awaiting_workspace_permission';publish();
-            progress.report(new vscode.LanguageModelTextPart('Choose **Sutra workspace permissions** to continue this request.\n\n'));
-            if(!await beginArm({audit,token:activeCancel.token})){
-              audit.stage='permission_declined';progress.report(new vscode.LanguageModelTextPart('Workspace access was not granted. You can keep chatting.\n\n'+resumeAction(flow)));return;
-            }
-            a=armed;audit.stage='workspace';publish();
-            progress.report(new vscode.LanguageModelTextPart('**Workspace permissions saved.** Continuing your request.\n\n'));
+            await requestWorkspaceAccess(flow,audit,progress);
+            return;
           }else{
             audit.workspaceAccess={state:'reused',workspace:a.workspace,profile:a.profile};publish();
           }
@@ -932,8 +992,7 @@ function install(vscode,context,deps){
             event='capability_grant';extra={authorization};
           }
           if(flow.state==='NEED_PERMISSION'){
-            if(!await allowActionProfile()){
-              audit.stage='permission_declined';
+            if(!await allowActionProfile(flow)){
               return;
             }
             const grant=await approvePermission(flow.permission,activeCancel.token);
@@ -963,14 +1022,14 @@ function install(vscode,context,deps){
         if(!data?.result)throw new Error(data?.notice?.message||'No governed response available.');
         const reviewLinks=deps.publishReview(data);lastRoute=data.route?.model||data.result.model||'';publish();
         const assessmentText=observationText(flow.task_observations,true);
-        const r=data.result;recordUsage(r);audit.invocationId=r.invocation_id;audit.model=lastRoute;audit.stage=r.admission.admitted?'admitted':'withheld';publish();if(!r.admission.admitted){if(assessmentText)progress.report(new vscode.LanguageModelTextPart(assessmentText));progress.report(new vscode.LanguageModelTextPart('Sutra withheld the response: '+r.admission.errors.join('; ')));return;}
+        const r=data.result;recordUsage(r);audit.invocationId=r.invocation_id;audit.model=lastRoute;audit.stage=r.admission.admitted?'admitted':'withheld';publish();if(!r.admission.admitted){audit.taskObservations=flow.task_observations;progress.report(new vscode.LanguageModelTextPart('Sutra withheld the response: '+r.admission.errors.join('; ')));return;}
         const p=r.accepted_output;if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&!['edit','run_tests'].includes(p.action?.kind))throw new Error('No admitted action is available to satisfy required tool mode.');
         if(data.report_markdown){
           progress.report(new vscode.LanguageModelTextPart(data.report_markdown+'\n\n'));
           if(data.review_diagram){try{await deps.presentReview?.(data);progress.report(new vscode.LanguageModelTextPart('The **source dependency diagram** is open beside this chat. Its arrows show local import candidates, not execution order.\n\n'));}catch(error){progress.report(new vscode.LanguageModelTextPart('Diagram preview unavailable: '+error.message+'\n\n'));}}
           if(reviewLinks?.reportUri)progress.report(new vscode.LanguageModelTextPart(`[Review details and source citations](${reviewLinks.reportUri}) · Reviewed through Sutra with **${lastRoute}**.\n\n`));
-        }else progress.report(new vscode.LanguageModelTextPart(`Sutra routing confirmed · ${lastRoute} · task ${flow.binding?.session}\nRequest ${audit.id} · protocol invocation ${r.invocation_id}\n\n${p.answer||p.summary}\n\n`));
-        if(assessmentText)progress.report(new vscode.LanguageModelTextPart(assessmentText));
+        }else progress.report(new vscode.LanguageModelTextPart((p.answer||p.summary)+'\n\n'));
+        if(assessmentText){audit.taskObservations=flow.task_observations;publish();}
         const evidence=data.coverage?.evidence;
         if(data.coverage?.deferred_files>0)progress.report(new vscode.LanguageModelTextPart(`Source paging: ${data.coverage.fresh_selected_files} fresh files selected; ${data.coverage.deferred_files} mapped files deferred to stay within the current allowance. This response covers the selected evidence.\n\n`));
         if(evidence){
@@ -1000,6 +1059,9 @@ function install(vscode,context,deps){
   if(vscode.window.registerUriHandler)context.subscriptions.push(vscode.window.registerUriHandler({
     handleUri(uri){
       const link=uri.path.match(/^\/resume\/([a-f0-9]{32})$/)?.[1];
+      const access=uri.path.match(/^\/access\/([a-f0-9]{32})$/)?.[1];
+      if(access&&uri.authority===EXTENSION_ID&&!uri.query&&!uri.fragment)
+        return chooseWorkspaceAccess(access).catch(error=>vscode.window.showErrorMessage(error.message));
       if(link&&uri.authority===EXTENSION_ID&&!uri.query&&!uri.fragment)
         return recoverSaved(false,link).catch(error=>vscode.window.showErrorMessage(error.message));
     }
@@ -1008,10 +1070,12 @@ function install(vscode,context,deps){
     vscode.commands.registerCommand('karma.useNativeChat',()=>useNativeChat()),
     vscode.commands.registerCommand('karma.toggleThinkingForNextRequest',toggleNextThinking),
     vscode.commands.registerCommand('karma.cancelThinkingForNextRequest',()=>thinkingForNextRequest?toggleNextThinking():undefined),
-    vscode.commands.registerCommand('karma.resumeWorkflow',()=>recoverSaved()),vscode.commands.registerCommand('karma.discardWorkflow',()=>recoverSaved(true)),
+    vscode.commands.registerCommand('karma.resumeWorkflow',()=>recoverSaved().catch(error=>vscode.window.showErrorMessage?.(error.message))),
+    vscode.commands.registerCommand('karma.discardWorkflow',()=>recoverSaved(true).catch(error=>vscode.window.showErrorMessage?.(error.message))),
     vscode.commands.registerCommand('karma.openTasks',()=>openTasks().catch(error=>vscode.window.showErrorMessage(error.message))),
     vscode.commands.registerCommand('karma.increaseAllocation',()=>increaseAllocation().catch(error=>vscode.window.showErrorMessage(error.message))),
-    vscode.commands.registerCommand('karma.armNative',()=>beginArm()),vscode.commands.registerCommand('karma.disarmNative',()=>revoke()),
+    vscode.commands.registerCommand('karma.armNative',()=>chooseWorkspaceAccess().catch(error=>vscode.window.showErrorMessage?.(error.message))),
+    vscode.commands.registerCommand('karma.disarmNative',()=>revoke()),
     vscode.commands.registerCommand('karma.toggleNative',async()=>{clearAccess('Native chat setting changed.');await vscode.workspace.getConfiguration('karma').update('nativeEnabled',!enabled(),vscode.ConfigurationTarget.Global);changed.fire();publish();}));
   const listener=vscode.workspace.onDidChangeConfiguration?.(e=>{if(e.affectsConfiguration('karma.nativeEnabled')){if(!enabled())void setNextThinking(false);clearAccess('Native chat setting changed.');changed.fire();}else if(e.affectsConfiguration('karma.models'))changed.fire();if(e.affectsConfiguration('chat'))publish();});if(listener)context.subscriptions.push(listener);
   void setNextThinking(false);
@@ -1045,7 +1109,7 @@ function install(vscode,context,deps){
     vscode.workspace.onDidGrantWorkspaceTrust?.(publish),
   ].filter(Boolean);
   publish();
-  return {status,publish,withWorkspaceAccess,dispose(){
+  return {status,publish,withWorkspaceAccess,requestWorkspaceAccess:()=>chooseWorkspaceAccess(),dispose(){
     for(const subscription of subscriptions)subscription.dispose();
     clearAccess('Extension stopped.');
   }};

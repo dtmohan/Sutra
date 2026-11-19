@@ -10,7 +10,7 @@
 #flow-nodes{overflow-wrap:anywhere;line-height:1.5}#flow-nodes>.gate{margin-top:6px}
 .reasoning-card{border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin-bottom:8px}.reasoning-card summary{overflow-wrap:anywhere}.reasoning-card pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto;font:12px/1.6 var(--vscode-editor-font-family,monospace)}
 </style></head><body>
-<header><div><h1>Sutra Monitor</h1><p id="scope" class="muted">This workspace · loading recorded calls…</p></div><div class="actions"><span id="activity" role="status" aria-live="polite" class="pill">Waiting for data</span><button id="telemetry">Advanced dashboard</button><button id="refresh" aria-label="Refresh monitor">Refresh</button></div></header>
+<header><div><h1>Sutra Monitor</h1><p id="scope" class="muted">This workspace · loading recorded calls…</p></div><div class="actions"><span id="activity" role="status" aria-live="polite" class="pill">Waiting for data</span><button id="telemetry">Open Sutra workspace</button><button id="refresh" aria-label="Refresh monitor">Refresh</button></div></header>
 <div id="error" class="notice" role="status" hidden></div>
 <section class="kernel-section" aria-labelledby="saved-review-title">
 <div class="heading"><h2 id="saved-review-title">Tasks</h2><button id="open-tasks" type="button">Open tasks</button></div>
@@ -49,7 +49,8 @@
 <section class="kernel-section" aria-label="Kernel and context status"><div class="heading"><h2>Kernel &amp; adapters</h2><span id="adapter" class="muted">No task snapshot</span></div>
 <div id="gates" class="gates"></div>
 <p id="context-packet" class="plot-note">No workspace model packet recorded.</p>
-<p id="workspace-access" class="plot-note">Workspace permissions unavailable.</p>
+<p id="workspace-access" class="plot-note" role="status" aria-live="polite" aria-atomic="true">Workspace access unavailable.</p>
+<button id="workspace-access-choose" type="button" hidden aria-describedby="workspace-access">Workspace access…</button>
 <p id="native-request" class="plot-note">No Sutra request observed in this window.</p>
 <p id="compaction" class="plot-note">No VS Code compaction observed in this window.</p>
 <details><summary>Decision signals and context diagnostics</summary><div class="table-wrap"><table><thead><tr><th>Check</th><th>Decision</th><th>ω</th><th>σ</th><th>K</th><th>σ clause</th><th>Profile</th></tr></thead><tbody id="signals"></tbody></table></div><p id="kernel-identity" class="plot-note"></p>

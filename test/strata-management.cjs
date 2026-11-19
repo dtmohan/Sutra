@@ -56,7 +56,7 @@ function fixture(options = {}) {
       if (options.foreign) return {service:'foreign'};
       const name = Object.keys(configs).find(key => configs[key].port === port &&
         (states[key] === 'ready' || (options.startingServer && states[key] === 'starting')));
-      return name ? {service:'strata', model:configs[name].model, instance_id:instance(name),
+      return name ? {service:'strata', model:configs[name].model, instance_id:instance(name),loaded:true,
         activity:{in_flight:options.inflight || 0}} : null;
     },
     busy:options.busy || (() => false), now:() => time, wait:async ms => {time += ms;}, startupSeconds:1,
@@ -85,6 +85,17 @@ async function verify() {
   f.configs.beta.hash = 'f'.repeat(64);
   assert.equal((await f.manager.load(beta.id)).status, 'changed');
   assert.equal(f.sideEffects().length, 0);
+
+  f=fixture({running:true});
+  catalog=await f.manager.discover();
+  assert.equal(catalog.runtime_state,'ready');
+  assert.equal(catalog.profiles.find(row=>row.name==='alpha').ready,true);
+  f=fixture({running:true,inspectServer:async()=>({service:'strata',model:'first',loaded:true,
+    instance_id:'f'.repeat(32),activity:{in_flight:0}})});
+  catalog=await f.manager.discover();
+  assert.equal(catalog.runtime_state,'unverified','A CLI-ready profile cannot claim Loaded with a mismatched server identity');
+  assert.equal(catalog.profiles.find(row=>row.name==='alpha').ready,false);
+  assert.equal(f.sideEffects().length,0,'Discovery never repairs or reloads an unverifiable profile');
 
   f = fixture({admit:async (_bytes, {states}) => {
     // Configuration changes after the resource check cannot stop the old model.

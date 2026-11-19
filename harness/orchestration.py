@@ -51,10 +51,14 @@ def initialize(s):
         for op in ('UPDATE','DELETE'):
             s.db.execute(f"CREATE TRIGGER IF NOT EXISTS immutable_{table}_{op} BEFORE {op} ON {table} BEGIN SELECT RAISE(ABORT,'immutable orchestration record'); END")
     s.db.commit()
+    from accounting_batches import initialize as initialize_accounting
+    initialize_accounting(s)
 
 def node(s, nid):
     row=s.db.execute('SELECT record_json,digest FROM orchestration_nodes WHERE id=?',(nid,)).fetchone()
     if not row or sha('orchestration-node-v1:'+row[0])!=row[1]:raise InvalidUpdate('Missing or corrupt orchestration node')
+    from accounting_batches import assert_node_digest
+    assert_node_digest(s,nid,row[1])
     return json.loads(row[0])
 
 def events(s,nid):
@@ -68,15 +72,16 @@ def events(s,nid):
     return result
 
 def state(s,nid):
-    history=events(s,nid)
-    return history[-1]['to'] if history else node(s,nid)['initial_state']
+    from accounting_batches import current_state
+    return current_state(s,nid)
 
 def transition(s,nid,target,kind,data=None,kernel=None):
-    history=events(s,nid);current=history[-1]['to'] if history else node(s,nid)['initial_state']
+    from accounting_batches import event_head
+    current,seq,previous=event_head(s,nid)
     if current in TERMINAL or (target!=current and target not in EDGES.get(current,set())):
         raise InvalidUpdate('Orchestration transition forbidden: '+current+' -> '+target)
-    e={'node_id':nid,'seq':len(history)+1,'from':current,'to':target,'kind':kind,'data':data or {},
-       'kernel':kernel,'previous':history[-1]['receipt'] if history else 'GENESIS','at':time.time()}
+    e={'node_id':nid,'seq':seq+1,'from':current,'to':target,'kind':kind,'data':data or {},
+       'kernel':kernel,'previous':previous,'at':time.time()}
     raw=canonical(e);digest=sha('orchestration-event-v1:'+raw)
     s.db.execute('INSERT INTO orchestration_events VALUES(?,?,?,?)',(nid,e['seq'],raw,digest))
     s._audit('ORCHESTRATION_TRANSITION',{'node_id':nid,'receipt':digest,'kind':kind,'state':target,'kernel':kernel,'at':e['at']})
@@ -113,6 +118,8 @@ def task(s,sid):
     return create(s,'task',sid,binding=b,permissions=permissions(s,sid),limits=limits,goal=s.snapshot(sid)['goal'],context=None)
 
 def checked(s,nid):
+    from accounting_audit import check_admission
+    check_admission(s)
     n=node(s,nid)
     if n['kind']=='flow':return n
     if n['binding']!=binding(s,n['session']):raise InvalidUpdate('Orchestration contract, calibration or policy changed')
@@ -127,6 +134,7 @@ def descendants(s,nid):
     return result
 
 def spent(s,nid):
+    from accounting_batches import summary
     n=node(s,nid);used={k:0 for k in n['limits']}
     if n['kind']=='task':
         from review_budget import usage
@@ -135,24 +143,22 @@ def spent(s,nid):
             used.update(old['used'])
             if s.db.execute("SELECT 1 FROM sqlite_master WHERE name='host_actions'").fetchone():
                 used['actions']=s.db.execute("SELECT COUNT(*) FROM host_actions WHERE session=? AND json_extract(record_json,'$.contract_hash')=?",(n['session'],n['binding']['contract_hash'])).fetchone()[0]
-            for child in descendants(s,nid):
-                for raw,settled in s.db.execute("SELECT c.cost_json,r.record_json FROM orchestration_charges c LEFT JOIN orchestration_settlements r ON r.charge_id=c.id WHERE c.node_id=? AND c.kind IN ('edit','run_tests')",(child,)):
-                    used['seconds']+=(json.loads(settled)['used'] if settled else json.loads(raw)).get('seconds',0)
+            used['seconds']+=summary(s,nid)['action_seconds']
             return used
-    for child in descendants(s,nid):
-        for raw,settlement,digest in s.db.execute('SELECT c.cost_json,r.record_json,r.digest FROM orchestration_charges c LEFT JOIN orchestration_settlements r ON r.charge_id=c.id WHERE c.node_id=?',(child,)):
-            if settlement and sha('orchestration-settlement-v1:'+settlement)!=digest:raise InvalidUpdate('Corrupt orchestration settlement')
-            cost=json.loads(settlement)['used'] if settlement else json.loads(raw)
-            for k,v in cost.items():used[k]+=v
-    return used
+    return summary(s,nid)['used']
 
-def gates(s,nid,cost):
+def active_children(s,nid):
+    from accounting_batches import summary
+    return [node(s,child) for child in summary(s,nid)['active_children']]
+
+def _gates(s,nid,cost):
     n=checked(s,nid);frames=[];excluded=None
     while n:
         used=spent(s,n['id']);reserved={k:0 for k in n['limits']}
-        for child, in s.db.execute('SELECT id FROM orchestration_nodes WHERE parent_id=?',(n['id'],)):
-            if child==excluded or state(s,child) in TERMINAL:continue
-            c=node(s,child);actual=spent(s,child)
+        for c in active_children(s,n['id']):
+            child=c['id']
+            if child==excluded:continue
+            actual=spent(s,child)
             child_limits=effective_limits(s,c)
             for key in reserved:reserved[key]+=max(0,child_limits[key]-actual[key])
         effective={k:used[k]+reserved[k] for k in used}
@@ -160,6 +166,11 @@ def gates(s,nid,cost):
         frames.append(dict(k,node_id=n['id'],consumed=used,reserved_for_other_children=reserved))
         excluded=n['id'];n=checked(s,n['parent_id']) if n['parent_id'] else None
     return frames
+
+def gates(s,nid,cost):
+    from accounting_metrics import measure
+    with measure(s,'budget_gate',node_id=nid):
+        return _gates(s,nid,cost)
 
 def effective_limits(s,n):
     if n['kind'] == 'task':
@@ -259,6 +270,8 @@ def admit(s,sid,kind,resource_id,cost,paths=(),role=None,payload=None,model=None
     cid=uuid.uuid4().hex
     s.db.execute('INSERT INTO orchestration_charges VALUES(?,?,?,?,?)',(cid,n['id'],kind,resource_id,canonical(cost)))
     transition(s,n['id'],'RUNNING','DISPATCH',{'charge_id':cid,'resource_id':resource_id,'kind':kind,'role':role,'model':model,'frames':frames,'resource':resource},frames[0])
+    from accounting_batches import rotate
+    rotate(s)
     return {'node_id':n['id'],'charge_id':cid,'frames':frames}
 
 def settle(s,owner,receipt,elapsed=None):
@@ -276,10 +289,12 @@ def settle(s,owner,receipt,elapsed=None):
             if envelope.get('orchestration') != owner:
                 raise InvalidUpdate('Invocation settlement owner changed')
             cost['tokens'] = used(envelope, evidence)
-    r={'charge_id':owner['charge_id'],'receipt':receipt,'used':cost};raw=canonical(r)
+    r={'charge_id':owner['charge_id'],'receipt':receipt,'used':cost,'at':time.time()};raw=canonical(r)
     s.db.execute('INSERT INTO orchestration_settlements VALUES(?,?,?)',(owner['charge_id'],raw,sha('orchestration-settlement-v1:'+raw)))
     pending=s.db.execute('SELECT COUNT(*) FROM orchestration_charges c LEFT JOIN orchestration_settlements r ON r.charge_id=c.id WHERE c.node_id=? AND r.charge_id IS NULL',(owner['node_id'],)).fetchone()[0]
     if state(s,owner['node_id'])=='RUNNING':transition(s,owner['node_id'],'RUNNING' if pending else 'READY','SETTLED',r)
+    from accounting_batches import rotate
+    rotate(s)
 
 def _child_receipt(s,n,iid):
     row=s.db.execute("""

@@ -759,7 +759,8 @@ class OrchestrationTests(unittest.TestCase):
         first=out['children'][0]['id'];parent=m.node(self.s,first)['parent_id']
         contract=self.s.pinned(sid);used=m.spent(self.s,parent)
         row={'name':'large','digest':'identity','size':10*rm.GIB,'context_length':65536}
-        blocked={'available':False,'admitted':False,'reason':'memory pressure','decision':'BRIDGE'}
+        blocked={'available':True,'admitted':False,'reason':'memory pressure','decision':'BRIDGE',
+                 'blocker':'hardware_pressure','sample':{'wall_time':100}}
         healthy={'available':True,'admitted':True,'decision':'ALLOW','sample':{'wall_time':100}}
         with patch.dict(os.environ,{'SUTRA_RUNTIME_DIR':str(self.root/'runtime'),'SUTRA_MEMORY_OWNERSHIP':'exclusive'}),patch('monitoring.resource_state',return_value=blocked),patch.object(rm,'stable_resources',return_value=healthy),patch.object(rm,'running',side_effect=[[row],[],[]]),patch.object(rm,'api') as api:
             rm.write_state({'active':None,'owned':{'name':'large','digest':'identity','completed_at':1}})

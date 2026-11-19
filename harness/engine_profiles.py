@@ -1,7 +1,7 @@
 """Trusted local descriptors for Sutra-owned engine workers.
 
-Descriptor and file-metadata fingerprints detect configuration changes. They do
-not independently attest an engine or hash multi-gigabyte model weights.
+Execution and tokenizer assets are content-bound. Large model weights retain
+metadata bindings; this does not attest a model or an unrestricted same-user host.
 """
 import hashlib
 import json
@@ -58,20 +58,46 @@ def assigned_models():
     return set(values)
 
 
-def _file_binding(path):
-    location = Path(path)
+def require_approval(profile):
+    try:
+        approvals = json.loads(os.environ.get('SUTRA_ENGINE_APPROVALS', '{}'))
+    except (ValueError, TypeError):
+        raise InvalidUpdate('Invalid trusted engine approvals') from None
+    if (not isinstance(approvals, dict) or len(approvals) > MAX_PROFILES or any(
+            not is_engine(key) or not isinstance(value, str) or re.fullmatch(r'[a-f0-9]{64}', value) is None
+            for key, value in approvals.items())):
+        raise InvalidUpdate('Invalid trusted engine approvals')
+    if approvals.get(profile['name']) != profile['profile_hash']:
+        raise InvalidUpdate('Engine profile requires first-load approval. Open Sutra engine settings and approve the displayed executable fingerprint.')
+
+
+def _file_binding(path, content=False):
+    location = Path(path).resolve()
     try:
         info = location.stat()
     except OSError as error:
         raise InvalidUpdate('Engine artifact is unavailable: ' + str(location)) from error
     if not stat.S_ISREG(info.st_mode):
         raise InvalidUpdate('Engine artifact is not a regular file: ' + str(location))
-    return {'path': str(location), 'size': info.st_size, 'mtime_ns': info.st_mtime_ns,
-            'device': info.st_dev, 'inode': info.st_ino}
+    result = {'path': str(location), 'size': info.st_size, 'mtime_ns': info.st_mtime_ns,
+              'device': info.st_dev, 'inode': info.st_ino}
+    if content:
+        if info.st_size > 256 * 1024**2:
+            raise InvalidUpdate('Engine execution or tokenizer asset exceeds its content-binding allocation')
+        digest = hashlib.sha256()
+        with location.open('rb') as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b''):
+                digest.update(block)
+            after = os.fstat(stream.fileno())
+        if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+            raise InvalidUpdate('Engine asset changed during content verification')
+        result['sha256'] = digest.hexdigest()
+    return result
 
 
 def _bindings(profile):
     paths = {profile['engine']['executable']}
+    content_paths = set(paths)
     tokenizer = Path(profile['tokenizer_path'])
     if not tokenizer.is_dir():
         raise InvalidUpdate('Engine tokenizer directory is unavailable')
@@ -81,11 +107,14 @@ def _bindings(profile):
     if not assets or len(assets) > 128:
         raise InvalidUpdate('Engine tokenizer asset list is unavailable or exceeds its bound')
     paths.update(str(path) for path in assets)
+    content_paths.update(str(path) for path in assets)
     for argument in profile['engine']['args']:
         if Path(argument).is_absolute():
             location = Path(argument)
             if location.is_file():
                 paths.add(argument)
+                if location.suffix in ('.json', '.txt', '.jinja'):
+                    content_paths.add(argument)
             elif location.is_dir():
                 children = [path for path in location.iterdir() if path.is_file() and
                             path.name in ('dense.bin', 'index.txt', 'native_experts.txt', 'conversions.json')]
@@ -97,11 +126,12 @@ def _bindings(profile):
         for asset in metal.rglob('*'):
             if asset.is_file() and asset.suffix in ('.metal', '.h', '.hpp'):
                 paths.add(str(asset))
+                content_paths.add(str(asset))
             if len(paths) > 256:
                 raise InvalidUpdate('Engine artifact list exceeds its bound')
     if len(paths) > 256:
         raise InvalidUpdate('Engine artifact list exceeds its bound')
-    return [_file_binding(path) for path in sorted(paths)]
+    return [_file_binding(path, path in content_paths) for path in sorted(paths)]
 
 
 def normalize(value, verify_files=True):
@@ -116,8 +146,8 @@ def normalize(value, verify_files=True):
     engine = value.get('engine')
     if not isinstance(engine, dict) or set(engine) != {'executable', 'args', 'cwd', 'environment'}:
         raise InvalidUpdate('Invalid engine execution descriptor')
-    executable = _path(engine['executable'], 'executable')
-    cwd = _path(engine['cwd'], 'working directory')
+    executable = str(Path(_path(engine['executable'], 'executable')).resolve())
+    cwd = str(Path(_path(engine['cwd'], 'working directory')).resolve())
     arguments = engine['args']
     if not isinstance(arguments, list) or len(arguments) > 128:
         raise InvalidUpdate('Invalid engine argument allocation')
@@ -147,7 +177,7 @@ def normalize(value, verify_files=True):
     profile = {'id': name, 'name': reference, 'model': _string(value.get('model'), 'model name', 200),
                'engine': {'executable': executable, 'args': arguments, 'cwd': cwd,
                           'environment': environment},
-               'tokenizer_path': _path(value.get('tokenizer_path'), 'tokenizer directory'),
+               'tokenizer_path': str(Path(_path(value.get('tokenizer_path'), 'tokenizer directory')).resolve()),
                'context_tokens': context, 'cold_memory_bytes': cold}
     for key in ('source_config', 'engine_source'):
         if key in value:
@@ -164,14 +194,24 @@ def normalize(value, verify_files=True):
         if not os.access(executable, os.X_OK):
             raise InvalidUpdate('Engine executable is not accessible')
         bindings = _bindings(profile)
-        if 'artifact_bindings' in value and value['artifact_bindings'] != bindings:
-            raise InvalidUpdate('Engine artifacts changed; reimport the model profile')
+        previous = value.get('artifact_bindings')
+        legacy = previous is not None and all(isinstance(row, dict) and 'sha256' not in row for row in previous)
+        if previous is not None and previous != bindings:
+            without_content = [{key: item for key, item in row.items() if key != 'sha256'} for row in bindings]
+            resolved_previous = [dict(row, path=str(Path(row['path']).resolve())) for row in previous] if legacy else previous
+            if not legacy or resolved_previous != without_content:
+                raise InvalidUpdate('Engine artifacts changed; reimport the model profile')
     else:
         bindings = value.get('artifact_bindings', [])
     profile['artifact_bindings'] = bindings
     fingerprint = hashlib.sha256(canonical(profile).encode()).hexdigest()
     if value.get('profile_hash', fingerprint) != fingerprint:
-        raise InvalidUpdate('Engine profile fingerprint does not match its descriptor')
+        legacy_profile = dict(profile, artifact_bindings=value.get('artifact_bindings'),
+                              engine=dict(profile['engine'], executable=value['engine']['executable'], cwd=value['engine']['cwd']),
+                              tokenizer_path=value['tokenizer_path'])
+        legacy_hash = hashlib.sha256(canonical(legacy_profile).encode()).hexdigest()
+        if not verify_files or not legacy or value.get('profile_hash') != legacy_hash:
+            raise InvalidUpdate('Engine profile fingerprint does not match its descriptor')
     profile['profile_hash'] = fingerprint
     return profile
 
@@ -182,8 +222,10 @@ def read(path=None):
         descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
         with os.fdopen(descriptor, 'rb') as handle:
             info = os.fstat(handle.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_REGISTRY_BYTES:
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_REGISTRY_BYTES or info.st_nlink != 1:
                 raise InvalidUpdate('Invalid bounded engine registry')
+            if info.st_uid != os.getuid() or info.st_mode & 0o022:
+                raise InvalidUpdate('Engine registry must be user-owned and not writable by group or other users')
             raw = handle.read(MAX_REGISTRY_BYTES + 1)
     except FileNotFoundError:
         return {}
@@ -258,6 +300,9 @@ def catalog(path=None):
                      'ready': False, 'provider': 'sutra_engine', 'capabilities': ['completion'],
                      'context_tokens': profile['context_tokens'],
                      'profile_hash': profile['profile_hash'],
+                     'executable_path': profile['engine']['executable'],
+                     'executable_sha256': next(row['sha256'] for row in profile['artifact_bindings'] if row['path'] == profile['engine']['executable']),
+                     'tokenizer_fingerprint': hashlib.sha256(canonical([row for row in profile['artifact_bindings'] if row['path'].startswith(profile['tokenizer_path'] + os.sep)]).encode()).hexdigest(),
                      'eligibility_reason': 'Registered local Sutra engine profile'})
     return {'models': rows, 'errors': errors}
 

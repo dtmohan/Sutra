@@ -142,7 +142,7 @@ function create({readProfile = startup.readStartupProfile, writeProfile = atomic
   };
 
   async function discover() {
-    if (!supported()) return {available:false, busy:isBusy(), profiles:[], models:[],
+    if (!supported()) return {available:false, supported:false, busy:isBusy(), profiles:[], models:[],
       message:'Native Strata model management requires a local macOS window.'};
     try {
       const record = await configuration();
@@ -179,6 +179,13 @@ function create({readProfile = startup.readStartupProfile, writeProfile = atomic
         const plan = await getPlan(profile);
         const state = await runtime(profile, 'status');
         if (state.profile !== row.id || !clean(state.state, 40)) throw new Error('Invalid native Strata profile status.');
+        let ready=state.ok===true&&state.state==='ready'&&state.api_identity_verified===true&&
+          state.generation_ready===true&&nativeID(state.owner_id)&&nativeID(state.instance_id);
+        if(ready){
+          try{const server=await inspectServer(profile.port);ready=serverMatches(server,profile,state)&&server.loaded===true;}
+          catch{ready=false;}
+        }
+        const reportedState=state.state==='ready'&&!ready?'unverified':state.state;
         const source = shown.profile.source_config;
         const selected = selectedValid(record) && record.profile === profile.profile && record.model === profile.model && record.port === profile.port;
         const entry = {kind:'profile', name:row.id, profile, source,
@@ -188,15 +195,15 @@ function create({readProfile = startup.readStartupProfile, writeProfile = atomic
         const id = put(entry);
         profiles.push({id, name:row.id, model:profile.model,
           context_tokens:contextTokens(plan) || contextTokens(shown.plan) || sources.get(source)?.context || null,
-          state:state.state, selected});
+          state:reportedState, ready, selected});
       }
       const selected = profiles.find(profile => profile.selected);
-      return {available:true, busy:isBusy(), profiles, models,
+      return {available:true, supported:true, busy:isBusy(), profiles, models,
         selected_profile:selected?.name || null, runtime_state:selected?.state || 'unselected',
         message:profiles.length ? 'Installed native Strata profiles. Loading verifies the native model and available resources.' :
           'No local native Strata profile is configured. Import a native Strata configuration.'};
     } catch (error) {
-      return {available:false, busy:isBusy(), profiles:[], models:[], message:error.message};
+      return {available:false, supported:true, busy:isBusy(), profiles:[], models:[], message:error.message};
     }
   }
 

@@ -6,7 +6,7 @@ const fs=require('node:fs'),path=require('node:path');
  for(let i=0;i<1800;i++){
   if(p.isClosed())break;const text=await p.locator('body').innerText();
   if(text!==last){fs.writeFileSync(path.join(__dirname,'../native-ui.txt'),text);last=text;}
-  const permissions=p.locator('.monaco-dialog-box').filter({hasText:'Workspace permissions for Sutra'});
+  const permissions=p.locator('.monaco-dialog-box').filter({hasText:'Workspace access for Sutra'});
   const profile=permissions.getByRole('button',{name:'Workspace agent',exact:true});
   if(await profile.count()===1&&await profile.isVisible())await profile.click();
   for(const label of ['Yes','Apply edit','Run test']){const target=p.getByRole('button',{name:label,exact:true});if(await target.count()===1&&await target.isVisible()&&(label!=='Yes'||/Sutra: (apply edit|run test)/.test(text))){console.log('Confirmed '+label+' after preview');await p.screenshot({path:path.join(__dirname,'../native-confirm-'+label.replace(' ','-')+'.png')});await target.click();}}

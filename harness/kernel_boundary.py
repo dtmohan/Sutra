@@ -1,6 +1,7 @@
 """Shared numeric validation only. Domain policy belongs to the two adapters."""
 from dataclasses import dataclass
 import math
+import time
 from numbers import Real
 from stp_canonical.kernel import STPKernel as CanonicalKernel
 
@@ -22,8 +23,15 @@ class KernelBoundary:
         object.__setattr__(self,'sigma_clause',measurement(self.sigma_clause,'sigma_clause',positive=True))
         if not math.isfinite(2*self.k):raise ValueError('2*k must be finite')
     def evaluate(self,omega,sigma):
-        return CanonicalKernel(self.k,self.sigma_clause).evaluate(
-            measurement(omega,'omega',nonnegative=True),measurement(sigma,'sigma'))
+        omega=measurement(omega,'omega',nonnegative=True)
+        sigma=measurement(sigma,'sigma')
+        kernel=CanonicalKernel(self.k,self.sigma_clause)
+        started=time.perf_counter_ns()
+        result=kernel.evaluate(omega,sigma)
+        elapsed=time.perf_counter_ns()-started
+        from accounting_metrics import record
+        record(None,'kernel',elapsed,decision=result.decision.value)
+        return result
     def frame(self,adapter,profile,omega,sigma):
         v=self.evaluate(omega,sigma)
         return {'adapter':adapter,'profile':profile,'profile_version':1,'omega':v.omega,

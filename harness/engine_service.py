@@ -1,5 +1,6 @@
 """Sutra-owned local engine service. No Strata Control or Ollama imports."""
 import argparse
+from contextlib import contextmanager
 import hmac
 import json
 import os
@@ -13,7 +14,7 @@ import threading
 import time
 import uuid
 
-from engine_client import FRAME_LIMIT, VERSION, runtime_hash, socket_path
+from engine_client import FRAME_LIMIT, VERSION, runtime_hash, socket_path, signed, verified, progress_frame, read_line
 from engine_profiles import load
 from platform_support import lock_file
 
@@ -22,6 +23,18 @@ class WorkerError(RuntimeError):
     def __init__(self, message, status='failed', decision=None):
         super().__init__(message)
         self.status, self.decision = status, decision
+
+
+@contextmanager
+def _socket_lifetime(endpoint):
+    try:
+        yield
+    finally:
+        endpoint.unlink(missing_ok=True)
+        try:
+            endpoint.parent.rmdir()
+        except OSError:
+            pass
 
 
 class EngineWorker:
@@ -62,8 +75,14 @@ class EngineWorker:
         cold = profile.get('cold_memory_bytes') if profile else None
         result = self.admission(cold, self.directory, native_fit=cold is None)
         if not result.get('admitted'):
-            raise WorkerError(result.get('reason', 'Engine memory admission is unavailable'),
-                              'paused', result.get('decision'))
+            error = WorkerError(result.get('reason', 'Engine memory admission is unavailable'),
+                                'paused', result.get('decision'))
+            hardware = result.get('hardware') or {}
+            error.blocking_measurement = {key: result.get(key) for key in
+                ('at', 'available_bytes', 'cold_memory_bytes', 'system_reserve_bytes', 'native_fit_only')}
+            error.blocking_measurement.update(hardware_decision=hardware.get('decision'),
+                hardware_reason=hardware.get('reason'), sample=hardware.get('sample'))
+            raise error
         return result
 
     def _stop(self):
@@ -242,7 +261,7 @@ def serve(directory, registry, *, worker=None, ready=None, stop=None):
     code = runtime_hash()
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     record = directory / 'worker.json'
-    with lock_file(directory / 'owner.lock'):
+    with _socket_lifetime(endpoint), lock_file(directory / 'owner.lock'):
         if endpoint.exists():
             endpoint.unlink()
         server.bind(str(endpoint))
@@ -258,13 +277,24 @@ def serve(directory, registry, *, worker=None, ready=None, stop=None):
             json.dump(document, stream)
         temporary.replace(record)
 
+        nonces = {}
+        nonce_lock = threading.Lock()
+
         def connection(peer, cancel):
             ended = threading.Event()
             write_lock = threading.Lock()
             stream = None
+            nonce = None
+            sequence = 0
 
             def emit(event, **fields):
-                frame = json.dumps(dict(event=event, **fields), separators=(',', ':'), ensure_ascii=False).encode() + b'\n'
+                nonlocal sequence
+                if nonce is None:
+                    raise WorkerError('The request was not authenticated')
+                if event == 'progress':
+                    progress_frame(fields.get('data'))
+                frame = json.dumps(signed(dict(event=event, nonce=nonce, seq=sequence, **fields), owner), separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode() + b'\n'
+                sequence += 1
                 if len(frame) > FRAME_LIMIT:
                     raise WorkerError('Engine result exceeds its transport allocation')
                 with write_lock:
@@ -283,14 +313,25 @@ def serve(directory, registry, *, worker=None, ready=None, stop=None):
 
             try:
                 peer.settimeout(5)
-                stream = peer.makefile('rb')
-                raw = stream.readline(FRAME_LIMIT + 1)
+                raw = read_line(peer, bytearray(), time.monotonic() + 5)
                 if len(raw) > FRAME_LIMIT or not raw.endswith(b'\n'):
                     raise WorkerError('Invalid bounded engine request')
-                request = json.loads(raw)
-                if (not isinstance(request, dict) or request.get('version') != VERSION or
-                        not isinstance(request.get('token'), str) or not hmac.compare_digest(request['token'], owner)):
+                envelope = verified(json.loads(raw), owner)
+                if (set(envelope) != {'version', 'nonce', 'sent_at', 'request'} or type(envelope.get('version')) is not int or envelope.get('version') != VERSION or
+                        not isinstance(envelope.get('nonce'), str) or len(envelope['nonce']) != 32 or
+                        any(char not in '0123456789abcdef' for char in envelope['nonce']) or
+                        type(envelope.get('sent_at')) is not int or abs(time.time() - envelope['sent_at']) > 60 or
+                        not isinstance(envelope.get('request'), dict)):
                     raise WorkerError('Engine worker authentication failed', 'denied')
+                nonce = envelope['nonce']
+                with nonce_lock:
+                    now = time.monotonic()
+                    for key in [key for key, expiry in nonces.items() if expiry < now]:
+                        del nonces[key]
+                    if nonce in nonces or len(nonces) >= 2048:
+                        raise WorkerError('Engine request nonce was replayed or the admission window is full', 'denied')
+                    nonces[nonce] = now + 125
+                request = envelope['request']
                 watcher = threading.Thread(target=disconnected, daemon=True)
                 watcher.start()
                 result = worker.operation(request, emit, cancel)
@@ -305,8 +346,9 @@ def serve(directory, registry, *, worker=None, ready=None, stop=None):
                     emit('result', data={'ok': False,
                         'status': 'timeout' if isinstance(error, TimeoutError) else getattr(error, 'status', 'failed'),
                         'decision': getattr(error, 'decision', None), 'error': str(error)[:1000],
+                        'blocking_measurement': getattr(error, 'blocking_measurement', None),
                         'usage': worker.last_generation if isinstance(error, TimeoutError) else None})
-                except OSError:
+                except (OSError, WorkerError):
                     pass
             finally:
                 ended.set()

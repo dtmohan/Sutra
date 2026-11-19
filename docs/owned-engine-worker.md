@@ -187,3 +187,19 @@ on the next arithmetic request produced 47 reasoning chunks and the correct
 JSON answer for 17 × 19, with 115 input tokens and 57 output tokens in 6.54 seconds.
 This is a small functional check, not a throughput benchmark. Native timeout
 settlement and cancelled-load recovery additionally have deterministic tests.
+
+## Native chat permission and resume compatibility
+
+Use **Sutra: Workspace Access…** to inspect or change the trusted workspace
+grant. The permission choice is handled outside the active model-response turn;
+the host does not keep a model call open while waiting for consent. Declining
+access must be reported as a permission decision, not a model-generation error.
+
+Resume targets the originating Local chat when the host supports session-specific
+opening. Some VS Code versions ignore an origin session passed to generic
+open-chat commands. On those hosts Sutra offers to copy a single-use saved-request
+instruction for the original Local chat instead of opening an arbitrary chat or
+a GitHub sign-in flow. Select Sutra Auto in that chat and paste the instruction.
+The instruction identifies the saved request; it does not grant permissions or
+refund spending. This compatibility fallback needs a live host journey as well
+as command-boundary tests.

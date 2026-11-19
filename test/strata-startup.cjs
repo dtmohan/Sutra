@@ -29,6 +29,14 @@ const owner = 'c'.repeat(32), instance = 'd'.repeat(32);
 const stopPlan = {ok:true, plan:{profile:profile.profile, owner_id:owner, instance_id:instance}};
 const serverStatus = {service:'strata', model:profile.model, instance_id:instance, activity:{in_flight:0}};
 const fail = () => assert.fail('Unexpected side effect');
+assert.equal(startup.selectedReference({...profile,profile:'manager-selected-high'}),'strata:profile/manager-selected-high');
+for(const invalid of [null,{}, {...profile,profile:'../escape'}, {...profile,port:-1}])assert.equal(startup.selectedReference(invalid),null);
+const hostSource=fs.readFileSync(path.join(__dirname,'../extension.js'),'utf8');
+const automatic=hostSource.slice(hostSource.indexOf('async function startStrata('),hostSource.indexOf('async function stopStrata('));
+assert.match(automatic,/readStartupProfile\(\)/);assert.match(automatic,/selectedReference\(selected\)/);
+assert(!automatic.includes('native.find('),'Startup must not choose a tier instead of the manager selection');
+const configurationHandler=hostSource.slice(hostSource.indexOf('const strataConfiguration='),hostSource.indexOf('if(strataConfiguration)'));
+assert(!configurationHandler.includes('startStrata('),'Changing model/settings choices must never trigger an engine load');
 
 function options(changes = {}) {
   return {

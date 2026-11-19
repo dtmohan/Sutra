@@ -59,7 +59,9 @@ def handle(operation, ref=None):
         if operation == 'load':
             if not engine_profiles.is_engine(ref) or ref not in engine_profiles.assigned_models():
                 raise InvalidUpdate('The engine profile needs a trusted user selection before loading')
-            result = engine_client.activate(engine_profiles.load(ref))
+            profile = engine_profiles.load(ref)
+            engine_profiles.require_approval(profile)
+            result = engine_client.activate(profile)
             return dict(result, message='Sutra loaded and verified its owned engine worker.')
         if operation == 'unload':
             return dict(engine_client.unload(), message='Sutra unloaded its owned engine child.')

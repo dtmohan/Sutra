@@ -27,7 +27,10 @@ function create({bootstrapPython,python,registryPath,runtimeDir,models=[],extens
     SUTRA_ENGINE_ONLY:'1',PYTHONNOUSERSITE:'1'};
   // Inference must use the Sutra environment, never an inherited application's
   // Python bundle or modules supplied through the editor's startup shell.
-  for(const key of ['PYTHONHOME','PYTHONPATH','VIRTUAL_ENV'])delete env[key];
+  for(const key of Object.keys(env)){
+    if(key==='VIRTUAL_ENV'||/^(?:DYLD_|LD_|STRATA_|PYTHON)/.test(key))delete env[key];
+  }
+  env.PYTHONNOUSERSITE='1';
 
   async function command(operation,ref,options={}){
     if(!OPERATIONS.has(operation))throw new Error('Unknown Sutra engine management operation.');

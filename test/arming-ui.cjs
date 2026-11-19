@@ -46,8 +46,8 @@ async function main() {
   try {
     browser = await connect();
     let page = await workbench(browser);
-    const permissions = 'Sutra: Workspace Permissions…';
-    const dialog = () => page.locator('.monaco-dialog-box').filter({hasText:'Workspace permissions for Sutra'});
+    const permissions = 'Sutra: Workspace Access…';
+    const dialog = () => page.locator('.monaco-dialog-box').filter({hasText:'Workspace access for Sutra'});
     const status = label => page.locator('.statusbar').getByText(label,{exact:false}).waitFor({state:'visible'});
     const screenshot = name => page.screenshot({path:path.join(path.dirname(resultPath),name)});
 

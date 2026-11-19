@@ -67,6 +67,13 @@ function validProfile(profile, selected) {
       typeof value === 'string' && value.length <= 4096 && !/[\x00-\x1f\x7f]/.test(value));
 }
 
+function selectedReference(profile) {
+  return profile && Number.isInteger(profile.port) && profile.port>0 && profile.port<=65535 &&
+    typeof profile.model==='string' && profile.model.length>0 && profile.model.length<=200 &&
+    !/[\x00-\x1f\x7f]/.test(profile.model) && validProfile(profile,profile)
+    ? 'strata:profile/'+profile.profile : null;
+}
+
 function nativeCommand(profile, action, args = []) {
   return new Promise((resolve, reject) => {
     execFile(profile.executable, ['runtime', action, '--profile', profile.profile, ...args, '--output', 'json'],
@@ -276,4 +283,4 @@ async function stop(getConfig, {
 
 // Machine-management UI uses the same identity and lifecycle checks.
 module.exports = {settingKeys, start, stop, validProfile, readStartupProfile,
-  nativeCommand, readServer, matchingPlan, memoryBinding, startupPath};
+  nativeCommand, readServer, matchingPlan, memoryBinding, startupPath, selectedReference};

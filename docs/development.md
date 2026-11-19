@@ -1,39 +1,65 @@
 # Development
 
 Use Python 3.9+ and a recent Node.js with `structuredClone` support (Node 22 works).
-The Python suite uses the standard library. TypeScript and Mermaid runtime files
-are vendored so packaging and normal extension use need no registry downloads.
+The portable Python suite uses standard-library fixtures. Engine codec tests that
+need `regex` and `Jinja2` skip when those pinned dependencies are unavailable.
+Installed model packs are never discovered from a developer's home directory by
+the ordinary suite. TypeScript and Mermaid runtime files are vendored.
 
-From the repository root:
+Use the single gate runner from the repository root:
 
 ```sh
 export KARMA_NODE="$(command -v node)"
 export KARMA_TYPESCRIPT="$PWD/vendor/typescript/typescript.js"
-python3 -B -m unittest discover -s harness -q
-node test/native-provider.cjs
-node test/hardening.cjs
-node test/panel-entry.cjs
-node test/model-selection.cjs
-node test/branding.cjs
-node test/host-tokens.cjs
-node test/runtime-integrity.cjs
-python3 -B scripts/runtime-integrity.py
-python3 -B package.py --output dist
+bash scripts/qa.sh
+bash scripts/qa.sh --with-package
 ```
 
-Action execution tests exercise operating-system sandbox capabilities. macOS uses
-`sandbox-exec`; Linux sandbox availability depends on the host. Windows action
-execution is currently read-only. Do not weaken the adapter to make a test pass.
+The runner verifies release metadata, runs every portable Python test and the
+Node contract suites listed in `scripts/qa.sh`, and returns nonzero for any failed
+gate. `--with-package` additionally builds the VSIX and checks exact runtime-file
+completeness, byte agreement, duplicate/unexpected archive members and kernel
+identity. The package omission and changelog-order regressions are ordinary
+Python tests. The gate runner never regenerates integrity hashes or installs
+model dependencies.
 
-Optional browser checks need Playwright and a Chromium browser. Set
-`KARMA_PLAYWRIGHT` to the installed Playwright module path and `KARMA_BROWSER` to
-the browser executable, then run `node test/dashboard-browser.cjs` and
-`node test/diagram-browser.cjs`. Set `KARMA_UI_OUTPUT` to an artifact directory
-and run `node test/usage-browser.cjs` for the docked token dashboard. The usage
-view's read-only message boundary, shared reader and hidden-view polling behavior
-are covered by `test/hardening.cjs`. Native VS Code integration drivers in `test/`
-need an isolated VS Code profile, installed local models and their documented
-environment variables; they are not ordinary Node unit tests.
+Action tests exercise operating-system sandbox capabilities. macOS uses
+`sandbox-exec`; Linux availability depends on the host. Windows action execution
+is currently read-only. Do not weaken an adapter to make a test pass.
+
+Optional checks are explicit:
+
+```sh
+# Existing Playwright module and Chromium-compatible executable:
+export KARMA_PLAYWRIGHT="/absolute/path/to/playwright"
+export KARMA_BROWSER="/absolute/path/to/chromium"
+export KARMA_UI_OUTPUT="/absolute/path/to/disposable-artifacts"
+bash scripts/qa.sh --browser
+
+# Pack codec only: reads the selected tokenizer, never loads model weights.
+export SUTRA_ENGINE_TEST_PYTHON="/absolute/path/to/Engine/python/bin/python"
+export SUTRA_ENGINE_TEST_TOKENIZER="/absolute/path/to/tokenizer-directory"
+bash scripts/qa.sh --engine-codec
+
+# Package + isolated VS Code smoke host:
+bash scripts/qa.sh --vscode
+```
+
+The installed-pack flag requires both paths and fails if the selected pack or
+pinned codec dependencies are unavailable. A portable run ignores a leftover
+`SUTRA_ENGINE_TEST_TOKENIZER`; only `--engine-codec` enables that extra gate.
+The optional differential script `test/live-engine-codec.py --pack PATH` reads
+only the chosen tokenizer. Its optional earlier-runtime oracle is a validation
+comparison, never a production dependency.
+
+`--browser` runs dashboard, diagram, Sutra Monitor and native-manager suites.
+The diagram suite tests light/dark/high-contrast changes and inert hostile labels.
+`--vscode` uses the isolated smoke fixture described by `scripts/vscode-smoke.py`;
+it is not a live model-quality result. The native drivers under `test/` require
+separate disposable VS Code profiles, selected local providers and their own
+explicit environment variables. Never equate fixture activation with a successful
+live workspace review. Record the frozen checkout, model/profile, prompt, receipts,
+remaining task budget and any environmental limitations with live outcomes.
 
 On macOS the bundled telemetry helper can be rebuilt from source:
 
@@ -65,7 +91,7 @@ configured matrix is not evidence that a remote run has passed.
 | `extension.js`, `native_provider.js` | VS Code integration and governed chat |
 | `native_memory.js` | Workspace-scoped authenticated receipt pointers |
 | `host_tokens.js`, `vendor/tokenizer/` | Offline approximate VS Code history sizing |
-| `usage_view.js` | Docked token dashboard and status-bar navigation |
+| `usage_view.js` | Sutra Monitor: token, system and kernel status |
 | `media/` | Dashboard, token tables and diagram views |
 | `harness/` | Contracts, tools, adapters, calibration and invocation gateway |
 | `harness/stp_canonical/` | Unmodified supplied four-decision kernel |
@@ -74,9 +100,8 @@ configured matrix is not evidence that a remote run has passed.
 | `package.py` | Runtime-only VSIX and source archive generation |
 
 Changes to governed backend policy files affect the policy hash and may make old
-checkpoints inadmissible. The Sutra branding change leaves all `harness/` files
-byte-identical to the imported baseline. Public UI wording may change separately
-from protocol IDs, signed marker formats and ledger formats.
+checkpoints inadmissible. Public UI wording may change separately from protocol IDs, signed marker formats
+and ledger formats. Recheck saved-task compatibility after any policy change.
 
 `test/host-context-vscode.js` exercises native short turns and automatic compaction
 of intentionally oversized history. Run it only with the disposable fixture

@@ -5,7 +5,11 @@ const model='sutra:engine/local-qwen';
 const base={bootstrapPython:'python3',python:'/private Sutra/python/bin/python',
   registryPath:'/private Sutra/models.json',runtimeDir:'/private Sutra/runtime',
   extensionPath:'/installed Sutra',models:[model],environment:{PATH:'/trusted/bin',
-    PYTHONPATH:'/foreign/control',PYTHONHOME:'/foreign/python',VIRTUAL_ENV:'/foreign/env'}};
+    PYTHONPATH:'/foreign/control',PYTHONHOME:'/foreign/python',VIRTUAL_ENV:'/foreign/env',
+    PYTHONSTARTUP:'/foreign/startup.py',PYTHONUSERBASE:'/foreign/modules',PYTHONNOUSERSITE:'0',
+    DYLD_INSERT_LIBRARIES:'/foreign/hook.dylib',DYLD_LIBRARY_PATH:'/foreign/libs',
+    LD_PRELOAD:'/foreign/hook.so',LD_LIBRARY_PATH:'/foreign/libs',STRATA_COMPONENTS_DIR:'/foreign/control',
+    SUTRA_ENGINE_APPROVALS:JSON.stringify({[model]:'a'.repeat(64)})}};
 
 (async()=>{
  const calls=[];
@@ -28,7 +32,11 @@ const base={bootstrapPython:'python3',python:'/private Sutra/python/bin/python',
   assert.equal(call.options.env.SUTRA_RUNTIME_DIR,base.runtimeDir);
   assert.deepEqual(JSON.parse(call.options.env.SUTRA_ENGINE_MODELS),[model]);
   assert.equal(call.options.env.SUTRA_ENGINE_ONLY,'1');
-  for(const key of ['PYTHONPATH','PYTHONHOME','VIRTUAL_ENV'])assert(!Object.hasOwn(call.options.env,key));
+  for(const key of Object.keys(base.environment).filter(key=>key==='VIRTUAL_ENV'||/^(?:DYLD_|LD_|STRATA_|PYTHON)/.test(key))){
+    if(key!=='PYTHONNOUSERSITE')assert(!Object.hasOwn(call.options.env,key));
+  }
+  assert.equal(call.options.env.PYTHONNOUSERSITE,'1');
+  assert.equal(call.options.env.SUTRA_ENGINE_APPROVALS,base.environment.SUTRA_ENGINE_APPROVALS,'Trusted host approval bindings survive sanitization');
  }
  assert.equal(calls[2].options.timeout,180000);
  assert.equal(calls[5].options.timeout,180000);

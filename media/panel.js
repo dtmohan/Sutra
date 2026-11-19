@@ -4,6 +4,7 @@ let preservedConstraints={};
 let current=null,selectedModel='local-assistant:latest',proposalId=null,proposalKind=null,busy=false,nativeState={},lastReceipt=null,cpuHistory=[],autoRunning=false;
 let strataState={profiles:[],models:[],available:false},strataPending=false;
 let engineState={models:[],status:{},environment_ready:false},enginePending=false;
+let strataPendingText='',enginePendingText='',modelDraft={},modelDraftDirty=false,modelSavePending=false;
 function send(op,data={}){el('error').textContent='';vscode.postMessage({op,...data});}
 function setText(id,text){const element=el(id);if(element.textContent!==text)element.textContent=text;}
 function fieldError(id,message){el(id).setAttribute('aria-invalid',String(!!message));setText(id+'-error',message);}
@@ -127,7 +128,16 @@ window.addEventListener('message',({data:m})=>{
  }
   if(m.type==='auto-running'){autoRunning=m.value;updateButtons();}
   if(m.type==='busy'){busy=m.value;updateButtons();el('status').textContent=busy?'Working locally…':'';}
- if(m.type==='error'){el('error').textContent=m.message;if(enginePending){enginePending=false;setText('engine-status',m.message);}if(strataPending)strataPending=false;updateStrataButtons();}
+ if(m.type==='error'){
+  el('error').textContent=m.message;
+  if(enginePending||m.op?.startsWith('engine_')){enginePending=false;setText('engine-status',m.message);}
+  if(strataPending||m.op?.startsWith('strata_')){strataPending=false;setText('strata-status',m.message);}
+  if(m.op==='save_model_tiers'){modelSavePending=false;setText('model-save-status',m.message+' Your draft choices were retained.');}
+  if(m.op==='refresh_models')setText('model-discovery',m.message);
+  if(m.op==='save_runtime_settings')setText('runtime-save-status',m.message);
+  if(m.op==='save_tier_reasoning')setText('tier-reasoning-status',m.message);
+  updateStrataButtons();
+ }
   if(m.type==='dashboard'){showDashboard(m.data);if(!m.data.hardware?.available||!KarmaTokens.freshAge(m.data.hardware.age_seconds))expireDashboard('Readings expired. Waiting for a fresh update.');}
   if(m.type==='models'){for(const id of ['model','review-model','api-model','static-model','auto-model']){el(id).replaceChildren(...m.data.map(x=>{const o=document.createElement('option');o.value=x.name;o.textContent=x.name;return o;}));if(id==='api-model'){const opt=document.createElement('option');opt.value='auto';opt.textContent='Auto · prefer different model weights';el(id).prepend(opt);}const preferred=id==='api-model'?'auto':id==='static-model'&&!current?.static?.model?'qwen3.6:35b':selectedModel;el(id).value=preferred==='auto'||m.data.some(m=>m.name===preferred)?preferred:selectedModel;}}
   if(m.type==='state'){
@@ -186,7 +196,7 @@ window.addEventListener('message',({data:m})=>{
  if(m.type==='state'){el('chat-task').textContent=m.data.contract?'Task: '+m.data.contract.contract.goal:'No active task.';el('workflow-notice').hidden=!(m.data.session&&!m.data.auto);if(m.data.chat){renderReview(m.data.chat.answer,m.data.chat.warning);}}
  if(m.type==='tier-settings'){el('tier-summary').textContent=['low','mid','high'].map(t=>t+': '+(m.models[t]||'no local chat model available')).join(' · ');showModelChoices(m);}
  if(m.type==='show-section')showSection(m.section);
- if(m.type==='models-saved')el('model-save-status').textContent='Model choices saved.';
+ if(m.type==='models-saved'){modelDraftDirty=false;modelSavePending=false;setText('model-save-status','Model choices saved.');}
  if(m.type==='chat-notice'){el('chat-usage').textContent='';el('chat-progress').textContent='';el('chat-route').textContent='Sutra guidance · no model call';el('chat-answer').textContent=m.data.message;el('chat-diagram').disabled=true;if(m.data.kind==='workflow')el('workflow-notice').hidden=false;}
  if(m.type==='dashboard-error'){expireDashboard('Connection interrupted. Waiting for a fresh reading.');}
  if(m.type==='busy'){el('chat-send').disabled=m.value;el('chat-new').disabled=m.value;el('configure-models').disabled=m.value;el('chat-stop').disabled=!m.value;el('save-model-tiers').disabled=m.value||!modelCandidates.length;el('refresh-models').disabled=m.value;updateEngineButtons();}
@@ -244,6 +254,7 @@ el('open-current-task').onclick=()=>showSection('advanced');
 function showModelChoices(m){
  m={...m,catalog:m.catalog||{models:[],suggested_tiers:{},error:'Local models have not been discovered. Refresh model discovery or connect the native runtime.'}};
  const candidates=m.catalog.models.filter(x=>x.eligible===true);modelCandidates=candidates;
+ if(!modelDraftDirty)modelDraft={...m.models};
  for(const tier of ['low','mid','high']){
   const select=el('tier-'+tier);select.replaceChildren();
   const available=candidates.filter(model=>!model.tier||model.tier===tier);
@@ -251,10 +262,11 @@ function showModelChoices(m){
    const o=document.createElement('option');o.value=model.name;
    const native=typeof model.name==='string'&&(model.name.startsWith('strata:profile/')||model.name.startsWith('sutra:engine/'));
    const label=model.display_name||model.name;
+   const state=model.state||model.runtime_state;
    o.textContent=label+(model.parameter_size?' · '+model.parameter_size:'')+(model.moe?' · MoE':'')+
-    (native?(model.ready===true?' · loaded':' · loads on demand'):'');select.append(o);
+    (native?(model.ready===true?' · loaded':state==='starting'?' · loading':state?' · '+state.replaceAll('_',' '):' · loads on demand'):'');select.append(o);
   }
-  const saved=m.models[tier];if(!available.some(x=>x.name===saved)){const missing=document.createElement('option');missing.value=saved||'';missing.textContent=saved?saved+' (unavailable — choose a replacement)':'No local chat model available';select.append(missing);}
+  const saved=modelDraft[tier];if(!available.some(x=>x.name===saved)){const missing=document.createElement('option');missing.value=saved||'';const row=m.catalog.models.find(x=>x.name===saved);missing.textContent=saved?saved+' ('+(row?.state||'unavailable')+' — choose a replacement)':'No local chat model available';select.append(missing);}
   select.value=saved||'';
   select.setAttribute('aria-invalid',String(!!saved&&!available.some(x=>x.name===saved)));
  }
@@ -265,11 +277,15 @@ function showModelChoices(m){
  el('model-suggestions').textContent=suggestedModels?'Discovered defaults — '+['low','mid','high'].map(t=>t+': '+suggestedModels[t]).join(' · ')+(differs?'. Your saved choices were preserved. Use discovered defaults, then Save choices, to replace them.':'. These match your saved choices.'):'No complete defaults available. Choose an installed model or native profile for each tier.';
  const issues=(m.catalog.errors||[]).map(entry=>entry.error).filter(value=>typeof value==='string'&&value.trim());
  setText('model-discovery',(m.catalog.error||candidates.length+' eligible local models.')+' '+(m.catalog.selection_note||'')+(issues.length?' '+[...new Set(issues)].join(' '):''));
- el('model-save-status').textContent='';el('save-model-tiers').disabled=busy||!candidates.length;
+ if(!modelDraftDirty&&!modelSavePending)setText('model-save-status','');
+ const picked=modelTiers.map(t=>m.catalog.models.find(row=>row.name===modelDraft[t]));
+ const sameModel=picked.every(Boolean)&&new Set(picked.map(row=>row.model||row.name)).size===1;
+ setText('model-capability-note',sameModel?'These tiers share the same model weights and capabilities. Context profiles change capacity; they do not create a stronger model.':'Tier names are routing roles. Capability depends on the models you choose, not the tier label.');
+ el('save-model-tiers').disabled=busy||!candidates.length||modelSavePending;
  updateNativeDraftButton();
  updateEngineButtons();
 }
-el('use-model-defaults').onclick=()=>{if(!suggestedModels)return;for(const tier of ['low','mid','high']){const select=el('tier-'+tier);select.value=suggestedModels[tier];select.setAttribute('aria-invalid','false');}setText('model-save-status','Suggested choices selected. Click Save choices to apply.');};
+el('use-model-defaults').onclick=()=>{if(!suggestedModels)return;modelDraft={...suggestedModels};modelDraftDirty=true;for(const tier of ['low','mid','high']){const select=el('tier-'+tier);select.value=suggestedModels[tier];select.setAttribute('aria-invalid','false');}setText('model-save-status','Suggested choices selected. Click Save choices to apply.');};
 function activeNativeModel(){
  const active=strataState.profiles.find(profile=>profile.selected===true);
  const name=active?.name?'strata:profile/'+active.name:null;
@@ -279,16 +295,17 @@ function activeNativeModel(){
 function updateNativeDraftButton(){el('use-native-profile').disabled=!!(busy||nativeState.working||nativeState.arming||nativeState.selecting||strataState.busy||strataPending||enginePending||engineState.busy||!activeNativeModel());}
 el('use-native-profile').onclick=()=>{
  const active=activeNativeModel();if(!active||el('use-native-profile').disabled)return;
- for(const tier of modelTiers){el('tier-'+tier).value=active.name;el('tier-'+tier).setAttribute('aria-invalid','false');}
+ modelDraftDirty=true;for(const tier of modelTiers){modelDraft[tier]=active.name;el('tier-'+tier).value=active.name;el('tier-'+tier).setAttribute('aria-invalid','false');}
  setText('model-save-status','The active native profile is selected for all tiers. This uses the same model weights for each tier. Click Save choices to apply.');
 };
 for(const tier of ['low','mid','high'])el('tier-'+tier).onchange=()=>{
  const select=el('tier-'+tier),invalid=!modelCandidates.some(m=>m.name===select.value&&(!m.tier||m.tier===tier));
+ modelDraft[tier]=select.value;modelDraftDirty=true;
  select.setAttribute('aria-invalid',String(invalid));
  setText('model-save-status',invalid?'Choose an installed local model.':'Unsaved model choices. Click Save choices to apply.');
 };
 el('refresh-models').onclick=()=>send('refresh_models');
-el('save-model-tiers').onclick=()=>send('save_model_tiers',{models:Object.fromEntries(['low','mid','high'].map(t=>[t,el('tier-'+t).value]))});
+el('save-model-tiers').onclick=()=>{modelDraft=Object.fromEntries(modelTiers.map(t=>[t,el('tier-'+t).value]));modelDraftDirty=true;modelSavePending=true;setText('model-save-status','Validating and saving model choices…');send('save_model_tiers',{models:modelDraft});};
 
 function engineBusy(){return !!(busy||nativeState.arming||nativeState.selecting||nativeState.working||engineState.busy||engineState.status?.busy||enginePending||strataState.busy||strataPending);}
 function selectedEngineModel(){return engineState.models.find(model=>model.name===el('engine-profile').value);}
@@ -301,26 +318,27 @@ function updateEngineButtons(){
  const waiting=engineBusy(),selected=selectedEngineModel(),ready=engineState.environment_ready===true;
  el('engine-manager').setAttribute('aria-busy',String(!!(engineState.busy||engineState.status?.busy||enginePending)));
  el('engine-profile').disabled=waiting||!engineState.models.length;
- el('engine-load').disabled=waiting||!ready||!selected||selected.eligible===false;
- el('engine-unload').disabled=waiting||!ready||!engineState.status?.running||!engineState.status?.profile;
+ const supported=engineState.supported!==false;
+ el('engine-load').disabled=!supported||waiting||!ready||!selected||selected.eligible===false;
+ el('engine-unload').disabled=!supported||waiting||!ready||!engineState.status?.running||!engineState.status?.profile;
  // Status refresh is read-only. Keep it available after a busy/error snapshot.
- el('engine-refresh').disabled=enginePending;
- el('engine-setup').disabled=waiting;
+ el('engine-refresh').disabled=enginePending&&!engineState.busy;
+ el('engine-setup').disabled=!supported||waiting;
  el('engine-use-tiers').disabled=waiting||!ready||!selected||!modelCandidates.some(model=>model.name===selected.name&&model.eligible===true&&!model.tier);
  if(waiting){for(const tier of modelTiers)el('tier-'+tier).disabled=true;}
  else{for(const tier of modelTiers)el('tier-'+tier).disabled=busy;}
- el('save-model-tiers').disabled=waiting||!modelCandidates.length;
+ el('save-model-tiers').disabled=waiting||!modelCandidates.length||modelSavePending;
 }
 function engineProfileDetails(){
  const model=selectedEngineModel(),active=activeEngineModel();
  const context=Number.isSafeInteger(model?.context_tokens)&&model.context_tokens>0?model.context_tokens.toLocaleString()+' context tokens':'Context size not reported';
  setText('engine-profile-info',model?[model.display_name||model.name,context,
-  model===active&&engineState.status?.running?'Loaded by Sutra':'Available to load'].join(' · '):'Set up the worker to register compatible local model profiles.');
+  model===active&&engineState.status?.engine?.running===true&&engineState.status?.engine?.generation_ready===true?'Loaded by Sutra':'Available to load'].join(' · '):'Set up the worker to register compatible local model profiles.');
  updateEngineButtons();
 }
 function showEngine(data){
  const previous=el('engine-profile').value;
- enginePending=false;
+ if(data?.busy!==true)enginePending=false;
  engineState={...data,models:Array.isArray(data?.models)?data.models.filter(model=>typeof model?.name==='string'):[],status:data?.status&&typeof data.status==='object'?data.status:{}};
  const select=el('engine-profile');select.replaceChildren();
  for(const model of engineState.models){
@@ -330,15 +348,17 @@ function showEngine(data){
  const active=activeEngineModel();
  select.value=engineState.models.some(model=>model.name===previous)?previous:active?.name||engineState.models[0]?.name||'';
  const status=engineState.status;
- const phase=({loading:'Loading',starting:'Starting',ready:'Loaded',generating:'Generating',idle:status.profile?'Loaded':'Ready',stopped:'Stopped',unloaded:'Unloaded',error:'Needs attention',failed:'Needs attention'})[status.phase];
- setText('engine-runtime-state',engineState.environment_ready!==true?'Setup needed':phase||(!status.running?'Unloaded':status.profile?'Loaded':'Ready'));
- setText('engine-status',typeof engineState.error==='string'?engineState.error:engineState.message||(engineState.environment_ready?'Choose a registered model to load with Sutra.':'Set up the local worker runtime before loading a model.'));
+ const ready=status.running===true&&status.engine?.running===true&&status.engine?.generation_ready===true;
+ const loaded=ready?'Loaded':'Needs attention';
+ const phase=({loading:'Loading',starting:'Starting',ready:loaded,generating:'Generating',idle:status.profile?loaded:'Ready',stopped:'Stopped',unloaded:'Unloaded',uncertain:'Needs attention',error:'Needs attention',failed:'Needs attention'})[status.phase];
+ setText('engine-runtime-state',engineState.environment_ready!==true?'Setup needed':phase||(status.running===false?'Unloaded':status.profile?loaded:'Needs attention'));
+ setText('engine-status',enginePending&&data?.busy===true?enginePendingText:typeof engineState.error==='string'?engineState.error:engineState.message||(engineState.environment_ready?'Choose a registered model to load with Sutra.':'Set up the local worker runtime before loading a model.'));
  engineProfileDetails();updateStrataButtons();
 }
 function engineAction(op,fields={}){
- if(op==='engine_refresh'?enginePending:engineBusy())return;
+ if(op==='engine_refresh'?(enginePending&&!engineState.busy):engineBusy())return;
  enginePending=true;
- setText('engine-status',({engine_refresh:'Checking the Sutra worker…',engine_setup:'Preparing the local worker runtime…',engine_load:'Checking resources and loading the selected model…',engine_unload:'Unloading Sutra’s owned model process…'})[op]);
+ enginePendingText=({engine_refresh:'Checking the Sutra worker…',engine_setup:'Preparing the local worker runtime…',engine_load:'Checking resources and loading the selected model…',engine_unload:'Unloading Sutra’s owned model process…'})[op];setText('engine-status',enginePendingText);
  updateStrataButtons();send(op,fields);
 }
 el('engine-profile').onchange=engineProfileDetails;
@@ -348,7 +368,7 @@ el('engine-unload').onclick=()=>engineAction('engine_unload');
 el('engine-load').onclick=()=>{const selected=selectedEngineModel();if(selected&&!el('engine-load').disabled)engineAction('engine_load',{ref:selected.name});};
 el('engine-use-tiers').onclick=()=>{
  const selected=selectedEngineModel();if(!selected||el('engine-use-tiers').disabled)return;
- for(const tier of modelTiers){el('tier-'+tier).value=selected.name;el('tier-'+tier).setAttribute('aria-invalid','false');}
+ modelDraftDirty=true;for(const tier of modelTiers){modelDraft[tier]=selected.name;el('tier-'+tier).value=selected.name;el('tier-'+tier).setAttribute('aria-invalid','false');}
  setText('model-save-status','The selected Sutra worker model is in the draft for all tiers. This shares its model weights and capabilities. Click Save choices to apply.');
 };
 window.addEventListener('message',({data:m})=>{if(m.type==='engine-state')showEngine(m.data);});
@@ -356,15 +376,15 @@ window.addEventListener('message',({data:m})=>{if(m.type==='engine-state')showEn
 function strataBusy(){return !!(busy||nativeState.arming||nativeState.selecting||nativeState.working||strataState.busy||strataPending||enginePending||engineState.busy||engineState.status?.busy);}
 function selectedStrataProfile(){return strataState.profiles.find(profile=>profile.id===el('strata-profile').value);}
 function updateStrataButtons(){
- const waiting=strataBusy(),available=strataState.available===true,selected=selectedStrataProfile();
+ const waiting=strataBusy(),supported=strataState.supported!==false,available=strataState.available===true,selected=selectedStrataProfile();
  el('strata-manager').setAttribute('aria-busy',String(!!(strataState.busy||strataPending)));
  el('strata-profile').disabled=waiting||!available||!strataState.profiles.length;
- el('strata-load').disabled=waiting||!available||!selected;
+ el('strata-load').disabled=!supported||waiting||!available||!selected;
  el('strata-unload').disabled=waiting||!available||!['ready','starting'].includes(strataState.runtime_state);
  el('strata-refresh').disabled=waiting;
  el('strata-add-config').disabled=waiting||!available;
  el('strata-setup').disabled=waiting||!available;
- el('strata-locate').disabled=waiting;
+ el('strata-locate').disabled=!supported||waiting;
  el('strata-autostart').disabled=waiting||!available||!selected;
  updateNativeDraftButton();
  updateEngineButtons();
@@ -374,23 +394,24 @@ function strataProfileDetails(){
  const context=Number.isSafeInteger(profile?.context_tokens)&&profile.context_tokens>0?profile.context_tokens.toLocaleString()+' context tokens':'Context size not reported';
  setText('strata-profile-info',profile?[
   profile.model||profile.name||'Native profile',context,
-  profile.selected?'Active native profile':'Available native profile'
+  profile.selected?'Selected native profile':'Available native profile',
+  ({ready:'Loaded and verified',starting:'Loading',stopped:'Unloaded',failed:'Load failed',stale:'Needs recovery',unverified:'Readiness not verified'})[profile.state]||'State not checked'
  ].join(' · '):'Add an installed model or run Strata setup to create a runtime profile.');
  updateStrataButtons();
 }
 function showStrata(data){
  const previous=el('strata-profile').value;
- strataPending=false;
+ if(data?.busy!==true)strataPending=false;
  strataState={...data,profiles:Array.isArray(data?.profiles)?data.profiles:[],models:Array.isArray(data?.models)?data.models:[]};
  const select=el('strata-profile');select.replaceChildren();
  for(const profile of strataState.profiles){
-  const option=textNode('option',(profile.name||profile.id)+(profile.selected?' · active profile':''));option.value=profile.id;select.append(option);
+  const option=textNode('option',(profile.name||profile.id)+(profile.selected?' · selected':'')+(profile.state?' · '+profile.state:''));option.value=profile.id;select.append(option);
  }
  if(!strataState.profiles.length){const empty=textNode('option','No profile discovered');empty.value='';select.append(empty);}
  select.value=strataState.profiles.some(profile=>profile.id===previous)?previous:
   (strataState.profiles.find(profile=>profile.selected||profile.id===strataState.selected_profile)?.id||strataState.profiles[0]?.id||'');
- setText('strata-runtime-state',({ready:'Loaded',starting:'Loading',stopped:'Unloaded',stale:'Needs recovery',failed:'Load failed'})[strataState.runtime_state]||(strataState.available?'Available':'Not connected'));
- setText('strata-status',strataState.error||strataState.message||(strataState.available?'Choose a native profile to load.':'Locate the Strata executable to connect its runtime.'));
+ setText('strata-runtime-state',strataPending&&data?.busy===true?'Loading':({ready:'Loaded',starting:'Loading',stopped:'Unloaded',stale:'Needs recovery',failed:'Load failed',unverified:'Not verified'})[strataState.runtime_state]||(strataState.available?'Available':'Not connected'));
+ setText('strata-status',strataPending&&data?.busy===true?strataPendingText:strataState.error||strataState.message||(strataState.available?'Choose a native profile to load.':'Locate the Strata executable to connect its runtime.'));
  el('strata-autostart').checked=strataState.start_on_startup===true;
  const list=el('strata-installed-models');list.replaceChildren();
  for(const model of strataState.models){
@@ -402,7 +423,7 @@ function showStrata(data){
 }
 function strataAction(op,fields={}){
  if(strataBusy())return;
- strataPending=true;setText('strata-status',({strata_refresh:'Checking the native Strata runtime…',strata_load:'Checking resources and loading the selected native profile…',strata_unload:'Checking that the native runtime is idle before unloading…',strata_add_config:'Choose an installed model configuration in VS Code…',strata_setup:'Opening native Strata setup…',strata_locate:'Choose the Strata executable in VS Code…',strata_autostart:'Saving the native runtime startup preference…'})[op]);
+ strataPending=true;strataPendingText=({strata_refresh:'Checking the native Strata runtime…',strata_load:'Checking resources and loading the selected native profile…',strata_unload:'Checking that the native runtime is idle before unloading…',strata_add_config:'Choose an installed model configuration in VS Code…',strata_setup:'Opening native Strata setup…',strata_locate:'Choose the Strata executable in VS Code…',strata_autostart:'Saving the native runtime startup preference…'})[op];setText('strata-status',strataPendingText);
  updateStrataButtons();send(op,fields);
 }
 el('strata-profile').onchange=strataProfileDetails;

@@ -45,4 +45,15 @@ assert.deepEqual(forRequest(owned,ownedCatalog,'auto'),{models:owned,fallbacks:[
 assert.throws(()=>validate({...owned,mid:'sutra:engine/missing'},ownedCatalog),/Sutra-owned engine profile for mid.*registry and environment/);
 assert.equal(engineProfile(owned.low),'low');
 for(const invalid of ['sutra:engine/../escape','sutra:engine/A','sutra:engine/a/extra',null])assert(!engineProfile(invalid));
+const {engineApprovals,engineApprovalCandidates}=require('../model_selection');
+const identity={name:owned.low,eligible:true,model:'Example model',profile_hash:'a'.repeat(64),
+ executable_path:'/Users/example/Sutra/Engine/engine',executable_sha256:'b'.repeat(64)};
+assert.deepEqual(engineApprovalCandidates([owned.low,owned.low],{models:[identity]},{}),[identity]);
+assert.deepEqual(engineApprovalCandidates([owned.low],{models:[identity]},{[owned.low]:identity.profile_hash}),[]);
+assert.deepEqual(engineApprovalCandidates([owned.low],{models:[{...identity,profile_hash:'c'.repeat(64)}]},
+ {[owned.low]:identity.profile_hash}),[{...identity,profile_hash:'c'.repeat(64)}],'Changing a bound profile requires renewed approval');
+for(const invalid of [[],null,{bad:'a'.repeat(64)},{[owned.low]:'not-a-hash'}])assert.throws(()=>engineApprovals(invalid));
+for(const invalid of [{...identity,executable_path:'relative'}, {...identity,executable_sha256:undefined},
+ {...identity,profile_hash:undefined}])assert.throws(()=>engineApprovalCandidates([owned.low],{models:[invalid]},{}),/Cannot verify/);
+assert.deepEqual(engineApprovalCandidates(['small'],catalog,{}),[],'Ordinary model selection cannot approve an executable');
 console.log(JSON.stringify({passed:true,checks:['prefill empty tiers from installed metadata','preserve saved and missing choices','never invent unavailable defaults','reject ineligible models on save','allow fixed available tiers during a High outage','block fixed unavailable High with recovery details','fallback and restore Auto High as readiness changes without editing settings']}));

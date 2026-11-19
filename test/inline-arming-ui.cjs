@@ -17,7 +17,7 @@ const file=process.env.SUTRA_ARM_RESULT,sleep=ms=>new Promise(r=>setTimeout(r,ms
     await page.screenshot({path:path.join(path.dirname(file),'VSCode-before-arm.png')});
    }
   }
-  const dialog=page.locator('.monaco-dialog-box').filter({hasText:'Workspace permissions for Sutra'});
+  const dialog=page.locator('.monaco-dialog-box').filter({hasText:'Workspace access for Sutra'});
   const arm=dialog.getByRole('button',{name:'Read only',exact:true});
   if(await arm.count()&&await arm.first().isVisible()){
    assert.equal(confirmed,0,'Unexpected second arming confirmation');

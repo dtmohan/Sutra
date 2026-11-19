@@ -32,7 +32,7 @@ class CancellationTokenSource {
   }
 }
 
-function windowFor(root, storage) {
+function windowFor(root, storage, dependencies) {
   const commands = new Map();
   const status = new EventEmitter();
   const vscode = {
@@ -53,7 +53,7 @@ function windowFor(root, storage) {
     lm: {registerLanguageModelChatProvider: disposable, registerTool: disposable},
   };
   const context = {globalStorageUri: {fsPath: storage}, workspaceState: new Map(), subscriptions: []};
-  const authorization = createStore(vscode, context);
+  const authorization = createStore(vscode, context, dependencies);
   const controller = install(vscode, context, {
     authorization, workspace: () => root, onStatus: value => status.emit('access', value),
   });
@@ -132,6 +132,29 @@ async function check() {
     fs.mkdirSync(root);
     assert.notEqual(authorization.scope(), savedGrant.scope);
     assert(!second.controller.status().armed, 'Replacing a directory at the same path requires a new grant');
+    // A watcher can remain open but emit nothing. Exercise revocation through
+    // the independent reconciliation clock, with no machine-speed deadline.
+    const ticks = new Set();
+    const silentWatch = () => Object.assign(new EventEmitter(), {close() {}});
+    const options = {watch: silentWatch,
+      setInterval(callback, period) {assert.equal(period, 500); ticks.add(callback); return callback;},
+      clearInterval(callback) {ticks.delete(callback);}};
+    const third = windowFor(root, storage, options);
+    const fresh = {id: crypto.randomUUID(), profile: 'workspace_agent', scope: third.authorization.scope()};
+    third.authorization.write(fresh);
+    assert(third.controller.status().armed);
+    let cancelled = false;
+    const pending = third.controller.withWorkspaceAccess(undefined, token => new Promise(resolve => {
+      token.onCancellationRequested(() => {cancelled = true; resolve();});
+    }));
+    const rejection = assert.rejects(pending, /permission changed|cancelled/i);
+    third.authorization.write({id: crypto.randomUUID()});
+    for (const tick of [...ticks]) tick();
+    await rejection;
+    assert(cancelled, 'A silent watcher must not retain an in-flight workspace grant');
+    assert(!third.controller.status().armed);
+    third.controller.dispose();
+    assert.equal(ticks.size, 0, 'Disposal must stop every reconciliation timer');
     console.log('Workspace permission storage passed scope, revocation, cancellation and malformed-record checks.');
   } finally {
     first.controller.dispose();

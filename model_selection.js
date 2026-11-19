@@ -2,6 +2,22 @@
 const tiers=['low','mid','high'];
 const nativeProfile=name=>typeof name==='string'&&/^strata:profile\/([a-z][a-z0-9_-]{0,63})$/.exec(name)?.[1];
 const engineProfile=name=>typeof name==='string'&&/^sutra:engine\/([a-z][a-z0-9_-]{0,63})$/.exec(name)?.[1];
+function engineApprovals(value={}){
+ if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).length>64||
+  Object.entries(value).some(([ref,hash])=>!engineProfile(ref)||typeof hash!=='string'||!/^[a-f0-9]{64}$/.test(hash)))throw Error('Sutra engine approvals must be a User setting containing profile references and SHA-256 identities.');
+ return {...value};
+}
+function engineApprovalCandidates(names,catalog,approvals={}){
+ const saved=engineApprovals(approvals),result=[];
+ for(const ref of new Set(names.filter(engineProfile))){
+  const row=catalog.models?.find(model=>model.name===ref&&model.eligible===true);
+  if(!row||typeof row.profile_hash!=='string'||!/^[a-f0-9]{64}$/.test(row.profile_hash)||
+   typeof row.executable_path!=='string'||!require('node:path').isAbsolute(row.executable_path)||
+   typeof row.executable_sha256!=='string'||!/^[a-f0-9]{64}$/.test(row.executable_sha256))throw Error('Cannot verify the engine executable for '+ref+'. Refresh the worker catalog before approving it.');
+  if(saved[ref]!==row.profile_hash)result.push(row);
+ }
+ return result;
+}
 function prefill(current,catalog){
  const names=new Set((catalog.models||[]).filter(m=>m.eligible===true&&!m.tier).map(m=>m.name));
  const result={};
@@ -67,4 +83,4 @@ function fallbackMessage(fallback){
  return `Sutra Auto: ${label(fallback.tier)} (${fallback.model||'unconfigured'}) is unavailable. Work routed to ${label(fallback.tier)} will use ${label(fallback.availableTier)} (${fallback.availableModel}). Your saved model choices are unchanged.`;
 }
 
-module.exports={prefill,validate,forRequest,ModelUnavailable,fallbackMessage,nativeProfile,engineProfile};
+module.exports={prefill,validate,forRequest,ModelUnavailable,fallbackMessage,nativeProfile,engineProfile,engineApprovals,engineApprovalCandidates};

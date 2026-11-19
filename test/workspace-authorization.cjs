@@ -205,6 +205,27 @@ function changePreparedSource(fixture, paused) {
   return {oldPage, name, changed};
 }
 
+async function authorizeSavedRequest(h, fixture, prompt, tier = 'low', asParts = false) {
+  const before = fixture.snapshot(), prompts = h.prompts.length;
+  const waiting = text(await h.send(prompt, tier));
+  assert.match(waiting, /Workspace access needed/, waiting);
+  assert.equal(h.prompts.length, prompts, 'A model response must not wait on a permission modal');
+  assert(!h.controller.status().working, 'The response must finish before explicit workspace consent');
+  const saved = fixture.snapshot();
+  assert.deepEqual(saved.contract, before.contract);
+  assert.deepEqual(saved.budget, before.budget, 'Permission guidance cannot spend workspace task capacity');
+  assert.deepEqual(saved.source_events, before.source_events, 'No source work may precede consent');
+  assert.deepEqual(saved.synthesis_receipts, before.synthesis_receipts);
+  const requestCount = h.requests.length;
+  await h.command('karma.armNative');
+  assert(h.controller.status().armed, 'The explicit Workspace Access choice must persist authorization');
+  assert.equal(h.prompts.length, prompts + 1);
+  assert.equal(h.requests.length, requestCount, 'Granting access alone cannot read source or dispatch inference');
+  assert.deepEqual(fixture.snapshot(), saved, 'The explicit grant preserves the saved workflow and all spending');
+  const continued = await h.send('continue', tier);
+  return asParts ? continued : text(continued);
+}
+
 async function reviewJourney(base) {
   // This is the same narrow task in which re-reading a previously selected
   // source file used to trigger a second pause before the larger model ran.
@@ -212,7 +233,7 @@ async function reviewJourney(base) {
   let h = host(fixture, {'Read only': true});
   try {
     assert(!h.controller.status().armed);
-    assert.match(text(await h.send(reviewPrompt)), /paused/i);
+    assert.match(await authorizeSavedRequest(h, fixture, reviewPrompt), /paused/i);
     const preflight = fixture.snapshot();
     const pending = lastFlow(preflight);
     assert.equal(pending.state, 'PAUSED');
@@ -250,7 +271,10 @@ async function reviewJourney(base) {
     h = host(fixture);
     assert(!h.controller.status().armed, 'Revocation survives reload');
     const since = h.requests.length;
-    assert.match(text(await h.send('continue', 'high')), /access was not granted/i);
+    assert.match(text(await h.send('continue', 'high')), /Workspace access needed/i);
+    assert.equal(h.prompts.length, 0, 'Revoked access defers consent until the response has ended');
+    await h.command('karma.armNative');
+    assert(!h.controller.status().armed);
     assert.equal(h.prompts.length, 1);
     assert(h.requests.slice(since).every(request => ['pending', 'inspect'].includes(request.event)),
       'Declining authorization must stop before source and inference work');
@@ -258,6 +282,7 @@ async function reviewJourney(base) {
 
     h.close();
     h = host(fixture, {'Read only': true});
+    await h.command('karma.armNative');
     const response = text(await h.send('continue', 'high'));
     assert.match(response, /Entry/, response);
     const done = fixture.snapshot();
@@ -277,7 +302,7 @@ async function changedSourceJourney(base) {
   const fixture = reviewProject(base, 'changed-source', 36);
   let h = host(fixture, {'Read only': true});
   try {
-    assert.match(text(await h.send(reviewPrompt, 'mid')), /paused/i);
+    assert.match(await authorizeSavedRequest(h, fixture, reviewPrompt, 'mid'), /paused/i);
     const paused = fixture.snapshot();
     assert.equal(lastFlow(paused).stop.status, 'context_budget');
     assert(paused.synthesis_receipts.length > 0);
@@ -309,7 +334,7 @@ async function automaticAllocationJourney(base) {
   const fixture = reviewProject(base, 'automatic-allocation', sourceLimit / 1024, {source_bytes: sourceLimit});
   let h = host(fixture, {'Read only': true});
   try {
-    assert.match(text(await h.send(reviewPrompt, 'mid')), /paused/i);
+    assert.match(await authorizeSavedRequest(h, fixture, reviewPrompt, 'mid'), /paused/i);
     const original = fixture.snapshot();
     assert.equal(lastFlow(original).stop.status, 'context_budget');
     assert(original.synthesis_receipts.length > 0);
@@ -339,12 +364,16 @@ async function automaticAllocationJourney(base) {
     await h.command('karma.disarmNative');
     h.close();
     h = host(fixture);
-    assert.match(text(await h.send('continue', 'high')), /access was not granted/i);
+    assert.match(text(await h.send('continue', 'high')), /Workspace access needed/i);
+    assert.equal(h.prompts.length, 0);
+    await h.command('karma.armNative');
+    assert(!h.controller.status().armed);
     const revoked = fixture.snapshot();
     assert.deepEqual(revoked, greeted, 'An available reserve cannot authorize a revoked workspace');
 
     h.close();
     h = host(fixture, {'Read only': true});
+    await h.command('karma.armNative');
     const response = text(await h.send('continue', 'high'));
     assert.match(response, /Entry/, response);
     const done = fixture.snapshot();
@@ -388,7 +417,7 @@ async function exhaustedBindingJourney(base) {
   fixture.bridge({op: 'auto_new', goal: 'Review project Cedar CED724 in src only.', roots: ['src'], max_tools: 1});
   const h = host(fixture, {'Read only': true});
   try {
-    assert.match(text(await h.send(reviewPrompt, 'mid')), /paused/i);
+    assert.match(await authorizeSavedRequest(h, fixture, reviewPrompt, 'mid'), /paused/i);
     const before = fixture.snapshot();
     const paused = lastFlow(before);
     assert.equal(paused.stop.stage, 'BINDING');
@@ -425,7 +454,7 @@ async function automaticReceiptReuseJourney(base) {
     {max_tools: operationLimit});
   let h = host(fixture, {'Read only': true});
   try {
-    assert.match(text(await h.send(reviewPrompt, 'mid')), /paused/i);
+    assert.match(await authorizeSavedRequest(h, fixture, reviewPrompt, 'mid'), /paused/i);
     const before = fixture.snapshot();
     const paused = lastFlow(before);
     assert.equal(paused.stop.status, 'context_budget');
@@ -475,7 +504,7 @@ async function actionJourney(base, apply = false) {
   const h = host(fixture, {'Workspace agent': true, 'Apply edit': true});
   let reopened;
   try {
-    const parts = await h.send('Fix retry in src/retry.py.');
+    const parts = await authorizeSavedRequest(h, fixture, 'Fix retry in src/retry.py.', 'low', true);
     const call = parts.find(part => part instanceof Call);
     assert(call, text(parts));
     assert.equal(call.name, action);

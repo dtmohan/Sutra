@@ -171,6 +171,9 @@ def phase(args):
                       SUTRA_ENGINE_ONLY='1', SUTRA_STRATA_MODELS='[]',
                       SUTRA_MEMORY_OWNERSHIP='shared', SUTRA_RUNTIME_DIR=str(runtime_dir))
     profiles = owned_profiles(models)
+    # This opt-in CLI fixture explicitly selects the inspected local profiles;
+    # approvals are fixture-local and never written to User settings or registry.
+    os.environ['SUTRA_ENGINE_APPROVALS'] = json.dumps({row['name']: row['profile_hash'] for row in profiles.values()})
     profile_hashes = {tier: profile['profile_hash'] for tier, profile in profiles.items()}
     fixture_path = output / 'fixture.json'
     if args.phase == 'low' and not fixture_path.exists():

@@ -184,3 +184,38 @@ A release is blocked by any open S1, or an S2 without a dated waiver.
 3. Documentation and known limitations are updated when a guarantee changes.
 4. No new S1 or S2 is open against the change.
 5. The change was exercised end-to-end at least once on the platform it claims.
+
+## 9. Release-candidate freeze
+
+A sign-off is only valid for a frozen tree. The 0.49.0 review changed under the
+reviewer three times (0.48.0 to 0.49.0, stale-to-fresh integrity manifest,
+missing-then-present engine files), so the gate result and the tree could not be
+quoted together. Rules:
+
+1. **Freeze before sign-off.** Announce the freeze, confirm `git status` is
+   stable across two checks at least five minutes apart, and record the commit.
+2. **Hash last.** Run `scripts/runtime-integrity.py --write` after the final edit,
+   never before packaging. A stale manifest fails closed at activation and blocks
+   `check-release.py`, `test/hardening.cjs` and `test/runtime-integrity.cjs`.
+3. **Run the gate twice.** A single green run does not clear a suite that failed
+   earlier in the day; capture both runs and name any flake.
+4. **Verify the artifact, not only the tree.** `scripts/qa.sh --with-package`
+   must pass, and the VSIX must contain every runtime file the code spawns by
+   path (service workers, engine modules, vendored packs).
+5. **No sign-off on a WIP version.** Version strings, changelog and docs must
+   name the same release before the gate is quoted.
+
+## 10. Native-engine addendum (0.48+)
+
+The native engine adds a new trust boundary. These checks are required in
+addition to the journeys above:
+
+| Check | Pass condition |
+| --- | --- |
+| Registry trust | A profile cannot silently repoint at a different binary. The resolved executable path is confirmed to the user before first spawn; the identity is keyed or content-derived, not an unkeyed descriptor hash. |
+| Environment | The executable environment is built from the same allowlist the registry validation enforces; loader variables (`PYTHONPATH`, `DYLD_*`, `LD_PRELOAD`) are rejected. |
+| Worker lifecycle | A wedged or stale worker is detected by owner identity before a new child is spawned; startup has one deadline and reports the live owner instead of a generic timeout. |
+| Readiness truth | "Loaded" is shown only after server/telemetry identity is verified, or is explicitly labelled unverified. |
+| Slot lease | Acquisition, cancellation and release are bounded; a killed child releases the OS lease; a failed release is reported, not hidden. |
+| Packaging | Every process spawned by path ships in the VSIX, and the packaged gate asserts completeness. |
+| Recovery | Failed activation, slot contention and profile change have distinct messages with the correct next action (Load/Retry, wait, re-import). |

@@ -62,7 +62,20 @@ class ContextStore:
           CREATE TRIGGER IF NOT EXISTS no_event_delete BEFORE DELETE ON events
             BEGIN SELECT RAISE(ABORT,'event log is append-only'); END;
         ''')
-    def close(self): self.db.close()
+    def close(self):
+        try:
+            if getattr(self, '_accounting_pending_finding', None):
+                # A failed effect may have rolled back the finding along with
+                # its charge. Never commit that partial effect merely to keep
+                # the finding: persist quarantine after rolling it back.
+                if self.db.in_transaction:
+                    self.db.rollback()
+                from accounting_batches import persist_pending_finding
+                persisted = persist_pending_finding(self)
+                if not persisted and not getattr(self, 'accounting_read_only', False):
+                    raise InvalidUpdate('Accounting finding could not be persisted before closing')
+        finally:
+            self.db.close()
     def create(self, session):
         with self.db: self.db.execute('INSERT INTO sessions(id) VALUES(?)',(session,))
     def _append(self, session, source_id, authority, kind, raw, payload, expected_revision):

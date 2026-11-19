@@ -15,8 +15,8 @@ from engine_process import (EngineBusy, EngineCancelled, EngineError, EngineProc
 
 FAKE_ENGINE = r'''#!/usr/bin/env python3
 import json,os,sys,threading,time
-scenario=os.environ.get('FAKE_SCENARIO','basic')
-log=os.environ['FAKE_COMMANDS']
+scenario=os.environ.get('GGML_FAKE_SCENARIO','basic')
+log=os.environ['GGML_FAKE_COMMANDS']
 stop=threading.Event()
 running=threading.Event()
 write_lock=threading.Lock()
@@ -83,8 +83,8 @@ class EngineProcessTests(unittest.TestCase):
 
     def engine(self, scenario='basic', **extra):
         profile = {'executable': str(self.executable), 'args': [], 'cwd': str(self.root),
-                   'context_tokens': 8192, 'env': {'FAKE_SCENARIO': scenario,
-                                                  'FAKE_COMMANDS': str(self.commands)},
+                   'context_tokens': 8192, 'env': {'GGML_FAKE_SCENARIO': scenario,
+                                                  'GGML_FAKE_COMMANDS': str(self.commands)},
                    'drain_timeout': .2, 'shutdown_timeout': .5, **extra}
         engine = EngineProcess(profile)
         self.addCleanup(engine.stop)
@@ -103,6 +103,31 @@ class EngineProcessTests(unittest.TestCase):
         engine.start(probe_token_ids=[7,9])
         self.assertEqual(len(self.recorded()),1)
         self.assertTrue(self.recorded()[0].startswith('GEN 1 '))
+
+    def test_actual_spawn_environment_drops_inherited_loader_and_python_hooks(self):
+        from unittest.mock import patch
+        with patch.dict(os.environ, {'DYLD_INSERT_LIBRARIES': '/foreign/library', 'LD_PRELOAD': '/foreign/library',
+                                     'PYTHONPATH': '/foreign/python', 'STRATA_COMPONENTS_DIR': '/foreign/control'}):
+            engine = self.engine()
+        for key in ('DYLD_INSERT_LIBRARIES', 'LD_PRELOAD', 'PYTHONPATH', 'STRATA_COMPONENTS_DIR'):
+            self.assertNotIn(key, engine.environment)
+        self.assertEqual(engine.environment['GGML_FAKE_SCENARIO'], 'basic')
+        with self.assertRaisesRegex(ValueError, 'environment name'):
+            self.engine(env={'DYLD_INSERT_LIBRARIES': '/foreign/library'})
+
+    def test_wedged_native_stdin_cannot_extend_timeout_or_block_owned_shutdown(self):
+        self.executable.write_text('#!/usr/bin/env python3\nimport sys,time\n'
+            'print("READY 65536 stop",flush=True)\n'
+            'sys.stdin.readline()\nprint("T 7",flush=True)\n'
+            'print("DONE 1 1 0 0 length",flush=True)\ntime.sleep(30)\n')
+        engine = self.engine(context_tokens=65536)
+        engine.start(probe_token_ids=[42], timeout=2)
+        started = time.monotonic()
+        with self.assertRaises(EngineTimeout):
+            engine.generate([100000] * 60000, 1, timeout=.1)
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertTrue(engine.metadata()['poisoned'])
+        self.assertFalse(engine.metadata()['running'])
 
     def test_generation_stream_progress_sampling_and_native_metrics(self):
         engine = self.engine('lp');engine.start()

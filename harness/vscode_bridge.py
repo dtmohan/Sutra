@@ -501,7 +501,7 @@ def _handle(root,workspace,request,metadata=None,prepare_catalog=True):
 
 
 REQUEST_ENVIRONMENT = frozenset((
-    'SUTRA_ENGINE_MODELS', 'SUTRA_ENGINE_ONLY', 'SUTRA_ENGINE_PYTHON', 'SUTRA_ENGINE_REGISTRY',
+    'SUTRA_ENGINE_MODELS', 'SUTRA_ENGINE_ONLY', 'SUTRA_ENGINE_PYTHON', 'SUTRA_ENGINE_REGISTRY', 'SUTRA_ENGINE_APPROVALS',
     'SUTRA_ENGINE_CONTEXT',
     'SUTRA_STRATA_PORT', 'SUTRA_STRATA_MODEL', 'SUTRA_STRATA_MODELS', 'SUTRA_STRATA_ONLY', 'SUTRA_CAPABILITIES_MODE',
     'SUTRA_RUNTIME_DIR', 'SUTRA_MEMORY_OWNERSHIP', 'SUTRA_WORKSPACE_ALLOCATION',
@@ -564,6 +564,105 @@ def cache_allocation(root, compartments):
             'system_reserve_bytes': HEADROOM}
 
 
+def worker_frames(stream, on_idle, poll_seconds=1.0):
+    """Bounded input reader; only the controller thread touches SQLite.
+
+    Raw descriptor reads work for POSIX and Windows pipes and avoid buffered
+    stdin locks during worker shutdown. In-memory test streams remain synchronous.
+    """
+    try:
+        descriptor = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        while True:
+            raw = stream.readline(200002)
+            if not raw:
+                return
+            yield raw
+    else:
+        import codecs
+        import queue
+        import threading
+        frames = queue.Queue(maxsize=1)
+        stopped = threading.Event()
+        end = object()
+
+        def deliver(value):
+            while not stopped.is_set():
+                try:
+                    frames.put(value, timeout=.1)
+                    return True
+                except queue.Full:
+                    pass
+            return False
+
+        def read():
+            decoder = codecs.getincrementaldecoder('utf-8')()
+            pending = ''
+            try:
+                while not stopped.is_set():
+                    position = pending.find('\n')
+                    if position >= 0:
+                        raw, pending = pending[:position + 1], pending[position + 1:]
+                        if not deliver(raw):
+                            return
+                        continue
+                    if len(pending) > 200000:
+                        deliver(pending[:200002])
+                        return
+                    chunk = os.read(descriptor, 65536)
+                    if not chunk:
+                        pending += decoder.decode(b'', final=True)
+                        if pending:
+                            deliver(pending)
+                        return
+                    pending += decoder.decode(chunk)
+            except (OSError, UnicodeError):
+                deliver(ValueError('Invalid worker request encoding or input pipe'))
+            finally:
+                deliver(end)
+
+        threading.Thread(target=read, name='sutra-worker-input', daemon=True).start()
+        try:
+            while True:
+                try:
+                    value = frames.get(timeout=poll_seconds)
+                except queue.Empty:
+                    on_idle()
+                    continue
+                if value is end:
+                    return
+                yield value
+        finally:
+            stopped.set()
+
+
+def seal_idle_worker(root, workspace):
+    """Seal bookkeeping only, under the same cross-window writer lock."""
+    from accounting_batches import seal_if_idle, status
+    from platform_support import lock_file
+    root = Path(root)
+    if not (root / 'state.sqlite').is_file():
+        return {'sealed': False, 'empty': True}
+    metadata = root / 'workspace.json'
+    if metadata.exists() and json.loads(metadata.read_text()).get('workspace') != str(Path(workspace).resolve()):
+        raise InvalidUpdate('Idle accounting storage belongs to another workspace')
+    try:
+        with lock_file(root / 'bridge.lock'):
+            store = InvocationLedger(root / 'state.sqlite')
+            try:
+                head = seal_if_idle(store)
+                view = status(store)
+                return {'sealed': bool(head), 'head': head,
+                        'empty': not view['tail_open'],
+                        'pending_charges': view['pending_charges']}
+            finally:
+                store.close()
+    except InvalidUpdate as exc:
+        if str(exc) == 'A request is already running for this task':
+            return {'sealed': False, 'busy': True}
+        raise
+
+
 def request_stream(root, workspace, stream=None, output=None):
     from lifecycle import deadline, Interrupted
     from ram_compartments import Compartments
@@ -572,14 +671,29 @@ def request_stream(root, workspace, stream=None, output=None):
     baseline = {key: os.environ.get(key) for key in REQUEST_ENVIRONMENT}
     compartments = Compartments(0)
     scope = (str(workspace), str(root))
-    while True:
-        raw = stream.readline(200002)
-        if not raw:
+    idle = {'last_request': time.monotonic(), 'last_attempt': 0., 'finished': False, 'result': None}
+
+    def on_idle():
+        now = time.monotonic()
+        if idle['finished'] or now - idle['last_request'] < 30 or now - idle['last_attempt'] < 10:
             return
+        idle['last_attempt'] = now
+        try:
+            idle['result'] = seal_idle_worker(root, workspace)
+            idle['finished'] = bool(idle['result'].get('sealed') or idle['result'].get('empty'))
+        except Exception as exc:
+            # The next request verifies the ledger again and fails closed. An
+            # idle callback never runs a model, replays an action or grants scope.
+            idle['result'] = {'error': type(exc).__name__ + ': ' + str(exc)[:240]}
+            idle['finished'] = True
+
+    for raw in worker_frames(stream, on_idle):
         started = time.perf_counter()
-        fatal = len(raw) > 200000
+        fatal = isinstance(raw, Exception) or len(raw) > 200000
         allocation = None
         try:
+            if isinstance(raw, Exception):
+                raise InvalidUpdate(str(raw))
             if fatal:
                 raise InvalidUpdate('Worker request is too large')
             envelope = json.loads(raw)
@@ -599,12 +713,13 @@ def request_stream(root, workspace, stream=None, output=None):
             answer = {'ok': False, 'error': type(exc).__name__ + ': ' + str(exc)}
         memory = compartments.snapshot()
         memory.update(request_elapsed_ms=round((time.perf_counter() - started) * 1000, 3),
-                      admission=allocation, worker_pid=os.getpid())
+                      admission=allocation, worker_pid=os.getpid(), accounting_idle=idle['result'])
         answer['host_memory'] = memory
         if fatal:
             answer['fatal'] = True
         print(json.dumps(answer), file=output, flush=True)
         print('SUTRA_BRIDGE_REQUEST_END', file=sys.stderr, flush=True)
+        idle.update(last_request=time.monotonic(), last_attempt=0., finished=False)
         if fatal:
             return
 

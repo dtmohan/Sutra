@@ -65,7 +65,9 @@ def native_command(action, name=None):
         if action == 'activate':
             from monitoring import ResourceWait
             raise ResourceWait({'profile':'native-strata-v1','available':False,'admitted':False,
-                                'decision':None,'reason':'Native activation response timed out; its owner may still be loading. Resume to inspect the saved native state; no model inference or budget reset occurred.'}) from None
+                                'decision':None,'blocker':'runtime_timeout','provider':'strata',
+                                'observed_at':time.time(),
+                                'reason':'Native activation response timed out; its owner may still be loading. Resume to inspect the saved native state; no model inference or budget reset occurred.'}) from None
         raise InvalidUpdate('Native Strata metadata inspection timed out') from None
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         raise InvalidUpdate('Native Strata management is unavailable: '+str(error)[:160]) from None
@@ -74,7 +76,10 @@ def native_command(action, name=None):
         if isinstance(result, dict) and result.get('status') in ('paused', 'busy', 'timeout'):
             from monitoring import ResourceWait
             raise ResourceWait({'profile':'native-strata-v1','available':False,'admitted':False,
-                                'decision':result.get('decision'),'reason':str(error)[:600]})
+                                'decision':result.get('decision'),'reason':str(error)[:600],
+                                'blocker':{'busy':'runtime_busy','timeout':'runtime_timeout'}.get(result['status'],
+                                    'model_admission' if result.get('decision') else 'measurement_unavailable'),
+                                'provider':'strata','status':result['status'],'observed_at':time.time()})
         raise InvalidUpdate(str(error)[:600])
     if response.returncode != 0:
         raise InvalidUpdate('Native Strata command failed despite its response')

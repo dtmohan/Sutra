@@ -10,11 +10,9 @@ function validate(d){
 const label=s=>[...s].map(c=>/[\p{L}\p{N} .,/:_\-]/u.test(c)?c:'#'+c.codePointAt(0)+';').join('');
 function mermaidSource(d,direction){
   validate(d);const dir=direction||d.direction;if(!['LR','TB'].includes(dir))throw Error('Invalid diagram direction');
-  return ['flowchart '+dir,...d.nodes.map(n=>`  ${n.id}["${label(n.label)}"]:::${n.kind}`),...d.edges.map(e=>`  ${e.source} -->${e.label?'|"'+label(e.label)+'"|':''} ${e.target}`),
-    '  classDef source fill:#e7edff,stroke:#536cb8,color:#152347,stroke-width:1.5px',
-    '  classDef device fill:#ffffff,stroke:#9caac3,color:#17263e,stroke-width:1.5px',
-    '  classDef process fill:#eef2f8,stroke:#7b8fae,color:#17263e,stroke-width:1.5px',
-    '  classDef output fill:#e1f3ed,stroke:#398775,color:#123b32,stroke-width:1.5px'].join('\n');
+  // Keep copied Mermaid theme-neutral; the preview/export resolves editor colors.
+  return ['flowchart '+dir,...d.nodes.map(n=>`  ${n.id}["${label(n.label)}"]:::${n.kind}`),
+    ...d.edges.map(e=>`  ${e.source} -->${e.label?'|"'+label(e.label)+'"|':''} ${e.target}`)].join('\n');
 }
 function safeSVG(svg){
   if(typeof svg!=='string'||Buffer.byteLength(svg)>2000000||!/^<svg\b/.test(svg)||/<(?:script|foreignObject|iframe|image|use)\b|<!DOCTYPE|<!ENTITY|\son[a-z]+\s*=|(?:href|src)\s*=\s*["'](?!#)|url\(\s*["']?(?!#)[^)]|@import/i.test(svg))throw Error('Unsafe or oversized SVG export');

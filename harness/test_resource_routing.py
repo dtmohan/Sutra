@@ -54,6 +54,27 @@ class ResourceRoutingTests(unittest.TestCase):
         after=review_budget.usage(self.s,sid)['used'];self.assertEqual(after['calls'],before['calls']+1)
         self.assertGreater(after['tokens'],before['tokens']);self.assertTrue(self.s.verify_invocations(sid))
 
+    def test_runtime_wait_is_not_memory_pressure_and_never_switches_or_releases_models(self):
+        out=self.until('SYNTHESIS')
+        sid=self.meta['active']
+        before=copy.deepcopy(review_budget.usage(self.s,sid))
+        contract=self.s.pinned(sid)
+        for blocker in ('runtime_busy','runtime_timeout','runtime_uncertain','measurement_unavailable'):
+            error=ResourceWait({'decision':None,'admitted':False,'available':False,
+                                'blocker':blocker,'reason':'Runtime observation fixture','observed_at':1000})
+            with patch('chat_runtime.answer',side_effect=error), \
+                 patch('resource_routing.propose',side_effect=AssertionError('No memory fallback')), \
+                 patch('runtime_memory.recover',side_effect=AssertionError('No memory release')):
+                stopped=self.step(out,tier='auto')
+            self.assertEqual(stopped['state'],'PAUSED')
+            self.assertEqual(stopped['stop']['blocker'],blocker)
+            self.assertEqual(stopped['stop']['measurement']['observed_at'],1000)
+            self.assertNotIn('recovery',stopped['stop'])
+            self.assertEqual(review_budget.usage(self.s,sid),before)
+            self.assertEqual(self.s.pinned(sid),contract)
+            with patch('monitoring.resource_state',return_value={'admitted':True}):
+                out=self.step(stopped,event='resume',tier='auto')
+
     def test_child_fallback_keeps_completed_sibling_across_model_switch(self):
         out=self.children();out=self.step(out);first=out['children'][0]['id']
         self.assertEqual(machine.state(self.s,first),'DONE');spent=machine.spent(self.s,first)

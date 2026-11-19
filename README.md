@@ -1,4 +1,24 @@
-# Sutra 0.49.0 — Sutra-owned engine worker
+# Sutra 0.50.0 — Accounting recovery and idle checkpoints
+
+Accounting seals retain explicit pending reservations and scope state, so work
+can settle after its batch closes without losing context, permissions or spent
+budget. Persistent request workers seal quiet accounting tails. Separate host
+timings distinguish kernel evaluation, budget gates, seals and recovery.
+
+Strict verification remains the default. The faster recovery API requires a
+trusted head supplied outside the ledger; the package does not configure a NAS
+or create an independent trust authority. See [accounting behavior and trust
+boundaries](docs/accounting-batches.md) and the source validation records.
+The canonical STP kernel and saved model tier choices are preserved.
+
+# Sutra 0.49.1 — Native workflow stabilization
+
+This maintenance release addresses the native-worker QA findings, including explicit
+engine fingerprint approval, recoverable workspace permissions and chat navigation,
+and clearer loading and admission states. Release checks now require every runtime
+file in the VSIX. Diagrams follow the editor theme. The canonical STP kernel is
+unchanged. See [the resolution register](docs/qa/RESOLUTION-0.49.1.md) for the
+validation status and remaining limits.
 
 Sutra can now load a compatible inference engine directly, without Strata
 Control, a Strata HTTP server or Ollama on this execution path. A persistent
@@ -269,7 +289,7 @@ Use **Sutra: Open Chat (Sutra Auto)** to start in VS Code's native Local Chat. A
 
 The advanced architecture review proceeds from inspection to report. If it needs evidence from another file, **Read another file and retry** uses the review's existing scope and remaining budget.
 
-When a native request pauses, choose **Resume this request** in the original chat or **Resume** in Sutra Monitor. Both submit a continuation through Sutra Auto. To resume using a specific model tier, select it and send **continue** in the original chat.
+When a native request pauses, choose **Resume this request** in the original chat or **Resume** in Sutra Monitor. Sutra first attempts to target that original Local chat. Some VS Code hosts ignore the target session in generic open-chat commands; on those hosts Sutra offers to copy a single-use continuation instruction. Paste it into the original Local chat with Sutra Auto selected. Sutra does not open an unrelated chat or a sign-in flow as a fallback. To resume using a specific model tier, select it and send **continue** in the original chat.
 
 Sutra Monitor shows why a review stopped and which recovery actions are available. The dashboard also improves keyboard navigation, form labels and control contrast.
 
@@ -313,7 +333,7 @@ Work started under an older policy uses the explicit review restart. If the old 
 
 # Sutra 0.35.0 — persistent workspace permissions
 
-Choose **Sutra: Workspace Permissions…** from the Command Palette or pick a profile the first time native chat needs project files. **Read only** enables scoped reads. **Workspace agent** also enables scoped edits and sandboxed tests with the existing action approval flow. Optional tools have their own approval policy.
+Choose **Sutra: Workspace Access…** from the Command Palette or pick a profile the first time native chat needs project files. **Read only** enables scoped reads. **Workspace agent** also enables scoped edits and sandboxed tests with the existing action approval flow. Optional tools have their own approval policy.
 
 Sutra restores the profile when you reload a trusted workspace or switch models. Use **Sutra: Revoke Workspace Access** to remove it. Paused requests retain their context, task constraints and consumed budget. Send **continue** to resume a saved request.
 
@@ -407,7 +427,7 @@ experimental local tool, not a guarantee that model answers are correct.
    required for the harness.
 3. Run **Sutra: Open Chat (Sutra Auto)**. This saves the compatible Local
    chat and model selection for new chats. Existing chats retain their selection.
-4. Chat normally. The first request that needs project files offers **Read only** or **Workspace agent** permissions and continues in the same chat after approval. Sutra remembers the choice for this trusted workspace across reloads, updates and model changes. Workspace agent access lets Sutra request file scopes for edits and local tests, then confirm each exact action. Manage or revoke access from **Sutra: Workspace Permissions…** or the dashboard.
+4. Chat normally. The first request that needs project files offers **Read only** or **Workspace agent** permissions and continues in the same chat after approval. Sutra remembers the choice for this trusted workspace across reloads, updates and model changes. Workspace agent access lets Sutra request file scopes for edits and local tests, then confirm each exact action. Manage or revoke access from **Sutra: Workspace Access…** or the dashboard.
 
 Sutra discovers installed models and fills empty tiers. Use **Sutra: Configure
 Local Models** to change those choices. **Sutra Low**, **Sutra Mid** and

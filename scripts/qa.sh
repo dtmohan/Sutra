@@ -5,8 +5,9 @@
 #   scripts/qa.sh                 # Python suite + Node contract suites
 #   scripts/qa.sh --with-package  # also build the offline VSIX
 #   scripts/qa.sh --browser       # also run Playwright checks (needs KARMA_PLAYWRIGHT/KARMA_BROWSER)
+#   scripts/qa.sh --engine-codec  # explicitly read SUTRA_ENGINE_TEST_TOKENIZER using SUTRA_ENGINE_TEST_PYTHON
 #
-#   scripts/qa.sh --vscode        # package + isolated VS Code host; requires running Ollama
+#   scripts/qa.sh --vscode        # package + isolated VS Code host fixture; see docs/development.md
 # Exit status is non-zero if any gate fails. Each gate prints its own output.
 set -uo pipefail
 
@@ -16,11 +17,13 @@ cd "$ROOT"
 WITH_PACKAGE=0
 WITH_BROWSER=0
 WITH_VSCODE=0
+WITH_ENGINE_CODEC=0
 for arg in "$@"; do
   case "$arg" in
     --with-package) WITH_PACKAGE=1 ;;
     --browser) WITH_BROWSER=1 ;;
     --vscode) WITH_VSCODE=1; WITH_PACKAGE=1 ;;
+    --engine-codec) WITH_ENGINE_CODEC=1 ;;
     *) echo "Unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -49,7 +52,15 @@ gate() {
 }
 
 python_suite() {
-  python3 -B -m unittest discover -s harness -p 'test_*.py' -q
+  env -u SUTRA_ENGINE_TEST_TOKENIZER python3 -B -m unittest discover -s harness -p 'test_*.py' -q
+}
+
+engine_codec_suite() {
+  if [ -z "${SUTRA_ENGINE_TEST_TOKENIZER:-}" ] || [ -z "${SUTRA_ENGINE_TEST_PYTHON:-}" ]; then
+    echo "FAIL: --engine-codec requires SUTRA_ENGINE_TEST_TOKENIZER and SUTRA_ENGINE_TEST_PYTHON" >&2
+    return 1
+  fi
+  "$SUTRA_ENGINE_TEST_PYTHON" -B -m unittest discover -s harness -p 'test_engine_codec.py' -q
 }
 
 node_suite() {
@@ -74,6 +85,9 @@ fi
 
 gate "release metadata" python3 -B scripts/check-release.py
 gate "python harness" python_suite
+if [ "$WITH_ENGINE_CODEC" -eq 1 ]; then
+  gate "installed engine codec (opt-in)" engine_codec_suite
+fi
 
 for suite in capabilities model-activity native-provider workspace-authorization workspace-authorization-store hardening panel-entry model-selection bridge-worker strata-startup strata-management strata-runtime strata-setup strata-manager-ui provider-slot engine-management engine-manager-ui branding host-tokens runtime-integrity; do
   gate "node $suite" node_suite "$suite"

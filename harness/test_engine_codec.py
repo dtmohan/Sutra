@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -8,7 +9,8 @@ from engine_codec import CodecError, EngineCodec, OutputDecoder
 
 
 DEPENDENCIES = all(importlib.util.find_spec(name) is not None for name in ('regex', 'jinja2'))
-REAL_PACK = Path.home() / 'Library/Application Support/Sutra/Strata/data/packs/q2_0/tokenizer'
+PACK_OPTION = os.environ.get('SUTRA_ENGINE_TEST_TOKENIZER')
+REAL_PACK = Path(PACK_OPTION).expanduser() if PACK_OPTION else None
 
 
 class BytesCodec:
@@ -166,10 +168,12 @@ class FixtureCodecTests(unittest.TestCase):
             EngineCodec(self.path)
 
 
-@unittest.skipUnless(DEPENDENCIES and REAL_PACK.is_dir(), 'Installed native pack and engine dependencies are opt-in')
+@unittest.skipUnless(PACK_OPTION, 'Set SUTRA_ENGINE_TEST_TOKENIZER explicitly for installed-pack validation')
 class InstalledPackTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        if not DEPENDENCIES:
+            raise RuntimeError('Installed-pack validation requires the pinned engine dependencies')
         cls.codec = EngineCodec(REAL_PACK)
 
     def test_installed_pack_roundtrips_unicode_and_controls(self):

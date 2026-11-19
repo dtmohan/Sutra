@@ -30,10 +30,11 @@ class DirectEngineModelTests(unittest.TestCase):
         self.root = Path(directory.name)
         self.registry = self.root / 'models.json'
         self.models = {tier: 'sutra:engine/' + tier for tier in ('low', 'mid', 'high')}
-        engine_profiles.write({tier: descriptor(self.root, tier, context) for tier, context in
+        registered = engine_profiles.write({tier: descriptor(self.root, tier, context) for tier, context in
                                (('low', 16384), ('mid', 24576), ('high', 32768))}, self.registry)
         environment = patch.dict(os.environ, SUTRA_ENGINE_REGISTRY=str(self.registry),
                                  SUTRA_ENGINE_MODELS=json.dumps(list(self.models.values())),
+                                 SUTRA_ENGINE_APPROVALS=json.dumps({row['name']: row['profile_hash'] for row in registered.values()}),
                                  SUTRA_ENGINE_ONLY='1', SUTRA_STRATA_MODELS='[]',
                                  SUTRA_RUNTIME_DIR=str(self.root / 'runtime'), SUTRA_THINKING='off')
         environment.start(); self.addCleanup(environment.stop)
@@ -171,6 +172,18 @@ class DirectEngineModelTests(unittest.TestCase):
         self.assertEqual(len(attempts), 3, 'Malformed replies use only the protocol repair allocation')
         self.assertEqual(usage(self.ledger, result['session'])['used']['calls'], 3)
         self.assertTrue(self.ledger.verify_invocations(result['session']))
+
+    def test_unapproved_profile_cannot_activate_or_spend_a_native_call(self):
+        with patch.dict(os.environ, SUTRA_ENGINE_APPROVALS='{}'):
+            with self.assertRaisesRegex(InvalidUpdate, 'first-load approval'):
+                self.ask()
+        self.assertEqual(self.calls, [])
+
+    def test_catalog_can_use_an_explicit_fixture_registry_without_user_discovery(self):
+        from engine_model import append_catalog
+        with patch.dict(os.environ, SUTRA_ENGINE_REGISTRY=str(self.root / 'unrelated-user-registry')):
+            catalog = append_catalog({'models': [], 'errors': []}, path=self.registry)
+        self.assertEqual({row['name'] for row in catalog['models']}, set(self.models.values()))
 
     def test_artifact_change_before_dispatch_does_not_activate(self):
         provider = EngineModel(self.root / 'calls', self.models['low'])

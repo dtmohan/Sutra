@@ -10,9 +10,9 @@ class Result{constructor(callId,content){Object.assign(this,{callId,content});}}
 class CTS{constructor(){const listeners=[];this.token={isCancellationRequested:false,onCancellationRequested:f=>{listeners.push(f);return disposable();}};this.cancel=()=>{this.token.isCancellationRequested=true;for(const f of listeners)f();};}dispose(){}}
 const lastInvocation=new WeakMap();
 function setup(saved={}){
- let provider,tool,kind='edit',pick=0,discoveries=0,hold;const commands={},contextKeys={},uiCalls=[],calls=[],statuses=[],routeEvents=[],models={low:'model-a',mid:'model-b',high:'model-c'},cfg={nativeEnabled:true},policies={},overrides={};
+ let provider,tool,kind='edit',pick=0,discoveries=0,hold;const commands={},contextKeys={},uiCalls=[],copied=[],calls=[],statuses=[],routeEvents=[],models={low:'model-a',mid:'model-b',high:'model-c'},cfg={nativeEnabled:true},policies={},overrides={};
  const st={session:'task-1',contract:{contract_hash:'contract-1',contract:{goal:'Fix retry',constraints:{native_task:true,allowed_paths:['src/retry.py'],edits_allowed:true,tests_allowed:true,network_allowed:false}}},calibration:{binding:{hash:'cal-1'}}};
- const v={EventEmitter,CancellationTokenSource:CTS,LanguageModelTextPart:Text,LanguageModelToolCallPart:Call,LanguageModelToolResultPart:Result,LanguageModelToolResult:class{constructor(content){this.content=content;}},LanguageModelChatMessageRole:{User:1,Assistant:2},LanguageModelChatToolMode:{Auto:1,Required:2},ConfigurationTarget:{Global:1},MarkdownString:class{value='';appendText(t){this.value+=t;}appendCodeblock(t){this.value+='\n'+t;}},Uri:{file:p=>({fsPath:p})},workspace:{getConfiguration:()=>({get:(k,d)=>overrides[k]??cfg[k]??d,inspect:k=>({globalValue:cfg[k],policyValue:policies[k]}),update:async(k,x)=>{cfg[k]=x;}}),onDidChangeConfiguration:()=>disposable()},window:{showErrorMessage:async message=>{uiCalls.push(['error',message]);},showInformationMessage:async message=>{uiCalls.push(['notice',message]);},showWarningMessage:async(_m,_o,...labels)=>labels.at(-1),showQuickPick:async choices=>{pick++;return choices[0];}},commands:{getCommands:async()=>['workbench.action.chat.newLocalChat'],executeCommand:async(...args)=>{if(args[0]==='setContext')contextKeys[args[1]]=args[2];else uiCalls.push(args);},registerCommand:(n,f)=>{commands[n]=f;return disposable();}},lm:{selectChatModels:async()=>{discoveries++;return provider.provideLanguageModelChatInformation();},registerLanguageModelChatProvider:(n,p)=>{assert.equal(n,'karma');provider=p;return disposable();},registerTool:(n,t)=>{assert.equal(n,'karma_native_action');tool=t;return disposable();}}};
+ const v={env:{clipboard:{writeText:async text=>copied.push(text)}},EventEmitter,CancellationTokenSource:CTS,LanguageModelTextPart:Text,LanguageModelToolCallPart:Call,LanguageModelToolResultPart:Result,LanguageModelToolResult:class{constructor(content){this.content=content;}},LanguageModelChatMessageRole:{User:1,Assistant:2},LanguageModelChatToolMode:{Auto:1,Required:2},ConfigurationTarget:{Global:1},MarkdownString:class{value='';appendText(t){this.value+=t;}appendCodeblock(t){this.value+='\n'+t;}},Uri:{file:p=>({fsPath:p})},workspace:{getConfiguration:()=>({get:(k,d)=>overrides[k]??cfg[k]??d,inspect:k=>({globalValue:cfg[k],policyValue:policies[k]}),update:async(k,x)=>{cfg[k]=x;}}),onDidChangeConfiguration:()=>disposable()},window:{showErrorMessage:async message=>{uiCalls.push(['error',message]);},showInformationMessage:async message=>{uiCalls.push(['notice',message]);},showWarningMessage:async(_m,_o,...labels)=>labels.at(-1),showQuickPick:async choices=>{pick++;return choices[0];}},commands:{getCommands:async()=>['workbench.action.chat.newLocalChat'],executeCommand:async(...args)=>{if(args[0]==='setContext')contextKeys[args[1]]=args[2];else uiCalls.push(args);},registerCommand:(n,f)=>{commands[n]=f;return disposable();}},lm:{selectChatModels:async()=>{discoveries++;return provider.provideLanguageModelChatInformation();},registerLanguageModelChatProvider:(n,p)=>{assert.equal(n,'karma');provider=p;return disposable();},registerTool:(n,t)=>{assert.equal(n,'karma_native_action');tool=t;return disposable();}}};
  let uriHandler;
  v.window.registerUriHandler=handler=>{uriHandler=handler;return disposable();};
  const deps={workspace:()=>'/project',authorization:{
@@ -65,7 +65,7 @@ function setup(saved={}){
  };
  const controller=install(v,{subscriptions:[],workspaceState:{get:k=>saved[k],update:async(k,value)=>{saved[k]=structuredClone(value);}}},deps),token=new CTS();
  const send=async(tier='low',messages=[{role:1,content:[new Text('Fix retry')]}],options={tools:[{name:'karma_native_action'},{name:'run_in_terminal'}]})=>{const parts=[];await provider.provideLanguageModelChatResponse({id:'karma-'+tier},messages,options,{report:p=>parts.push(p)},token.token);return parts;};
- return {flowRequests,statuses,routeEvents,policies,overrides,v,provider,tool,commands,contextKeys,uiCalls,calls,st,controller,cfg,token,send,uriHandler,arm:()=>commands['karma.armNative']({goal:'BYPASS',roots:['/']}),kind:k=>{kind=k;},hold:h=>{hold=h;},picks:()=>pick,discoveries:()=>discoveries,deps};
+ return {flowRequests,statuses,routeEvents,policies,overrides,v,provider,tool,commands,contextKeys,uiCalls,copied,calls,st,controller,cfg,token,send,uriHandler,arm:()=>controller.requestWorkspaceAccess(),kind:k=>{kind=k;},hold:h=>{hold=h;},picks:()=>pick,discoveries:()=>discoveries,deps};
 }
 (async()=>{
  const checks=[];const h=setup();
@@ -102,12 +102,12 @@ function setup(saved={}){
   checks.push('chat toggle is cancellable, skips invalid requests and applies across one governed turn before returning to Adaptive');
  }
  const confirm=h.v.window.showWarningMessage;h.v.window.showWarningMessage=async()=>undefined;
- const setupReply=await h.send();assert(setupReply.some(p=>p.value?.includes('Sutra workspace permissions')));assert.equal(h.calls.length,1);assert.equal(h.calls[0].op,'conversation');checks.push('declining workspace access cannot read source or create a task');h.v.window.showWarningMessage=confirm;
- assert.equal(h.controller.status().routing.stage,'permission_declined');assert(!h.controller.status().routing.active);assert(!h.controller.status().armed);
+ const setupReply=await h.send();assert(setupReply.some(p=>p.value?.includes('Workspace access needed')));assert.equal(h.calls.length,1);assert.equal(h.calls[0].op,'conversation');checks.push('declining workspace access cannot read source or create a task');h.v.window.showWarningMessage=confirm;
+ assert.equal(h.controller.status().routing.stage,'awaiting_workspace_permission');assert(h.controller.status().permissionCanChoose);assert(!h.controller.status().routing.active);assert(!h.controller.status().armed);
  await h.arm();assert.equal(h.picks(),0);assert(h.controller.status().armed);assert(h.controller.status().label.includes('routing unverified'));assert(!h.calls.some(c=>c.op==='new'));checks.push('one confirmation arms reading; command arguments cannot bypass it or create a task');
- const history=[{role:1,content:[new Text('OLD SECRET HISTORY')]},{role:2,content:[new Text('old answer')]},{role:1,content:[new Text('<userRequest>Fix retry</userRequest>')]}];
+ const history=[{role:1,content:[new Text('OLD SECRET HISTORY')]},{role:2,content:[new Text('old answer')]},{role:1,content:[new Text('<userRequest>continue</userRequest>')]}];
  const parts=await h.send('low',history),call=parts.find(p=>p instanceof Call);assert.equal(call.name,'karma_native_action');assert(!h.calls.some(c=>c.op==='native_execute'));
- assert(parts.some(p=>p instanceof Text&&p.value.includes('Sutra routing confirmed')&&p.value.includes('protocol invocation inv-')));assert(h.routeEvents.some(r=>r.stage==='received'&&r.active));assert.equal(h.routeEvents.at(-1).stage,'admitted');assert(!h.routeEvents.at(-1).active);assert(h.controller.status().label.includes('routing unverified'));checks.push('routing proof comes from actual provider entry and protocol invocation; idle and armed status never claims focused-chat coverage');
+ assert(parts.some(p=>p instanceof Text&&p.value.includes('proposal')));assert(!parts.some(p=>p.value?.includes('protocol invocation')));assert(h.routeEvents.some(r=>r.stage==='received'&&r.active));assert.equal(h.routeEvents.at(-1).stage,'admitted');assert(!h.routeEvents.at(-1).active);assert(h.controller.status().label.includes('routing unverified'));checks.push('routing proof comes from actual provider entry and protocol invocation; idle and armed status never claims focused-chat coverage');
  const formatted=setup();await formatted.arm();formatted.kind('report');let diagramsOpened=0;
  const originalFormatted=formatted.deps.backendRequest;
  formatted.deps.backendRequest=async(m,t)=>{const d=await originalFormatted(m,t);if(m.op==='native_work'){d.result.accepted_output.report={overview:'Overview'};d.report_markdown='Overview\n\n## Main components\n\n- **Entry** — Dispatches the request.';d.review_diagram={title:'Source relationships'};d.coverage={evidence:{fresh_snapshot_files:10,excerpt_files:['main.py'],child_reports:2}};}return d;};
@@ -178,10 +178,10 @@ function setup(saved={}){
  const unsupported=setup();unsupported.v.commands.getCommands=async()=>[];await assert.rejects(unsupported.commands['karma.useNativeChat'](),/cannot open/);assert.equal(unsupported.cfg.defaultModel,undefined);
  const failed=setup();failed.cfg.defaultModel='old';failed.cfg.defaultToCopilotHarness=true;failed.v.commands.executeCommand=async()=>{throw Error('Open failed');};await assert.rejects(failed.commands['karma.useNativeChat'](),/Open failed/);assert.equal(failed.cfg.defaultModel,'old');assert.equal(failed.cfg.defaultToCopilotHarness,true);assert.equal(failed.cfg['editor.preferCopilotHarness'],undefined);
  checks.push('policy, workspace overrides, unsupported chat and opening failures do not leave misleading defaults or claim routing');
- const pendingArm=setup();let pickDone;pendingArm.v.window.showWarningMessage=()=>new Promise(resolve=>{pickDone=resolve;});const arming=pendingArm.arm();
- while(!pickDone)await new Promise(r=>setImmediate(r));assert(pendingArm.controller.status().arming);assert.equal(pendingArm.controller.status().label,'Sutra: awaiting permission choice');
- const again=pendingArm.arm();assert.equal(again,arming);const during=await pendingArm.send();assert(during.some(p=>p.value?.includes('Choose Sutra workspace permissions')));assert.equal(pendingArm.controller.status().routing.stage,'awaiting_confirmation');
- await pendingArm.commands['karma.useNativeChat']();assert(!pendingArm.uiCalls.some(c=>c[0]==='workbench.action.chat.newLocalChat'));pickDone(undefined);await arming;assert(!pendingArm.controller.status().arming);assert(!pendingArm.controller.status().armed);assert(!pendingArm.calls.some(c=>c.op==='native_work'));
+ const pendingArm=setup();let pickDone,armDialogs=0;pendingArm.v.window.showWarningMessage=()=>{armDialogs++;return new Promise(resolve=>{pickDone=resolve;});};const arming=pendingArm.arm();
+ while(!pickDone)await new Promise(r=>setImmediate(r));assert(pendingArm.controller.status().arming);assert.equal(pendingArm.controller.status().label,'Sutra: awaiting workspace access');
+ const again=pendingArm.arm();assert.equal(armDialogs,1,'Concurrent access commands must share one modal choice');const during=await pendingArm.send();assert(during.some(p=>p.value?.includes('Choose workspace access in the dialog')));assert.equal(pendingArm.controller.status().routing.stage,'awaiting_confirmation');
+ await pendingArm.commands['karma.useNativeChat']();assert(!pendingArm.uiCalls.some(c=>c[0]==='workbench.action.chat.newLocalChat'));pickDone(undefined);assert.deepEqual(await Promise.all([arming,again]),[false,false]);assert.equal(armDialogs,1);assert(!pendingArm.controller.status().arming);assert(!pendingArm.controller.status().armed);assert(!pendingArm.calls.some(c=>c.op==='native_work'));
  pendingArm.v.window.showWarningMessage=async(_m,_o,label)=>label;await pendingArm.arm();assert(pendingArm.controller.status().armed);assert.equal(pendingArm.controller.status().accessProfile,'read_only');
  checks.push('pending arming is visible; repeated arm/open and requests cannot interrupt or bypass the confirmation; cancellation recovers');
  const greeting=setup();const raw='  Hello\nPlease brainstorm with me.  ';const hello=await greeting.send('low',[{role:1,content:[new Text(raw)]}]);
@@ -286,41 +286,45 @@ function setup(saved={}){
  inline.v.window.showWarningMessage=async(_m,_o,...labels)=>{confirmations++;return labels.at(-1);};
  const intro=await inline.send('low',[{role:1,content:[new Text('Hello, remember this project')]}]);
  const inlinePrompt='Review this project architecture';
- const inlineReply=await inline.send('low',[{role:2,content:intro},{role:1,content:[new Text(inlinePrompt)]}]);
+ const permissionReply=await inline.send('low',[{role:2,content:intro},{role:1,content:[new Text(inlinePrompt)]}]);
+ assert(permissionReply.some(p=>p.value?.includes('Workspace access needed')));
+ assert.equal(confirmations,0,'No dialog or model response waits for consent');
+ assert(!inline.controller.status().working);assert(inline.controller.status().permissionCanChoose);
+ assert(!inline.calls.some(c=>c.op==='native_work'));
+ await inline.commands['karma.armNative']();assert.equal(confirmations,1);assert(inline.controller.status().armed);
+ const inlineReply=await inline.send('low',[{role:2,content:permissionReply},{role:1,content:[new Text('continue')]}]);
  const conversations=inline.calls.filter(c=>c.op==='conversation'),inlineWork=inline.calls.find(c=>c.op==='native_work');
- assert.equal(conversations.length,2);assert.equal(conversations[1].parent,'1'.padStart(32,'0'));assert.equal(inlineWork.prompt,inlinePrompt);assert.equal(inlineWork.conversation_id,'2'.padStart(32,'0'));assert.equal(inlineWork.contract_hash,'contract-1');assert.equal(inlineWork.calibration_hash,'cal-1');assert.equal(confirmations,1);
- assert(inlineReply.some(p=>p.value?.includes('routing confirmed')));assert(!inlineReply.some(p=>p.value?.includes('Conversational answer')));assert(inlineReply.some(p=>p.value?.includes('Sutra’s workspace workflow')));assert(!inline.uiCalls.some(c=>c[0].startsWith('workbench.')));
+ assert.equal(conversations.length,2);assert.equal(conversations[1].parent,'1'.padStart(32,'0'));assert.equal(inlineWork.prompt,inlinePrompt);assert.equal(inlineWork.conversation_id,'2'.padStart(32,'0'));assert.equal(inlineWork.contract_hash,'contract-1');assert.equal(inlineWork.calibration_hash,'cal-1');
+ assert(!inlineReply.some(p=>p.value?.includes('Conversational answer')));assert(!inline.uiCalls.some(c=>c[0].startsWith('workbench.')));
  await inline.send('high',[{role:2,content:inlineReply},{role:1,content:[new Text('Continue review')]}]);
  assert.equal(confirmations,1);const switched=inline.calls.filter(c=>c.op==='native_work').at(-1);assert.equal(switched.contract_hash,inlineWork.contract_hash);assert.equal(switched.session,inlineWork.session);assert(!inline.calls.some(c=>['auto_new','native_permissions'].includes(c.op)));
- checks.push('inline arming resumes the exact pending request with its conversation receipt and existing permissions, without opening any chat; model switches keep that binding');
- assert(inlineReply.some(p=>p.value?.includes('Workspace permissions saved')));
- assert(inline.routeEvents.some(r=>r.workspaceAccess?.state==='requested'));
- assert(inline.routeEvents.some(r=>r.workspaceAccess?.state==='granted'));
- assert.equal(inline.controller.status().routing.workspaceAccess.state,'reused');
+ checks.push('permission pauses end the model response normally; explicit consent and continue retain the exact request, receipt, contract and model-switch binding');
  for(const approve of [false,true]){
   const waiting=setup();waiting.kind('report');let decide;
+  const first=await waiting.send();assert(first.some(p=>p.value?.includes('Workspace access needed')));
   waiting.v.window.showWarningMessage=(message,options,...labels)=>{
-   assert.equal(message,'Workspace permissions for Sutra');assert.equal(options.modal,true);assert.deepEqual(labels,['Read only','Workspace agent']);
+   assert.equal(message,'Workspace access for Sutra');assert.equal(options.modal,true);assert.deepEqual(labels,['Read only','Workspace agent']);
    return new Promise(resolve=>{decide=resolve;});
   };
-  const response=waiting.send();while(!decide)await new Promise(r=>setImmediate(r));
-  assert.equal(waiting.controller.status().routing.workspaceAccess.state,'requested');
+  const consent=waiting.commands['karma.armNative']();while(!decide)await new Promise(r=>setImmediate(r));
+  assert(!waiting.controller.status().routing.active,'Consent is outside the finished model call');
   assert(!waiting.controller.status().armed);assert(!waiting.flowRequests.some(r=>r.armed));
   assert.deepEqual(waiting.calls.map(c=>c.op),['conversation']);
-  decide(approve?'Workspace agent':undefined);const parts=await response;
-  assert.equal(waiting.controller.status().routing.workspaceAccess.state,approve?'granted':'declined');
+  decide(approve?'Workspace agent':undefined);await consent;
+  assert.equal(waiting.controller.status().armed,approve);
+  assert(!waiting.calls.some(c=>c.op==='native_work'),'Consent alone never starts inference');
+  assert(waiting.uiCalls.some(c=>c[0]==='notice'&&c[1].includes(approve?'Workspace access saved':'Workspace access was not granted')));
+  if(approve)await waiting.send('high',[{role:2,content:first},{role:1,content:[new Text('continue')]}]);
   assert.equal(waiting.calls.some(c=>c.op==='native_work'),approve);
-  assert(parts.some(p=>p.value?.includes(approve?'Workspace permissions saved':'Workspace access was not granted')));
  }
- checks.push('confirmation feedback records requested/granted/declined or already armed; pending and declined dialogs cannot dispatch workspace work');
+ checks.push('modal decline/cancellation cannot interrupt a model stream or grant source access; approval waits for explicit continuation');
  const standalone=setup();await standalone.arm();assert(!standalone.uiCalls.some(c=>c[0].startsWith('workbench.')));assert.equal(standalone.cfg.defaultModel,undefined);
- checks.push('standalone arming changes no chat selection, saved model, or conversation');
- for(const stop of ['cancel','disarm','disable','workspace']){
-  const race=setup();let approve;race.v.window.showWarningMessage=()=>new Promise(resolve=>{approve=resolve;});
-  const work=race.send();const rejected=assert.rejects(work,/cancelled|changed/i);
-  while(!approve)await new Promise(r=>setImmediate(r));assert.equal(race.controller.status().routing.stage,'awaiting_workspace_permission');
-  await assert.rejects(race.send('high'),/running/);
-  if(stop==='cancel')race.token.cancel();else if(stop==='disarm')race.commands['karma.disarmNative']();else if(stop==='disable')await race.commands['karma.toggleNative']();else race.deps.workspace=()=>'/different';
+ checks.push('standalone access consent changes no chat selection, saved model, or conversation');
+ for(const stop of ['disarm','disable','workspace']){
+  const race=setup();await race.send();let approve;race.v.window.showWarningMessage=()=>new Promise(resolve=>{approve=resolve;});
+  const consent=race.arm();const rejected=assert.rejects(consent,/cancelled|changed/i);
+  while(!approve)await new Promise(r=>setImmediate(r));
+  if(stop==='disarm')race.commands['karma.disarmNative']();else if(stop==='disable')await race.commands['karma.toggleNative']();else race.deps.workspace=()=>'/different';
   approve('Workspace agent');await rejected;assert(!race.controller.status().armed);assert(!race.controller.status().arming);assert.deepEqual(race.calls.map(c=>c.op),['conversation']);
  }
  const stale=setup();let accept;stale.v.window.showWarningMessage=()=>new Promise(r=>accept=r);const waiting=stale.arm();const invalidated=assert.rejects(waiting,/cancelled/);while(!accept)await new Promise(r=>setImmediate(r));stale.commands['karma.disarmNative']();accept('Workspace agent');await invalidated;assert(!stale.controller.status().armed);
@@ -341,40 +345,42 @@ function setup(saved={}){
  const retained=await savedCase.send('high',[{role:1,content:[new Text('A different request')]}]);
  assert(retained.some(p=>p.value?.includes('Saved request retained')));assert(!savedCase.flowRequests.some(r=>r.event==='cancel'));
  const oldConversationCount=savedCase.calls.filter(c=>c.op==='conversation').length;
+ const workBeforeResume=savedCase.calls.filter(c=>c.op==='native_work').length;
+ const resumeInstruction=()=>savedCase.copied.at(-1);
+ let copyChoice,copyNotices=0;
+ savedCase.v.window.showInformationMessage=async(message,...labels)=>{
+  savedCase.uiCalls.push(['notice',message]);
+  if(labels.includes('Copy resume instruction')){copyNotices++;return copyChoice;}
+ };
  await savedCase.commands['karma.resumeWorkflow']();
- const resumeOpen=()=>savedCase.uiCalls.filter(c=>c[0]==='workbench.action.chat.open').at(-1)[1];
- const opened=resumeOpen();
- assert.deepEqual(opened.modelSelector,{vendor:'karma',id:'karma-auto',family:'karma'});
- assert.equal(opened.preserveInput,true);assert.match(opened.query,/^Resume saved Sutra request \[[a-f0-9]{32}\]$/);
+ assert.equal(copyNotices,1);assert.equal(savedCase.copied.length,0);
+ assert.equal(savedCase.calls.filter(c=>c.op==='native_work').length,workBeforeResume,'Dismissing Resume guidance cannot advance a task');
+ copyChoice='Copy resume instruction';
  await savedCase.commands['karma.resumeWorkflow']();
- assert.equal(savedCase.uiCalls.filter(c=>c[0]==='workbench.action.chat.open').length,1);
- const otherReply=await savedCase.send('auto',chatUser(opened.query),otherChat);
+ assert.equal(copyNotices,2,'Dismissing the first notice must not suppress a new explicit Resume action');
+ const opened=resumeInstruction();assert.match(opened,/^Resume saved Sutra request \[[a-f0-9]{32}\]$/);
+ assert(!savedCase.uiCalls.some(c=>c[0]==='workbench.action.chat.open'),'Resume cannot open Copilot or a foreign chat');
+ await savedCase.commands['karma.resumeWorkflow']();assert.equal(savedCase.copied.length,1);assert.equal(copyNotices,2);
+ const otherReply=await savedCase.send('auto',chatUser(opened),otherChat);
  assert(otherReply.some(p=>p.value?.includes('originating Sutra chat')));
  assert(!savedCase.calls.some(c=>c.op==='native_work'&&c.tier==='auto'));
  const manualOther=await savedCase.send('high',chatUser('continue'),otherChat);
  assert(manualOther.some(p=>p.value?.includes('originating Sutra chat')));
+ await savedCase.commands['karma.resumeWorkflow']();assert.notEqual(resumeInstruction(),opened);
+ const replay=await savedCase.send('auto',chatUser(opened),originalChat);assert(replay.some(p=>p.value?.includes('expired')));
  await savedCase.commands['karma.resumeWorkflow']();
- assert.notEqual(resumeOpen().query,opened.query);
- const replay=await savedCase.send('auto',chatUser(opened.query),originalChat);
- assert(replay.some(p=>p.value?.includes('expired')));
  const inspectRequest=savedCase.deps.request;
- savedCase.deps.request=async(m,t)=>{
-  const result=await inspectRequest(m,t);
-  return m.event==='inspect'?{...result,cursor:'changed-cursor'}:result;
- };
- const changedCursor=await savedCase.send('auto',chatUser(resumeOpen().query),originalChat);
+ savedCase.deps.request=async(m,t)=>{const result=await inspectRequest(m,t);return m.event==='inspect'?{...result,cursor:'changed-cursor'}:result;};
+ const changedCursor=await savedCase.send('auto',chatUser(resumeInstruction()),originalChat);
  assert(changedCursor.some(p=>p.value?.includes('saved Sutra request advanced')));
  savedCase.deps.request=inspectRequest;
- await savedCase.commands['karma.resumeWorkflow']();
- savedCase.deps.workspace=()=>'/different-workspace';
- const otherWorkspace=await savedCase.send('auto',chatUser(resumeOpen().query),originalChat);
- assert(otherWorkspace.some(p=>p.value?.includes('expired')));
- savedCase.deps.workspace=()=>'/project';
- await savedCase.commands['karma.resumeWorkflow']();
- await savedCase.send('auto',chatUser(resumeOpen().query),originalChat);
+ await savedCase.commands['karma.resumeWorkflow']();savedCase.deps.workspace=()=>'/different-workspace';
+ const otherWorkspace=await savedCase.send('auto',chatUser(resumeInstruction()),originalChat);assert(otherWorkspace.some(p=>p.value?.includes('expired')));
+ savedCase.deps.workspace=()=>'/project';await savedCase.commands['karma.resumeWorkflow']();
+ await savedCase.send('auto',chatUser(resumeInstruction()),originalChat);
  assert.equal(savedCase.calls.filter(c=>c.op==='conversation').length,oldConversationCount);
  assert.equal(savedCase.calls.filter(c=>c.op==='native_work').at(-1).prompt,'Fix retry');
- checks.push('Monitor Resume submits a single-use action through Sutra Auto, preserves the draft, rejects other chats and workspaces and stale cursors, and restores the original request');
+ checks.push('Monitor Resume redisplays after dismissal, copies one single-use originating-chat instruction, rejects foreign chats/workspaces/stale cursors and never opens a sign-in surface');
  const discarded=setup();discarded.kind('report');await discarded.arm();discarded.hold(()=>{throw Error('stopped fixture');});await assert.rejects(discarded.send(),/stopped/);discarded.hold(null);
  discarded.v.window.showWarningMessage=async()=> 'Discard and use new request';
  await discarded.send('high',[{role:1,content:[new Text('New request')]}]);assert(discarded.flowRequests.some(r=>r.event==='cancel'));
@@ -578,7 +584,7 @@ function setup(saved={}){
    budget:{used:{calls:1,tokens:1842}}};
   let flow,key;
   const attach=fixture=>{
-   fixture.v.window.showWarningMessage=async()=>{throw Error('Document evidence must not ask for workspace permissions');};
+   fixture.v.window.showWarningMessage=async()=>{throw Error('Document evidence must not ask for workspace access');};
    fixture.deps.request=async m=>{
     assert.equal(m.op,'orchestrate');
     assert(!m.armed);
@@ -805,11 +811,19 @@ function setup(saved={}){
   assert(!pause.some(part=>part.value?.includes('Continuing this request through Sutra’s workspace workflow')));
   assert.equal(permissionPrompts,0);
   const before=traffic.length;
-  const reviewed=await workspace.send('auto',user('Use this workspace.'),chat);
-  assert.deepEqual(traffic.slice(before).map(m=>m.event),['inspect','supply_evidence','step']);
-  assert.equal(permissionPrompts,1);
+  const accessPause=await workspace.send('auto',user('Use this workspace.'),chat);
+  assert.deepEqual(traffic.slice(before).map(m=>m.event),['inspect','supply_evidence']);
+  assert(accessPause.some(part=>part.value?.includes('Workspace access needed')));
+  assert.equal(permissionPrompts,0,'Selecting the scope must finish the response before consent');
+  assert(!workspace.controller.status().armed);
+  assert.equal(workspace.controller.status().pending.flow_id,flowId);
+  await workspace.commands['karma.armNative']();assert.equal(permissionPrompts,1);
+  const beforeContinue=traffic.length;
+  const reviewed=await workspace.send('high',user('continue'),chat);
+  assert.deepEqual(traffic.slice(beforeContinue).map(m=>m.event),['inspect','step']);
+  assert.equal(traffic.at(-1).tier,'high');
   assert(reviewed.some(part=>part.value?.includes('Workspace review completed')));
-  checks.push('a missing workspace target requests explicit scope before normal permission checks and retains the same workflow');
+  checks.push('a missing workspace target requests explicit scope, defers consent outside the response, and retains the workflow across model-switch continuation');
  }
  const routingFlow=setup();let routingStep=0;const routingEvents=[];
  const routingChat=(id,model,followup)=>({route:{model},routing_followup:followup,result:{invocation_id:id,admission:{admitted:true},accepted_output:{intent:'conversation',answer:followup?'UNPUBLISHED DRAFT':'Final routed answer'},token_usage:{calls:[{invocation_id:id,model,stage:'conversation',input_tokens:100,output_tokens:20}]}}});
@@ -898,7 +912,9 @@ function setup(saved={}){
   assert.equal(resumed,undefined);
   const completed=await review.send('auto',followup);
   assert.equal(completed.filter(part=>part.value?.includes('High (strata:high) is unavailable')).length,1);
-  assert(completed.some(part=>part.value?.includes('Sutra routing confirmed · model-b')));
+  assert.equal(review.controller.status().routing.model,'model-b');
+  assert.equal(review.controller.status().routing.stage,'admitted');
+  assert(!completed.some(part=>part.value?.includes('Sutra routing confirmed')),'Routing metadata belongs in Monitor');
   assert.equal(resumed.flow_id,saved.flow_id);
   assert.equal(resumed.cursor,saved.cursor);
   assert.deepEqual(resumed.binding,saved.binding);
@@ -938,7 +954,8 @@ function setup(saved={}){
   };
   const response=await sliced.send('low');
   const message=response.map(p=>p.value).join('');
-  for(const phrase of ['Child review saved slice 1','reached its time limit','last completed child checkpoint',
+  assert(sliced.controller.status().routing.progress.includes('Child review saved slice 1'));
+  for(const phrase of ['reached its time limit','last completed child checkpoint',
      'different Sutra model tier','40 in · 60 out · 2 calls'])assert(message.includes(phrase),phrase);
   assert(!sliced.calls.some(c=>c.op==='native_work'));
   assert.equal(sliced.controller.status().pending.stop.slice_ordinal,2);
@@ -982,19 +999,24 @@ function setup(saved={}){
   const [,resumeLink]=message.match(/\[Resume this request\]\((vscode:\/\/[^\s)]+)\)/);
   const uri=new URL(resumeLink);
   const click=()=>review.uriHandler.handleUri({authority:uri.host,path:uri.pathname,query:uri.search,fragment:uri.hash});
+  review.v.window.showInformationMessage=async(message,...choices)=>{review.uiCalls.push(['notice',message]);return choices[0];};
   await click();
-  const sent=review.uiCalls.find(c=>c[0]==='workbench.action.chat.open')[1];
+  assert(!review.uiCalls.some(c=>c[0]==='workbench.action.chat.open'),'Inline Resume must not open a foreign chat');
+  assert.equal(review.copied.length,1);
+  const instruction=review.copied[0];assert.match(instruction,/^Resume saved Sutra request \[[a-f0-9]{32}\]$/);
   assert(!resumed);assert.equal(publications,0);
   const history={role:2,content:paused};
-  await review.send('auto',[history,...chatUser(sent.query)]);
+  await review.send('high',[history,...chatUser(instruction)]);
   assert.equal(resumed.flow_id,pending.flow_id);
   assert.equal(resumed.cursor,pending.cursor);
   assert.deepEqual(resumed.binding,pending.binding);
   assert.equal(review.calls.filter(c=>c.op==='conversation').length,1);
   assert.equal(publications,1);
+  assert.equal(resumed.tier,'high');
   await click();
-  assert.equal(review.uiCalls.filter(c=>c[0]==='workbench.action.chat.open').length,1);
-  checks.push('inline Resume restores claim review draft and exact cursor; completed links cannot submit another request');
+  assert.equal(review.copied.length,1);
+  assert(!review.uiCalls.some(c=>c[0]==='workbench.action.chat.open'));
+  checks.push('inline Resume offers an explicit copied instruction, restores the exact claim-review cursor on another tier, and cannot replay a completed link');
  }
  for(const approve of [false,true]){
   const provenance=setup();provenance.kind('report');await provenance.arm();
@@ -1092,7 +1114,8 @@ function setup(saved={}){
   assert(automatic.controller.status().pending.stop.automatic_allocation.message.includes('automatic allocation ceiling'));
   automatic.v.window.showWarningMessage=async()=>{throw Error('Automatic allocation must not ask for manual confirmation');};
   const reply=await automatic.send('high',[{role:1,content:[new Text('continue')]}]);
-  assert(reply.some(p=>p.value?.includes('Sutra added source capacity within the workspace limits')));
+  assert.equal(automatic.controller.status().routing.progress,'Sutra added source capacity within the workspace limits.');
+  assert(!reply.some(p=>p.value?.includes('Sutra added source capacity within the workspace limits')));
   assert.equal(automatic.calls.filter(c=>c.op==='native_work').at(-1).tier,'high');
   assert.equal(automatic.controller.status().pending,null);
   checks.push('automatic allocation progress on resume stays in the same model-switch request without a confirmation');
@@ -1130,7 +1153,8 @@ function setup(saved={}){
    return out;
   };
   const reply=await fallback.send('auto');
-  assert(reply.some(p=>p.value?.includes('Host workflow · Memory admission blocked large. Auto will try small')));
+  assert(fallback.controller.status().routing.progress.includes('Memory admission blocked large. Auto will try small'));
+  assert(!reply.some(p=>p.value?.includes('Host workflow')),'Host progress must not clutter the answer');
   assert.equal(fallback.calls.filter(c=>c.op==='native_work').length,1);
   assert.equal(fallback.calls.find(c=>c.op==='native_work').contract_hash,'contract-1');
   assert(!reply.some(p=>p.value?.includes('Sutra paused')));
@@ -1150,14 +1174,16 @@ function setup(saved={}){
    const out=await real(m,t);
    return m.op==='orchestrate'&&out.state==='CODING'?{...out,state:'PAUSED',progress:'Fresh source mapping: structural_pass_complete',stop:{status:'resource_wait',resume_phase:'SYNTHESIS',error:'RESOURCE_WAIT: Selected model does not fit'}}:out;
   };
+  await routed.arm();
   const reply=await routed.send('low',[{role:1,content:[new Text('Give a high-level workspace overview')]}]);
   assert.equal(reply.filter(p=>p instanceof Thinking).length,0);
-  assert.equal(reply.filter(p=>p instanceof Text&&p.value.includes('/Reasoning.txt')).length,1);
-  assert(reply.some(p=>p.value?.includes('No separate reasoning text received.')));
-  assert(reply.some(p=>p.value?.includes('Host workflow · Fresh source mapping')));
-  assert(reply.some(p=>p.value?.includes('Host resource check · Workspace synthesis paused')));
+  assert.equal(reply.filter(p=>p instanceof Text&&p.value.includes('/Reasoning.txt')).length,0);
+  assert(!reply.some(p=>p.value?.includes('No separate reasoning text received.')));
+  assert(!reply.some(p=>p.value?.includes('Host workflow')));
+  assert.equal(routed.controller.status().routing.progress,'Fresh source mapping: structural_pass_complete');
+  assert(reply.some(p=>p.value?.includes('Host admission check · Workspace synthesis paused')));
   assert(!routed.calls.some(c=>c.op==='native_work'));
-  checks.push('router without reasoning followed by workspace memory pause shows one call, no phantom thinking, and explicit host stages');
+  checks.push('router without reasoning remains quiet inline; Monitor retains host progress and a workspace pause explains the blocking stage');
  }
  for(const firstThinking of [true,false]){
   const cooling=setup();let blockedResource=true,resourceFlow;
@@ -1205,6 +1231,11 @@ function setup(saved={}){
   };
   const result=await upgraded.send('high',[{role:1,content:[new Text('continue')]}]);
   if(approve){
+   assert(!restart,'Restart cannot mutate the saved task before workspace access is granted');
+   assert.equal(arms,0);assert(!upgraded.calls.some(c=>c.op==='native_work'));
+   assert(result.some(p=>p.value?.includes('Workspace access needed')));
+   await upgraded.commands['karma.armNative']();assert.equal(arms,1);assert(!restart);
+   await upgraded.send('high',[{role:2,content:result},{role:1,content:[new Text('continue')]}]);
    assert(restart?.armed);assert.equal(restart.binding.contract_hash,'contract-1');
    const work=upgraded.calls.find(c=>c.op==='native_work');assert.equal(work.prompt,originalPrompt);assert.equal(work.tier,'high');assert.equal(arms,1);
   }else{
@@ -1233,7 +1264,7 @@ function setup(saved={}){
   return realRequest(m,t);
  };
  const first=await live.send('low',[{role:1,content:[new Text('hello')]}]);
- assert.equal(first.filter(p=>p instanceof Text&&p.value.includes('/Reasoning.txt')).length,3);
+ assert.equal(first.filter(p=>p instanceof Text&&p.value.includes('/Reasoning.txt')).length,0);
  assert.equal(first.filter(p=>p instanceof Thinking&&p.metadata?.vscode_reasoning_done).length,3);
  assert.equal(new Set(first.filter(p=>p instanceof Thinking).map(p=>p.id)).size,3);
  assert(first.some(p=>p instanceof Thinking&&p.value.includes('off requested')));
@@ -1248,7 +1279,7 @@ function setup(saved={}){
  assert.notEqual(first.find(p=>p instanceof Thinking).id,second.find(p=>p instanceof Thinking).id);
  delete live.v.LanguageModelThinkingPart;
  assert((await live.send('low',[{role:1,content:[new Text('hello')]}])).some(p=>p instanceof Text&&p.value.includes('Conversational answer')));
- checks.push('three calls in one response have independent reasoning links and end markers; parent/child reasoning is a separate optional stream; model switches use distinct identities; it never becomes text answers, memory or action proof');
+ checks.push('three calls in one response keep independent inline thinking identities and end markers without answer-text diagnostics; model switches use distinct identities; reasoning never becomes memory or action proof');
  }
  console.log(JSON.stringify({passed:true,checks},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;});

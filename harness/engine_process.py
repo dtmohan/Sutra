@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import select
 import signal
 import subprocess
 import threading
@@ -23,6 +24,15 @@ MAX_OUTPUT_TOKENS = 262144
 MAX_TOKEN_ID = 2**31 - 1
 MAX_STDERR_BYTES = 32768
 POLL_SECONDS = .05
+
+
+def sanitized_environment(source=None, *, worker=False):
+    """Keep basic OS settings; inherited loader/interpreter hooks are never run."""
+    source = os.environ if source is None else source
+    basic = {'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TMP', 'TEMP',
+             'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'SYSTEMROOT', 'WINDIR'}
+    return {key: value for key, value in source.items()
+            if key in basic or worker and key.startswith('SUTRA_')}
 
 
 class EngineError(RuntimeError):
@@ -163,9 +173,9 @@ class EngineProcess:
         overrides = profile.get('env', profile.get('environment', {}))
         if not isinstance(overrides, dict) or len(overrides) > 128:
             raise ValueError('Invalid native engine environment')
-        self.environment = dict(os.environ)
+        self.environment = sanitized_environment()
         for key, value in overrides.items():
-            if not re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]{0,127}', str(key)):
+            if not isinstance(key, str) or not re.fullmatch(r'(?:STRATA_|GGML_|MLX_|OMP_)[A-Z0-9_]+', key):
                 raise ValueError('Invalid native engine environment name')
             self.environment[key] = _text(value, 'engine environment value')
         self.executable, self.cwd = executable, cwd
@@ -269,15 +279,30 @@ class EngineProcess:
                 raise EngineProtocolError('Native engine emitted control characters')
             return line
 
-    def _write(self, line):
+    def _write(self, line, *, deadline, cancel_event=None, interruptible=True):
         proc = self._proc
         if proc is None or proc.poll() is not None:
             raise EngineError('Native engine is not running')
-        try:
-            proc.stdin.write(line.encode('ascii') + b'\n')
-            proc.stdin.flush()
-        except (OSError, ValueError):
-            raise EngineError('Native engine input pipe closed') from None
+        data = line.encode('ascii') + b'\n'
+        offset = 0
+        descriptor = proc.stdin.fileno()
+        while offset < len(data):
+            if interruptible and (self._shutdown.is_set() or cancel_event is not None and cancel_event.is_set()):
+                raise EngineCancelled('Native input was cancelled before the command completed')
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise EngineTimeout('Native input exceeded its absolute deadline')
+            try:
+                _, writable, _ = select.select([], [descriptor], [], min(POLL_SECONDS, remaining))
+                if writable:
+                    written = os.write(descriptor, data[offset:offset + 65536])
+                    if written <= 0:
+                        raise EngineError('Native engine input pipe closed')
+                    offset += written
+            except (BlockingIOError, InterruptedError):
+                continue
+            except (OSError, ValueError):
+                raise EngineError('Native engine input pipe closed') from None
 
     def _info_line(self, line):
         fields = line.split()
@@ -327,6 +352,9 @@ class EngineProcess:
             if os.name != 'nt':
                 options['start_new_session'] = True
             self._proc = subprocess.Popen([self.executable, '--serve', *self.args], **options)
+            if os.name == 'nt':
+                raise EngineError('This native engine transport requires nonblocking POSIX process pipes')
+            os.set_blocking(self._proc.stdin.fileno(), False)
             self._stream = _Stream()
             self._started_at = time.time()
             self._threads = [threading.Thread(target=self._stdout, args=(self._proc, self._stream), daemon=True),
@@ -418,7 +446,8 @@ class EngineProcess:
             started = time.monotonic()
             deadline = started + duration
             sent = True
-            self._write('GEN '+str(maximum)+(' '+' '.join(sampling) if sampling else '')+' '+','.join(map(str, ids)))
+            self._write('GEN '+str(maximum)+(' '+' '.join(sampling) if sampling else '')+' '+','.join(map(str, ids)),
+                        deadline=deadline, cancel_event=cancel_event)
             tokens, reused, stopped, interrupted, callback_error = [], 0, False, None, None
             metrics = None
             while metrics is None:
@@ -429,7 +458,7 @@ class EngineProcess:
                 if interrupted and not stopped:
                     if 'stop' not in self._capabilities:
                         raise EngineProtocolError('Native engine cannot safely cancel this request')
-                    self._write('STOP')
+                    self._write('STOP', deadline=now + self.drain_timeout, interruptible=False)
                     stopped = True
                     deadline = now + self.drain_timeout
                 if interrupted and now >= deadline:

@@ -24,7 +24,7 @@ POLICY_FILES = ('engine_profiles.py','engine_model.py','engine_client.py','engin
                 'review_role.py', 'vscode_bridge.py', 'coding_role.py', 'host_actions.py',
                 'monitoring.py', 'unittest_entry.py', 'telemetry.m', 'lifecycle.py', 'storage_policy.py',
                 'repository_tools.py', 'architecture_role.py', 'architecture_runtime.py','api_extract.py','api_extract.js','api_facts.py','api_roles.py','api_runtime.py',
-                'static_typescript.js','static_analysis.py','static_role.py','static_runtime.py','platform_support.py','telemetry_portable.js','review_budget.py','auto_review.py')
+                'static_typescript.js','static_analysis.py','static_role.py','static_runtime.py','platform_support.py','telemetry_portable.js','review_budget.py','accounting_batches.py','accounting_metrics.py','accounting_audit.py','auto_review.py')
 
 
 def policy_hash():

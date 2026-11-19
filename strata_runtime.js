@@ -103,10 +103,11 @@ function create({readProfile = startup.readStartupProfile, writeProfile = manage
       } catch { ready = false; }
     }
     const ref = 'strata:profile/'+name;
+    const verifiedState=state.state==='ready'&&!ready?'unverified':state.state;
     return {name:ref,ref,display_name:name+' · '+selected.model,profile:name,model:selected.model,
       port:selected.port,context_tokens:context,profile_revision:preview.plan.launch.profile_revision,
-      source_sha256:preview.plan.source_sha256,active:['ready','starting'].includes(state.state),ready,
-      eligible:true,provider:'strata',execution_compatibility:'unverified'};
+      source_sha256:preview.plan.source_sha256,active:ready||state.state==='starting',ready,state:verifiedState,
+      eligible:!['failed','stale','unverified'].includes(verifiedState),provider:'strata',execution_compatibility:'unverified'};
   }
 
   function legacyName(current,profiles) {

@@ -67,10 +67,26 @@ def resource_state(root, now=None, *, refresh=False, newer_than=None, max_wait=2
     return state
 
 
+def wait_category(state):
+    explicit = state.get('blocker')
+    if explicit in ('runtime_busy', 'runtime_timeout', 'runtime_uncertain', 'runtime_starting',
+                    'model_admission', 'measurement_unavailable', 'hardware_pressure'):
+        return explicit
+    runtime=state.get('runtime') or {}
+    if runtime.get('kind')=='model_capacity':
+        return 'model_admission'
+    if runtime.get('kind')=='busy':
+        return 'runtime_busy'
+    if runtime.get('kind')=='identity_changed':
+        return 'runtime_uncertain'
+    return 'hardware_pressure' if state.get('available') and state.get('sample') else 'measurement_unavailable'
+
+
 class ResourceWait(InvalidUpdate):
     """A measured, recoverable admission stop, not a provider failure."""
     def __init__(self, state):
         self.state = state
+        self.category = wait_category(state)
         details = [state.get('reason', 'Resource measurement unavailable')]
         if state.get('available'):
             details.append('OS thermal pressure: '+str(state.get('thermal_label', 'unknown')))

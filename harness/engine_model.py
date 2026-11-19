@@ -58,6 +58,7 @@ class EngineModel(LocalModel):
         from runtime_memory import HEADROOM, dispatch_context, enabled, fresh_resources, lease
         if self.model not in engine_profiles.assigned_models():
             raise InvalidUpdate('Sutra engine profile is not assigned in trusted model settings')
+        engine_profiles.require_approval(self.profile)
         if not enabled():
             raise InvalidUpdate('Sutra engine dispatch requires the shared host runtime directory')
         with lease():
@@ -125,16 +126,18 @@ class EngineModel(LocalModel):
                         'eval_count': count(result.get('completion_tokens')),
                         'message': {'role': 'assistant', 'content': content, 'thinking': thinking},
                         'timings': result.get('timings'), 'instance_id': result.get('instance_id')}
-            record['response'] = response
             if result.get('instance_id') != self.engine_instance['instance_id']:
                 raise InvalidUpdate('Sutra engine instance changed during inference')
+            from engine_client import observed_usage
+            observed_usage(result)
+            if (response['prompt_eval_count'] + self.budget.response_reserve > self.runtime_context_tokens or
+                    response['eval_count'] > self.budget.response_reserve):
+                raise RuntimeError('Sutra engine usage exceeds the admitted context or output budget')
+            record['response'] = response
             if response['done_reason'] == 'length':
                 raise OutputLimitExceeded('Sutra engine reached the allocated output limit')
             if response['done_reason'] != 'stop' or response['prompt_eval_count'] is None or response['eval_count'] is None:
                 raise RuntimeError('Sutra engine did not report a complete generation with token usage')
-            if (response['prompt_eval_count'] + self.budget.response_reserve > self.runtime_context_tokens or
-                    response['eval_count'] > self.budget.response_reserve):
-                raise RuntimeError('Sutra engine usage exceeds the admitted context or output budget')
             self.fresh_context_metadata()
             try:
                 answer = json.loads(content)
@@ -166,11 +169,11 @@ class EngineModel(LocalModel):
         return answer, record
 
 
-def append_catalog(catalog):
+def append_catalog(catalog, path=None):
     catalog['models'] = [row for row in catalog['models'] if not engine_profiles.is_engine(row.get('name'))]
     catalog.setdefault('errors', [])
     try:
-        observed = engine_profiles.catalog()
+        observed = engine_profiles.catalog(path)
     except InvalidUpdate as error:
         catalog['errors'].append({'provider': 'sutra_engine', 'error': str(error)})
     else:

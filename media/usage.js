@@ -149,17 +149,21 @@ function renderMonitor(){
  const profile = profiles[native?.accessProfile];
  const permission = !native ? 'unavailable' : native.enabled === false ? 'Sutra Auto is off' :
    native.armed && profile ? profile : 'No workspace access';
- el('workspace-access').textContent = 'Workspace permissions · '+permission;
+ setText('workspace-access','Workspace access · '+permission+
+   (native?.permissionPending===true?' · choose access to continue the saved request':''));
+ el('workspace-access-choose').hidden=native?.permissionPending!==true;
+ el('workspace-access-choose').disabled=native?.permissionCanChoose!==true;
  el('native-request').textContent = routing
    ? 'Last Sutra request: '+(routing.model||'model pending')+' · '+(routing.stage||'received')+memory+'.'
    : 'No Sutra request observed in this window. Check the model selected below the chat prompt.';
  const access = {
    requested:'waiting for permission choice', confirmed:'confirmation received',
    granted:'workspace access granted', declined:'permission declined', cancelled:'permission cancelled',
-   already_armed:'saved workspace permissions reused', restored:'saved workspace permissions restored',
-   reused:'saved workspace permissions reused'
+   already_armed:'saved workspace access reused', restored:'saved workspace access restored',
+   reused:'saved workspace access reused'
  }[routing?.workspaceAccess?.state];
  if(access)el('native-request').textContent+=' Last permission feedback: '+access+'.';
+ if(typeof routing?.progress==='string'&&routing.progress.trim())el('native-request').textContent+=' '+routing.progress;
  const ma=routing?.memoryAllocation,ms=routing?.memoryStatus;if(ma)el('context-packet').textContent+=' Conversation: '+T.number(ma.context_limit)+' context tokens, '+T.number(ma.response_reserve)+' output reserved; working note up to '+T.number(ma.summary_max_chars)+' characters. '+(ms?T.number(ms.stored_turns)+' saved turns · '+T.number(ms.omitted_turns)+' outside this working set.':'');
  const compact=native?.compaction;el('compaction').dataset.missing=String(compact?.status==='missing_checkpoint');
  el('compaction').textContent=compact?'Last VS Code compaction: '+(compact.status==='checkpoint_preserved'?'signed checkpoint retained; no model summary call':compact.status==='missing_checkpoint'?'no authenticated checkpoint; context may need restating':'unknown status')+' · '+new Date(compact.time).toLocaleTimeString()+'.':'No VS Code compaction observed in this window.';
@@ -267,6 +271,7 @@ function renderActivity(calls){
 window.addEventListener('message',({data:m})=>{if(m.type!=='usage')return;renderReasoningPreference(m.reasoningPreference,m.tierReasoning);renderActivity(m.activity||[]);setText('reasoning-error',m.activityError||'');el('reasoning-error').hidden=!m.activityError;snapshot=m.snapshot;routing=m.routing;native=m.native;error=m.error;for(const key of ['model','stage'])fillOptions(key);if(!snapshot){for(const key of ['input','output','calls','unknown'])el(key).textContent='—';for(const key of ['input','output'])el(key+'-note').textContent='Waiting for measurements';el('scope').textContent='This workspace · waiting for recorded calls…';el('visuals').hidden=true;el('details').hidden=true;el('empty').hidden=true;setText('window','');}render();});
 // Expire live readings even if the host/reader stops delivering messages.
 el('open-tasks').onclick=()=>vscode.postMessage({type:'open_tasks'});
+el('workspace-access-choose').onclick=()=>{if(!el('workspace-access-choose').disabled)vscode.postMessage({type:'workspace_access'});};
 el('resume-workflow').onclick=()=>vscode.postMessage({type:'resume'});el('discard-workflow').onclick=()=>vscode.postMessage({type:'discard'});
 el('manage-tools').onclick=()=>vscode.postMessage({type:'tools'});el('tool-policy').onclick=()=>vscode.postMessage({type:'tool_policy'});
 el('increase-allocation').onclick=()=>vscode.postMessage({type:'increase_allocation'});

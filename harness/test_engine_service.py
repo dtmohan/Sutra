@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from engine_client import _exchange, metadata
+from engine_client import _exchange, metadata, signed, VERSION
 import engine_profiles
 from engine_service import EngineWorker, WorkerError, serve
 from test_engine_profiles import descriptor
@@ -287,7 +287,7 @@ class EngineServiceTests(unittest.TestCase):
         self.addCleanup(peer.close)
         peer.connect(record['socket'])
         request = self.request('load')
-        request.update(version=record['version'], token=record['token'])
+        request = signed({'version': VERSION, 'nonce': 'c' * 32, 'sent_at': int(time.time()), 'request': request}, record['token'])
         peer.sendall(json.dumps(request).encode() + b'\n')
         until = time.monotonic() + 2
         while self.worker.loading_engine is None and time.monotonic() < until:
@@ -329,11 +329,19 @@ class EngineServiceTests(unittest.TestCase):
         self.assertIsNone(self.worker.instance_id)
         self.assertFalse((directory / 'worker.json').exists(), 'No stale worker identity may survive shutdown')
 
+    def test_replayed_authenticated_request_is_rejected_before_operation_dispatch(self):
+        _, record = self.start_server()
+        with patch('engine_client.secrets.token_hex', return_value='e' * 32):
+            self.assertTrue(_exchange(record, {'op': 'status'})['ok'])
+            with self.assertRaisesRegex(RuntimeError, 'nonce was replayed'):
+                _exchange(record, {'op': 'status'})
+        self.assertIsNone(self.worker.engine)
+
     def test_real_socket_authentication_and_result_framing(self):
         from engine_client import EngineServiceError
         directory, record = self.start_server()
         wrong = dict(record, token='f' * 64)
-        with self.assertRaisesRegex(EngineServiceError, 'authentication'):
+        with self.assertRaises(EngineServiceError):
             _exchange(wrong, {'op': 'status'})
         result = _exchange(record, {'op': 'ping'})
         self.assertEqual(result['runtime_hash'], 'b' * 64)
@@ -350,7 +358,7 @@ class EngineServiceTests(unittest.TestCase):
         peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         peer.connect(record['socket'])
         request = self.request('generate', expected_instance_id=loaded['instance_id'])
-        request.update(version=record['version'], token=record['token'])
+        request = signed({'version': VERSION, 'nonce': 'd' * 32, 'sent_at': int(time.time()), 'request': request}, record['token'])
         peer.sendall(json.dumps(request).encode() + b'\n')
         self.assertTrue(engine.entered.wait(2)); peer.close()
         self.assertTrue(engine.cancel_observed.wait(3))

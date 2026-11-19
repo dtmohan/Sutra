@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Governed local AI chat, codebase reviews, and diagnostics in VS Code.",
-  "version": "0.49.0",
+  "version": "0.50.0",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -117,7 +117,7 @@
       },
       {
         "command": "karma.armNative",
-        "title": "Sutra: Workspace Permissions\u2026"
+        "title": "Sutra: Workspace Access\u2026"
       },
       {
         "command": "karma.disarmNative",
@@ -370,7 +370,7 @@
           "type": "boolean",
           "default": true,
           "scope": "machine",
-          "description": "Make Sutra Auto available in native chat. Use the Sutra workspace permissions command to manage saved access. The current task scope still applies."
+          "description": "Make Sutra Auto available in native chat. Use Sutra: Workspace Access\u2026 to manage saved access. The current task scope still applies."
         },
         "karma.thinking": {
           "type": "string",
@@ -509,6 +509,16 @@
           "scope": "application",
           "default": "",
           "description": "Absolute path to the user-owned engine profile registry. Empty uses Engine/models.json in Sutra\u2019s application support directory. Profile assets are local and are not downloaded automatically."
+        },
+        "karma.engine.approvals": {
+          "type": "object",
+          "scope": "application",
+          "default": {},
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "description": "User-approved Sutra engine model references mapped to their exact profile fingerprints. User Settings only; changing an engine descriptor or bound asset requires a new approval. Repository settings and model output cannot authorize an engine."
         }
       }
     },
@@ -790,7 +800,7 @@
         "commands": [
           {
             "name": "new",
-            "description": "Start a separate read-only workspace review"
+            "description": "Start a separate workspace review; enter its goal when prompted, or include the review request after /new."
           },
           {
             "name": "models",

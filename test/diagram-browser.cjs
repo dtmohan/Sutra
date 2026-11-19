@@ -15,6 +15,24 @@ if(process.env.KARMA_DIAGRAM_FIXTURE)diagram=JSON.parse(fs.readFileSync(process.
  const width=await page.locator('#canvas svg').evaluate(e=>e.getBoundingClientRect().width);await page.click('#plus');assert((await page.locator('#canvas svg').evaluate(e=>e.getBoundingClientRect().width))>width);await page.click('#fit');
  await page.selectOption('#direction','TB');assert.equal((await page.evaluate(()=>sent.at(-1))).direction,'TB');await page.evaluate(source=>window.postMessage({type:'source',source},'*'),mermaidSource(diagram,'TB'));await page.waitForFunction(()=>document.querySelector('#canvas svg')?.id==='karma_graph_2');assert.equal(await page.locator('#error').textContent(),'');
  const hostile={...diagram,nodes:[{id:'n1',label:'<img src=https://example.com onerror=alert(1)> " ]; click evil',kind:'source'}],edges:[]};await page.evaluate(data=>window.postMessage(data,'*'),{type:'diagram',diagram:hostile,source:mermaidSource(hostile),receipt:'b'.repeat(32)});await page.waitForFunction(()=>document.querySelector('#canvas svg')?.id==='karma_graph_3');assert.equal(await page.locator('#canvas image, #canvas a, #canvas foreignObject, #canvas script').count(),0);assert.equal(await page.locator('#canvas .node').count(),1);assert.deepEqual(network,[]);assert.deepEqual(errors,[]);
+ await page.evaluate(data=>window.postMessage(data,'*'),{type:'diagram',diagram,source:mermaidSource(diagram),receipt:'c'.repeat(32)});
+ await page.waitForFunction(()=>document.querySelector('#canvas svg')?.id==='karma_graph_4');
+ for(const fixture of [
+   {kind:'vscode-dark',background:'#1e1e1e',foreground:'#d4d4d4',surface:'#313131',border:'#a0a0a0'},
+   {kind:'vscode-light',background:'#ffffff',foreground:'#202020',surface:'#f2f2f2',border:'#737373'},
+   {kind:'vscode-high-contrast',background:'#000000',foreground:'#ffffff',surface:'#000000',border:'#ffffff'},
+ ]){
+   const previous=await page.locator('#canvas svg').getAttribute('id');
+   await page.evaluate(f=>{document.body.className=f.kind;document.body.style.cssText=`--vscode-editor-background:${f.background};--vscode-editor-foreground:${f.foreground};--vscode-input-background:${f.surface};--vscode-contrastBorder:${f.border}`;},fixture);
+   await page.waitForFunction(id=>document.querySelector('#canvas svg')?.id!==id,previous);
+   const colors=await page.locator('#canvas svg').evaluate(node=>({background:node.style.background,rect:getComputedStyle(node.querySelector('.node rect')).fill,text:getComputedStyle(node.querySelector('.node text')).fill,stroke:getComputedStyle(node.querySelector('.node rect')).strokeWidth}));
+   const rgb=hex=>'rgb('+hex.slice(1).match(/../g).map(n=>parseInt(n,16)).join(', ')+')';
+   assert.equal(colors.background,rgb(fixture.background));assert.equal(colors.rect,rgb(fixture.surface));assert.equal(colors.text,rgb(fixture.foreground));
+   if(fixture.kind==='vscode-high-contrast')assert.equal(colors.stroke,'2.5px');
+   await page.click('#export');const themed=await page.evaluate(()=>sent.filter(m=>m.type==='export').at(-1).svg);safeSVG(themed);assert(themed.includes(fixture.background)||themed.includes(rgb(fixture.background)));
+   await page.screenshot({path:path.join(out,'Diagram-'+fixture.kind+'.png'),fullPage:true});
+ }
+ assert.deepEqual(network,[]);assert.deepEqual(errors,[]);
  for(const x of ['<svg onload="alert(1)"></svg>','<svg><script>x</script></svg>','<svg><image href="https://example.com"/></svg>','<svg><style>@import url(https://x)</style></svg>'])assert.throws(()=>safeSVG(x),/Unsafe/);
- fs.writeFileSync(path.join(out,'Diagram-browser-validation.json'),JSON.stringify({passed:true,checks:['production HTML renders with nonce-bound scripts and no script resource requests','official bundled Mermaid renders offline without any network request','nine-device listening chain retains both WiiM units, C2860 and projector branch','diagram fits viewport and supports zoom and direction changes','exported SVG passes host checks and retains vector text','hostile labels remain inert text; no image, link, foreignObject or script','active or externally referenced SVG exports rejected','no browser errors']},null,2));fs.unlinkSync(file);
+ fs.writeFileSync(path.join(out,'Diagram-browser-validation.json'),JSON.stringify({passed:true,checks:['production HTML renders with nonce-bound scripts and no script resource requests','official bundled Mermaid renders offline without any network request','nine-device listening chain retains both WiiM units, C2860 and projector branch','diagram fits viewport and supports zoom and direction changes','exported SVG passes host checks and retains vector text','hostile labels remain inert text; no image, link, foreignObject or script','light, dark and high-contrast theme changes preserve readable SVG and exported colors','active or externally referenced SVG exports rejected','no browser errors']},null,2));fs.unlinkSync(file);
  }finally{await browser.close();}})().catch(e=>{console.error(e);process.exitCode=1;});
