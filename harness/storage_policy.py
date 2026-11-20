@@ -93,6 +93,10 @@ def write_trace(directory, call_id, record):
                  'predicted_n', 'predicted_ms', 'predicted_per_second')
                 if type(timings.get(key)) in (int, float) and 0 <= timings[key] < 2 ** 53 and math.isfinite(timings[key])}
     compatibility = record.get('decoder_compatibility')
+    from local_model import transport_observation
+    transport = transport_observation(record)
+    if transport is not None:
+        compact['transport'] = transport
     if isinstance(compatibility, dict):
         compact['decoder_compatibility'] = {k: compatibility[k] for k in
             ('policy', 'runner', 'runtime_version') if k in compatibility and

@@ -1,4 +1,10 @@
-Sutra 0.53.1 — Retained context handoffs
+Sutra 0.53.2 — Resumable provider waits
+
+Conversation timeouts retain the original request and spending for explicit
+resume. Provider-header waits and interrupted streams have distinct diagnostics.
+No incomplete output, invented token usage, automatic retries or extra workspace
+approval. Shared-server contention remains possible; model tiers and settings
+stay unchanged.
 
 Discovery and report writers share a verified contents directory of saved notes
 and exact source spans. Small windows defer whole units for recall. Native work

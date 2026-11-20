@@ -9,6 +9,21 @@ class OutputLimitExceeded(RuntimeError):
 class StructuredOutputRejected(RuntimeError):
     """The backend rejected the generated proposal; bounded repair is possible."""
 
+
+def transport_observation(record):
+    """Bounded host transport facts; no inferred queue state or token counts."""
+    state=record.get('transport') if isinstance(record,dict) else None
+    if not isinstance(state,dict) or type(state.get('version')) is not int or state['version']!=1:return None
+    phase=state.get('phase');headers=state.get('headers_received')
+    if phase not in ('connect','response_headers','stream','decode','complete') or type(headers) is not bool:return None
+    counts={key:state.get(key) for key in ('frames_received','content_bytes','reasoning_bytes')}
+    if any(type(value) is not int or not 0<=value<=2**53-1 for value in counts.values()):return None
+    if phase in ('connect','response_headers') and (headers or any(counts.values())):return None
+    if phase in ('stream','decode','complete') and not headers:return None
+    if not counts['frames_received'] and (counts['content_bytes'] or counts['reasoning_bytes']):return None
+    return dict(version=1,phase=phase,headers_received=headers,**counts)
+
+
 class LocalModel:
     model_interface = 1
     transport_deadline_cap = 360
@@ -50,7 +65,9 @@ class LocalModel:
             sensor=Sensor(self.log_dir); body.update(sensor.request())
         except Exception:
             sensor=None  # Diagnostics must not prevent an otherwise governed call.
-        record={'call_id':call_id,'request':body,'conservative_input_charge':charge,
+        transport={'version':1,'phase':'connect','headers_received':False,'frames_received':0,
+                   'content_bytes':0,'reasoning_bytes':0}
+        record={'call_id':call_id,'request':body,'conservative_input_charge':charge,'transport':transport,
                 'decoder_compatibility':getattr(self,'decoder_compatibility',None)}
         from lifecycle import timeout
         from invocation_gateway import transport_seconds, transport_timeout
@@ -59,7 +76,9 @@ class LocalModel:
         if self.health: self.health.active=c
         try:
             c.request('POST','/api/chat',json.dumps(body),{'Content-Type':'application/json'})
+            transport['phase']='response_headers'
             r=c.getresponse()
+            transport.update(headers_received=True,phase='stream')
             if r.status!=200: raise RuntimeError(f'HTTP {r.status}: {r.read(300).decode(errors="replace")}')
             from model_activity import ACTIVE
             activity=ACTIVE.get()
@@ -76,12 +95,15 @@ class LocalModel:
                 if not raw: break
                 if len(raw)>65536: raise RuntimeError('Model stream frame exceeds transport limit')
                 chunk=json.loads(raw)
+                transport['frames_received']+=1
                 if chunk.get('error'): raise RuntimeError(str(chunk['error'])[:300])
                 message=chunk.get('message',{})
                 text=message.get('content',''); thought=message.get('thinking','')
                 if not isinstance(text,str) or not isinstance(thought,str):
                     raise RuntimeError('Invalid model stream text')
                 total+=len(text.encode())+len(thought.encode())
+                transport['content_bytes']+=len(text.encode())
+                transport['reasoning_bytes']+=len(thought.encode())
                 if total>byte_limit: raise RuntimeError('Model stream exceeds transport allocation')
                 content.append(text); reasoning.append(thought)
                 if sensor:
@@ -101,7 +123,9 @@ class LocalModel:
             if not response.get('done'): raise RuntimeError('Incomplete generation')
             if response.get('prompt_eval_count',0)+self.budget.response_reserve>body['options']['num_ctx']:
                 raise RuntimeError('Actual prompt exceeds admitted context budget')
+            transport['phase']='decode'
             answer=json.loads(response['message']['content']); record['answer']=answer; record['ok']=True
+            transport['phase']='complete'
         except Exception as exc:
             record['ok']=False; record['error']=str(exc); exc.call_record=record; raise
         finally:

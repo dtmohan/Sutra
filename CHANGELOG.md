@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.53.2
+
+- Save conversation transport timeouts as resumable provider waits, preserving the original request, parent context, model settings and consumed spending.
+- Distinguish waiting for response headers from an interrupted stream using bounded host observations; retain partial-byte counters without inventing token usage or publishing partial answers.
+- Explain provider waits in native chat with explicit Resume/continue guidance, without workspace arming, automatic retries or engine/memory claims.
+- Keep existing transport deadlines, shared-server ownership, model tiers and the canonical STP kernel unchanged.
+
 ## 0.53.1
 
 - Share scoped retained-context directories between discovery, report writers and architecture reports, preserving whole notes and nonadjacent source spans.

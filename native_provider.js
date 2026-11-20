@@ -547,6 +547,7 @@ function install(vscode,context,deps){
       return;
     }
     const details=[stop.error,...failures.map(f=>f.path+': '+f.error)].filter(Boolean);
+    if(stop.status==='provider_wait')details.unshift('Local provider wait · Conversation routing paused.');
     if(stop.status==='child_review_rejected')details.unshift('A child review failed response validation. Its rejected output has not been used in your report.');
     if(stop.status==='resource_wait'){
       const stage={CLASSIFYING:'Conversation routing',MAPPING:'Source mapping',CHILDREN:'Child review',SYNTHESIS:'Workspace synthesis',CODING:'Workspace coding'}[stop.resume_phase]||'Workflow';
@@ -569,7 +570,9 @@ function install(vscode,context,deps){
     const reason=details.length?details.join('\n'):(stop.status||'Inspect Sutra Monitor for details.');
     audit.stage='paused';audit.message=reason;publish();
     let guidance='Resolve the reported cause before resuming.';
-    if(stop.status==='resource_wait'){
+    if(stop.status==='provider_wait'){
+      guidance='Check that the local provider is available. If it is handling other work, wait for that work to finish, then send **continue** here. The failed call remains charged; no automatic retry or model escalation was attempted.';
+    }else if(stop.status==='resource_wait'){
       const blocker=stop.blocker||stop.measurement?.blocker;
       guidance=blocker==='runtime_busy'?'Wait for the active runtime operation to finish, then continue here. No model switch or memory release was attempted.':
         ['runtime_timeout','runtime_uncertain','runtime_starting'].includes(blocker)?'Refresh the engine worker status in Sutra model settings. Readiness or ownership must be verified before retrying.':

@@ -213,7 +213,7 @@ class InvocationLedger(GovernedContext):
         return envelope
 
     def finalize(self, envelope, payload, proposal, transport_error=None, elapsed_seconds=None, token_usage=None,
-                 accounting_settlement=None, failure_kind=None, generation_progress=None):
+                 accounting_settlement=None, failure_kind=None, generation_progress=None, transport_failure=None):
         session = envelope['session']; rid = envelope['delivery_id']
         model_proposal = copy.deepcopy(proposal)
         from task_observations import split, capture
@@ -268,6 +268,10 @@ class InvocationLedger(GovernedContext):
                        'resulting_contract_hash': self.origin(session, bootstrap=True)['contract_hash']}
             if failure_kind is not None:
                 receipt['failure_kind'] = failure_kind
+            from local_model import transport_observation
+            transport_failure = (transport_observation({'transport':transport_failure}) if transport_error else None)
+            if transport_failure is not None:
+                receipt['transport_failure'] = transport_failure
             observation = capture(self, envelope, payload, proposal, observation_fields)
             if observation is not None:
                 receipt['task_observation'] = observation
@@ -341,6 +345,8 @@ class InvocationLedger(GovernedContext):
             result['coherence_observation'] = coherence
         if progress_observation is not None:
             result['generation_progress_observation'] = progress_observation
+        if transport_failure is not None:
+            result['transport_failure'] = transport_failure
         return result
 
     def quarantine_invocation(self, session, invocation_id, reason):
@@ -767,7 +773,7 @@ class InvocationGateway:
             except Exception: progress = None
             result = ledger.finalize(envelope, payload, proposal, error, time.monotonic() - started,
                                      measured(record), settlement(envelope, record), failure_kind,
-                                     progress)
+                                     progress, record.get('transport') if isinstance(record,dict) else None)
             activity.finish(result['admission']['admitted'], measured(record))
             result['token_usage'] = history(ledger.db, run_id=self.run_id)
             if error and not repairable: result['blocked'] = error

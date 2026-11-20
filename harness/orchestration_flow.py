@@ -1217,6 +1217,25 @@ def _handle(s,meta,workspace,root,req,providers=None):
             return response(s,fid)
         r=chat['result']
         if not r['admission']['admitted']:
+            if r.get('failure_kind') == 'timeout' and not request.get('document_stage_flow'):
+                transport = r.get('transport_failure') or {}
+                phase = transport.get('phase')
+                if phase == 'response_headers':
+                    detail = ('The local provider did not return response headers before the timeout. '
+                              'It may still have been loading or waiting behind another client; generation was not observed.')
+                elif phase == 'stream':
+                    detail = 'The local provider did not finish its response stream before the timeout. Its output has not been admitted.'
+                else:
+                    detail = 'The local provider did not complete before the transport timeout. Queueing and generation state are unknown.'
+                stop = {'status': 'provider_wait', 'resume_phase': 'CLASSIFYING',
+                        'error': detail, 'automatic_retry': False,
+                        'failed_invocation_id': r['invocation_id'], 'model': chat['route']['model']}
+                if transport:
+                    stop['transport_failure'] = transport
+                # The failed call remains charged and quarantined. It cannot
+                # become a conversation parent or routing continuation.
+                move(s, fid, 'PAUSED', 'ROUTING_STOPPED', workflow_stop=stop)
+                return response(s, fid, claim_review_usage=r.get('token_usage'))
             if request.get('document_stage_flow'):
                 progress = 'Document synthesis stopped.'
                 stop_document_stage(s, fid, r['admission']['errors'], progress)

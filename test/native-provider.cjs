@@ -1480,6 +1480,53 @@ function setup(saved={}){
   assert(coolReply.some(p=>p.value?.includes('Conversational answer')));assert.equal(cooling.calls[0].prompt,'Hello');assert.equal(cooling.calls[0].tier,'high');assert.equal(cooling.calls[0].think_for_turn,firstThinking?true:undefined);assert(!cooling.controller.status().armed);
  }
  checks.push('classification resource pause resumes the original conversational prompt on another model without arming files or replaying while blocked');
+ {
+  const saved={},waiting=setup(saved),greeting='Hello Karma - how are you?',failedId='7'.repeat(32);
+  let providerFlow;const requests=[];
+  const wire=instance=>async(m,t)=>{
+   if(m.op!=='orchestrate')return instance.deps.backendRequest(m,t);
+   requests.push(structuredClone(m));
+   if(m.event==='pending')return providerFlow||{state:'DONE',flow_id:null};
+   if(m.event==='start'){
+    providerFlow={flow_id:'provider-wait-flow',cursor:'1',state:'PAUSED',prompt:m.prompt,children:[],
+     stop:{status:'provider_wait',resume_phase:'CLASSIFYING',automatic_retry:false,
+      failed_invocation_id:failedId,error:'The local provider did not return response headers before the timeout. It may still have been loading or waiting behind another client; generation was not observed.'}};
+    return {...providerFlow,claim_review_usage:{calls:[{invocation_id:failedId,stage:'conversation',model:'model-a',
+     input_tokens:null,output_tokens:null,status:'quarantined'}]}};
+   }
+   if(m.event==='resume'){
+    assert.equal(m.tier,'high');assert.equal(m.armed,false);
+    providerFlow={...providerFlow,state:'CLASSIFYING',cursor:'2',stop:null};
+   }
+   if(m.event==='step'&&providerFlow.state==='CLASSIFYING'){
+    const conversation=await instance.deps.backendRequest({...m,op:'conversation',prompt:providerFlow.prompt},t);
+    providerFlow={...providerFlow,state:'DONE',cursor:'3',conversation};
+   }
+   return structuredClone(providerFlow);
+  };
+  waiting.deps.request=wire(waiting);
+  waiting.v.window.showWarningMessage=async()=>{throw Error('Provider wait cannot arm workspace access');};
+  const first=await waiting.send('auto',[{role:1,content:[new Text(greeting)]}]);
+  const text=first.map(part=>part.value||'').join('');
+  assert(text.includes('Local provider wait · Conversation routing paused.'));
+  assert(text.includes('other work')&&text.includes('failed call remains charged'));
+  assert(text.includes('1 call'));
+  assert(!text.includes('Sutra withheld')&&!text.includes('Last model allocation')&&!text.includes('Refresh the engine worker'));
+  assert.deepEqual(requests.map(row=>row.event),['pending','start']);
+  assert.equal(waiting.controller.status().routing.stage,'paused');
+  assert.equal(waiting.controller.status().routing.token_usage.calls[0].invocation_id,failedId);
+  assert(!waiting.controller.status().armed);
+  const reloaded=setup(saved);reloaded.deps.request=wire(reloaded);
+  reloaded.v.window.showWarningMessage=async()=>{throw Error('Resume cannot arm workspace access');};
+  const next=await reloaded.send('high',[{role:1,content:[new Text('continue')]}]);
+  assert(next.some(part=>part.value?.includes('Conversational answer')));
+  assert.equal(reloaded.calls.filter(row=>row.op==='conversation').length,1);
+  assert.equal(reloaded.calls.find(row=>row.op==='conversation').prompt,greeting);
+  assert.equal(reloaded.calls.find(row=>row.op==='conversation').tier,'high');
+  assert(!reloaded.calls.some(row=>row.op==='native_work'));
+  assert.equal(reloaded.controller.status().pending,null);
+  checks.push('provider timeout is a saved classifier pause with charged usage; reload and explicit model-switch continuation preserve the original greeting without arming or automatic retry');
+ }
  for(const approve of [false,true]){
   const upgraded=setup();upgraded.kind('report');
   const originalPrompt='Review saved workspace architecture';

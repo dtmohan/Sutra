@@ -1,4 +1,11 @@
-# Sutra 0.53.1 — Retained context handoffs
+# Sutra 0.53.2 — Resumable provider waits
+
+Conversation timeouts now keep a saved request that can resume on the selected
+model without repeating workspace approval. The host distinguishes missing HTTP
+response headers from an interrupted stream, preserves consumed spending, and
+withholds incomplete output. A healthy shared model server may still queue work
+behind another client; this recovery does not preempt those clients or increase
+the existing timeout. Model tiers and shared-server settings are preserved.
 
 Discovery notes and exact source spans now share a scoped contents directory
 with report writers. Smaller contexts defer whole units behind retrievable
