@@ -60,12 +60,16 @@ def _need(stop):
             required, model, slots = (measured.get(key) for key in
                                       ('required_context', 'model_context', 'slots'))
             available = details.get('available_tokens')
+            from allocation_recovery import exact_context_fit
+            fits_model = (type(required) is int and type(model) is int and
+                          (exact_context_fit(details, measured) if details.get('context_profile') == 2
+                           else required <= model))
             if (dimension == 'tokens' and type(required) is int and type(model) is int
                     and type(slots) is int and slots in (1, 2)
                     and type(available) is int and available >= 0
                     and details.get('effective_context_tokens') == model
                     and details.get('attempt_slots_reserved') == slots
-                    and available // slots < required <= model
+                    and available // slots < required and fits_model
                     and slots * required - available == minimum):
                 return dimension, minimum
     if status == 'context_budget':

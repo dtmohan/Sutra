@@ -77,7 +77,7 @@ def _preparation(s, node, purpose):
 
 
 def acquire(s, meta, workspace, root, request, candidates, *, real,
-            before_read=None, purpose='workspace_synthesis'):
+            before_read=None, purpose='workspace_synthesis', cached_only=False):
     """Select and read new evidence, or re-verify an exact prior preparation.
 
     A prepared snapshot is not an independent grant. Its owner, task binding,
@@ -97,7 +97,11 @@ def acquire(s, meta, workspace, root, request, candidates, *, real,
     s.db.commit()
 
     if identity:
-        machine.allowed(machine.gates(s, owner, {}))
+        # A sizing-only lookup can re-verify previously paid evidence without
+        # reserving fresh work. New acquisition and every model dispatch keep
+        # their normal quantitative admission. It never builds a new receipt.
+        if not cached_only:
+            machine.allowed(machine.gates(s, owner, {}))
         preparation = _preparation(s, node, purpose)
         if preparation and all(preparation.get(k) == v for k, v in identity.items() if k != 'owner'):
             if preparation['candidates'] == candidates:
@@ -122,6 +126,9 @@ def acquire(s, meta, workspace, root, request, candidates, *, real,
                     _audit(s, 'REVIEW_SOURCE_REUSED', dict(preparation, reused_by=owner))
                     return preparation['receipts'], data, dict(plan, snapshot_owner=preparation['owner'])
 
+    if cached_only:
+        return None
+
     if purpose == 'child_review':
         files = candidates
         plan = {'selected': files, 'omitted': []}
@@ -141,3 +148,14 @@ def acquire(s, meta, workspace, root, request, candidates, *, real,
         record = dict(identity, candidates=candidates, receipts=receipts, page_plan=plan)
         _audit(s, _PREPARED, record, commit_node=True)
     return receipts, data, dict(plan, snapshot_owner=owner)
+
+
+def reuse(s, meta, workspace, root, request, candidates, *, real,
+          purpose='workspace_synthesis'):
+    """Plan from exact current paid receipts; never acquire new source.
+
+    Binding, inherited read scope, source identity and receipt checks are the
+    same as ordinary reuse. Financial admission remains mandatory for execution.
+    """
+    return acquire(s, meta, workspace, root, request, candidates, real=real,
+                   purpose=purpose, cached_only=True)

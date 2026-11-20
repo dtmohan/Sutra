@@ -89,6 +89,36 @@ class KarmaAdapter:
                         'host_feedback' if status == 'yellow' else 'continue',
                     semantic_completion_verified=False, grants_permissions=False,
                     task_closed=False, persistent_unchanged_request=persistent)
+    def child_source_handoff(self, observation):
+        """Bridge repeated checks only after their requested bodies were supplied.
+
+        This closes source acquisition for one branch, not the user's task or
+        the truth of the findings. Parent synthesis and all ordinary gates remain.
+        """
+        from discovery_governor import DEFAULT_POLICY
+        keys = {'profile', 'version', 'observed_repeats', 'synthesize_after',
+                'requested_targets', 'delivered_targets', 'checkpoints_verified', 'sources_current'}
+        if (not isinstance(observation, dict) or set(observation) != keys
+                or observation['profile'] != 'child-source-handoff-v1'
+                or type(observation['version']) is not int or observation['version'] != 1
+                or observation['synthesize_after'] != DEFAULT_POLICY['synthesize_after']):
+            raise ValueError('Unknown child source-handoff observation')
+        for key in ('observed_repeats', 'requested_targets', 'delivered_targets'):
+            if type(observation[key]) is not int or not 0 <= observation[key] <= 128:
+                raise ValueError('Invalid child source-handoff count')
+        if (not observation['requested_targets'] or
+                observation['delivered_targets'] > observation['requested_targets'] or
+                any(type(observation[key]) is not bool for key in ('checkpoints_verified', 'sources_current'))):
+            raise ValueError('Invalid child source-handoff scope')
+        valid = observation['checkpoints_verified'] and observation['sources_current']
+        handoff = (valid and observation['observed_repeats'] >= observation['synthesize_after']
+                   and observation['delivered_targets'] == observation['requested_targets'])
+        omega = 3 * self.boundary.k if not valid else 2 * self.boundary.k if handoff else 0.
+        return dict(self.frame('child-source-handoff-v1', omega, 0.),
+                    scope='child_source_acquisition',
+                    suggested_recovery='partial_handoff' if handoff else 'continue' if valid else 'inspect_evidence',
+                    grants_permissions=False, semantic_completion_verified=False, task_closed=False)
+
     def child_repair(self, observation):
         """Checkpoint a proven unchanged failed format repair, without a grant."""
         fields = {'profile', 'version', 'status', 'fingerprint', 'failure_class',

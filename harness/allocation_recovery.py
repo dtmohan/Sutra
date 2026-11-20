@@ -177,6 +177,39 @@ def quantitative_event_additions(s, node, event):
     return dict(additions)
 
 
+def exact_context_fit(details, need):
+    """A financial reservation may exceed an independently measured token window.
+
+    This validates a host observation already committed in the stop receipt.
+    It never grants physical capacity; dispatch still measures the live model.
+    """
+    if details.get('context_profile') != 2:
+        return False
+    proof = details.get('physical_fit')
+    if not isinstance(proof, dict):
+        return False
+    try:
+        from context_window import validate_window, STRATA_CONTEXT_SLACK
+        from smriti_adapter import SmritiAdapter
+        window = validate_window(proof['window'])
+        cap = need['model_context']; count = proof['prompt_tokens']
+        output = proof['output_reserve']
+        if (type(cap) is not int or type(count) is not int or type(output) is not int
+                or cap != proof['context_tokens'] or cap > window['context_tokens']
+                or output != details['output_reserve'] or count <= 0 or output <= 0
+                or proof.get('version') != 1 or proof.get('basis') != 'strata_count_tokens_v1'
+                or proof.get('context_slack_tokens') != STRATA_CONTEXT_SLACK):
+            return False
+        for key in ('wire_sha256', 'packet_sha256'):
+            value = proof.get(key)
+            if not isinstance(value, str) or len(value) != 64 or any(c not in '0123456789abcdef' for c in value):
+                return False
+        frame = SmritiAdapter().context(count, output + STRATA_CONTEXT_SLACK, cap)
+        return frame['decision'] == 'ALLOW' and frame == proof.get('capacity')
+    except (KeyError, TypeError, ValueError, InvalidUpdate):
+        return False
+
+
 def child_increase(s, data):
     """Measure an in-place amendment for the paused, settled child."""
     import orchestration as m
@@ -207,7 +240,9 @@ def child_increase(s, data):
                 or check['limiting_dimension'] != 'tokens' or type(required) is not int or required <= 0):
             raise InvalidUpdate('The child allocation stop differs from its measured token gate')
     elif (need.get('dimension') != 'tokens' or need.get('slots') != 1
-          or type(required) is not int or not 0 < required <= sizing.get('effective_context_tokens', 0)):
+          or type(required) is not int or required <= 0
+          or not (exact_context_fit(sizing, need) if sizing.get('context_profile') == 2
+                  else required <= sizing.get('effective_context_tokens', 0))):
         raise InvalidUpdate('This child stop has no measured task allocation increase. Select a model with a larger context or address the reported limit.')
     child = m.checked(s, branch)
     root = m.checked(s, data['root_node'])

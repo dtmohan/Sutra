@@ -117,7 +117,7 @@ class ChildEvidenceRecipeTests(unittest.TestCase):
         self.assertNotIn('unrelated_later_effect()', advanced)
 
     def test_recipe_version_must_be_a_known_integer(self):
-        for version in (True, None, 0, 4, '2'):
+        for version in (True, None, 0, 5, '2'):
             with self.subTest(version=version), self.assertRaisesRegex(InvalidUpdate, 'child evidence recipe'):
                 child.slice_excerpts(packet(child_evidence_version=version), self.data)
 

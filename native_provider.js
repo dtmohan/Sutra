@@ -617,7 +617,11 @@ function install(vscode,context,deps){
       progress.report(new vscode.LanguageModelTextPart('**Evidence needed**\n\n'+reason+'\n\n'+guidance+' Your remaining budget is saved.'+link));
       return;
     }
-    const details=[stop.error,...failures.map(f=>f.path+': '+f.error)].filter(Boolean);
+    const childSizing=stop.child_context||{};
+    const sourcePageStop=stop.resume_phase==='CHILDREN'&&!childSizing.task_allocation_need&&
+      (['source_page','source_exhausted'].includes(childSizing.failure_basis)||
+      !childSizing.failure_basis&&typeof childSizing.cause==='string'&&childSizing.cause.startsWith('No complete nonblank source line fits'));
+    const details=[sourcePageStop?(childSizing.cause||stop.error):stop.error,...failures.map(f=>f.path+': '+f.error)].filter(Boolean);
     if(stop.status==='provider_wait')details.unshift('Local provider wait · Conversation routing paused.');
     if(stop.status==='child_review_rejected')details.unshift('A child review failed response validation. Its rejected output has not been used in your report.');
     if(stop.status==='resource_wait'){
@@ -630,11 +634,13 @@ function install(vscode,context,deps){
       const observed=stop.measurement?.observed_at||stop.measurement?.sample?.wall_time;
       if(Number.isFinite(observed))details.push('Blocking observation: '+new Date(observed*1000).toLocaleString()+'. Monitor readings show the current state and can differ.');
     }
-    const allocationStop=['context_budget','task_budget','budget_stopped'].includes(stop.status)||stop.status==='memory_fault'&&stop.memory_fault?.code==='capacity';
+    const allocationStop=!sourcePageStop&&(['context_budget','task_budget','budget_stopped'].includes(stop.status)||stop.status==='memory_fault'&&stop.memory_fault?.code==='capacity');
+    if(sourcePageStop)details.unshift('Host source paging check paused the child before the next model call. No reasoning stream was generated for that call.');
     if(allocationStop)details.unshift('Host allocation check paused the workflow before the next model call. No reasoning stream was generated for that call.');
     const coverage=Number.isInteger(stop.mapped_files)&&Number.isInteger(stop.source_files)?` Mapped ${stop.mapped_files} of ${stop.source_files} source files.`:'';
     if(stop.recovery)details.push('Runtime memory recovery: '+(stop.recovery.error||stop.recovery.action?.replaceAll('_',' ')||'observed')+'. Task allocation is unchanged.');
-    if(stop.memory_fault)details.push('Memory recovery: '+stop.memory_fault.recovery.replaceAll('_',' ')+'. Exact saved pages and task grants are retained.');
+    if(stop.memory_fault&&!sourcePageStop&&!(stop.resume_phase==='CHILDREN'&&stop.memory_fault.code==='capacity'))
+      details.push('Memory recovery: '+stop.memory_fault.recovery.replaceAll('_',' ')+'. Exact saved pages and task grants are retained.');
     const automatic=stop.automatic_allocation;
     const autoMessage=allocationMessage(automatic);
     if(autoMessage&&!details.includes(autoMessage))details.push(autoMessage);
@@ -669,12 +675,16 @@ function install(vscode,context,deps){
         (stop.control_wait||stop.retry_mode==='explicit_off'
           ? 'Change the reasoning setting indicated above, then continue with '+page+'.'
           : 'Resume '+page+' with the current reasoning setting, or choose another configured model.');
+    }else if(sourcePageStop){
+      guidance='The next child source page needs recovery before this review can continue. Accepted source checkpoints, task constraints and consumed spending are saved.';
     }else if(stop.child_allocation_granted){
       guidance='Child capacity was increased. Resume the saved checkpoint in this chat.';
     }else if(stop.resume_phase==='CHILDREN'&&stop.memory_fault?.code==='capacity'){
-      guidance=stop.child_context?.task_allocation_need
+      guidance=childSizing.task_allocation_need
         ? 'Choose **Increase allocation…** in Sutra Monitor to add the measured child capacity and keep its checkpoint.'
-        : 'Select a Sutra model with a larger context window and send **continue**.';
+        : childSizing.failure_basis==='physical_context'||childSizing.physical_context
+          ? 'Select a Sutra model with a larger context window and send **continue**.'
+          : 'The host could not establish a fitting child packet. Check the saved fit measurements before resuming; the child checkpoint and spending are retained.';
     }else if(stop.resume_phase==='CHILDREN'&&allocationStop){
       guidance='Inspect the child allocation limit in Sutra Monitor. Its last checkpoint and spending are saved.';
     }else if(automatic?.status==='model_context'){

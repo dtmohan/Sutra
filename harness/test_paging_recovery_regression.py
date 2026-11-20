@@ -124,7 +124,7 @@ class PagingRecoveryRegressionTests(unittest.TestCase):
         packet = provider.payloads[0]
         self.assertEqual(provider.model, fixtures.MODELS['high'])
         self.assertEqual(len(provider.payloads), 1)
-        self.assertEqual(packet['child_evidence_version'], 3)
+        self.assertEqual(packet['child_evidence_version'], child.CHILD_EVIDENCE_VERSION)
         self.assert_source_spans(packet)
         self.assertEqual(packet['child_slice'], cursor)
         self.assertEqual(packet['request'], node['context']['request'])
@@ -176,7 +176,7 @@ class PagingRecoveryRegressionTests(unittest.TestCase):
         self.assertEqual(new['limits'], {key: old_limits[key] - old_spent[key] for key in old_limits})
         reviewed = self.step(resumed)
         packet = self.models[-1][1].payloads[0]
-        self.assertEqual(packet['child_evidence_version'], 3)
+        self.assertEqual(packet['child_evidence_version'], child.CHILD_EVIDENCE_VERSION)
         self.assert_source_spans(packet)
         self.assertIn(anchor, packet['excerpts'].get(target, ''))
         self.assertEqual(packet['child_checkpoint'], [])

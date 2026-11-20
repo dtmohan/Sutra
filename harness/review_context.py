@@ -83,7 +83,7 @@ class EvidenceFocus:
         return Path(path).stem.replace('_', '').lower() in self.modules
 
 
-def retrieval_hints(notes, sources):
+def retrieval_hints(notes, sources, *, graph=None):
     """Match unverified source requests only against the caller's source scope."""
     references = re.findall(r'(?<![\w/.-])(?:[a-zA-Z_][\w-]*/)*[a-zA-Z_][\w-]*(?:\.[a-zA-Z_][\w-]*)*',
                             '\n'.join(note for note in notes if isinstance(note, str)))
@@ -106,6 +106,22 @@ def retrieval_hints(notes, sources):
         if found:
             matched.append(reference)
             preferred.extend(path for path in found if path not in preferred)
+        # New callers can resolve a bare symbol against declarations in their
+        # already authorized partition. Legacy recipes omit graph and preserve
+        # their exact historical selection. A requested external path cannot
+        # turn its basename into a local-file or symbol match.
+        if graph is not None and '/' not in reference:
+            for node in graph.get('nodes', []):
+                source = node.get('path')
+                name = node.get('name', '')
+                leaf = name.rsplit('.', 1)[-1]
+                if (source in sources and name != '<module>' and
+                        reference.casefold() in (name.casefold(), leaf.casefold())):
+                    qualified = Path(source).stem + '.' + leaf
+                    if qualified not in matched:
+                        matched.append(qualified)
+                    if source not in preferred:
+                        preferred.append(source)
     return preferred, ' '.join(dict.fromkeys(matched))
 
 

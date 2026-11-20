@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.54.1
+
+- Resolve bare requested symbols against the child’s authorized static graph and deliver coherent declaration bodies through a versioned source recipe; keep historical recipes unchanged.
+- Measure a valid source-bearing packet before requesting task capacity, including an exact whole-line fallback when geometric shrinking skipped a viable page.
+- Reuse verified, unchanged source receipts before sizing recovery, avoiding successive empty-packet and full-source allocation requests without progress.
+- Route proved child financial shortages through the existing workspace-governed allocation path, preserving the same child, checkpoints, receipt history and consumed spending.
+- After repeated identical checks and verified delivery of their requested declaration bodies, record a kernel-governed bounded handoff to parent synthesis; retain unresolved checks and unverified partial scope.
+- Keep exact physical token-window proofs separate from financial UTF-8 reservations across model switches; missing counters and actual context overflow do not become allocation grants.
+- Distinguish source paging, host sizing and measured physical-window stops in chat; keep unresolved findings unverified and the canonical STP kernel unchanged.
+
 ## 0.54.0
 
 - Move accepted bridge requests into a private persistent coordinator independent of the VS Code UI, with authenticated workspace/chat-bound IDs, bounded queueing and retained results/activity.

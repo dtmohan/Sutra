@@ -416,6 +416,14 @@ def build(system, payload, schema):
             body['rejected_branch_prior_slices_unverified'] = [
                 select(note, ('summary', 'remaining', 'citations')) for note in payload['recovery_checkpoint']
             ]
+        if role == 'subagent' and payload.get('child_source_handoff'):
+            handoff = payload['child_source_handoff']
+            body['source_review_stage'] = {
+                'mode': 'partial_handoff',
+                'requested_source': copy.deepcopy(handoff['targets']),
+                'unresolved_check_unverified': copy.deepcopy(
+                    (payload.get('child_checkpoint') or payload.get('recovery_checkpoint'))[-1]['remaining']),
+                'meaning': 'The requested declaration bodies were supplied. Return supported findings and unresolved gaps for parent synthesis.'}
         handoff = payload.get('conversation_handoff') or {}
         if handoff:
             body['conversation_note_unverified'] = note_view(handoff)
@@ -456,6 +464,10 @@ def build(system, payload, schema):
                 feedback['target_file_count'] = len(manifest.splitlines()) if manifest else 0
         if payload.get('repair'): body['repair'] = payload['repair']
         wire_system = system if role == 'review_reader' else SYSTEMS[role]
+        if role == 'subagent' and payload.get('child_source_handoff'):
+            wire_system += (' Complete this bounded branch handoff using the supplied source and earlier notes. '
+                            'Keep unresolved checks in remaining and distinguish uncertainty from a verified result. '
+                            'This is partial evidence for the parent; it does not certify the project or close the user task.')
         if payload.get('retained_context_version') == 1 and role in ('architect', 'chat_reviewer'):
             wire_system += (' retained_context indexes saved notes and source. To recall a deferred page, '
                             'put exactly Recall context: <ref> in remaining using its supplied reference. '

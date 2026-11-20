@@ -23,7 +23,7 @@ SYSTEM='''You are a read-only child reviewer. Answer only the assigned branch ob
 Return only the requested JSON object. Echo task_id, branch_id and every constraint_echo entry exactly into constraints; complete must be false. Choose citations unchanged from the supplied source choices. Keep summary under 320 characters and each remaining entry under 160 characters. For a sliced branch, continue only for a concrete unresolved check within this branch, with a new source citation and next step; otherwise use slice_status=complete or omit it. Finish the JSON object within the output allowance.'''
 SLICE_OUTPUT_TOKENS = 2048
 REPAIR_ALLOWANCE = {'errors': ['x' * 140] * 2}
-CHILD_EVIDENCE_VERSION = 3
+CHILD_EVIDENCE_VERSION = 4
 CHILD_REPAIR_CONTROL_VERSION = 1
 
 
@@ -161,7 +161,8 @@ def schema(p):
     result['properties']['branch_id']={'type':'string','enum':[p['branch']['id']]}
     result['required'].append('branch_id')
     if p.get('child_slice'):
-        result['properties']['slice_status'] = {'type': 'string', 'enum': ['continue', 'complete']}
+        result['properties']['slice_status'] = {'type': 'string',
+            'enum': ['complete'] if p.get('child_source_handoff') else ['continue', 'complete']}
     return result
 
 
@@ -195,17 +196,157 @@ def recovery_checkpoints(s, node, *, evidence_version=1):
     return checkpoint_context(s, previous, machine.slice_cursor(s, previous), evidence_version=evidence_version)
 
 
+def _requested_declarations(p, data, hints):
+    """Resolve an explicit remaining check inside the already supplied graph."""
+    if p.get('child_evidence_version', 1) < 4 or not hints:
+        return []
+    graph, sources = data['graph'], data['sources']
+    focus = context.EvidenceFocus(hints)
+    result = []
+    for path in context.ordered_sources(sources, graph, p['request'], version=3, latest=hints):
+        lines = sources[path].splitlines(keepends=True)
+        for node in context.ranked_declarations(graph, path, p['request'], hints):
+            if not context.explicit_symbol(focus, path, node['name']):
+                continue
+            start = node['line'] - 1
+            boundary = min((other['line'] - 1 for other in graph.get('nodes', [])
+                            if other['path'] == path and other['line'] > node['line']
+                            and other.get('column', 0) <= node.get('column', 0)), default=len(lines))
+            declared_end = node.get('end_line')
+            end = declared_end if type(declared_end) is int and start < declared_end <= boundary else boundary
+            if not 0 <= start < end <= len(lines):
+                continue
+            result.append({'path': path, 'start': start, 'end': end,
+                           'text': ''.join(lines[start:end])})
+    return result
+
+
+def _child_source_notes(p):
+    return [*p.get('recovery_checkpoint', []), *p.get('child_checkpoint', [])]
+
+
+def _declaration_delivered(p, declaration):
+    start, end = declaration['start'] + 1, declaration['end'] + 1
+    spans = []
+    for note in _child_source_notes(p):
+        span = note.get('source_spans', {}).get(declaration['path'], {})
+        if type(span.get('start_line')) is int and type(span.get('next_line')) is int:
+            spans.append((span['start_line'], span['next_line']))
+    at = start
+    for first, after in sorted(spans):
+        if first > at:
+            break
+        at = max(at, after)
+        if at >= end:
+            return True
+    return False
+
+
+def source_handoff(s, sid, p, data):
+    """Bridge repeated requests only after their exact target body was supplied.
+
+    Literal repetition and delivered source spans are host observations. They
+    do not establish comprehension, completion of the user task or correctness.
+    The next bounded child reply passes findings and unresolved checks upward.
+    """
+    if p.get('child_evidence_version', 1) < 4 or not p.get('child_slice'):
+        return None
+    n = machine.node(s, p['branch']['id'])
+    if n['session'] != sid or n['binding'] != machine.binding(s, sid):
+        raise InvalidUpdate('Child source handoff belongs to another task')
+    if machine.state(s, n['id']) in ('CANCELLED', 'QUARANTINED'):
+        raise InvalidUpdate('Child source handoff was revoked')
+    cursor = p['child_slice']
+    # Accepted deliveries are also checked when their completed branch is
+    # joined. Bind the exact admitted history prefix without requiring it to
+    # remain the current cursor or the node to remain executable.
+    machine.check_slice(s, n['id'], cursor)
+    current = checkpoint_context(s, n['id'], cursor, evidence_version=p['child_evidence_version'])
+    recovered = recovery_checkpoints(s, n, evidence_version=p['child_evidence_version'])
+    if p.get('child_checkpoint', []) != current or p.get('recovery_checkpoint', []) != recovered:
+        raise InvalidUpdate('Child source handoff checkpoint history changed')
+    notes = [*recovered, *current]
+    if not notes:
+        return None
+    remaining = notes[-1]['remaining']
+    literal = canonical(remaining)
+    repeats = 0
+    for note in reversed(notes):
+        if canonical(note['remaining']) != literal or repeats == 128:
+            break
+        repeats += 1
+    from discovery_governor import DEFAULT_POLICY
+    threshold = DEFAULT_POLICY['synthesize_after']
+    if repeats < threshold:
+        return None
+    _, hints = context.retrieval_hints(remaining, data['sources'], graph=data['graph'])
+    targets = _requested_declarations(p, data, hints)
+    if not targets or len(targets) > 128 or not all(_declaration_delivered(p, target) for target in targets):
+        return None
+    if (set(data.get('versions', {})) != set(data['sources'])
+            or any(n['context']['versions'].get(path) != digest for path, digest in data['versions'].items())):
+        raise InvalidUpdate('Child source handoff source version changed')
+    observation = {'profile': 'child-source-handoff-v1', 'version': 1,
+                   'observed_repeats': repeats, 'synthesize_after': threshold,
+                   'requested_targets': len(targets), 'delivered_targets': len(targets),
+                   'checkpoints_verified': True, 'sources_current': True}
+    kernel = KarmaAdapter().child_source_handoff(observation)
+    if kernel['decision'] != 'BRIDGE':
+        return None
+    return {'version': 1, 'observation': observation, 'observed_repeats': repeats,
+            'remaining_hash': sha(literal),
+            'targets': [{'path': target['path'], 'start_line': target['start'] + 1,
+                         'next_line': target['end'] + 1, 'sha256': sha(target['text'])}
+                        for target in targets],
+            'kernel': kernel, 'semantic_completion_verified': False,
+            'publication': 'parent_synthesis_required'}
+
+
 def slice_excerpts(p, data, *, source_spans=None):
     version = p.get('child_evidence_version', 1)
-    if type(version) is not int or version not in (1, 2, CHILD_EVIDENCE_VERSION):
+    if type(version) is not int or version not in (1, 2, 3, CHILD_EVIDENCE_VERSION):
         raise InvalidUpdate('Unsupported child evidence recipe')
     if version >= 3:
         notes = p.get('child_checkpoint') or p.get('recovery_checkpoint') or []
-        preferred, hints = context.retrieval_hints(notes[-1]['remaining'] if notes else [], data['sources'])
+        preferred, hints = context.retrieval_hints(notes[-1]['remaining'] if notes else [], data['sources'],
+                                                 **({'graph': data['graph']} if version >= 4 else {}))
         prior = {}
         for note in [*p.get('recovery_checkpoint', []), *p.get('child_checkpoint', [])]:
             prior.update(note.get('source_spans', {}))
-        return chat.excerpts(data['sources'], context.query(p), p['excerpt_bytes'], data['graph'],
+        declarations = _requested_declarations(p, data, hints)
+        sources = data['sources']
+        if declarations:
+            # An explicit in-scope method request must not lose most of its
+            # byte allowance to unrelated partition files. A whole declaration
+            # is a source page, not proof that the model understood it.
+            target_paths = {item['path'] for item in declarations}
+            sources = {path: text for path, text in sources.items() if path in target_paths}
+            outstanding = [item for item in declarations if not _declaration_delivered(p, item)]
+            if not outstanding:
+                if not p.get('child_source_handoff'):
+                    ordinary = chat.excerpts(data['sources'], context.query(p), p['excerpt_bytes'], data['graph'],
+                                             recipe_version=3, delivered_spans=prior, source_spans=source_spans)
+                    if ordinary:
+                        return ordinary
+                # Resupply verified current source for a bounded findings/gaps
+                # reply. It is not new evidence or proof of semantic closure.
+                target = declarations[0]
+                text = chat.whole_line_excerpt(target['text'], p['excerpt_bytes'])
+                if not text:
+                    return {}
+                if source_spans is not None:
+                    source_spans[target['path']] = {'start_line': target['start'] + 1,
+                        'next_line': target['start'] + 1 + len(text.splitlines(keepends=True)),
+                        'anchor_line': target['start'] + 1, 'sha256': sha(text)}
+                return {target['path']: text}
+            target = outstanding[0]
+            if len(target['text'].encode()) <= p['excerpt_bytes']:
+                if source_spans is not None:
+                    source_spans[target['path']] = {'start_line': target['start'] + 1,
+                        'next_line': target['end'] + 1, 'anchor_line': target['start'] + 1,
+                        'sha256': sha(target['text'])}
+                return {target['path']: target['text']}
+        return chat.excerpts(sources, context.query(p), p['excerpt_bytes'], data['graph'],
                              recipe_version=3, preferred_paths=preferred, symbol_hints=hints,
                              delivered_spans=prior, source_spans=source_spans)
     if version == 2:
@@ -270,29 +411,114 @@ def _fit(s, packet, budget, mandatory_only=False):
     return fmt, charge + budget.response_reserve
 
 
-def _context_failure(s, packet, provider, allocation, cause, stage):
-    """Measure any shortfall with the same minimum packet and output allowance."""
+def _minimum_source_packet(packet, data):
+    """Find a whole-line source floor within the existing page recipe's bound.
+
+    Shrinking a byte allowance geometrically can step over the first complete
+    line (for example 209 -> 167 when that line is 185 bytes). Probe selection
+    only, then construct the smallest nonempty admissible page. These probes
+    neither read files nor reserve task work. Original checkpoint notes remain.
+    """
+    def selected(limit):
+        return slice_excerpts(dict(packet, excerpt_bytes=limit), data)
+
+    low, high = 63, 64
+    excerpts = selected(high)
+    while not excerpts and high < 65536:
+        low, high = high, min(65536, high * 2)
+        excerpts = selected(high)
+    if not excerpts:
+        return None
+    while high - low > 1:
+        middle = (low + high) // 2
+        if selected(middle):
+            high = middle
+        else:
+            low = middle
+    result = dict(packet, excerpt_bytes=high, map_bytes=512)
+    result['excerpts'] = selected(high)
+    result['source_paths'] = sorted(result['excerpts'])
+    context.evidence(result, data)
+    result['facts'] = chat.facts(data['graph'], result['sites'])
+    return result
+
+
+def _requested_source_packet(packet, data):
+    """Prefer one bounded requested declaration over repeatedly funding headers."""
+    if packet.get('child_evidence_version', 1) < 4:
+        return None
+    notes = packet.get('child_checkpoint') or packet.get('recovery_checkpoint') or []
+    _, hints = context.retrieval_hints(notes[-1]['remaining'] if notes else [], data['sources'], graph=data['graph'])
+    targets = _requested_declarations(packet, data, hints)
+    target = next((item for item in targets if not _declaration_delivered(packet, item)), None)
+    if target is None and packet.get('child_source_handoff') and targets:
+        target = targets[0]
+    if target is None or len(target['text'].encode()) > 65536:
+        return None
+    limit = max(64, len(target['text'].encode()))
+    result = dict(packet, excerpt_bytes=limit, map_bytes=512)
+    result['excerpts'] = slice_excerpts(result, data)
+    if result['excerpts'].get(target['path']) != target['text']:
+        return None
+    result['source_paths'] = sorted(result['excerpts'])
+    context.evidence(result, data)
+    result['facts'] = chat.facts(data['graph'], result['sites'])
+    return result
+
+
+def _context_failure(s, packet, provider, allocation, cause, stage, *, data=None, minimum=None,
+                     selection='whole_line_floor'):
+    """Measure a dispatchable packet, not the empty page left by failed fitting."""
     from model_context import allocation as model_allocation
 
     failure = context.ReviewContextExceeded(allocation, provider.budget, cause)
     failure.details.update(branch_id=packet['branch']['id'], fit_stage=stage)
-    if provider.budget.context_profile == 2:
-        return failure
-    installed, _ = model_allocation(provider.context_metadata)
-    if installed.context_limit > provider.budget.context_limit:
-        model_budget = Budget(installed.context_limit, provider.budget.response_reserve,
-                              installed.template_reserve)
-        try:
-            _, required = _fit(s, dict(packet), model_budget, mandatory_only=True)
-        except ContextBudgetExceeded:
+    if data is not None:
+        minimum = minimum or _minimum_source_packet(packet, data)
+        if minimum is None:
+            failure.details.update(failure_basis='source_exhausted', source_selection={
+                'page_limit_bytes': 65536,
+                'meaning': 'No complete line selectable by the committed source recipe within its page bound; not semantic coverage.'})
             return failure
-        failure.details['required_context'] = required
-        extra = required - allocation['available_tokens']
-        if extra > 0:
-            failure.details['task_allocation_need'] = {
-                'dimension': 'tokens', 'minimum': extra, 'required_context': required,
-                'model_context': installed.context_limit, 'slots': 1,
-            }
+        packet = minimum
+        failure.details['minimum_packet'] = {
+            'source_bearing': True,
+            'selection': selection,
+            'excerpt_bytes': sum(len(value.encode()) for value in packet['excerpts'].values()),
+            'source_paths': list(packet['source_paths']),
+        }
+    installed, _ = model_allocation(provider.context_metadata)
+    budget = provider.budget
+    if budget.context_profile == 2:
+        from allocation_recovery import MAXIMA
+        # A financial UTF-8 reservation is not a physical token window. The
+        # supported task ceiling is only a planning probe, never a grant or a
+        # dispatch budget. Keep the exact window and current physical cap.
+        physical_limit = budget.context_limit
+        model_budget = budget.with_limits(reservation_limit=MAXIMA['tokens'])
+    else:
+        physical_limit = installed.context_limit
+        model_budget = budget.with_limits(context_limit=physical_limit)
+    probe = dict(packet)
+    try:
+        fmt, required = _fit(s, probe, model_budget, mandatory_only=True)
+        if budget.context_profile == 2:
+            from context_window import check as check_window
+            failure.details['physical_fit'] = check_window(
+                model_budget, SYSTEM, dict(probe, repair=REPAIR_ALLOWANCE), fmt, planning=True)
+    except ContextBudgetExceeded as unavailable:
+        failure.details['failure_basis'] = 'physical_context' if getattr(unavailable, 'physical_context', None) else 'host_context'
+        if getattr(unavailable, 'physical_context', None):
+            failure.details['physical_context'] = unavailable.physical_context
+        return failure
+    failure.details['required_context'] = required
+    extra = required - allocation['available_tokens']
+    if extra > 0:
+        failure.details.update(failure_basis='reservation_budget', task_allocation_need={
+            'dimension': 'tokens', 'minimum': extra, 'required_context': required,
+            'model_context': allocation['effective_context_tokens'], 'slots': 1,
+            **({'context_profile': 2} if budget.context_profile == 2 else {}),
+        })
     return failure
 
 
@@ -315,6 +541,25 @@ def _preflight(s, sid, packet, provider, real):
 def _fit_packet(s, sid, packet, data, provider, preferred_slots):
     """Shrink source pages first, then release the reserved repair share."""
     choices = range(preferred_slots, 0, -1) if preferred_slots else (None,)
+    requested = _requested_source_packet(packet, data)
+    if requested is not None:
+        for slots in choices:
+            allocation = _context_budget(s, sid, provider, 'child_slice' in packet, slots) if slots else None
+            probe = dict(requested)
+            try:
+                fmt, _ = _fit(s, probe, provider.budget)
+            except ContextBudgetExceeded as exc:
+                if slots == 1:
+                    failure = _context_failure(s, packet, provider, allocation, exc, 'packet',
+                                               data=data, minimum=requested, selection='requested_declaration')
+                    if failure.details.get('task_allocation_need'):
+                        raise failure from exc
+                # A declaration larger than this model's admitted capacity can
+                # still be reviewed in bounded whole-line pages below.
+                continue
+            packet.update(probe)
+            return fmt, 1 if slots == 1 else 3
+    minimum = None
     for slots in choices:
         allocation = _context_budget(s, sid, provider, 'child_slice' in packet, slots) if slots else None
         packet['excerpt_bytes'] = max(64, min(65536, provider.budget.input_limit // 3))
@@ -325,16 +570,29 @@ def _fit_packet(s, sid, packet, data, provider, preferred_slots):
             context.evidence(packet, data)
             packet['facts'] = chat.facts(data['graph'], packet['sites'])
             try:
-                if packet.get('child_evidence_version') in (2, 3) and not packet['excerpts']:
+                if packet.get('child_evidence_version') in (2, 3, 4) and not packet['excerpts']:
                     raise ContextBudgetExceeded('No complete nonblank source line fits the child excerpt allocation')
                 fmt, _ = _fit(s, packet, provider.budget)
                 return fmt, 1 if slots == 1 else 3
             except ContextBudgetExceeded as exc:
                 if packet['excerpt_bytes'] == 64 and packet['map_bytes'] == 512:
+                    minimum = minimum or _minimum_source_packet(packet, data)
+                    if minimum is not None:
+                        # Last chance before a grant: an exact whole page can
+                        # fit where the geometric probe skipped its boundary.
+                        probe = dict(minimum)
+                        try:
+                            fmt, _ = _fit(s, probe, provider.budget)
+                        except ContextBudgetExceeded as minimum_failure:
+                            exc = minimum_failure
+                        else:
+                            packet.update(probe)
+                            return fmt, 1 if slots == 1 else 3
                     if allocation is None:
                         raise
                     if slots == 1:
-                        raise _context_failure(s, packet, provider, allocation, exc, 'packet') from exc
+                        raise _context_failure(s, packet, provider, allocation, exc, 'packet',
+                                               data=data, minimum=minimum) from exc
                     break
                 packet['excerpt_bytes'] = max(64, packet['excerpt_bytes'] * 4 // 5)
                 packet['map_bytes'] = max(512, packet['map_bytes'] * 4 // 5)
@@ -369,6 +627,8 @@ def request_check(s,sid,p):
     if set(data['sources'])!=set(n['files']):raise InvalidUpdate('Child snapshot exceeds assigned files')
     for path,digest in data['versions'].items():
         if n['context']['versions'].get(path)!=digest:raise InvalidUpdate('Source changed since branch planning; replan required')
+    if p.get('child_source_handoff') != source_handoff(s, sid, p, data):
+        raise InvalidUpdate('Child source handoff observation changed')
     if type(p['excerpt_bytes']) is not int or not 64<=p['excerpt_bytes']<=65536:raise InvalidUpdate('Invalid child excerpt budget')
     if p['excerpts']!=slice_excerpts(p,data) or p['facts']!=chat.facts(data['graph'],p['sites']):raise InvalidUpdate('Child evidence differs from fresh source')
     context.check(p,data)
@@ -384,6 +644,8 @@ def validate(s,sid,p,proposal):
     for c in proposal['citations']:
         if c['quote'] not in chat.citation_quotes(p) or c['quote'] not in p['excerpts'].get(c['path'],''):raise InvalidUpdate('Child citation lacks fresh source')
     if '```mermaid' in proposal['answer'].lower():raise InvalidUpdate('Child cannot invent a diagram')
+    if p.get('child_source_handoff') and proposal.get('slice_status') == 'continue':
+        raise InvalidUpdate('The bounded child source handoff must return findings and unresolved checks to its parent')
     if proposal.get('slice_status') == 'continue':
         prior = {(c['path'], c['quote']) for note in p['child_checkpoint'] for c in note['citations']}
         current = {(c['path'], c['quote']) for c in proposal['citations']}
@@ -391,12 +653,16 @@ def validate(s,sid,p,proposal):
             raise InvalidUpdate('A continuation needs a specific next step and at least one new source quotation')
     return {'admission':{'admitted':True,'errors':[],'semantic_correctness_verified':False},'checks':['child_lineage','full_contract','inherited_permissions','fresh_source','smriti_context','citations'],'provisional':True}
 
-def _advance_slice(s, nid, out, route, cursor, recovered=False):
+def _advance_slice(s, nid, out, route, cursor, recovered=False, packet=None):
     result = {'result': out, 'route': route, 'branch_id': nid}
     if recovered:
         result['recovered'] = True
     if out['admission']['admitted']:
         event = machine.complete(s, nid, out['invocation_id'])
+        if recovered or (packet or {}).get('child_source_handoff'):
+            _, _, delivered = machine._child_receipt(s, machine.node(s, nid), out['invocation_id'])
+            if delivered.get('child_source_handoff'):
+                result['partial_handoff'] = copy.deepcopy(delivered['child_source_handoff'])
         if event['kind'] == 'CHILD_SLICE_SAVED':
             result.update(slice_status='checkpoint', slice_ordinal=cursor['ordinal'])
     else:
@@ -520,20 +786,40 @@ def run(s,meta,workspace,root,nid,models,tier='auto',provider=None):
         if request['conversation_id']:
             from conversation import workspace_handoff
             p['conversation_handoff'] = workspace_handoff(s, sid, request['conversation_id'], p['request'])
-        preferred_slots = _preflight(s, sid, p, provider, real)
-        from review_source_receipts import acquire
-        receipts, data, _ = acquire(s, meta, workspace, root, request, n['files'], real=real, purpose='child_review')
+        from review_source_receipts import acquire, reuse
+        prepared = reuse(s, meta, workspace, root, request, n['files'], real=real, purpose='child_review')
+        if prepared is not None:
+            # A paid, current snapshot lets the first recovery measurement
+            # include its real source body and any bounded handoff. Measuring
+            # an empty packet first could spend two grants without progress.
+            preferred_slots = 2 if real else None
+            receipts, data, _ = prepared
+        else:
+            preferred_slots = _preflight(s, sid, p, provider, real)
+            receipts, data, _ = acquire(s, meta, workspace, root, request, n['files'], real=real, purpose='child_review')
         graph = data['graph']
         signals['unresolved_calls'] = sum(c['target'] is None for c in graph['calls'])
         route = adapter.route(request['prompt'], models, tier, signals)
         if provider.model != route['model']:
             raise InvalidUpdate('Child route changed after source preparation')
         p.update(snapshot_receipts=receipts, route=route)
+        handoff = source_handoff(s, sid, p, data)
+        if handoff:
+            p['child_source_handoff'] = handoff
         fmt, attempts = _fit_packet(s, sid, p, data, provider, preferred_slots)
         if saved_repair:
             attempts = min(attempts, saved_repair['remaining_attempts'])
             if saved_repair['repair']:
                 p['repair'] = copy.deepcopy(saved_repair['repair'])
+        if handoff:
+            with s.db:
+                machine.transition(s, nid, machine.state(s, nid), 'CHILD_SOURCE_HANDOFF',
+                    {'scope': 'child_source_acquisition', 'child_slice': cursor,
+                     'observation': handoff['observation'], 'targets': handoff['targets'],
+                     'remaining_hash': handoff['remaining_hash'],
+                     'handoff_hash': sha(canonical(handoff)),
+                     'semantic_completion_verified': False, 'task_closed': False},
+                    handoff['kernel'])
         rid=s.begin_run(sid,p['request'],[],None,max_calls=attempts,max_repairs=attempts-1)
         output_repaired = saved_repair['output_repaired'] if saved_repair else False
         for attempt in range(attempts):
@@ -563,17 +849,17 @@ def run(s,meta,workspace,root,nid,models,tier='auto',provider=None):
             out.pop('model_proposal',None)
             if out['admission']['admitted']:
                 s.event(rid,'ALLOW',{'invocation_id':out['invocation_id']})
-                return _advance_slice(s, nid, out, route, cursor)
+                return _advance_slice(s, nid, out, route, cursor, packet=p)
             s.event(rid,'NACK',{'errors':out['admission']['errors']})
             if cursor and out.get('failure_kind') == 'timeout':
                 s.event(rid,'FIN',{'reason':'child_slice_timeout','invocation_id':out['invocation_id']})
-                return _advance_slice(s, nid, out, route, cursor)
+                return _advance_slice(s, nid, out, route, cursor, packet=p)
             has_retry = attempt + 1 < attempts
             recovery = repair(out, p, output_repaired, has_retry)
             if not has_retry or (out.get('blocked') and recovery is None):
                 if cursor and out.get('failure_kind') == 'output_limit':
                     s.event(rid,'FIN',{'reason':'child_slice_output_limit','invocation_id':out['invocation_id']})
-                    return _advance_slice(s, nid, out, route, cursor)
+                    return _advance_slice(s, nid, out, route, cursor, packet=p)
                 s.event(rid,'FIN',{'reason':'child_repair_exhausted'})
                 with s.db:machine.transition(s,nid,'QUARANTINED','CHILD_REJECTED',{'invocation_id':out['invocation_id']})
                 break
@@ -604,6 +890,13 @@ def joined_results(s,sid,parent,ids,prompt,*,note_version=1):
         item = {'invocation_id':iid,'model':env['model'],'branch_id':p['branch']['id'],'files':p['source_paths'],
                 'answer_unverified':report.markdown(output),'evidence_coverage':p['evidence_coverage'],
                 'summary_unverified':'\n'.join(summaries),'remaining_unverified':output['remaining'],'citations':list(citations.values())}
+        if p.get('child_source_handoff'):
+            _, _, verified = machine._child_receipt(s, machine.node(s, p['branch']['id']), iid)
+            item['child_source_handoff'] = copy.deepcopy(verified['child_source_handoff'])
+            item['evidence_coverage'] = dict(item['evidence_coverage'],
+                review_scope='bounded_partial_handoff', semantic_completion_verified=False)
+            prior_remaining = notes[-1]['remaining'] if notes else []
+            item['remaining_unverified'] = list(dict.fromkeys([*prior_remaining, *output['remaining']]))
         if note_version in (2, 3):
             item.update(prior_summaries_unverified=[note['summary'] for note in notes],
                         final_summary_unverified=output['summary'])

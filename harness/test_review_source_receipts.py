@@ -1,12 +1,13 @@
 """Scope, freshness and integrity checks for retry source commitments."""
 import unittest
+from unittest.mock import patch
 
 from context_manager import ContextBudgetExceeded, InvalidUpdate
 from invocation_gateway import InvocationLedger
 import orchestration as machine
 import orchestration_flow as flow
 import review_budget
-from review_source_receipts import acquire
+from review_source_receipts import acquire, reuse
 import test_orchestration as fixtures
 
 
@@ -55,6 +56,29 @@ class ReviewSourceReceiptTests(unittest.TestCase):
         self.assertEqual(again, receipts)
         self.assertEqual(review_budget.usage(self.s, self.sid), charged)
         self.assertTrue(self.s.audit_valid())
+
+    def test_sizing_lookup_never_acquires_a_missing_snapshot(self):
+        self.set_up_review()
+        before = review_budget.usage(self.s, self.sid)
+        with machine.scope(self.review['execution_id']), \
+                patch('static_runtime.build_partition', side_effect=AssertionError('new source acquisition')):
+            cached = reuse(self.s, self.meta, self.ws, self.root, self.request,
+                           self.candidates, real=False)
+        self.assertIsNone(cached)
+        self.assertEqual(review_budget.usage(self.s, self.sid), before)
+
+    def test_sizing_paid_receipts_does_not_require_or_grant_execution_funding(self):
+        self.set_up_review()
+        receipts, original, _ = self.sources()
+        before = review_budget.usage(self.s, self.sid)
+        with machine.scope(self.review['execution_id']), \
+                patch('static_runtime.build_partition', side_effect=AssertionError('new source acquisition')), \
+                patch.object(machine, 'gates', side_effect=AssertionError('sizing is not execution')):
+            cached, data, _ = reuse(self.s, self.meta, self.ws, self.root, self.request,
+                                    self.candidates, real=False)
+        self.assertEqual(cached, receipts)
+        self.assertEqual(data['versions'], original['versions'])
+        self.assertEqual(review_budget.usage(self.s, self.sid), before)
 
     def test_grown_source_compiles_and_charges_a_fresh_snapshot(self):
         self.set_up_review()

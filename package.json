@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Governed local AI chat, codebase reviews, and diagnostics in VS Code.",
-  "version": "0.54.0",
+  "version": "0.54.1",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"

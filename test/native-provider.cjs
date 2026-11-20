@@ -1336,6 +1336,64 @@ function setup(saved={}){
  checks.push('context allocation shortages return a saved, explained pause instead of a retriable provider exception');
  assert(tightReply.some(p=>p.value?.includes('Increase allocation')));
  assert(tightReply.some(p=>p.value?.includes('No reasoning stream was generated')));
+ for(const typed of [false,true]){
+  const sourcePage=setup();sourcePage.kind('report');await sourcePage.arm();
+  const request=sourcePage.deps.request;
+  sourcePage.deps.request=async(m,t)=>{
+   const result=await request(m,t);
+   if(m.op!=='orchestrate'||result.state!=='CODING')return result;
+   return {...result,state:'PAUSED',stop:{status:'memory_fault',resume_phase:'CHILDREN',
+    error:'The review packet cannot fit the current allocation: 15,672 per call; 15,672 task/parent budget units remain.',
+    memory_fault:{code:'capacity',recovery:'repartition_or_select_larger_eligible_context'},
+    child_context:{branch_id:'saved-child',available_tokens:15672,effective_context_tokens:65536,
+     cause:'No complete nonblank source line fits the child excerpt allocation',
+     ...(typed?{failure_basis:'source_page'}:{})}}};
+  };
+  const reply=await sourcePage.send();const text=reply.map(part=>part.value||'').join('\n');
+  assert(text.includes('Host source paging check'));
+  assert(text.includes('No complete nonblank source line fits'));
+  assert(!text.includes('Select a Sutra model with a larger context'));
+  assert(!text.includes('Increase allocation'));
+  assert(!text.includes('15,672 per call'));
+  assert(!text.includes('Memory recovery: repartition'));
+  assert(text.includes('Accepted source checkpoints'));
+  assert.equal(sourcePage.controller.status().pending.stop.child_context.branch_id,'saved-child');
+  assert(!sourcePage.calls.some(call=>call.op==='native_work'));
+ }
+ checks.push('child source-page misses use their observed paging cause and retained checkpoints, without invented financial or larger-model recovery');
+ {
+  const childCapacity=setup();childCapacity.kind('report');await childCapacity.arm();
+  const request=childCapacity.deps.request;
+  childCapacity.deps.request=async(m,t)=>{
+   const result=await request(m,t);
+   return m.op==='orchestrate'&&result.state==='CODING'?{...result,state:'PAUSED',stop:{
+    status:'memory_fault',resume_phase:'CHILDREN',error:'The child packet did not fit.',
+    memory_fault:{code:'capacity',recovery:'repartition_or_select_larger_eligible_context'},
+    child_context:{failure_basis:'reservation_budget',available_tokens:15672,effective_context_tokens:65536}}}:result;
+  };
+  const reply=(await childCapacity.send()).map(part=>part.value||'').join('\n');
+  assert(reply.includes('Check the saved fit measurements'));
+  assert(!reply.includes('Select a Sutra model with a larger context'));
+  assert(!reply.includes('Memory recovery: repartition'));
+  checks.push('an unmeasured child fit failure does not claim a larger model is the remedy');
+ }
+ for(const physical of [false,true]){
+  const measuredChild=setup();measuredChild.kind('report');await measuredChild.arm();
+  const request=measuredChild.deps.request;
+  measuredChild.deps.request=async(m,t)=>{
+   const result=await request(m,t);
+   return m.op==='orchestrate'&&result.state==='CODING'?{...result,state:'PAUSED',stop:{
+    status:'context_budget',resume_phase:'CHILDREN',error:'Measured child admission bound.',
+    memory_fault:{code:'capacity',recovery:'repartition_or_select_larger_eligible_context'},
+    child_context:physical?{failure_basis:'physical_context',physical_context:{required_input_tokens:69000,context_limit_tokens:65536}}:
+     {failure_basis:'reservation_budget',cause:'No complete nonblank source line fits the child excerpt allocation',available_tokens:15672,effective_context_tokens:65536,
+      task_allocation_need:{dimension:'tokens',minimum:1000,required_context:16672,model_context:65536,slots:1}}}}:result;
+  };
+  const reply=(await measuredChild.send()).map(part=>part.value||'').join('\n');
+  assert(reply.includes(physical?'Select a Sutra model with a larger context':'Increase allocation'));
+  assert(!reply.includes(physical?'Increase allocation':'Select a Sutra model with a larger context'));
+ }
+ checks.push('measured child financial shortfalls and physical-window limits retain distinct recovery choices');
  {
   const raw=tight.deps.request,grants=[];let previewCount=0,detail='';
   const proposal={version:0,goal:'Review project',before:{tokens:250000},used:{tokens:228975},additions:{tokens:228975},after:{tokens:478975},remaining_after:{tokens:250000}};

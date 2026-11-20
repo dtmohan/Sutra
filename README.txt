@@ -1,4 +1,10 @@
-Sutra 0.54.0 — Persistent request coordinator
+Sutra 0.54.1 — Child source and allocation recovery
+
+Child reviews now retain requested in-scope symbol names and page their complete
+bounded declaration bodies before falling back to smaller source pages. Recovery
+measures a real source-bearing packet and uses governed allocation within workspace
+limits; a financial shortfall no longer recommends an unrelated larger model.
+Saved checkpoints, permissions, receipts and consumed spending remain intact.
 
 Accepted requests now run in a private, persistent coordinator outside the VS Code
 UI. Reloading or stopping the chat display detaches it; send continue in the same

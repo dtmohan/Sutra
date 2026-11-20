@@ -511,6 +511,18 @@ def run(s,meta,workspace,root,req,providers=None):
             sizing = getattr(exc, 'details', {})
             if sizing.get('branch_id') in (data.get('children') or []):
                 stop['child_context'] = sizing
+                need = sizing.get('task_allocation_need')
+                if need:
+                    stop.update(status='context_budget', allocation=sizing, allocation_need=need)
+                    if sizing.get('minimum_packet', {}).get('source_bearing'):
+                        stop['error'] = (
+                            f'The next source-bearing child packet needs {need["required_context"]:,} '
+                            f'reservation units, including {sizing["output_reserve"]:,} reserved for output; '
+                            f'{sizing["available_tokens"]:,} task/parent units remain. '
+                            'The context-sizing check passed for the selected model. '
+                            f'The measured additional task allocation is {need["minimum"]:,} units. '
+                            'The saved checkpoints, source receipts, constraints and consumed spending are retained.')
+                    return budget_pause(s, meta, root, req, fid, target, stop)
         observe_fault(s,(data.get('binding') or {}).get('session',''),exc)
         kind = 'MEMORY_STOPPED'
         if target == 'SYNTHESIS' and detail['code'] == 'source_changed':
