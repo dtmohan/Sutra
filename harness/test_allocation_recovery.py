@@ -120,6 +120,12 @@ class AllocationTests(unittest.TestCase):
         from paging import Budget
         from review_context import ReviewContextExceeded
 
+        # The forced continuation must have an unread source page after the
+        # first accepted span; the shared two-line fixture is already exhausted.
+        for index in range(4):
+            body = ''.join(f'    value += {line}\n' for line in range(180))
+            (self.ws / f'part{index}.py').write_text(
+                f'def part{index}():\n    value = {index}\n' + body + '    return value\n')
         out = self.until('CHILDREN'); sid = self.meta['active']
         child, sibling = [row['id'] for row in out['children']]
         execution = out['execution_id']
@@ -132,6 +138,9 @@ class AllocationTests(unittest.TestCase):
 
         with patch.object(fixtures.Child, 'call', checkpoint):
             out = self.step(out)
+        delivered = self.models[-1][1].payloads[0]
+        self.assertTrue(any(span['next_line'] <= len((self.ws / path).read_text().splitlines())
+                            for path, span in delivered['excerpt_spans'].items()))
         cursor = m.slice_cursor(self.s, child)
         checkpoint = m.slice_history(self.s, child, cursor)
         spent = {ident: m.spent(self.s, ident) for ident in (child, sibling, execution)}

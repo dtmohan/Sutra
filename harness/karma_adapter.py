@@ -31,6 +31,44 @@ class KarmaAdapter:
         else:
             deviation=0.
         return dict(self.frame('task-focus-v1',deviation,0.),**signals)
+
+    def coherence(self, signals):
+        """Suggest recovery for a bounded structural observation, never a grant.
+
+        Semantic conflict counts are explicitly unverified indicators. Open
+        questions and incomplete free-text analysis alone are normal during
+        work and do not turn every stage into a warning or a stop.
+        """
+        booleans = {'binding_valid', 'references_valid', 'sources_current',
+                    'support_acyclic', 'within_limits'}
+        counts = {'missing_references', 'invalid_references', 'stale_sources',
+                  'cross_context_references', 'circular_support_components',
+                  'unsupported_claims', 'open_obligations', 'conflict_indicators',
+                  'model_closure_proposals'}
+        if not isinstance(signals, dict) or set(signals) != booleans | counts:
+            raise ValueError('Unknown coherence observation signals')
+        if any(type(signals[key]) is not bool for key in booleans):
+            raise ValueError('Coherence state signals must be boolean')
+        if any(type(signals[key]) is not int or not 0 <= signals[key] <= 4096 for key in counts):
+            raise ValueError('Coherence counts must be bounded nonnegative integers')
+        needs_review = (not all(signals[key] for key in booleans)
+                        or any(signals[key] for key in counts - {'open_obligations'}))
+        result = self.frame('text-coherence-observation-v1',
+                            2 * self.boundary.k if needs_review else 0., 0.)
+        return dict(result, observation_only=True, authority='host_observation_not_permission',
+                    suggested_recovery='inspect_evidence_or_clarify' if needs_review else 'continue',
+                    semantic_correctness_verified=False, signals=dict(signals))
+
+    def generation_progress(self, snapshot):
+        """Observe literal stream repetition without deciding answer quality."""
+        from generation_progress import validate_snapshot
+        value = validate_snapshot(snapshot)
+        repeated = value['repetition_indicator']
+        return dict(self.frame('generation-progress-observation-v1',
+                               2 * self.boundary.k if repeated else 0., 0.),
+                    observation_only=True, authority='host_observation_not_permission',
+                    signal='literal_repetition', semantic_correctness_verified=False,
+                    suggested_recovery='checkpoint_and_reassess' if repeated else 'continue')
     def evidence_admission(self, *, target_status, evidence_status, recovery_possible, budget_exhausted=False):
         """Map host-verified target, evidence and recovery facts into STP."""
         if target_status not in ('resolved', 'missing', 'invalid'):

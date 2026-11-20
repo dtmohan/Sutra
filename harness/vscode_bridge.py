@@ -306,13 +306,13 @@ def handle(root,workspace,request):
             if request.get('op')=='orchestrate':
                 from orchestration_flow import handle as orchestrate
                 from storage_policy import prune,require_space
-                if request.get('event') not in ('task_list','task_focus','task_close','pending','inspect','cancel'):
+                if request.get('event') not in ('task_list','task_focus','task_close','pending','recoverable_review','inspect','cancel'):
                     prune(root);require_space(root)
                 meta=json.loads(metadata.read_text()) if metadata.exists() else {'workspace':str(Path(workspace).resolve())}
                 if not metadata.exists():metadata.write_text(canonical(meta))
                 # Document evidence has its own scoped read and ledger reservation.
                 reconcile_workspace=request.get('event') not in (
-                    'start','task_list','pending','inspect','supply_evidence','locate_document','approve_document')
+                    'start','task_list','pending','recoverable_review','inspect','supply_evidence','locate_document','approve_document')
                 if reconcile_workspace:reconcile(s,workspace)
                 try:return orchestrate(s,meta,Path(workspace).resolve(),root,request)
                 except BaseException:
@@ -506,7 +506,7 @@ REQUEST_ENVIRONMENT = frozenset((
     'SUTRA_STRATA_PORT', 'SUTRA_STRATA_MODEL', 'SUTRA_STRATA_MODELS', 'SUTRA_STRATA_ONLY', 'SUTRA_CAPABILITIES_MODE',
     'SUTRA_RUNTIME_DIR', 'SUTRA_MEMORY_OWNERSHIP', 'SUTRA_WORKSPACE_ALLOCATION',
     'KARMA_STORAGE_LIMIT_MIB', 'SUTRA_LOGIT_SENSOR', 'SUTRA_ACTIVITY',
-    'SUTRA_THINKING', 'KARMA_NODE', 'KARMA_TYPESCRIPT', 'SUTRA_RAM_CACHE_MIB',
+    'SUTRA_THINKING', 'SUTRA_CHILD_THINKING', 'KARMA_NODE', 'KARMA_TYPESCRIPT', 'SUTRA_RAM_CACHE_MIB',
 ))
 
 

@@ -2,6 +2,7 @@
 from contextlib import contextmanager, nullcontext
 import http.client
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -10,7 +11,7 @@ import subprocess
 import sys
 import time
 
-from context_manager import InvalidUpdate
+from context_manager import InvalidUpdate, canonical, sha
 from lifecycle import timeout
 from local_model import LocalModel, OutputLimitExceeded, StructuredOutputRejected
 from paging import Budget
@@ -112,6 +113,69 @@ TRANSPORT_SECONDS = 150
 # leave most of its allowance for the structured answer.
 ADAPTIVE_MAX_GENERATION = 3072
 ADAPTIVE_THINKING_LIMITS = {'low': 768, 'medium': 896, 'high': 1024}
+HOST_JSON_DIRECTIVE = ('\n\nOUTPUT FORMAT REQUIREMENT: Return exactly one JSON object matching this JSON Schema. '
+                       'No Markdown, code fences, commentary or text outside the JSON. '
+                       'Use required fields, correct types and only allowed fields.\nJSON Schema:\n')
+HOST_JSON_DIRECTIVE_BYTES = len(HOST_JSON_DIRECTIVE.encode())
+
+
+def _host_json_capability(state):
+    capability = state.get('structured_output')
+    return (isinstance(capability, dict) and capability.get('method') == 'prompt_and_validate'
+            and capability.get('constrained_decoding') is False
+            and capability.get('stream_buffered') is True
+            and isinstance(capability.get('formats'), list) and 'json_schema' in capability['formats'])
+
+
+def _host_json_messages(messages, schema):
+    # The schema is already reserved by model_packet.schema_allowance. Only
+    # this fixed directive is additional; reserve it in template_allowance.
+    messages = [dict(message) for message in messages]
+    if not messages or messages[0].get('role') != 'system' or not isinstance(messages[0].get('content'), str):
+        raise InvalidUpdate('Strata host JSON requires the committed system message')
+    messages[0]['content'] += HOST_JSON_DIRECTIVE + canonical(schema)
+    return messages
+
+
+def _host_json_answer(text):
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError('duplicate JSON key (key withheld)')
+            result[key] = value
+        return result
+
+    def constant(_):
+        raise ValueError('non-finite JSON number')
+
+    def number(value):
+        result = float(value)
+        if not math.isfinite(result):
+            constant(value)
+        return result
+
+    try:
+        answer = json.loads(text, object_pairs_hook=pairs, parse_constant=constant, parse_float=number)
+    except json.JSONDecodeError as exc:
+        cause = 'invalid JSON: ' + _json_failure_cause(str(exc))
+    except ValueError as exc:
+        cause = str(exc) if str(exc) in ('duplicate JSON key (key withheld)', 'non-finite JSON number') else 'invalid JSON value'
+    except (OverflowError, RecursionError):
+        cause = 'JSON value exceeds the parser limit'
+    else:
+        if isinstance(answer, dict):
+            return answer
+        cause = 'expected one JSON object'
+    raise StructuredOutputRejected('Strata rejected the structured reply. Cause: ' + cause +
+        '. Return one JSON object matching the supplied schema.') from None
+
+
+def _host_json_text(text):
+    # A whole-response Markdown wrapper carries no JSON values. Never search
+    # for objects inside prose or select among several candidate objects.
+    fenced = re.fullmatch(r'\s*```(?:json)?[ \t]*\r?\n(.*)\r?\n```\s*', text, re.DOTALL)
+    return (fenced[1], 'json_fence') if fenced else (text, 'none')
 
 
 def _configured_int(key, lower, upper, default=None):
@@ -237,16 +301,71 @@ def append_catalog(catalog):
     return catalog
 
 
+def _json_failure_cause(message):
+    # JSONDecodeError diagnostics contain a parser reason and numeric location.
+    # Other ValueErrors (notably duplicate keys) can contain generated text.
+    reasons = ("Expecting value", "Extra data", "Expecting property name enclosed in double quotes",
+               "Invalid \\escape", "Invalid control character at", "Unterminated string starting at",
+               "Expecting ',' delimiter", "Expecting ':' delimiter")
+    for reason in reasons:
+        if re.fullmatch(re.escape(reason) + r': line [0-9]{1,12} column [0-9]{1,12} \(char [0-9]{1,12}\)', message):
+            return message
+    if message.startswith('duplicate JSON key: '):
+        return 'duplicate JSON key (key withheld)'
+    if message in ('invalid JSON constant: NaN', 'invalid JSON constant: Infinity',
+                   'invalid JSON constant: -Infinity'):
+        return message
+    return 'invalid JSON (provider detail withheld)'
+
+
+def _structured_failure_cause(message):
+    """Keep a bounded diagnostic without echoing generated keys or values."""
+    if not isinstance(message, str) or len(message) > 4096:
+        return 'structured output validation failed (provider detail withheld)'
+    prefix = 'model did not return valid JSON: '
+    if message.startswith(prefix):
+        return 'invalid JSON: ' + _json_failure_cause(message[len(prefix):])
+    if message.startswith('model output failed the JSON Schema at '):
+        # jsonschema renders the offending value and arbitrary object keys in
+        # its error text. Retain only known validator grammar, never that text.
+        suffix = re.search(r" is not of type ('(?:object|array|string|number|integer|boolean|null)'(?:, '(?:object|array|string|number|integer|boolean|null)')*)$", message)
+        if suffix and len(suffix[1]) <= 80:
+            return 'JSON Schema: value is not of type ' + suffix[1]
+        if message.endswith(' is a required property'):
+            return 'JSON Schema: required property missing (property withheld)'
+        if ': Additional properties are not allowed (' in message:
+            return 'JSON Schema: additional properties are not allowed (properties withheld)'
+        return 'JSON Schema mismatch (path and value withheld)'
+    if message.startswith('structured output was incomplete (finish_reason='):
+        return 'structured output was incomplete (provider finish reason withheld)'
+    if message.startswith('could not validate structured output: '):
+        return 'could not validate structured output (provider detail withheld)'
+    return 'structured output validation failed (provider detail withheld)'
+
+
+def _error_usage(chunk, error):
+    """Error events may include finalized counts; never retain arbitrary metadata."""
+    value = chunk.get('usage')
+    if not isinstance(value, dict) and isinstance(error, dict):
+        value = error.get('usage')
+    if not isinstance(value, dict):
+        return None
+    inp, out = count(value.get('prompt_tokens')), count(value.get('completion_tokens'))
+    if inp is None and out is None:
+        return None
+    return {'done': inp is not None and out is not None,
+            'done_reason': 'structured_output_failed',
+            'prompt_eval_count': inp, 'eval_count': out}
+
+
 def _stream(response, transport_socket, started, byte_limit, on_thinking):
     """Read the Strata SSE dialect with an absolute deadline and bounded frames."""
     answer, reasoning = [], []
     total, final, ended, first_answer_s = 0, None, False, None
     frame_limit = 6 * byte_limit + MAX_METADATA_BYTES  # One buffered JSON value plus escaping.
     while True:
-        remaining = TRANSPORT_SECONDS - (time.monotonic() - started)
-        if remaining <= 0:
-            raise TimeoutError('Strata transport deadline reached')
-        transport_socket.settimeout(timeout(remaining))
+        from invocation_gateway import transport_timeout
+        transport_socket.settimeout(transport_timeout(started, TRANSPORT_SECONDS))
         line = response.readline(frame_limit + 1)
         if not line:
             break
@@ -260,15 +379,23 @@ def _stream(response, transport_socket, started, byte_limit, on_thinking):
         if raw == b'[DONE]':
             ended = True
             break
-        chunk = json.loads(raw)
+        try:
+            chunk = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError('Invalid Strata stream JSON: ' + _json_failure_cause(str(exc))) from None
         if not isinstance(chunk, dict):
             raise RuntimeError('Invalid Strata stream event')
         if 'error' in chunk:
             error = chunk['error']
             if isinstance(error, dict) and error.get('code') == 'structured_output_failed':
                 if str(error.get('message')).startswith('structured output was incomplete (finish_reason=length)'):
-                    raise OutputLimitExceeded('Strata reached the allocated output limit')
-                raise StructuredOutputRejected('Strata rejected the structured reply. Return one JSON object matching the supplied schema.')
+                    failure = OutputLimitExceeded('Strata reached the allocated output limit')
+                else:
+                    cause = _structured_failure_cause(error.get('message'))
+                    failure = StructuredOutputRejected('Strata rejected the structured reply. Cause: ' + cause +
+                        '. Return one JSON object matching the supplied schema.')
+                failure.strata_response = _error_usage(chunk, error)
+                raise failure
             raise RuntimeError('Strata reported a generation error')
         if 'prompt_progress' in chunk and not chunk.get('choices'):
             continue
@@ -311,6 +438,7 @@ class StrataModel(LocalModel):
     def __init__(self, log_dir, review=False, model=MODEL):
         if not is_strata(model):
             raise InvalidUpdate('Unknown Strata provider reference')
+        self.host_json_mode = False
         self.native_profile = profile_metadata(model) if managed(model) else None
         if self.native_profile is not None:
             self.port = self.native_profile['port']
@@ -326,13 +454,36 @@ class StrataModel(LocalModel):
             'model_info': {'strata.context_length': maximum},
             '_sutra_runtime_cap': self.context_cap,
             '_sutra_provider': 'strata',
+            # A cold profile's live format capability is unknown until
+            # dispatch. Reserve the possible directive before memory planning.
+            '_sutra_template_reserve': 256 + HOST_JSON_DIRECTIVE_BYTES,
             'thinking': {'values': ['low', 'medium', 'high'], 'default': 'high'},
         }
         from model_activity import thinking_control
         thinking = thinking_control(self.context_metadata, os.environ.get('SUTRA_THINKING', 'adaptive'))
         super().__init__(log_dir, self.port, model,
-                         budget=Budget(context_limit=self.context_cap, response_reserve=2048 if review else 1024),
+                         budget=Budget(context_limit=self.context_cap, response_reserve=2048 if review else 1024,
+                                       template_reserve=self.context_metadata['_sutra_template_reserve']),
                          thinking=thinking)
+        if self.native_profile is None:
+            self._configure_structured_output(state)
+        elif self.native_profile.get('ready') is True:
+            try:
+                state = status(self.port, self.native_profile['model'])
+            except InvalidUpdate:
+                state = None
+        else:
+            state = None
+        if state is not None:
+            from context_window import discover
+            window = discover(self.port, state)
+            if window is not None:
+                self.context_metadata['_sutra_context_window'] = window
+
+    def _configure_structured_output(self, state):
+        self.host_json_mode = _host_json_capability(state)
+        if self.host_json_mode and self.budget.template_reserve < 256 + HOST_JSON_DIRECTIVE_BYTES:
+            raise InvalidUpdate('Strata host JSON directive exceeds the planned template allowance')
 
     def fresh_context_metadata(self):
         if self.native_profile is not None:
@@ -361,6 +512,7 @@ class StrataModel(LocalModel):
             state = status(self.port, self.server_identity['server_model'])
             if _identity(state, self.model) != self.server_identity:
                 raise InvalidUpdate('Strata server changed before dispatch')
+            self._configure_structured_output(state)
             if self.native_profile is not None and state['context']['max_positions'] != self.native_profile['context_tokens']:
                 raise InvalidUpdate('Native Strata context differs from the selected profile')
             activity = state.get('activity')
@@ -370,7 +522,12 @@ class StrataModel(LocalModel):
             sample = hardware['sample']
             available = sample.get('available_bytes') if sample.get('profile') == 'portable-memory-v1' else (
                 sample['free_bytes'] + sample['inactive_bytes'])
-            self.runtime_context_tokens = dispatch_context(self, system, payload, schema)
+            from context_window import check, exact, runtime_context
+            if exact(self.budget):
+                self.context_measurement = check(self.budget, system, payload, schema, thinking=self.thinking)
+                self.runtime_context_tokens = runtime_context(self.budget, self.context_measurement)
+            else:
+                self.runtime_context_tokens = dispatch_context(self, system, payload, schema)
             plan = {'decision': hardware['decision'], 'profile': 'warm-strata-v1', 'model': self.model,
                     'context_tokens': self.runtime_context_tokens, 'resident': True,
                     'available_bytes': available, 'system_reserve_bytes': HEADROOM,
@@ -391,24 +548,26 @@ class StrataModel(LocalModel):
         consume_dispatch(call_id, self.model, system, payload, schema, packet=packet)
         check_provider(self, payload)
         charge = self.budget.check(system, payload, schema)
-        body = {'model': self.server_identity['server_model'],
-                'messages': packet['messages'] if packet else self.messages(system, payload),
-                'response_format': {'type': 'json_schema', 'json_schema': {
-                    'name': 'sutra_proposal', 'schema': packet['schema'] if packet else schema}},
-                'stream': True, 'max_tokens': self.budget.response_reserve, 'temperature': 0, 'seed': 42}
-        if self.thinking is not None:
-            body['reasoning_effort'] = 'none' if self.thinking is False else self.thinking
-        thinking_limit = ADAPTIVE_THINKING_LIMITS.get(self.thinking)
-        if (payload.get('reasoning') or {}).get('preference') == 'adaptive' and thinking_limit is not None:
-            body['max_tokens'] = min(body['max_tokens'], ADAPTIVE_MAX_GENERATION)
-            body['reasoning_budget_tokens'] = min(thinking_limit, body['max_tokens'] // 3)
+        from context_window import wire_request, exact, validate_proof
+        body, _, wire_schema = wire_request(system, payload, schema, self.server_identity['server_model'],
+                                           self.thinking, self.budget.response_reserve, host_json=self.host_json_mode)
+        if exact(self.budget):
+            validate_proof(getattr(self, 'context_measurement', None), self.budget, system, payload, schema)
+            if self.context_measurement['wire_sha256'] != sha(canonical(body)):
+                raise InvalidUpdate('Strata transport differs from its physical context proof')
         record = {'call_id': call_id, 'request': body, 'provider': 'strata',
-                  'conservative_input_charge': charge}
+                  'conservative_input_charge': charge,
+                  'structured_output': {'mode': 'host_json' if self.host_json_mode else 'provider_json_schema',
+                                        'basis': 'verified_prompt_and_validate' if self.host_json_mode else 'provider_default',
+                                        'schema_sha256': sha(canonical(wire_schema))}}
+        if exact(self.budget):
+            record['physical_context'] = self.context_measurement
         activity = ACTIVE.get()
         if activity:
             activity.emit('control', requested=self.thinking, policy=payload.get('reasoning'))
         started = time.monotonic()
-        connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=timeout(TRANSPORT_SECONDS))
+        from invocation_gateway import transport_seconds
+        connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=timeout(transport_seconds(TRANSPORT_SECONDS)))
         response = None
         try:
             connection.request('POST', '/v1/chat/completions', json.dumps(body), _headers())
@@ -427,14 +586,23 @@ class StrataModel(LocalModel):
                 raise OutputLimitExceeded('Strata reached the allocated output limit')
             if result['done_reason'] != 'stop' or result['prompt_eval_count'] is None or result['eval_count'] is None:
                 raise RuntimeError('Strata did not report a complete generation and token usage')
+            if exact(self.budget) and result['prompt_eval_count'] != self.context_measurement['prompt_tokens']:
+                raise RuntimeError('Strata prompt usage differs from its exact physical context measurement')
             if (result['prompt_eval_count'] + self.budget.response_reserve > self.runtime_context_tokens
                     or result['eval_count'] > body['max_tokens']):
                 raise RuntimeError('Strata usage exceeds the admitted context or output budget')
             if self.native_profile is not None and _identity(status(self.port, self.server_identity['server_model']), self.model) != self.server_identity:
                 raise InvalidUpdate('Native Strata server changed during inference')
-            answer = json.loads(result['message']['content'])
+            if self.host_json_mode:
+                text, normalization = _host_json_text(result['message']['content'])
+                record['structured_output']['normalization'] = normalization
+                answer = _host_json_answer(text)
+            else:
+                answer = json.loads(result['message']['content'])
             record.update(answer=answer, ok=True)
         except Exception as exc:
+            if getattr(exc, 'strata_response', None) is not None:
+                record['response'] = exc.strata_response
             record.update(ok=False, error=str(exc))
             exc.call_record = record
             raise

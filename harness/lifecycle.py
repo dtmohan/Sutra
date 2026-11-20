@@ -6,12 +6,43 @@ import json
 from pathlib import Path
 import signal
 import time
+import threading
 from context_manager import InvalidUpdate, canonical, sha
 
 _deadline = ContextVar('karma_deadline', default=None)
 
 class Interrupted(BaseException):
     pass
+
+def remaining():
+    bound = _deadline.get()
+    return None if bound is None else max(0, bound-time.monotonic())
+
+def hard_deadline_supported():
+    return hasattr(signal, 'SIGALRM') and threading.current_thread() is threading.main_thread()
+
+@contextmanager
+def call_deadline(seconds):
+    """Bound a new timed call while restoring the enclosing bridge alarm."""
+    if not hard_deadline_supported():
+        raise InvalidUpdate('This provider cannot enforce the selected call deadline')
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    started = time.monotonic()
+    outer_first = previous_timer[0] > 0 and previous_timer[0] <= seconds
+    duration = min(seconds, previous_timer[0]) if outer_first else seconds
+    def expired(signum, frame):
+        if outer_first and callable(previous_handler): previous_handler(signum, frame)
+        raise TimeoutError('Model transport reached its admitted deadline')
+    try:
+        signal.signal(signal.SIGALRM, expired)
+        signal.setitimer(signal.ITIMER_REAL, duration)
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, max(.000001, previous_timer[0]-(time.monotonic()-started)), previous_timer[1])
 
 def timeout(cap):
     deadline = _deadline.get()
@@ -70,7 +101,8 @@ def reconcile(s, workspace):
     for raw,digest,payload in pending:
         if sha('invocation-v1:'+raw)!=digest:raise InvalidUpdate('Interrupted invocation commitment corrupted')
         env=json.loads(raw)
-        s.finalize(env,json.loads(payload),None,'Prior bridge ended without a model receipt; result withheld',elapsed_seconds=150)
+        from invocation_timing import reserved_seconds
+        s.finalize(env,json.loads(payload),None,'Prior bridge ended without a model receipt; result withheld',elapsed_seconds=reserved_seconds(env))
         events.append({'kind':'invocation','id':env['id'],'status':'quarantined'})
     for rid, in s.db.execute('SELECT id FROM protocol_runs').fetchall():
         if not any(e['kind'] in ('ALLOW','FIN','RESOURCE_WAIT') for e in s.run(rid)['events']):

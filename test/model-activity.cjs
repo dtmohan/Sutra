@@ -1,6 +1,12 @@
 'use strict';
 const assert=require('node:assert/strict');
 const {decoder,ActivityLog}=require('../model_activity');
+const progressMetrics=require('../media/generation_progress');
+const progressSnapshot=(extra={})=>({profile:'literal-generation-progress-v1',received_chars:4096,observed_chars:4096,
+ omitted_chars:0,invalid_chars:0,invalid_feeds:0,long_units:32,duplicate_units:28,novel_units:4,recent_units:32,
+ recent_duplicate_fraction:.875,recent_novelty_fraction:.125,repetition_indicator:true,current_repetition:true,
+ alert:true,alert_emitted:true,analysis_complete:true,pending_chars:0,finished:false,semantic_assessment:'unassessed',
+ limits:{...progressMetrics.limits},...extra});
 const events=[],logs=[],d=decoder(e=>events.push(e),s=>logs.push(s));
 const send=e=>d.write(Buffer.from('SUTRA_EVENT '+JSON.stringify(e)+'\n'));
 send({kind:'thinking',id:'forged',seq:1,text:'cannot start a call'});
@@ -23,6 +29,70 @@ for(let i=0;i<20;i++)log.accept({kind:'start',id:String(i)});
 assert.equal(log.calls.length,12);log.clear();assert.equal(log.calls.length,0);
 const oversized=decoder(()=>assert.fail('oversized frame accepted'),()=>{});oversized.write(Buffer.from('SUTRA_EVENT '+ 'x'.repeat(70000)+'\n'));oversized.end();
 console.log('PASS bounded activity framing, Unicode, identity, sequence, interruption, model switching and retention');
+
+// The literal sensor is a bounded observation. It cannot create an action or
+// smuggle source text, forged counts or model identities through diagnostics.
+{
+ const good=progressSnapshot({patterns:['PRIVATE PATTERN'],text:'PRIVATE TEXT',permissions:{write:true},
+  kernel:{adapter:'karma',profile:'generation-progress-observation-v1',profile_version:1,decision:'BRIDGE',
+   omega:.3,sigma:0,k:.15,sigma_clause:1,observation_only:true,semantic_correctness_verified:false,grant:true}});
+ const clean=progressMetrics.normalize(good);assert(clean);assert.equal(clean.kernel.observation_only,true);
+ assert(!JSON.stringify(clean).includes('PRIVATE'));assert(!JSON.stringify(clean).includes('permissions'));assert(!('grant' in clean.kernel));
+ for(const extra of [
+  {received_chars:4095},{duplicate_units:33},{recent_units:33},{pending_chars:4097},
+  {recent_duplicate_fraction:.5},{recent_novelty_fraction:NaN},{long_units:true},{invalid_chars:-1},
+  {finished:true,pending_chars:1},{analysis_complete:false},{repetition_indicator:false},
+  {semantic_assessment:'correct'},{limits:{...progressMetrics.limits,recent_units:64}},
+  {limits:{...progressMetrics.limits,raw:'PRIVATE'}}
+ ])assert.equal(progressMetrics.normalize(progressSnapshot(extra)),null,JSON.stringify(extra));
+ assert.equal(progressMetrics.normalize(undefined),null);
+ const seen=[],reader=decoder(e=>seen.push(e),()=>{}),emit=e=>reader.write(Buffer.from('SUTRA_EVENT '+JSON.stringify(e)+'\n'));
+ emit({kind:'progress',id:'forged',seq:1,generation_progress:good});
+ emit({kind:'start',id:'p',seq:1,model:'real-model',role:'subagent',node_id:'real-task'});
+ emit({kind:'thinking',id:'p',seq:2,text:'Actual commentary.'});
+ emit({kind:'progress',id:'p',seq:900,generation_progress:{...good,received_chars:0}});
+ emit({kind:'progress',id:'p',seq:3,model:'forged',node_id:'other-task',generation_progress:good});
+ emit({kind:'progress',id:'p',seq:4,generation_progress:good});
+ emit({kind:'thinking',id:'p',seq:4,text:' Continued.'});
+ const completed=progressSnapshot({alert:false,finished:true,current_repetition:false,long_units:40,duplicate_units:28,novel_units:12,
+  recent_duplicate_fraction:.625,recent_novelty_fraction:.375});
+ emit({kind:'finish',id:'p',seq:5,status:'accepted',generation_progress:completed});
+ emit({kind:'progress',id:'p',seq:6,generation_progress:good});
+ assert.deepEqual(seen.map(e=>e.kind),['start','thinking','progress','thinking','finish']);
+ assert.equal(seen[2].model,'real-model');assert.equal(seen[2].node_id,'real-task');
+ assert.equal(seen[2].generation_progress.current_repetition,true);
+ assert.equal(seen[4].generation_progress.current_repetition,false);
+ const log=new ActivityLog();seen.forEach(e=>log.accept(e));
+ assert.equal(log.calls[0].generation_progress.finished,true);
+ assert.equal(log.calls[0].text,'Actual commentary. Continued.');
+ log.accept({kind:'progress',id:'p',seq:7,generation_progress:good});
+ assert.equal(log.calls[0].generation_progress.finished,true);
+ const capped=[],bounded=decoder(e=>capped.push(e),()=>{});
+ bounded.write(Buffer.from('SUTRA_EVENT '+JSON.stringify({kind:'start',id:'bounded',seq:1,model:'m',role:'subagent'})+'\n'));
+ bounded.write(Buffer.from('SUTRA_EVENT '+JSON.stringify({kind:'progress',id:'bounded',seq:2,generation_progress:{...good,raw:'x'.repeat(70000)}})+'\n'));
+ bounded.write(Buffer.from('SUTRA_EVENT '+JSON.stringify({kind:'finish',id:'bounded',seq:2,status:'accepted'})+'\n'));
+ assert.deepEqual(capped.map(e=>e.kind),['start','finish'],'Oversized progress must not consume a valid finish sequence');
+ console.log('PASS strict literal-progress snapshots, namespace filtering, call identity, malformed sequence isolation, one alert and finish metrics');
+}
+
+// The concurrency bound must not become a lifetime limit for a persistent bridge.
+{
+ const seen=[],reader=decoder(e=>seen.push(e),()=>{}),send=e=>reader.write(Buffer.from('SUTRA_EVENT '+JSON.stringify(e)+'\n'));
+ for(let n=0;n<65;n++)send({kind:'start',id:'pending-'+n,seq:1,model:'m',role:'subagent'});
+ assert.equal(seen.length,64,'At most64 unfinished calls are accepted');
+ send({kind:'finish',id:'pending-0',seq:2,status:'accepted'});
+ send({kind:'start',id:'pending-64',seq:1,model:'replacement',role:'subagent'});
+ assert.equal(seen.filter(e=>e.kind==='start').length,65,'Finishing one call releases its active slot');
+ const count=seen.length;
+ send({kind:'start',id:'pending-0',seq:1,model:'replayed',role:'subagent'});
+ send({kind:'progress',id:'pending-0',seq:100,generation_progress:progressSnapshot()});
+ assert.equal(seen.length,count,'Recent completed identities cannot reopen or emit late progress');
+ reader.close();const closed=seen.length;reader.close();
+ send({kind:'start',id:'after-close',seq:1,model:'m',role:'subagent'});reader.end();
+ assert.equal(seen.length,closed,'Closing is idempotent and rejects all later events');
+ assert.equal(seen.filter(e=>e.kind==='finish'&&e.status==='interrupted').length,64);
+ console.log('PASS concurrent activity bound, released slots, recent replay protection and closed-decoder finality');
+}
 
 // Metadata-only calls must never create a VS Code "Finished thinking" block.
 {
@@ -68,6 +138,37 @@ console.log('PASS bounded activity framing, Unicode, identity, sequence, interru
  console.log('PASS quiet metadata-only calls, authentic inline thinking with protocol details, and old-host privacy');
 }
 
+// Host progress text is distinct from model reasoning and appears at most once.
+{
+ const {chatActivity}=require('../model_activity');
+ class Text{constructor(value){this.value=value;}}
+ class Thinking{constructor(value,id,metadata){Object.assign(this,{value,id,metadata});}}
+ const parts=[],emit=chatActivity({LanguageModelTextPart:Text,LanguageModelThinkingPart:Thinking},{report:p=>parts.push(p)});
+ emit({kind:'progress',id:'unknown',seq:2,generation_progress:progressSnapshot()});assert.equal(parts.length,0);
+ emit({kind:'start',id:'live',seq:1,model:'model',role:'subagent'});
+ emit({kind:'thinking',id:'live',seq:2,text:'PRIVATE MODEL COMMENTARY'});
+ emit({kind:'progress',id:'live',seq:3,generation_progress:progressSnapshot()});
+ emit({kind:'progress',id:'live',seq:4,generation_progress:progressSnapshot()});
+ emit({kind:'finish',id:'live',seq:5,status:'accepted',generation_progress:progressSnapshot({alert:false,finished:true})});
+ assert.equal(parts.filter(p=>p instanceof Text).length,1);
+ assert(parts.find(p=>p instanceof Text).value.includes('literal signal; correctness unverified'));
+ assert(!parts.find(p=>p instanceof Text).value.includes('PRIVATE MODEL COMMENTARY'));
+ assert(parts.some(p=>p instanceof Thinking&&p.value==='PRIVATE MODEL COMMENTARY'));
+ const count=parts.length;emit({kind:'progress',id:'live',seq:6,generation_progress:progressSnapshot()});assert.equal(parts.length,count);
+ const fallback=[],finishOnly=chatActivity({LanguageModelTextPart:Text},{report:p=>fallback.push(p)});
+ finishOnly({kind:'start',id:'finish-only',seq:1,model:'model',role:'subagent'});
+ finishOnly({kind:'finish',id:'finish-only',seq:2,status:'accepted',generation_progress:progressSnapshot({alert:false,finished:true})});
+ assert.equal(fallback.length,1);assert(fallback[0] instanceof Text);
+ const legacy=[],legacyEmit=chatActivity({LanguageModelTextPart:Text},{report:p=>legacy.push(p)});
+ legacyEmit({kind:'start',id:'legacy',model:'model',role:'conversation'});
+ legacyEmit({kind:'progress',id:'legacy',seq:2,generation_progress:progressSnapshot()});
+ legacyEmit({kind:'finish',id:'legacy',status:'accepted'});assert.equal(legacy.length,0);
+ const broken=chatActivity({LanguageModelTextPart:Text},{report(){throw Error('broken diagnostic display');}});
+ broken({kind:'start',id:'broken',seq:1,model:'model',role:'subagent'});
+ assert.doesNotThrow(()=>broken({kind:'progress',id:'broken',seq:2,generation_progress:progressSnapshot()}));
+ console.log('PASS one inert host repetition notice, authentic thinking separation, final-snapshot fallback, legacy quietness and diagnostic failure isolation');
+}
+
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {ActivityArchive,activityUri,parseActivityUri}=require('../model_activity');
 const temp=fs.mkdtempSync(path.join(os.tmpdir(),'sutra-reasoning-'));
@@ -82,6 +183,13 @@ try{
  const restored=new ActivityArchive(dir);
  assert.equal(restored.calls.length,3);assert.equal(restored.calls[1].model,'large');assert.equal(restored.calls[1].status,'withheld');
  assert(restored.document(id(2)).includes('Unverified subagent'));assert(!restored.document(id(2)).includes('Unverified conversation'));
+ archive.accept({kind:'start',id:id(42),seq:1,role:'subagent',model:'large'});
+ archive.accept({kind:'progress',id:id(42),seq:2,generation_progress:progressSnapshot({text:'PRIVATE PATTERN'})});
+ archive.accept({kind:'finish',id:id(42),seq:3,status:'accepted',generation_progress:progressSnapshot({alert:false,finished:true})});
+ const withProgress=new ActivityArchive(dir),savedProgress=withProgress.calls.find(c=>c.id===id(42));
+ assert(savedProgress.generation_progress.finished);assert(!JSON.stringify(savedProgress).includes('PRIVATE PATTERN'));
+ assert(withProgress.document(id(42)).includes('Repeated reasoning text observed (literal signal; correctness unverified)'));
+ assert(withProgress.document(id(42)).includes('4096 of 4096 received characters analyzed'));
  archive.accept({kind:'start',id:id(40),role:'conversation',model:'small'});
  archive.accept({kind:'control',id:id(40),requested:false});
  archive.accept({kind:'finish',id:id(40),status:'accepted',thinking_chars:0,usage:{input_tokens:3,output_tokens:5}});
@@ -119,6 +227,28 @@ try{
  const blocked=path.join(temp,'blocked');fs.writeFileSync(blocked,'file');const fail=new ActivityArchive(blocked);
  assert.doesNotThrow(()=>fail.accept({kind:'start',id:id(50),role:'subagent',model:'small'}));assert(fail.error);assert.equal(fail.calls.length,1);
  const isolated=new ActivityArchive(path.join(temp,'b'.repeat(24)));assert(isolated.document(id(2)).includes('unavailable'));
+ const continuous=new ActivityArchive(path.join(temp,'c'.repeat(24))),visible=[],parts=[];
+ class ProgressText{constructor(value){this.value=value;}}
+ const show=require('../model_activity').chatActivity({LanguageModelTextPart:ProgressText},{report:p=>parts.push(p)});
+ const stream=decoder(e=>{visible.push(e);continuous.accept(e);show(e);},()=>{});
+ const emit=e=>stream.write(Buffer.from('SUTRA_EVENT '+JSON.stringify(e)+'\n'));
+ for(let n=1000;n<1220;n++){
+  emit({kind:'start',id:id(n),seq:1,model:n%2?'small':'large',role:'subagent'});
+  emit({kind:'progress',id:id(n),seq:2,generation_progress:progressSnapshot()});
+  emit({kind:'finish',id:id(n),seq:3,status:'accepted',generation_progress:progressSnapshot({alert:false,finished:true})});
+ }
+ assert.equal(visible.filter(e=>e.kind==='start').length,220);
+ assert.equal(visible.filter(e=>e.kind==='progress').length,220);
+ assert.equal(visible.filter(e=>e.kind==='finish').length,220);
+ assert.equal(parts.filter(p=>p instanceof ProgressText).length,220,'Each sequential call remains visible beyond the old64-call ceiling');
+ assert.equal(continuous.calls.length,12);assert(fs.statSync(continuous.file).size<=1024*1024);
+ assert.equal(new ActivityArchive(continuous.directory).calls.length,12);
+ assert(new ActivityArchive(continuous.directory).document(id(1219)).includes('literal signal; correctness unverified'));
+ const beforeReplay=visible.length;
+ emit({kind:'start',id:id(1219),seq:1,model:'replayed',role:'subagent'});
+ emit({kind:'thinking',id:id(1219),seq:99,text:'late'});assert.equal(visible.length,beforeReplay);
+ stream.close();const afterClose=visible.length;stream.close();emit({kind:'start',id:id(1221),seq:1,model:'m',role:'subagent'});
+ assert.equal(visible.length,afterClose);continuous.dispose();
  console.log('PASS persistent per-call diagnostics: reload, stage/model isolation, interruptions, count/age/byte bounds, privacy, unsafe files and failure isolation');
 }finally{fs.rmSync(temp,{recursive:true,force:true});}
 
@@ -156,6 +286,11 @@ try{
  context.subscriptions.forEach(s=>s.dispose());
  view=install(fake,{...context,subscriptions:[]},deps);receive({type:'ready'});
  assert.equal(sent.at(-1).activity.length,2);assert(view.activityDocument(childUri).includes('Child retained details'));
+ view.activity({kind:'start',id:id(62),seq:1,model:'large',role:'subagent'});
+ view.activity({kind:'progress',id:id(62),seq:2,generation_progress:progressSnapshot()});
+ assert(sent.at(-1).activity.find(c=>c.id===id(62)).generation_progress.repetition_indicator);
+ view.activity({kind:'finish',id:id(62),seq:3,status:'accepted',generation_progress:progressSnapshot({alert:false,finished:true})});
+ assert(view.activityDocument(view.activityLink({id:id(62)})).includes('literal signal; correctness unverified'));
  current=path.join(tmp,'b'.repeat(24));view.reset();assert.equal(sent.at(-1).activity.length,0);
  assert(view.activityDocument(childUri).includes('different workspace'));
  assert(view.activityDocument('karma-preview:/activity/../../private').includes('different workspace'));

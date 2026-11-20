@@ -81,6 +81,55 @@ class RuntimeMemoryTests(unittest.TestCase):
         budget,diagnostics=allocation(p.context_metadata)
         self.assertGreater(budget.context_limit,4096);self.assertLess(budget.context_limit,65536)
         self.assertEqual(budget.context_limit,diagnostics['memory_context_cap'])
+        self.assertEqual(rm.read_state()['plan']['context_tokens'], budget.context_limit)
+        self.assertEqual(rm.read_state()['events'][-1]['event'], 'context_planned')
+
+    def test_required_context_preflight_expands_only_under_fresh_memory_admission(self):
+        p = self.provider(); p.budget = Budget(8192, 1024, 256)
+        p.context_metadata = dict(self.metadata, _sutra_runtime_cap=8192)
+        original = p.budget
+        observed = {'required_input': 13000, 'output_reserve': 1024,
+                    'required_context': 14024, 'context_limit': 8192,
+                    'pinned_statements': 0, 'stored_turns': 2}
+        with patch.object(rm, 'fresh_resources', return_value=self.healthy), \
+                patch.object(rm, 'running', return_value=[]), patch.object(rm, 'api') as api:
+            info = rm.refit_required_context(p, self.root, observed)
+        api.assert_not_called()
+        self.assertGreaterEqual(p.budget.context_limit, observed['required_context'])
+        self.assertEqual(p.budget.response_reserve, original.response_reserve)
+        self.assertEqual(p.budget.template_reserve, original.template_reserve)
+        self.assertEqual(info['effective_context_tokens'], p.budget.context_limit)
+        self.assertEqual(rm.read_state()['plan']['context_observation'], observed)
+        self.assertEqual(rm.read_state()['events'][-1]['event'], 'mandatory_context_planned')
+
+    def test_required_context_shortage_stays_resource_wait_without_budget_mutation(self):
+        p = self.provider(); p.budget = Budget(8192, 1024, 256)
+        p.context_metadata = dict(self.metadata, _sutra_runtime_cap=8192)
+        original = p.budget
+        hardware = dict(self.healthy, sample={'free_bytes': 14 * rm.GIB, 'inactive_bytes': 0})
+        observed = {'required_input': 13000, 'output_reserve': 1024,
+                    'required_context': 14024, 'context_limit': 8192,
+                    'pinned_statements': 0, 'stored_turns': 2}
+        with patch.object(rm, 'fresh_resources', return_value=hardware), \
+                patch.object(rm, 'running', return_value=[]), patch.object(rm, 'api') as api:
+            with self.assertRaisesRegex(ResourceWait, 'mandatory conversation packet') as stopped:
+                rm.refit_required_context(p, self.root, observed)
+        api.assert_not_called()
+        self.assertEqual(p.budget, original)
+        self.assertEqual(stopped.exception.state['runtime']['stage'], 'context_preflight')
+        self.assertFalse(stopped.exception.state['runtime']['inference_started'])
+        self.assertEqual(rm.read_state()['events'][-1]['event'], 'mandatory_context_paused')
+
+    def test_context_refit_never_exceeds_architecture_or_bypasses_os_pressure(self):
+        p = self.provider(); p.budget = Budget(8192, 1024, 256)
+        p.context_metadata = dict(self.metadata, _sutra_runtime_cap=8192)
+        with patch.object(rm, 'fresh_resources', side_effect=ResourceWait(self.blocked)), \
+                patch.object(rm, 'running') as inventory:
+            self.assertIsNone(rm.refit_required_context(p, self.root, {'required_context': 70000}))
+            with self.assertRaises(ResourceWait):
+                rm.refit_required_context(p, self.root, {'required_context': 14000})
+        inventory.assert_not_called()
+        self.assertEqual(p.budget.context_limit, 8192)
 
     def test_unknown_mlx_kv_is_not_reported_as_a_verified_bound(self):
         meta=dict(self.metadata,details={'format':'safetensors'})

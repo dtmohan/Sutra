@@ -9,7 +9,7 @@ from review_targets import (
     DOCUMENT_TEXT_REQUIRED, document_file_target, document_input_notice, document_text, has_document_text,
     may_use_retained_document, refers_to_previous_review_target, refers_to_retained_document,
 )
-from evidence_admission import measure as evidence_measure, record_document, workspace_roots
+from evidence_admission import measure as evidence_measure, record_document, workspace_roots, workspace_target
 
 
 def document_workspace_notice(prompt):
@@ -25,6 +25,36 @@ def latest_chat_flow(s,workspace,chat):
                AND json_extract(record_json,'$.workspace')=? AND json_extract(record_json,'$.chat_key')=?
                ORDER BY rowid DESC LIMIT 1""",(str(workspace),chat)).fetchone()
     return info(s,previous[0]) if previous else None
+
+
+def _original_ask(s, turn):
+    """A restart's creation time does not make its original ask newer."""
+    current = turn; seen = set()
+    while current.get('restarted_from'):
+        if current['id'] in seen: raise InvalidUpdate('Review restart lineage contains a cycle')
+        seen.add(current['id'])
+        prior = m.node(s, current['restarted_from'])
+        if (prior.get('kind') != 'flow' or any(prior.get(key) != turn.get(key)
+                for key in ('workspace', 'chat_key', 'prompt'))):
+            raise InvalidUpdate('Review restart lineage changed its original request or chat')
+        current = prior
+    return current['id']
+
+
+def _latest_ask_flow(s, workspace, chat):
+    original = s.db.execute("""SELECT id FROM orchestration_nodes
+        WHERE json_extract(record_json,'$.kind')='flow'
+        AND json_extract(record_json,'$.workspace')=? AND json_extract(record_json,'$.chat_key')=?
+        AND json_extract(record_json,'$.restarted_from') IS NULL ORDER BY rowid DESC LIMIT 1""",
+        (str(workspace), chat)).fetchone()
+    if not original: return None
+    for raw, in s.db.execute("""SELECT record_json FROM orchestration_nodes
+        WHERE json_extract(record_json,'$.kind')='flow'
+        AND json_extract(record_json,'$.workspace')=? AND json_extract(record_json,'$.chat_key')=?
+        ORDER BY rowid DESC""", (str(workspace), chat)):
+        turn = json.loads(raw)
+        if _original_ask(s, turn) == original[0]: return turn
+    return None
 
 
 def referenced_document_notice(s,workspace,prompt,chat,parent,prior_prompt=None):
@@ -170,7 +200,15 @@ def response(s,fid,**extra):
     outcome = extra.get('data', {}).get('result')
     observations = summary(s, data.get('conversation_id'), data.get('invocation_id'),
         ('awaiting_action' if m.state(s,fid)=='AWAITING_ACTION' else 'admitted' if outcome['admission']['admitted'] else 'withheld') if outcome else data.get('observation_delivery'))
-    return dict(task_observations=observations,flow_id=fid,state=m.state(s,fid),cursor=history[-1]['receipt'] if history else None,
+    from coherence_observations import read_observation
+    publication = extra.get('data', {}).get('report_review') or {}
+    coherence_id = (publication.get('reviewer_id') or (outcome or {}).get('invocation_id')
+                    or data.get('invocation_id') or data.get('conversation_id'))
+    coherence = read_observation(s, coherence_id)
+    if m.state(s, fid) == 'PAUSED' and data.get('binding'):
+        extra.setdefault('claim_review_usage', workflow_usage(s, fid))
+    return dict(task_observations=observations,coherence_observation=coherence,
+                flow_id=fid,state=m.state(s,fid),cursor=history[-1]['receipt'] if history else None,
                 conversation_id=data.get('conversation_id'),binding=data.get('binding'),
                 git_provenance=data.get('git_provenance'),
                 resource_fallback=data.get('resource_fallback'),
@@ -179,16 +217,76 @@ def response(s,fid,**extra):
                 execution_id=data.get('root_node') if data.get('root_node') and m.node(s,data['root_node'])['kind']=='execution' else None,
                 children=[{'id':i,'state':m.state(s,i),'files':m.node(s,i)['files']} for i in data.get('children',[])],**extra)
 
+def _terminal_review(s, flow, data):
+    """Only the latest closed, unpublished workspace draft can be restarted.
+
+    Historical output is inspected as an immutable receipt, never admitted as
+    fresh evidence under a new policy. A restart still reads the source again.
+    """
+    chat = flow.get('chat_key')
+    if not chat or m.state(s, flow['id']) != 'DONE': return False
+    last = m.events(s, flow['id'])[-1]
+    if last['kind'] != 'WORKFLOW_FINISHED' or last['data'].get('observation_delivery') != 'withheld': return False
+    from task_stack import owner
+    if owner(s, flow['workspace'], flow['id']) != chat: return False
+    latest = _latest_ask_flow(s, flow['workspace'], chat)
+    if not latest or latest['id'] != flow['id']: return False
+    checkpoint = data.get('parent_checkpoint') or {}
+    cid = checkpoint.get('candidate_id')
+    if not cid or checkpoint.get('version') != 1 or last['data'].get('invocation_id') != cid: return False
+    row = s.db.execute('SELECT i.record_json,i.digest,d.payload_json,d.payload_hash,r.record_json,r.id '
+        'FROM invocations i JOIN deliveries d ON d.id=i.delivery_id '
+        'JOIN invocation_receipts r ON r.invocation_id=i.id WHERE i.id=?', (cid,)).fetchone()
+    if not row: return False
+    raw, digest, payload, payload_hash, receipt, rid = row
+    env, source, accepted = json.loads(raw), json.loads(payload), json.loads(receipt)
+    parent = m.node(s, data['root_node'])
+    actor_id = (env.get('orchestration') or {}).get('node_id')
+    if not actor_id: return False
+    actor = m.node(s, actor_id)
+    return (sha('invocation-v1:' + raw) == digest and sha('invocation-receipt-v1:' + receipt) == rid
+        and accepted.get('invocation_hash') == digest and accepted.get('status') == 'accepted'
+        and sha(canonical(accepted.get('proposal'))) == accepted.get('response_hash')
+        and 'report' in (accepted.get('proposal') or {}) and env.get('role') == 'chat_reviewer'
+        and env.get('session') == parent['session'] and actor.get('flow_id') == flow['id']
+        and sha(payload) == payload_hash == env.get('payload_hash') == checkpoint.get('packet_hash')
+        and sha(canonical(accepted['proposal'])) == checkpoint.get('candidate_hash')
+        and source.get('workspace') == flow['workspace'] and source.get('request') == flow['prompt']
+        and not s.db.execute('SELECT 1 FROM invocation_quarantine WHERE invocation_id=?', (cid,)).fetchone())
+
+
 def recovery(s,fid):
     """Inspect incompatibility without accepting or rewriting old commitments."""
     n,data=info(s,fid)
-    if m.state(s,fid) in m.TERMINAL or not data.get('root_node'):return None
+    terminal = m.state(s,fid) in m.TERMINAL
+    if not data.get('root_node') or terminal and not _terminal_review(s, n, data): return None
     parent=m.node(s,data['root_node']);old=parent['binding']
     try:current=m.binding(s,parent['session'])
     except InvalidUpdate:
         return {'kind':'binding_changed','restart_allowed':False,
                 'message':'The saved task calibration is no longer usable. Discard this request and establish a valid task before continuing.'}
     changed=[key for key in old if old[key]!=current.get(key)]
+    if terminal:
+        if changed != ['logic_hash'] or not s.snapshot(parent['session'])['constraints'].get('auto_review'): return None
+        from task_stack import view
+        stack = view(s, n['workspace'], n['chat_key'])
+        return {'kind': 'policy_changed', 'restart_allowed': True, 'terminal_review': True,
+                'stack_cursor': stack['cursor'], 'parked_flow_id': stack['focused'],
+                'message': 'This unpublished review ended under an older Sutra policy. Restart review keeps the '
+                           'original task, constraints and consumed spending, and reads fresh source under the current policy.'
+                           + (' The older open task will remain saved and be parked while this review continues.'
+                              if stack['focused'] else '')}
+    if set(changed) <= {'logic_hash', 'contract_hash'}:
+        from native_access import read_scope_correction
+        correction = read_scope_correction(s, n, data, old)
+        if correction:
+            return {'kind': 'source_scope_correction', 'restart_allowed': True,
+                    'binding': {key: value for key, value in current.items() if key != 'logic_hash'},
+                    'source_roots': correction['read_scope'],
+                    'message': 'The original request asked for this workspace, but the router committed suggested '
+                               'filenames as its scope. Restart review corrects that read-only target to the workspace '
+                               'in a new contract version. The original request, other constraints, consumed spending '
+                               'and total allocation remain; no edits, tests or network access are granted.'}
     if not changed:
         if (data.get('workflow_stop') or {}).get('status') != 'provenance_changed':
             return None
@@ -216,7 +314,7 @@ def plan(s,meta,workspace,prompt,conversation_id,parent_id=None):
     parent=m.checked(s,parent_id) if parent_id else m.task(s,meta['active']);s.db.commit()
     if m.state(s,parent['id'])=='WAITING_CHILDREN':
         fork=[e for e in m.events(s,parent['id']) if e['kind']=='FORK'][-1]
-        children=[m.node(s,i) for i in fork['data']['children']]
+        children=[m.node(s,i) for i in m.fork_children(s,parent['id'])]
         if all(c['context']['request']==prompt and c['context'].get('conversation_id')==conversation_id for c in children):return parent,children,fork['data']['signals']
         raise InvalidUpdate('Another parent request owns the outstanding children')
     pages,_=auto.current_pages(s,meta,workspace);versions={};calls=0;unresolved=0
@@ -305,10 +403,16 @@ def handle(s,meta,workspace,root,req,providers=None):
     if fid is not None and event in ('start','start_existing','start_review'):
         raise InvalidUpdate('A new request needs a new workflow identity')
     from task_stack import assert_focused, close, owner, select
-    if event in ('task_list','pending'):
+    if event in ('task_list','pending','recoverable_review'):
         projection=task_projection(s,workspace,chat)
         if event=='task_list':
             return projection
+        if event=='recoverable_review':
+            latest = _latest_ask_flow(s, workspace, chat)
+            if latest:
+                saved = response(s, latest['id'], prompt=latest['prompt'])
+                if (saved.get('recovery') or {}).get('terminal_review'):
+                    return dict(saved, **projection)
         return dict(projection['focused_flow'] or {'state':'DONE','flow_id':None},**projection)
     if fid:
         n=m.node(s,fid)
@@ -332,27 +436,68 @@ def handle(s,meta,workspace,root,req,providers=None):
                         m.transition(s,fid,'CANCELLED','CANCELLED',{'spending_retained':True})
             projection=task_projection(s,workspace,chat)
             return dict(response(s,fid),**projection) if event=='cancel' else projection
-        if event!='inspect':
+        if event!='inspect' and not (event == 'restart_review' and (recovery(s,fid) or {}).get('terminal_review')):
             assert_focused(s,workspace,chat,fid)
     else:
         meta={'workspace':str(workspace)}
     out=run(s,meta,workspace,root,req,providers)
     return dict(out,**task_projection(s,workspace,chat))
 
+def workflow_usage(s, fid):
+    """Complete receipt-backed usage for this flow, including interrupted calls."""
+    from token_usage import history, summarize
+    _, data = info(s, fid)
+    sid = (data.get('binding') or {}).get('session')
+    call_ids = set(); runs = set()
+    if sid:
+        for raw, in s.db.execute('SELECT record_json FROM invocations WHERE session=? ORDER BY rowid', (sid,)):
+            env = json.loads(raw)
+            owner = (env.get('orchestration') or {}).get('node_id')
+            while owner:
+                node = m.node(s, owner)
+                if node.get('flow_id') == fid:
+                    call_ids.add(env['id']); runs.add(env['run_id']); break
+                owner = node.get('parent_id')
+    calls = [call for run in runs for call in history(s.db, run_id=run)['calls']
+             if call['invocation_id'] in call_ids]
+    calls.sort(key=lambda call: (call['created_at'], call['invocation_id']))
+    return {'calls': calls, 'totals': summarize(calls), 'total_calls': len(calls), 'limit': None}
+
+
 def run(s,meta,workspace,root,req,providers=None):
     """Translate measured resource stops at the shared orchestration boundary."""
     from monitoring import ResourceWait
+    from lifecycle import Interrupted
     req=dict(req)
     req.pop('_created_flow_id',None)
     try:
         return _handle(s,meta,workspace,root,req,providers)
+    except Interrupted as exc:
+        fid = req.get('_created_flow_id') or req.get('flow_id')
+        if not fid or m.state(s, fid) in m.TERMINAL:
+            raise
+        # The bridge owns the workspace lock here. Settle durable commitments
+        # before returning normal saved-pause guidance; never replay or refund.
+        from lifecycle import reconcile
+        reconcile(s, workspace)
+        _, data = info(s, fid)
+        phase = m.state(s, fid)
+        target = (data.get('workflow_stop') or {}).get('resume_phase') if phase == 'PAUSED' else phase
+        stop = {'status': 'interrupted', 'resume_phase': target, 'stage': target,
+                'error': str(exc), 'automatic_retry': False}
+        move(s, fid, 'PAUSED', 'BRIDGE_INTERRUPTED', workflow_stop=stop)
+        save(root, meta)
+        return response(s, fid, claim_review_usage=workflow_usage(s, fid))
     except (BudgetStop,m.OrchestrationStop) as exc:
         fid=req.get('flow_id')
         if not fid or m.state(s,fid) not in ('BINDING','WORKSPACE','NEED_TOOL_APPROVAL','MAPPING','BRANCHING','CHILDREN'):raise
         phase=m.state(s,fid)
-        return budget_pause(s, meta, root, req, fid, phase, {
+        stop = {
             'status': 'task_budget', 'stage': phase, 'error': str(exc),
-            'frame': exc.frame, 'automatic_retry': False})
+            'resume_phase': phase, 'frame': exc.frame, 'automatic_retry': False}
+        if getattr(exc, 'child_repair', None):
+            stop['child_repair'] = exc.child_repair
+        return budget_pause(s, meta, root, req, fid, phase, stop)
     except (PageFault, ContextBudgetExceeded) as exc:
         fid=req.get('_created_flow_id') or req.get('flow_id')
         if not fid:raise
@@ -421,6 +566,69 @@ def run(s,meta,workspace,root,req,providers=None):
             stop['recovery']={'admitted':False,'error':str(recovery_error),'automatic_inference':False}
             move(s,fid,'PAUSED','RESOURCE_RECOVERY_OBSERVED',workflow_stop=stop)
         return response(s,fid)
+
+
+def child_rejection(s, fid, child):
+    """Save a rejected worker as an inspectable stop, never a join candidate."""
+    node = m.node(s, child)
+    final = m.events(s, child)[-1]
+    iid = final['data'].get('invocation_id')
+    errors, model, receipt_id = [], None, None
+    if iid:
+        row = s.db.execute(
+            'SELECT i.record_json,r.record_json,r.id FROM invocations i '
+            'JOIN invocation_receipts r ON r.invocation_id=i.id AND r.session=i.session '
+            'WHERE i.id=? AND i.session=?', (iid, node['session'])).fetchone()
+        if not row or not s.verify_invocations(node['session']):
+            raise InvalidUpdate('Rejected child receipt is absent or corrupt')
+        envelope, receipt = json.loads(row[0]), json.loads(row[1])
+        if ((envelope.get('orchestration') or {}).get('node_id') != child
+                or receipt['status'] != 'quarantined'):
+            raise InvalidUpdate('Rejected child receipt does not match its owner')
+        errors = [str(error)[:500] for error in receipt['admission'].get('errors', [])[:4]]
+        model, receipt_id = envelope['model'], row[2]
+    eligible = final['kind'] == 'CHILD_REJECTED' and not node.get('replacement_of')
+    used, limits = m.spent(s, child), m.effective_limits(s, node)
+    eligible = eligible and all(used[key] < limits[key] for key in limits)
+    stop = {'status': 'child_review_rejected', 'resume_phase': 'CHILDREN',
+            'branch_id': child, 'invocation_id': iid, 'receipt': receipt_id,
+            'model': model, 'errors': errors, 'retryable': eligible,
+            'error': ('The child review failed its output checks. Its rejected output cannot be published or joined. '
+                      + ('Resume may allocate one replacement from this branch’s remaining allowance.' if eligible else
+                         'This branch has no further bounded replacement; its results remain quarantined.')),
+            'automatic_retry': False}
+    move(s, fid, 'PAUSED', 'CHILD_REVIEW_STOPPED', workflow_stop=stop)
+    return response(s, fid)
+
+
+def retry_child(s, fid, data, models, tier):
+    stop = data['workflow_stop']
+    if not stop.get('retryable'):
+        return response(s, fid)
+    child = stop['branch_id']
+    retry_route = None
+    if tier == 'auto':
+        from model_routing import TIERS
+        choices = [candidate for candidate in reversed(TIERS)
+                   if models.get(candidate) and models[candidate] != stop.get('model')]
+        if not choices:
+            updated = dict(stop, error=stop['error'] + ' Auto has no alternate configured model. Choose another model before resuming.')
+            move(s, fid, 'PAUSED', 'CHILD_REVIEW_STOPPED', workflow_stop=updated)
+            return response(s, fid)
+        retry_route = {'tier': choices[0], 'model': models[choices[0]], 'models': dict(models),
+                       'reason': 'one bounded alternate-model review after rejected structured output'}
+    try:
+        replacement = m.replace_child(s, data['root_node'], child, retry_route)
+    except m.OrchestrationStop as exc:
+        updated = dict(stop, retryable=False, frame=exc.frame,
+                       error='The remaining child/parent allocation cannot admit a fresh replacement. Spending is retained.')
+        move(s, fid, 'PAUSED', 'CHILD_REVIEW_STOPPED', workflow_stop=updated)
+        return response(s, fid)
+    children = list(data['children'])
+    children[children.index(child)] = replacement['id']
+    move(s, fid, 'CHILDREN', 'CHILD_REPAIR_ALLOCATED', children=children, workflow_stop=None,
+         previous_rejected_child=child, replacement_child=replacement['id'], resource_fallback=None)
+    return response(s, fid, progress='Preparing one fresh child review with remaining allocation; rejected output stays quarantined.')
 
 
 def review_provenance(s, meta, workspace, fid, data, prompt):
@@ -799,7 +1007,7 @@ def _handle(s,meta,workspace,root,req,providers=None):
             return response(s,fid)
         if event=='start_existing':
             work=proposal.get('workspace_request') or {'operation':'read','paths':[]}
-            status,roots=workspace_roots(work)
+            work,status,roots=workspace_target(work,prompt)
             if status!='resolved':
                 raise InvalidUpdate('Continuation needs the original admitted workspace target')
             move(s,fid,'NEED_ARM','ACTION_CONTINUATION',conversation_id=req['conversation_id'],
@@ -858,37 +1066,69 @@ def _handle(s,meta,workspace,root,req,providers=None):
     if event=='restart_review':
         if not incompatibility or not incompatibility['restart_allowed']:raise InvalidUpdate('This saved request cannot restart as a policy-only or source-snapshot review')
         parent=m.node(s,d['root_node']);sid=parent['session']
+        terminal_restart = incompatibility.get('terminal_review') is True
+        if terminal_restart and req.get('confirmed') is not True:
+            raise InvalidUpdate('Restarting an unpublished completed review requires explicit confirmation')
+        if terminal_restart:
+            from task_stack import view
+            if req.get('stack_cursor') != view(s, workspace, f['chat_key'])['cursor']:
+                raise InvalidUpdate('Task stack changed before review restart; inspect its current state')
         if not req.get('armed') or meta.get('active')!=sid or req.get('binding')!=identity(s,sid):
             raise InvalidUpdate('Restart requires the same user-armed task and current binding')
+        correction = None
+        if incompatibility['kind'] == 'source_scope_correction':
+            if req.get('confirmed') is not True:
+                raise InvalidUpdate('Read-scope correction requires explicit user confirmation')
+            from native_access import read_scope_correction
+            correction = read_scope_correction(s, f, d, parent['binding'])
+            if not correction:
+                raise InvalidUpdate('The confirmed read-scope correction changed')
         conversation_id = d.get('conversation_id')
-        if conversation_id:
+        if conversation_id and not correction:
             from conversation import workspace_handoff
             session_for(s,{'prompt':prompt,'parent':conversation_id},axis=chat_axis(workspace,f.get('chat_key')))
             workspace_handoff(s,sid,conversation_id,prompt)
-        # This is an explicit host UI event. Keep the task and all consumed use;
-        # do not transfer old model results or authorize any new file/action scope.
+        # This is an explicit host UI event. Keep the task and all consumed use.
+        # Policy/source restarts retain scope; a separately confirmed router
+        # target correction versions only read scope. Old model results never
+        # become new evidence or action authority.
         chat=f.get('chat_key')
+        if correction:
+            from execution_sessions import finish, idle
+            idle(s, parent['id'])
+            finish(s, fid, cancelled=True)
+            if parent['kind'] != 'execution':
+                with s.db:
+                    m.abandon_children(s, parent['id'], 'Read-only source target corrected after confirmation')
+            from native_access import correct_read_scope
+            correct_read_scope(s, meta, workspace, correction)
+            save(root, meta)
         with s.db:
             from execution_sessions import finish
-            finish(s, fid, cancelled=True)
-            if chat:
+            if not terminal_restart: finish(s, fid, cancelled=True)
+            if chat and not terminal_restart:
                 from task_stack import close, select, view
                 close(s,workspace,chat,fid,expected_cursor=view(s,workspace,chat)['cursor'])
                 m.transition(s,fid,'CANCELLED','CANCELLED',{'spending_retained':True})
-            else:
+            elif not terminal_restart:
                 m.abandon_children(s,parent['id'],'User restarted review after a policy or source change')
                 m.cancel(s,fid)
             new=m.create(s,'flow',objective=prompt,workspace=str(workspace),prompt=prompt,
                          conversation_parent=conversation_id,restarted_from=fid,chat_key=chat)
-            restart_kind = 'SOURCE_RESTART' if incompatibility['kind']=='provenance_changed' else 'POLICY_RESTART'
+            restart_kind = ('SOURCE_SCOPE_RESTART' if correction else
+                            'SOURCE_RESTART' if incompatibility['kind']=='provenance_changed' else 'POLICY_RESTART')
             m.transition(s,new['id'],'CLASSIFYING',restart_kind,{'previous_flow':fid})
             m.transition(s,new['id'],'NEED_ARM','USER_REVIEW',{'conversation_id':conversation_id,
-                         'permission':d.get('permission') or {'operation':'read','paths':[]}})
+                         'permission':correction['permission'] if correction else d.get('permission') or {'operation':'read','paths':[]},
+                         **({'source_roots': correction['read_scope']} if correction else {})})
             if chat:
+                from task_stack import select, view
+                select(s,workspace,chat,new['id'],expected_cursor=(req['stack_cursor'] if terminal_restart
+                    else view(s,workspace,chat)['cursor']),attach=True)
                 meta['_flow']=new['id']
                 save(root,meta)
-                select(s,workspace,chat,new['id'],expected_cursor=view(s,workspace,chat)['cursor'],attach=True)
-        return response(s,new['id'],progress=('Review restarted with the current source snapshot; task constraints and consumed budget retained.'
+        return response(s,new['id'],progress=('Review restarted with the original workspace target; other constraints, consumed spending and total allocation retained.'
+                        if correction else 'Review restarted with the current source snapshot; task constraints and consumed budget retained.'
                         if incompatibility['kind']=='provenance_changed' else
                         'Review restarted under the current policy; task constraints and consumed budget retained.'))
     if incompatibility:return response(s,fid)
@@ -914,7 +1154,7 @@ def _handle(s,meta,workspace,root,req,providers=None):
             return response(s, fid, progress=summary(snapshot))
         if event!='resume':raise InvalidUpdate('Workflow paused. Choose Resume or Discard; allocations remain unchanged.')
         saved_phase_stops = ('RESOURCE_STOPPED', 'ROUTING_STOPPED', 'MEMORY_STOPPED',
-                             'CLAIM_REVIEW_STOPPED', 'DOCUMENT_STAGE_STOPPED', 'CHILD_SLICE_STOPPED')
+                             'CLAIM_REVIEW_STOPPED', 'REVIEWER_UNAVAILABLE', 'BRIDGE_INTERRUPTED', 'DOCUMENT_STAGE_STOPPED', 'CHILD_SLICE_STOPPED', 'CHILD_REVIEW_STOPPED')
         stopped = [e for e in m.events(s, fid)
                    if e['kind'] in (*saved_phase_stops, 'MAPPING_STOPPED', 'CONTEXT_STOPPED')]
         if not stopped:raise InvalidUpdate('Paused workflow requires inspection before recovery')
@@ -927,6 +1167,8 @@ def _handle(s,meta,workspace,root,req,providers=None):
                 raise InvalidUpdate('Workflow task, calibration or permissions changed')
         if target != 'CLASSIFYING' and provenance_changed(s, workspace, fid, d):
             return response(s, fid)
+        if last['kind'] == 'CHILD_REVIEW_STOPPED':
+            return retry_child(s, fid, d, models, tier)
         if last['kind']=='RESOURCE_STOPPED':
             from monitoring import require_resources
             from runtime_memory import recover
@@ -1011,7 +1253,7 @@ def _handle(s,meta,workspace,root,req,providers=None):
         if p['intent']!='workspace':
             move(s,fid,'DONE','CLASSIFIED',conversation_id=r['invocation_id'])
             return response(s,fid,conversation=chat)
-        status,roots=workspace_roots(work)
+        work,status,roots=workspace_target(work,prompt)
         if status!='resolved':
             recoverable=status=='missing' and work['operation']=='read'
             guidance=('Reply **Use this workspace**, or list up to eight relative paths below a **Workspace files:** heading.'
@@ -1143,9 +1385,16 @@ def _handle(s,meta,workspace,root,req,providers=None):
         pending=[i for i in d['children'] if m.state(s,i)!='DONE']
         if pending:
             child = pending[0]
-            if m.state(s,child) in m.TERMINAL:raise InvalidUpdate('Child is quarantined or cancelled; result cannot be joined')
-            out=run(s,meta,workspace,root,child,models,effective(d,models,tier),provider('subagent'))
+            if m.state(s,child) in m.TERMINAL:
+                return child_rejection(s, fid, child)
+            retry = m.node(s, child).get('retry_route') or {}
+            mode = effective(d,models,tier)
+            if mode == 'auto' and retry.get('models') == models:
+                mode = retry['tier']
+            out=run(s,meta,workspace,root,child,models,mode,provider('subagent'))
             latest = {'last_child': child, 'last_model': out['route']['model']}
+            if m.state(s, child) in ('QUARANTINED', 'CANCELLED'):
+                return child_rejection(s, fid, child)
             if out.get('slice_status') == 'timeout':
                 reason = out.get('slice_reason', 'timeout')
                 message = {
@@ -1172,12 +1421,13 @@ def _handle(s,meta,workspace,root,req,providers=None):
         move(s,fid,'SYNTHESIS','CHILDREN_JOINED',child_results=ids)
         return response(s,fid)
     if phase in ('SYNTHESIS','CODING'):
+        from invocation_timing import BridgeStepRequired
         from resource_routing import effective
         from static_analysis import StaticSourceChanged
         from review_followup import FollowupSourceChanged
         if phase == 'SYNTHESIS' and provenance_changed(s, workspace, fid, d):
             return response(s, fid)
-        request={'prompt':prompt,'models':models,'tier':effective(d,models,tier),'conversation_id':d['conversation_id'],**d['binding'],'child_results':d.get('child_results',[]),'orchestration_parent':d.get('result_parent',parent['id'])}
+        request={'prompt':prompt,'models':models,'tier':effective(d,models,tier),'conversation_id':d['conversation_id'],**d['binding'],'child_results':d.get('child_results',[]),'orchestration_parent':d.get('result_parent',parent['id']), '_parent_step': phase == 'SYNTHESIS'}
         claim_retry = d.get('claim_review_retry') if phase == 'SYNTHESIS' else None
         try:
             with m.scope(parent['id']):
@@ -1189,8 +1439,25 @@ def _handle(s,meta,workspace,root,req,providers=None):
                     out=resume_claim_review(s,meta,workspace,root,request,claim_retry,
                                             review_provider=provider('synthesis'))
                 else:
-                    from chat_runtime import answer
-                    out=answer(s,meta,workspace,root,request,provider=provider('synthesis'))
+                    from chat_runtime import answer, recover_parent_checkpoint, resume_parent_review
+                    checkpoint = d.get('parent_checkpoint')
+                    if phase == 'SYNTHESIS' and not checkpoint:
+                        checkpoint = recover_parent_checkpoint(s, sid, workspace, request)
+                        if checkpoint:
+                            move(s, fid, 'SYNTHESIS', 'PARENT_CANDIDATE_RECOVERED', parent_checkpoint=checkpoint)
+                            save(root, meta)
+                            return response(s, fid, progress='The saved draft is ready for claim review.',
+                                            claim_review_usage=workflow_usage(s, fid))
+                    out = (resume_parent_review(s, meta, workspace, root, request, checkpoint,
+                                                review_provider=provider('synthesis')) if checkpoint else
+                           answer(s,meta,workspace,root,request,provider=provider('synthesis')))
+        except BridgeStepRequired:
+            # No model dispatch or charge occurred. Keep the same saved work
+            # and let the next bridge step admit a complete bounded slice.
+            move(s, fid, phase, 'MODEL_SLICE_DEFERRED')
+            save(root, meta)
+            return response(s, fid, progress='Continuing the saved review in a fresh execution slice.',
+                            claim_review_usage=workflow_usage(s, fid))
         except (StaticSourceChanged, FollowupSourceChanged) as exc:
             if not claim_retry: raise
             stop = {'status': 'provenance_changed', 'error': str(exc)}
@@ -1214,8 +1481,40 @@ def _handle(s,meta,workspace,root,req,providers=None):
         if phase == 'SYNTHESIS':
             if provenance_changed(s, workspace, fid, d):
                 return response(s, fid)
+            if out.get('evidence_discovery_pending'):
+                move(s, fid, 'SYNTHESIS', 'PARENT_EVIDENCE_CHECKPOINT',
+                     parent_evidence=out['evidence_discovery_pending'])
+                save(root, meta)
+                return response(s, fid, progress='Gathering source evidence for the review.',
+                                claim_review_usage=workflow_usage(s, fid))
+            if out.get('parent_generation_pending'):
+                move(s, fid, 'SYNTHESIS', 'PARENT_GENERATION_CHECKPOINT',
+                     parent_generation=out['parent_generation_pending'])
+                save(root, meta)
+                return response(s, fid, progress='Review attempt saved. Continuing its remaining repair allowance.',
+                                claim_review_usage=workflow_usage(s, fid))
+            if out.get('parent_checkpoint'):
+                move(s, fid, 'SYNTHESIS', 'PARENT_REVIEW_CHECKPOINT',
+                     parent_checkpoint=out['parent_checkpoint'], claim_review_retry=None,
+                     parent_review_progress=out.get('claim_review_pending'))
+                save(root, meta)
+                return response(s, fid, progress='Draft saved. Continuing the claim review.',
+                                claim_review_usage=workflow_usage(s, fid))
             claim_stop = out.get('claim_review_stop')
             if claim_stop:
+                if claim_stop.get('status') == 'reviewer_unavailable':
+                    from chat_runtime import parent_checkpoint
+                    checkpoint = d.get('parent_checkpoint') or parent_checkpoint(s, sid, claim_stop['candidate_id'])
+                    move(s, fid, 'PAUSED', 'REVIEWER_UNAVAILABLE', workflow_stop=claim_stop,
+                         parent_checkpoint=checkpoint, parent_review_progress=claim_stop)
+                    save(root, meta)
+                    return response(s, fid, claim_review_usage=workflow_usage(s, fid))
+                if claim_stop.get('status') == 'claim_review_timeout' and claim_stop.get('automatic_retry') is True:
+                    move(s, fid, 'SYNTHESIS', 'CLAIM_REVIEW_CHECKPOINT', claim_review_retry=claim_stop,
+                         parent_review_progress=claim_stop)
+                    save(root, meta)
+                    return response(s, fid, progress='Claim review saved. Continuing its remaining attempt with thinking off.',
+                                    claim_review_usage=workflow_usage(s, fid))
                 move(s, fid, 'PAUSED', 'CLAIM_REVIEW_STOPPED', workflow_stop=claim_stop,
                      claim_review_retry=claim_stop)
                 save(root,meta)

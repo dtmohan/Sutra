@@ -64,7 +64,8 @@ class PacketTests(unittest.TestCase):
         self.assertNotIn('summary', provider.packet['schema']['properties'])
         self.assertEqual(result['accepted_output']['summary'], result['accepted_output']['answer'][:320])
         self.assertIn('return integer IDs from citation_choices', provider.packet['messages'][0]['content'])
-        self.assertIn('array must contain 1 to 4 IDs', provider.packet['messages'][0]['content'])
+        maximum = provider.packet['schema']['properties']['citations']['maxItems']
+        self.assertIn(f'array must contain 1 to {maximum} IDs', provider.packet['messages'][0]['content'])
         self.assertTrue(self.s.verify_invocations(self.sid))
         self.assertEqual(self.s.load_result(self.sid, result['invocation_id'])['citations'], [expected])
 
@@ -109,7 +110,7 @@ class PacketTests(unittest.TestCase):
         self.assertEqual(provider.packet['version'], 1)
         self.assertTrue(self.s.verify_invocations(self.sid))
 
-    def test_strata_child_checkpoint_and_report_share_current_citation_references(self):
+    def test_strata_child_findings_use_current_citation_references_without_parent_report(self):
         import subagent_runtime as child
         from strata_model import MODEL
         payload = {'contract': self.s.pinned(self.sid), 'request': 'Explain this architecture.',
@@ -121,9 +122,14 @@ class PacketTests(unittest.TestCase):
         data = json.loads(wire['messages'][1]['content'])
         self.assertEqual(data['citation_choices'][1], {'id': 2, 'path': 'entry.py', 'line_in_excerpt': 2})
         self.assertEqual(wire['schema']['properties']['citations']['items']['enum'], [1, 2])
-        self.assertIn('Include report whenever slice_status is complete', wire['messages'][0]['content'])
         self.assertIn('check within this branch', wire['messages'][0]['content'])
+        self.assertIn('slice_status complete or omit it', wire['messages'][0]['content'])
+        self.assertNotIn('substance in report', wire['messages'][0]['content'])
+        self.assertNotIn('task_commitment', wire['messages'][0]['content'])
+        self.assertNotIn('report', wire['schema']['properties'])
+        self.assertEqual(wire['schema']['properties']['answer']['maxLength'], 12000)
         self.assertNotIn('report', wire['schema']['required'])
+        self.assertNotIn('slice_status', wire['schema']['required'])
 
     def test_only_task_semantics_cross_boundary_with_source_verbatim(self):
         m = WireModel(); result = self.ask(provider=m)

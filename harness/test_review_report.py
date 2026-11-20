@@ -49,6 +49,23 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(report.prose('Uses `host_actions.py` safely.'),'Uses `host_actions.py` safely.')
         self.assertEqual(report.references(['a`[x](command:run).py']),'`` a`[x](command:run).py ``')
 
+    def test_chat_groups_evidence_locations_and_retains_full_mapping(self):
+        proposal = {'report': self.r, 'claim_evidence': [
+            {'claim': 'flow/0', 'id': 'e111', 'workspace': '/tmp/review workspace',
+             'path': 'main.py', 'start_line': 12, 'end_line': 14},
+            {'claim': 'overview', 'id': 'e222', 'workspace': '/tmp/review workspace',
+             'path': 'main.py', 'start_line': 12, 'end_line': 14},
+            {'claim': 'strengths/0', 'id': 'e333', 'workspace': '/tmp/review workspace',
+             'path': 'leaf.py', 'start_line': 3, 'end_line': 4},
+        ]}
+        before = copy.deepcopy(proposal)
+        rendered = report.markdown(proposal)
+        self.assertEqual(rendered.count('file:///tmp/review%20workspace/main.py#L12'), 1)
+        self.assertIn('leaf.py#L3', rendered)
+        self.assertIn('Full claim and evidence-ID mappings are in conversation details', rendered)
+        self.assertNotIn('| Claim | Evidence ID |', rendered)
+        self.assertEqual(proposal, before)
+
     def test_excerpt_reads_body_beyond_long_import_preamble_and_tracks_budget(self):
         src = '\n'.join('import os # '+str(i) for i in range(250)) + '\ndef dispatch():\n    return 42\n'
         graph = static_analysis.analyze({'main.py': src})
@@ -69,6 +86,17 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(report.diagram({'module_dependencies':[]},['main.js'],sources)['edges'],[])
         py = report.diagram({},['main.py','leaf.py'],{'main.py':'import leaf\n','leaf.py':'def leaf(): return leaf()\n'})
         self.assertEqual(len(py['edges']),1)
+
+    def test_flow_view_renders_only_published_order_and_labels_its_meaning(self):
+        self.r['flow'].append({'description': 'The helper returns the inspected result to the caller.', 'paths': ['leaf.py']})
+        before = copy.deepcopy(self.r)
+        diagram = report.flow_diagram({'report': self.r})
+        self.assertEqual([n['label'] for n in diagram['nodes']],
+                         [str(i) + '. ' + row['description'] for i, row in enumerate(self.r['flow'], 1)])
+        self.assertEqual(diagram['edges'], [{'source': 'n1', 'target': 'n2', 'label': 'next described step'}])
+        self.assertIn('not independently measured calls', diagram['note'])
+        self.assertEqual(self.r, before)
+        self.assertIsNone(report.flow_diagram({'report': dict(self.r, flow=[])}))
 
 
 if __name__ == '__main__': unittest.main()

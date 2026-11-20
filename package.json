@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Governed local AI chat, codebase reviews, and diagnostics in VS Code.",
-  "version": "0.50.1",
+  "version": "0.52.0",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -122,6 +122,10 @@
       {
         "command": "karma.disarmNative",
         "title": "Sutra: Revoke Workspace Access"
+      },
+      {
+        "command": "karma.nativeControls",
+        "title": "Sutra: Quick Controls"
       },
       {
         "command": "karma.toggleNative",
@@ -370,7 +374,7 @@
           "type": "boolean",
           "default": true,
           "scope": "machine",
-          "description": "Make Sutra Auto available in native chat. Use Sutra: Workspace Access\u2026 to manage saved access. The current task scope still applies."
+          "description": "Make Sutra Auto available in native chat. Click Sutra in the bottom status bar for enable/disable, chat, workspace access, models and reasoning. The current task scope still applies."
         },
         "karma.thinking": {
           "type": "string",
@@ -381,13 +385,13 @@
             "model-default"
           ],
           "enumDescriptions": [
-            "Start substantive conversation at the lowest supported positive effort. Multi-file architecture synthesis can also use thinking when its existing allocation includes the full output reserve and a retry.",
+            "Use supported positive effort for substantive conversation and source-backed architecture planning. Eligible multi-file synthesis and claim checks can also use thinking within the existing allocation.",
             "Request thinking off. Models that require it may still emit reasoning.",
             "Enable reasoning at the lowest advertised positive level.",
             "Use each installed model\u2019s default reasoning setting."
           ],
           "default": "adaptive",
-          "description": "Reasoning for Sutra Auto and fixed tiers set to Inherit. Evidence selection uses the lowest known effort. The Chat lightbulb requests thinking for one turn. Reasoning and answers share the existing allocation."
+          "description": "Reasoning for Sutra Auto and fixed tiers set to Inherit. Explicit choices are preserved when supported. The Chat lightbulb boosts planning and answering for one turn; child tasks keep their configured reasoning. Reasoning and answers share the existing allocation."
         },
         "karma.tierReasoning": {
           "type": "object",
@@ -753,6 +757,46 @@
               "description": "Include local model commentary; defaults true."
             }
           },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "karma_workspace_access",
+        "toolReferenceName": "sutraWorkspaceAccess",
+        "displayName": "Allow Sutra workspace access",
+        "userDescription": "Allow Sutra to read this workspace and automatically continue your request. Access is remembered for this workspace; edits and tests keep their own approval.",
+        "modelDescription": "Confirms only the workspace access requested by a host-issued Sutra ticket. Cannot choose scope, enable network, edit files, run tests or change budgets.",
+        "canBeReferencedInPrompt": false,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ticket": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ticket"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "karma_workspace_agent_access",
+        "toolReferenceName": "sutraWorkspaceAgentAccess",
+        "displayName": "Allow Sutra workspace agent access",
+        "userDescription": "Allow Sutra to propose scoped edits and tests in this workspace. Every edit and test keeps its own action confirmation.",
+        "modelDescription": "Confirms only a host-issued workspace agent access ticket. Separate from read-only consent. Cannot choose action scope, edit files, run tests or change budgets.",
+        "canBeReferencedInPrompt": false,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ticket": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ticket"
+          ],
           "additionalProperties": false
         }
       },

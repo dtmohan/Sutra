@@ -261,10 +261,80 @@ def configure(provider, root, metadata, weights):
         else: high = mid - 1
     provider.memory_weights = weights
     provider.context_metadata = dict(metadata, _sutra_runtime_cap=low)
+    # A packet can stop before inference. Keep the actual context allocation
+    # visible rather than leaving the last unrelated model's plan in Monitor.
+    plan = estimate(provider.model, metadata, weights, models, low, hardware, calibration, digest)
+    plan['calibration_status'] = status
+    provider.memory_cap_plan = plan
+    with lease():
+        data = read_state(); data.update(plan=plan, resident_models=models)
+        note(data, 'context_planned', model=provider.model, context_tokens=low,
+             decision=plan['decision'], inference_started=False)
+
+
+def refit_required_context(provider, root, observation):
+    """One fresh preflight for a mandatory packet above a hardware-derived cap.
+
+    This never invokes a model, changes task allocation, discards memory or
+    unloads a shared server. A larger context is used only if current measured
+    hardware and the unchanged metadata/calibration admit its memory plan.
+    """
+    metadata = getattr(provider, 'context_metadata', {})
+    cap = metadata.get('_sutra_runtime_cap')
+    if not enabled() or getattr(provider, 'port', None) != 11434 or not positive(cap):
+        return None
+    from model_context import allocation
+    from paging import Budget
+    original = {key: value for key, value in metadata.items() if key != '_sutra_runtime_cap'}
+    supported = allocation(original)[0].context_limit
+    required = observation['required_context']
+    if cap >= supported or required > supported:
+        return None
+    context = min(supported, math.ceil((required + 256) / 1024) * 1024)
+    weights = getattr(provider, 'memory_weights', None)
+    if not positive(weights):
+        denied('Installed model size is unavailable for mandatory context preflight.')
+    with lease():
+        hardware = fresh_resources(root)
+        models = running()
+        calibration, status = profile_for(provider, original)
+        previous = getattr(provider, 'memory_profile', None)
+        if previous and (not calibration or previous['sha256'] != calibration['sha256']):
+            denied('MLX calibration changed before mandatory context preflight.')
+        plan = estimate(provider.model, original, weights, models, context, hardware,
+                        calibration, getattr(provider, 'manifest_digest', None))
+        plan.update(calibration_status=status, context_observation=observation,
+                    model_context_limit=supported)
+        data = read_state(); data.update(plan=plan, resident_models=models)
+        admitted = plan['decision'] == 'ALLOW'
+        note(data, 'mandatory_context_planned' if admitted else 'mandatory_context_paused',
+             model=provider.model, context_tokens=context, decision=plan['decision'],
+             inference_started=False)
+        if not admitted:
+            denied('The mandatory conversation packet needs at least %s context units '
+                   '(%s conservative input + %s output reserve); its fresh memory plan '
+                   'requires %.2f GiB additional memory plus %.1f GiB system reserve, '
+                   'with %.2f GiB available. History, constraints and spending are retained.' %
+                   (required, observation['required_input'], observation['output_reserve'],
+                    plan['estimated_increment_bytes'] / GIB, HEADROOM / GIB,
+                    plan['available_bytes'] / GIB), plan=plan, kind='model_capacity',
+                   stage='context_preflight', inference_started=False)
+        provider.context_metadata = dict(original, _sutra_runtime_cap=context)
+        provider.memory_cap_plan = plan
+        old = provider.budget
+        provider.budget = Budget(context, old.response_reserve, old.template_reserve)
+        _, capacity = allocation(provider.context_metadata)
+        capacity['output_reserve_tokens'] = old.response_reserve
+        return capacity
 
 
 def dispatch_context(provider, system, payload, schema):
     charge = provider.budget.check(system, payload, schema)
+    from context_window import check as check_window, exact, runtime_context
+    if exact(provider.budget):
+        proof = check_window(provider.budget, system, payload, schema, thinking=getattr(provider, 'thinking', None))
+        provider.context_measurement = proof
+        return runtime_context(provider.budget, proof)
     # Existing byte-based charge includes template reserve. Add a small runtime
     # margin, never enlarge the admitted allocation or remove payload content.
     required = charge + provider.budget.response_reserve

@@ -45,6 +45,23 @@ class StrataTimedOut(Exhausted):
 
 
 class ControlsTests(unittest.TestCase):
+    def test_claim_evaluation_uses_supported_effort_with_answer_headroom(self):
+        from review_reasoning import check
+        for reserve, preference, expected in ((8192, 'adaptive', True), (2048, 'adaptive', False),
+                                              (8192, 'off', False), (8192, 'model-default', None)):
+            model = Exhausted()
+            model.budget = Budget(32384, reserve, 256)
+            p = {'review_protocol': 2, 'claims': {'overview': {}}, 'source_evidence': {'e1': {}}}
+            bind(model, p, preference=preference, evaluating_claims=True)
+            self.assertIs(model.thinking, expected)
+            check(p)
+            check_provider(model, p)
+        p['reasoning']['step'] = 1
+        p['reasoning']['preference'] = 'adaptive'
+        p['reasoning']['requested'] = True
+        p['claim_response_reserve'] = True
+        with self.assertRaises(InvalidUpdate): check(p)
+
     def test_supported_adaptive_defaults_and_user_overrides(self):
         for values, expected in [([True], False), (['low', 'medium'], False),
                                   ([], None), (['unfamiliar'], None)]:
@@ -101,6 +118,26 @@ class ReviewRecoveryTests(unittest.TestCase):
         return chat.answer(self.s, self.meta, self.ws, self.storage,
             {'prompt': 'Explain the architecture.', 'models': fixture.MODELS, 'tier': 'low'},
             provider=model, review_provider=reviewer)
+
+    def test_adaptive_claim_output_limit_reuses_one_attempt_without_losing_evidence_or_spending(self):
+        reviewer = Exhausted()
+        reviewer.model = fixture.MODELS['mid']
+        reviewer.budget = Budget(32384, 8192, 256)
+        before = usage(self.s, self.sid)
+        with patch.dict('os.environ', SUTRA_THINKING='adaptive'):
+            out = self.architecture(Fake(), reviewer)
+        self.assertTrue(out['result']['admission']['admitted'], out)
+        first, retry = reviewer.payloads
+        self.assertIs(first['reasoning']['requested'], True)
+        self.assertIs(retry['reasoning']['requested'], False)
+        for field in ('contract', 'claims', 'source_evidence', 'candidate_id', 'review_plan', 'review_page'):
+            self.assertEqual(first[field], retry[field])
+        calls = [c for c in out['result']['token_usage']['calls'] if c['stage'] == 'report_reviewer']
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]['status'], 'quarantined')
+        self.assertEqual(calls[0]['output_tokens'], 8192)
+        self.assertGreater(usage(self.s, self.sid)['used']['tokens'], before['used']['tokens'])
+        self.assertTrue(self.s.verify_invocations(self.sid))
 
     def test_adaptive_report_writer_retries_at_lowest_effort_and_charges_truncation(self):
         writer = Exhausted()

@@ -89,7 +89,7 @@ if [ "$WITH_ENGINE_CODEC" -eq 1 ]; then
   gate "installed engine codec (opt-in)" engine_codec_suite
 fi
 
-for suite in capabilities model-activity native-provider workspace-authorization workspace-authorization-store hardening panel-entry model-selection bridge-worker strata-startup strata-management strata-runtime strata-setup strata-manager-ui provider-slot engine-management engine-manager-ui branding host-tokens runtime-integrity; do
+for suite in capabilities model-activity coherence-feedback native-provider workspace-authorization workspace-authorization-store hardening diagram-views panel-entry model-selection bridge-worker strata-startup strata-management strata-runtime strata-setup strata-manager-ui provider-slot engine-management engine-manager-ui branding host-tokens runtime-integrity; do
   gate "node $suite" node_suite "$suite"
 done
 

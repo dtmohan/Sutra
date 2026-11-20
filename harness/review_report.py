@@ -16,9 +16,11 @@ def text(limit):
 
 
 def schema(p=None):
-    paths = dict(arr(dict(text(512), enum=sorted(p['excerpts'])) if p else text(512)), minItems=1, maxItems=3)
+    from claim_pages import source_paths
+    delivered = source_paths(p) if p else []
+    paths = dict(arr(dict(text(512), enum=delivered) if p else text(512)), minItems=1, maxItems=3)
     finding = obj({'observation': text(600), 'implication': text(400), 'paths': paths})
-    return obj({
+    result = obj({
         'overview': text(1000),
         'components': dict(arr(obj({'name': text(100), 'responsibility': text(500), 'paths': paths})), minItems=1, maxItems=6),
         'flow': dict(arr(obj({'description': dict(text(600), minLength=30), 'paths': paths})), minItems=1, maxItems=6),
@@ -26,13 +28,21 @@ def schema(p=None):
         'risks': dict(arr(finding), maxItems=4),
         'next_steps': dict(arr(dict(text(300), minLength=30)), maxItems=4),
     })
+    if p and p.get('report_schema_version') == 2:
+        # Narrative capacity follows the governed response budget. Source
+        # references remain bounded by the actual delivered path choices.
+        paths['maxItems'] = len(delivered)
+        for section in ('components', 'flow', 'strengths', 'risks', 'next_steps'):
+            result['properties'][section].pop('maxItems')
+    return result
 
 
 def validate(p, proposal):
     if not requested(p): return
     report = proposal['report']
     inventory = set(p['workspace_map']['files'])
-    read = set(p['excerpts'])
+    from claim_pages import source_paths
+    read = set(source_paths(p))
     for section in ('components', 'flow', 'strengths', 'risks'):
         allowed = read
         for item in report[section]:
@@ -85,14 +95,18 @@ def markdown(proposal):
     if proposal.get('publication_note'):lines += ['', prose(proposal['publication_note'])]
     if proposal.get('claim_evidence'):
         from pathlib import Path
-        lines += ['', '## Source-linked claim evidence', '',
-                  'IDs locate the exact excerpts in the review details. They establish provenance, not semantic correctness.', '',
-                  '| Claim | Evidence ID | Source |', '| --- | --- | --- |']
+        # The full claim-to-ID mapping is retained in the structured review
+        # details. Repeating it as a large table obscures the explanation in chat.
+        # Group only identical locations here; never infer semantic support from
+        # the existence of an authenticated source address.
+        locations = {}
         for entry in proposal['claim_evidence']:
             line = entry['start_line']
             uri = (Path(entry['workspace']) / entry['path']).as_uri() + ('#L' + str(line) if line else '')
             label = prose(entry['path']) + (':' + str(line) if line else '')
-            lines.append('| ' + prose(entry['claim']) + ' | ' + entry['id'] + ' | [' + label + '](' + uri + ') |')
+            locations[(entry['path'], line)] = '[' + label + '](' + uri + ')'
+        lines += ['', '**Source evidence:** ' + ' · '.join(locations.values()), '',
+                  'Full claim and evidence-ID mappings are in conversation details. Source links establish provenance; reviewer judgments remain unverified.']
     return '\n'.join(lines).strip()
 
 
@@ -128,3 +142,22 @@ def diagram(graph, preferred, sources=None):
             'note': f'{len(selected)} of {len(pairs)} local import candidates shown. Derived from import/require syntax and existing files; runtime loading and execution order are not proved.',
             'nodes': [{'id': ids[p], 'label': p[:100], 'kind': 'process'} for p in paths],
             'edges': [{'source': ids[a], 'target': ids[b], 'label': 'local import'} for a, b in selected]}
+
+
+def flow_diagram(proposal):
+    """Render the published explanation's sequence without inventing call edges."""
+    steps = (proposal.get('report') or {}).get('flow', [])
+    if not steps:
+        return None
+    shown = steps[:16]
+    nodes = []
+    for index, item in enumerate(shown):
+        label = str(index + 1) + '. ' + ' '.join(item['description'].split())
+        if len(label) > 100:
+            label = label[:97].rsplit(' ', 1)[0] + '…'
+        nodes.append({'id': 'n' + str(index + 1), 'label': label,
+                      'kind': 'source' if index == 0 else 'output' if index == len(shown)-1 else 'process'})
+    return {'title': 'Request flow from the review', 'direction': 'TB',
+            'note': (f'First {len(shown)} of {len(steps)} report steps shown. ' if len(shown) < len(steps) else '') + 'An illustration of the report’s ordered explanation. Arrows mean the next described step, not independently measured calls. Full descriptions and source links are in chat.',
+            'nodes': nodes, 'edges': [{'source': nodes[i]['id'], 'target': nodes[i+1]['id'],
+                                      'label': 'next described step'} for i in range(len(nodes)-1)]}

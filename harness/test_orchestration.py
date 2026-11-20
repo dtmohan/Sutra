@@ -42,6 +42,13 @@ class OrchestrationTests(unittest.TestCase):
             if out['state']==phase:return out
         self.fail('Flow never reached '+phase+': '+str(out))
     def children(self):return self.until('CHILDREN')
+    def sources_for_slices(self):
+        # Continuation tests need more source than one complete delivered page.
+        for index in range(4):
+            (self.ws / f'part{index}.py').write_text(
+                f'def part{index}():\n    return {index}\n' +
+                ''.join(f'    # source segment {line:03}: unique continuation evidence for part {index}.\n'
+                        for line in range(100)))
 
     def test_conversation_parent_stays_in_its_chat_across_reload_and_model_switch(self):
         chat_a, chat_b = 'a' * 64, 'b' * 64
@@ -179,6 +186,10 @@ class OrchestrationTests(unittest.TestCase):
         for stage,p in self.models:
             if stage not in ('subagent','synthesis'):continue
             packet=p.payloads[0]
+            if packet.get('review_protocol') == 2:
+                self.assertTrue(packet['source_evidence'])
+                self.assertEqual(packet['contract'], contract)
+                continue
             self.assertTrue(packet['excerpts']);self.assertTrue(packet.get('snapshot_receipts'))
             self.assertEqual(packet['contract'],contract)
             self.assertFalse(packet['contract']['constraints']['network_allowed'])
@@ -272,6 +283,7 @@ class OrchestrationTests(unittest.TestCase):
     def test_child_timeout_resumes_same_slice_with_new_model_and_retained_spend(self):
         from invocation_gateway import consume_dispatch
 
+        self.sources_for_slices()
         out = self.children()
         child = out['children'][0]['id']
         node = m.node(self.s, child)
@@ -371,10 +383,11 @@ class OrchestrationTests(unittest.TestCase):
         from budget_accounting import reserved
         from invocation_gateway import consume_dispatch
 
+        self.sources_for_slices()
         fork = m.fork
 
         def tight_child_allocation(s, nid, proposals, signals, context):
-            proposals[0]['limits']['tokens'] = 27500
+            proposals[0]['limits']['tokens'] = 35000
             return fork(s, nid, proposals, signals, context)
 
         with patch.object(m, 'fork', tight_child_allocation):
@@ -447,6 +460,7 @@ class OrchestrationTests(unittest.TestCase):
         self.assertTrue(self.s.audit_valid())
 
     def test_accepted_child_slice_recovers_before_checkpoint_commit_without_repeating_call(self):
+        self.sources_for_slices()
         out = self.children()
         child = out['children'][0]['id']
         sid = m.node(self.s, child)['session']
@@ -524,6 +538,7 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(event['data']['invocation_id'], recovered['child']['result']['invocation_id'])
 
     def test_successive_child_checkpoints_advance_source_and_reach_parent_synthesis(self):
+        self.sources_for_slices()
         out = self.children()
         child = out['children'][0]['id']
         original_call = Child.call
@@ -542,7 +557,11 @@ class OrchestrationTests(unittest.TestCase):
         first_result = first['child']['result']['accepted_output']
         second_result = second['child']['result']['accepted_output']
         self.assertNotEqual(first_result['citations'], second_result['citations'])
-        self.assertTrue(second_result['citations'][0]['quote'].strip().startswith('return '))
+        first_packet, second_packet = [worker.payloads[0] for stage, worker in self.models
+                                       if stage == 'subagent'][:2]
+        path = second_result['citations'][0]['path']
+        self.assertGreaterEqual(second_packet['excerpt_spans'][path]['start_line'],
+                                first_packet['excerpt_spans'][path]['next_line'])
         self.assertEqual(m.slice_cursor(self.s, child)['ordinal'], 3)
         final = self.until('DONE', second)
         self.assertTrue(final['data']['result']['admission']['admitted'])
@@ -1034,7 +1053,11 @@ class OrchestrationTests(unittest.TestCase):
         with patch.object(Child,'call',corrupt):out=self.step(out)
         self.assertEqual(m.state(self.s,cid),'QUARANTINED')
         self.assertEqual(m.spent(self.s,cid)['calls'],3)
-        with self.assertRaisesRegex(InvalidUpdate,'quarantined'):self.step(out)
+        self.assertEqual(out['state'], 'PAUSED')
+        self.assertEqual(out['stop']['status'], 'child_review_rejected')
+        self.assertTrue(out['stop']['receipt'])
+        with self.assertRaisesRegex(InvalidUpdate, 'not ready to join'):
+            m.join(self.s, m.node(self.s, cid)['parent_id'])
 
     def test_corrupt_transition_chain_is_detected_before_resume(self):
         out=self.children();fid=out['flow_id']

@@ -5,6 +5,7 @@ they do not independently re-hash multi-gigabyte weights or attest the server.
 Unknown metadata never proves separation. No inference or downloads occur here.
 """
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,22 @@ import re
 from context_manager import InvalidUpdate, canonical, sha
 
 MAX_MANIFEST_BYTES = 4 * 1024 * 1024
+
+
+def unavailable_observation(name, exc, *, stage='identity'):
+    # Provider metadata failures must not echo a remote body or arbitrary path.
+    return {'model': name, 'status': 'unavailable', 'stage': stage,
+            'error_kind': type(exc).__name__}
+
+
+class ReviewerUnavailable(InvalidUpdate):
+    """No eligible reviewer identity can currently be observed; no inference."""
+    def __init__(self, requested_model, availability):
+        self.requested_model = requested_model
+        self.availability = json.loads(canonical(availability))
+        super().__init__('The requested reviewer identity is unavailable. Resume with an available reviewer.'
+            if requested_model != 'auto' else
+            'No eligible reviewer identity is currently available. Restore a local reviewer, then Resume the saved review.')
 
 
 def family(architecture):
@@ -110,6 +127,7 @@ def enforce(separation, strict):
 
 def choose(mapper, requested='auto', models=None):
     if not isinstance(requested, str) or not requested: raise InvalidUpdate('reviewer_model must be a model name or auto')
+    observations = []
     if models is None:
         from vscode_bridge import ollama
         from model_catalog import combined
@@ -117,12 +135,29 @@ def choose(mapper, requested='auto', models=None):
         from engine_profiles import assigned_models as engine_assignments, is_engine
         approved = assigned_models() if os.environ.get('SUTRA_ENGINE_ONLY') != '1' else set()
         approved_engines = engine_assignments()
-        models = [m for m in combined(ollama)['models'] if m.get('eligible') and
+        catalog = combined(ollama)
+        observations.extend({'model': error.get('model'), 'provider': error.get('provider'),
+                             'status': 'unavailable', 'stage': 'catalog', 'error_kind': 'MetadataUnavailable'}
+                            for error in catalog.get('errors', []))
+        models = [dict(m) for m in catalog['models'] if m.get('eligible') and
                   (not is_strata(m['name']) or m['name'] in approved or m['name'] == 'strata:high' and not approved) and
                   (not is_engine(m['name']) or m['name'] in approved_engines)]
-        for row in models: row['identity'] = observe(row['name'], ollama)
+        observable = []
+        for row in models:
+            try:
+                row['identity'] = observe(row['name'], ollama)
+            except (InvalidUpdate, OSError, ValueError, http.client.HTTPException) as exc:
+                observations.append(unavailable_observation(row['name'], exc))
+                continue
+            observations.append({'model': row['name'], 'status': 'identity_observed',
+                                 'weight_identity_known': bool(row['identity'].get('weights_sha256'))})
+            observable.append(row)
+        models = observable
     by = {m['name']: m for m in models if m.get('eligible', True)}
-    if requested != 'auto' and requested not in by: raise InvalidUpdate('Reviewer must be an eligible installed local chat model')
+    if requested != 'auto' and requested not in by:
+        if any(row.get('model') == requested and row['status'] == 'unavailable' for row in observations):
+            raise ReviewerUnavailable(requested, observations)
+        raise InvalidUpdate('Reviewer must be an eligible installed local chat model')
     def separation(m): return compare(mapper, m.get('identity') or unknown(m['name']))
     if requested != 'auto' and separation(by[requested])['weight_relation'] == 'different':
         selected, reason = by[requested], 'requested'
@@ -130,7 +165,7 @@ def choose(mapper, requested='auto', models=None):
         different = [m for m in by.values() if separation(m)['weight_relation'] == 'different']
         unknowns = [m for m in by.values() if m['name'] != mapper['name'] and separation(m)['weight_relation'] == 'unknown']
         pool = different or unknowns or list(by.values())
-        if not pool: raise InvalidUpdate('No eligible local reviewer is installed')
+        if not pool: raise ReviewerUnavailable(requested, observations)
         # Prefer known separation before lineage and then cost. Lineage remains
         # a heuristic; a small different-family model is not a verified judge.
         selected = min(pool, key=lambda m: (separation(m)['same_family'] is not False,
@@ -138,6 +173,7 @@ def choose(mapper, requested='auto', models=None):
         reason = 'automatic' if requested == 'auto' else 'replaced_unseparated_choice'
     result = separation(selected)
     result.update(selection=reason, requested_model=requested)
+    if observations: result['identity_observations'] = observations
     return selected['name'], result
 
 

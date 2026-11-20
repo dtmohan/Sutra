@@ -6,16 +6,17 @@ const views=new Map(),statusItems=[],commands=new Map(),tools=new Map(),particip
 const tierModels={low:'fixture-small',mid:'fixture-mid',high:'fixture-large'};
 const documentPrompt='Review this resume at "/tmp/Candidate Resume (1).docx"';
 const documentNotice='Paste the document text for review.';
-const runtimeUpdates=[],bridgeAllocations=[],bridgeThinking=[];
+const runtimeUpdates=[],bridgeAllocations=[],bridgeThinking=[],bridgeChildThinking=[];
 const nativeAssignments=[],engineAssignments=[];let userModels,userEngineApprovals;
-const requestThinking=new WeakMap();
+const requestThinking=new WeakMap(),requestChildThinking=new WeakMap();
 const runtimeSettings=new Map();
 const inputValues=[],openedDocuments=[];
 const repoAllocation={source_bytes:1024000000};
 let userAllocation,provider,panel,holdDashboard=false,pendingDashboard,bridgeCount=0,dashboardSpawns=0,requestSpawns=0;
-let nativeRequest,architectureDispatch,fixtureCatalog,allowModelSave=false,warningChoice;
+let nativeRequest,nativeStatus,architectureDispatch,fixtureCatalog,allowModelSave=false,warningChoice;
 const nativeProvider={install(_vscode,_context,deps){
  nativeRequest=deps.request;
+ nativeStatus=deps.onStatus;
  return {status:()=>({working:false}),publish(){},dispose(){}};
 }};
 let state={contract:{contract_hash:'fixture-contract',contract:{constraints:{}}},calibration:{binding:{hash:'fixture-calibration'}},session:'fixture',model:'fixture-model',report:'architecture v1',api:{report:'API v1'}};
@@ -29,7 +30,7 @@ function spawn(exe,args,options){
   bridgeAllocations.push(environment.SUTRA_WORKSPACE_ALLOCATION);
   nativeAssignments.push({models:environment.SUTRA_STRATA_MODELS,only:environment.SUTRA_STRATA_ONLY});
   engineAssignments.push({models:environment.SUTRA_ENGINE_MODELS,only:environment.SUTRA_ENGINE_ONLY,python:environment.SUTRA_ENGINE_PYTHON,registry:environment.SUTRA_ENGINE_REGISTRY,approvals:environment.SUTRA_ENGINE_APPROVALS});
-  if(!streaming){bridgeThinking.push(environment.SUTRA_THINKING);requestThinking.set(req,environment.SUTRA_THINKING);}
+  if(!streaming){bridgeThinking.push(environment.SUTRA_THINKING);bridgeChildThinking.push(environment.SUTRA_CHILD_THINKING);requestThinking.set(req,environment.SUTRA_THINKING);requestChildThinking.set(req,environment.SUTRA_CHILD_THINKING);}
   const finish=()=>{if(req.op==='auto_new')state={...state,contract:{contract_hash:'fixture-contract',contract:{constraints:{auto_review:true}}},calibration:{binding:{hash:'fixture-calibration'}},session:'new-review',auto:{pending_files:0,mapped_files:2,source_files:2}};
    const data=req.op==='orchestrate'?{flow_id:'fixture-flow',state:'DONE',data:{state,route:{tier:'low',model:tierModels.low},result:{invocation_id:'fixture',admission:{admitted:true},accepted_output:{answer:'Fixture answer',remaining:[]}},coverage:{mapped_files:2,source_files:2},source_files:['a.py']}}:req.op==='models'?fixtureCatalog||{models:Object.values(tierModels).map(name=>({name,eligible:true})),suggested_tiers:tierModels}:req.op==='chat_answer'?{state,route:{tier:'low',model:tierModels.low,reason:'focused request'},result:{invocation_id:'fixture-invocation',admission:{admitted:true},accepted_output:{answer:'Fixture answer',remaining:[]}},coverage:{mapped_files:2,source_files:2},source_files:['a.py']}:req.op==='calibration_list'?{binding:{hash:'fixture',profiles:[]},profiles:[]}:req.op==='dashboard'?{hardware:{available:false,temperatures:{cpu:{available:true,maximum_celsius:42.12},gpu:{available:true,maximum_celsius:40.82}}},runs:[],invocations:{},actions:[]}:state;
    let response=req.op==='architecture'&&architectureDispatch?architectureDispatch(req):data;
@@ -223,26 +224,48 @@ const subscriptions=[];
  for(const name of ['importCalibration','selectCalibrations','revokeCalibration','evaluateCalibration'])assert(pkg.contributes.commands.some(c=>c.command==='karma.'+name));
  vscode.lm.registerLanguageModelChatProvider=()=>disposable();
  moduleFixture.exports.activate({subscriptions,extensionPath:root,globalStorageUri:uri(tmp),extension:{packageJSON:{version:'0.18.0'}}});
+ nativeStatus({enabled:false,label:'Sutra: off',explanation:'Sutra is off.',reason:'Saved setting.'});
+ const sutraStatus=statusItems.find(i=>i.command==='karma.nativeControls');
+ assert(sutraStatus,'The primary status item must open quick controls');
+ assert.equal(sutraStatus.name,'Sutra controls');assert(sutraStatus.tooltip.includes('Click for Sutra controls'));
+ assert.equal(sutraStatus.accessibilityInformation.role,'button');assert(sutraStatus.accessibilityInformation.label.includes('Sutra: off'));
+ nativeStatus({enabled:true,label:'Sutra: request received',explanation:'Request reached Sutra.',reason:'',routing:{active:true}});
+ assert(sutraStatus.text.startsWith('$(sync~spin)'));assert.equal(sutraStatus.command,'karma.nativeControls');
  const requestsBeforeOverride=requests.length,updatesBeforeOverride=runtimeUpdates.length;
  for(const event of ['start','step']){
   await nativeRequest({op:'orchestrate',event,tier:'low',think_for_turn:true});
   assert.equal(bridgeThinking.at(-1),'on');
+  assert.equal(bridgeChildThinking.at(-1),'off','One-shot orchestration thinking must preserve the configured child preference');
   assert(!Object.hasOwn(requests.at(-1),'think_for_turn'),'Private transport flag reached the bridge payload');
  }
  await nativeRequest({op:'orchestrate',event:'start'});
  assert.equal(bridgeThinking.at(-1),'adaptive');
+ assert.equal(bridgeChildThinking.at(-1),null,'The next ordinary request must clear the child override explicitly');
  for(const msg of [{op:'orchestrate',event:'start',think_for_turn:'on'},{op:'orchestrate',event:'pending',think_for_turn:true},{op:'state',think_for_turn:true}])
   await assert.rejects(nativeRequest(msg),/Invalid Sutra reasoning override/);
  await panel.webview.receive({op:'orchestrate',event:'start',think_for_turn:true});
  assert.equal(requests.length,requestsBeforeOverride+3,'Untrusted reasoning overrides dispatched');
  assert.equal(runtimeUpdates.length,updatesBeforeOverride,'One-request reasoning changed persisted settings');
  assert(panelMessages.some(m=>m.type==='error'&&m.message.includes('Invalid Sutra reasoning override')));
+ for(const [tier,wanted] of [['mid','model-default'],['high','adaptive']]){
+  await nativeRequest({op:'orchestrate',event:'step',tier,think_for_turn:true});
+  assert.equal(bridgeThinking.at(-1),'on');
+  assert.equal(bridgeChildThinking.at(-1),wanted,'One-shot thinking must preserve each configured base preference');
+ }
+ const savedBaseThinking=runtimeSettings.get('thinking');runtimeSettings.set('thinking','on');
+ await nativeRequest({op:'orchestrate',event:'step',tier:'auto',think_for_turn:true});
+ assert.equal(bridgeThinking.at(-1),'on');assert.equal(bridgeChildThinking.at(-1),'on');
+ assert.equal(runtimeSettings.get('thinking'),'on','One-shot thinking must not change an existing On setting');
+ await nativeRequest({op:'orchestrate',event:'step',tier:'auto'});
+ assert.equal(bridgeThinking.at(-1),'on');assert.equal(bridgeChildThinking.at(-1),null);
+ runtimeSettings.set('thinking',savedBaseThinking);
  for(const [event,tier,wanted] of [
   ['start','low','off'],['step','mid','model-default'],['resume','low','off'],
   ['step','high','adaptive'],['step','auto','adaptive']
  ]){
   await nativeRequest({op:'orchestrate',event,tier});
   assert.equal(requestThinking.get(requests.at(-1)),wanted,`Wrong reasoning for ${event} at ${tier}`);
+  assert.equal(requestChildThinking.get(requests.at(-1)),null,'Ordinary requests must not inherit the prior child override');
  }
  assert.deepEqual(runtimeSettings.get('tierReasoning'),fixedReasoning);
  assert.equal(runtimeSettings.get('thinking'),'adaptive');
@@ -277,5 +300,5 @@ const subscriptions=[];
  await panel.webview.receive({op:'save_model_tiers',models:engineSelection});
  assert.equal(prompts.length,promptsAfterApproval+1,'Changed engine identity requires approval again');
  assert.equal(userEngineApprovals[ref],'a'.repeat(64),'Dismissal preserves the prior approval instead of widening it');
- console.log(JSON.stringify({passed:true,checks:['runtime settings validate before saving and never dispatch or change the task','greeting with legacy task requires no model or state mutation','legacy task yields actionable guidance without duplicate error or model discovery','explicit /new creates a separate review and dispatches','new-review command arguments cannot bypass user goal entry','first-open model picker waits for webview readiness','status renders measured CPU/GPU Celsius','real errors render once','restricted public API','command arguments cannot bypass user input','calibration commands require user selection','no agent calibration mutation tools','agent tool boundary','native @sutra uses private bridge and configured models, never VS Code inference or transcript replay','cancelled native chat never dispatches','one-request reasoning stays in the trusted child environment and preserves Adaptive','fixed tiers keep distinct saved reasoning without affecting Auto','model discovery preserves configured choices; command arguments cannot replace them','live report refresh and invalidation','persistent single-flight dashboard','Darwin reclaimable-memory parser','report and calibration commands declared']},null,2));
+ console.log(JSON.stringify({passed:true,checks:['runtime settings validate before saving and never dispatch or change the task','greeting with legacy task requires no model or state mutation','legacy task yields actionable guidance without duplicate error or model discovery','explicit /new creates a separate review and dispatches','new-review command arguments cannot bypass user goal entry','first-open model picker waits for webview readiness','status renders measured CPU/GPU Celsius','real errors render once','restricted public API','command arguments cannot bypass user input','calibration commands require user selection','no agent calibration mutation tools','agent tool boundary','native @sutra uses private bridge and configured models, never VS Code inference or transcript replay','cancelled native chat never dispatches','one-request reasoning boosts orchestration while delegated children keep configured preferences','fixed tiers keep distinct saved reasoning without affecting Auto','model discovery preserves configured choices; command arguments cannot replace them','live report refresh and invalidation','persistent single-flight dashboard','Darwin reclaimable-memory parser','report and calibration commands declared']},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>{for(const d of subscriptions)d.dispose?.();fs.rmSync(tmp,{recursive:true,force:true});});

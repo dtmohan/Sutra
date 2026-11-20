@@ -41,6 +41,23 @@ class BoundaryTests(unittest.TestCase):
         self.assertNotIn('"additionalProperties"', wire[0]['content'])
         self.assertIn('Omit unused optional fields entirely', wire[0]['content'])
 
+    def test_format_guidance_does_not_supply_project_facts_or_diagram_devices(self):
+        for request in ('Review the project architecture and tools logic with a few block diagrams.',
+                        'Draw a conceptual flow Antenna -> Decoder -> Speaker.'):
+            with self.subTest(request=request):
+                provider = Fake()
+                self.ask(request, provider=provider)
+                payload = provider.payloads[0]
+                wire = chat.ConversationModel(self.storage/'calls').messages(chat.SYSTEM, payload)
+                self.assertEqual(wire[-1]['content'], request)
+                instructions = wire[0]['content']
+                self.assertIn('original user request remains authoritative', instructions)
+                self.assertIn('format examples are not project facts or requested work', instructions)
+                self.assertIn('Each node has id, label, kind', instructions)
+                self.assertIn('each edge has source, target, label', instructions)
+                for unrelated in ('Sensor', 'Display', 'app.py', 'tools.py', 'config.py'):
+                    self.assertNotIn(unrelated, instructions)
+
     def test_decoder_copy_is_version_scoped_and_host_limits_remain_strict(self):
         provider = Fake(); self.ask(provider=provider); p = provider.payloads[0]
         original = chat.model_schema(p, chat.schema(p)); before = copy.deepcopy(original)

@@ -2,8 +2,9 @@
 const {StringDecoder}=require('node:string_decoder');
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
 const retention=require('./harness/memory-policy.json').diagnostics;
+const generationProgress=require('./media/generation_progress');
 const MAX_BYTES=retention.reasoning_bytes,MAX_AGE=retention.max_age_seconds*1000;
-const KINDS=new Set(['start','control','thinking','finish']);
+const KINDS=new Set(['start','control','thinking','progress','finish']);
 function callLabel(role){
   return {
     review_reader:'Architecture evidence selection',report_reviewer:'Architecture claim review',
@@ -22,10 +23,25 @@ function chatActivity(vscode,progress,activityLink){
   return e=>{
     if(e.kind==='start'){
       if(calls.has(e.id))return;
-      calls.set(e.id,{...e,opened:false,done:false});
+      calls.set(e.id,{...e,opened:false,done:false,progressReported:false,progressSeq:e.seq===1?1:null});
       return;
     }
     const c=calls.get(e.id);if(!c||c.done)return;
+    const progressSequence=c.progressSeq!==null&&Number.isSafeInteger(e.seq)&&e.seq>c.progressSeq;
+    if(e.kind==='progress'){
+      if(c.progressSeq===null||!Number.isSafeInteger(e.seq)||e.seq<=c.progressSeq)return;
+      const value=generationProgress.normalize(e.generation_progress);
+      if(!value||!value.repetition_indicator||!value.alert_emitted)return;
+      c.progressSeq=e.seq;
+      if(!c.progressReported){
+        c.progressReported=true;
+        if(typeof vscode.LanguageModelTextPart==='function')try{
+          progress.report(new vscode.LanguageModelTextPart(generationProgress.notice+'\n\n'));
+        }catch{/* A diagnostic display failure cannot interrupt generation. */}
+      }
+      return;
+    }
+    if(Number.isSafeInteger(e.seq)&&c.progressSeq!==null&&e.seq>c.progressSeq)c.progressSeq=e.seq;
     if(e.kind==='control'){c.requested=e.requested;return;}
     const canThink=typeof vscode.LanguageModelThinkingPart==='function';
     if(e.kind==='thinking'&&typeof e.text==='string'&&e.text.trim())c.received=true;
@@ -40,6 +56,13 @@ function chatActivity(vscode,progress,activityLink){
       progress.report(new vscode.LanguageModelThinkingPart(e.text,e.id));
     }
     if(e.kind!=='finish')return;
+    const finalProgress=progressSequence?generationProgress.normalize(e.generation_progress):null;
+    if(finalProgress?.repetition_indicator&&!c.progressReported){
+      c.progressReported=true;
+      if(typeof vscode.LanguageModelTextPart==='function')try{
+        progress.report(new vscode.LanguageModelTextPart(generationProgress.notice+'\n\n'));
+      }catch{/* Keep this observation separate from model output and actions. */}
+    }
     c.done=true;
     const status=e.status==='accepted'?'checks passed; task completion and answer correctness are not verified':e.status;
     const shortened=e.display_truncated?' Display shortened; full generation still charged.':'';
@@ -53,18 +76,28 @@ function chatActivity(vscode,progress,activityLink){
 // Only the private bridge transport uses this decoder. Events never become tools,
 // conversation memory, grants or ledger receipts.
 function decoder(onEvent,onStderr){
-  const utf8=new StringDecoder('utf8');let pending='',discard=false;
-  const active=new Map();
+  const utf8=new StringDecoder('utf8');let pending='',discard=false,closed=false;
+  const active=new Map(),completed=new Set();
+  function remember(id){
+    completed.delete(id);completed.add(id);
+    while(completed.size>128)completed.delete(completed.values().next().value);
+  }
   function line(raw){
+    if(closed)return;
     if(!raw.startsWith('SUTRA_EVENT ')){onStderr(raw+'\n');return;}
     let e;try{e=JSON.parse(raw.slice(12));}catch{return;}
     if(!e||!KINDS.has(e.kind)||typeof e.id!=='string'||e.id.length>128||!Number.isSafeInteger(e.seq))return;
     if(e.kind==='start'){
-      if(active.has(e.id)||active.size>=64||e.seq!==1||typeof e.model!=='string'||typeof e.role!=='string')return;
+      if(active.has(e.id)||completed.has(e.id)||active.size>=64||e.seq!==1||typeof e.model!=='string'||typeof e.role!=='string')return;
       active.set(e.id,{seq:0,chars:0,done:false,identity:{id:e.id,model:e.model.slice(0,160),role:e.role.slice(0,80),node_id:typeof e.node_id==='string'?e.node_id.slice(0,128):null}});
     }
-    const state=active.get(e.id);if(!state||state.done||e.seq<=state.seq)return;state.seq=e.seq;
+    const state=active.get(e.id);if(!state||state.done||e.seq<=state.seq)return;
     const event={...state.identity,kind:e.kind,seq:e.seq};
+    if(e.kind==='progress'){
+      const value=generationProgress.normalize(e.generation_progress);
+      if(state.progressReported||!value||!value.repetition_indicator||!value.alert_emitted)return;
+      state.progressReported=true;event.generation_progress=value;
+    }
     if(e.kind==='thinking'){
       if(typeof e.text!=='string')return;
       event.text=e.text.slice(0,Math.min(2048,Math.max(0,retention.reasoning_chars-state.chars)));state.chars+=event.text.length;
@@ -75,7 +108,10 @@ function decoder(onEvent,onStderr){
       state.done=true;event.status=e.status==='accepted'?'accepted':'withheld';event.display_truncated=!!e.display_truncated;
       event.thinking_chars=Number.isSafeInteger(e.thinking_chars)&&e.thinking_chars>=0?e.thinking_chars:null;
       event.usage={};for(const k of ['input_tokens','output_tokens'])event.usage[k]=Number.isSafeInteger(e.usage?.[k])&&e.usage[k]>=0?e.usage[k]:null;
+      const value=generationProgress.normalize(e.generation_progress);if(value)event.generation_progress=value;
+      active.delete(e.id);remember(e.id);
     }
+    state.seq=e.seq;
     try{onEvent(event);}catch{/* Diagnostics cannot abort governed work. */}
   }
   function feed(text){
@@ -85,24 +121,42 @@ function decoder(onEvent,onStderr){
       if(chunk.endsWith('\n')){if(!discard)line(pending.trimEnd());pending='';discard=false;}
     }
   }
-  return {write:bytes=>feed(utf8.write(bytes)),end(){feed(utf8.end());if(pending&&!discard)line(pending);pending='';},
-    close(){for(const s of active.values())if(!s.done){s.done=true;try{onEvent({...s.identity,kind:'finish',seq:s.seq+1,status:'interrupted',usage:{input_tokens:null,output_tokens:null}});}catch{}}}};
+  return {write:bytes=>{if(!closed)feed(utf8.write(bytes));},end(){if(closed)return;feed(utf8.end());if(pending&&!discard)line(pending);pending='';},
+    close(){
+      if(closed)return;closed=true;pending='';discard=false;
+      const unfinished=[...active.values()];active.clear();
+      for(const s of unfinished)if(!s.done){s.done=true;remember(s.identity.id);try{onEvent({...s.identity,kind:'finish',seq:s.seq+1,status:'interrupted',usage:{input_tokens:null,output_tokens:null}});}catch{}}
+    }};
 }
 
 class ActivityLog{
-  constructor(){this.calls=[];}
+  constructor(){this.calls=[];this.progressSeq=new Map();}
   accept(e){
     if(e.kind==='start'){
-      this.calls.push({...e,text:'',status:'generating',startedAt:Date.now()});
+      const call={...e,text:'',status:'generating',startedAt:Date.now()};delete call.generation_progress;
+      this.calls.push(call);
       this.calls=this.calls.slice(-retention.reasoning_calls);
+      this.progressSeq.set(e.id,e.seq===1?1:null);
+      const kept=new Set(this.calls.map(c=>c.id));for(const id of this.progressSeq.keys())if(!kept.has(id))this.progressSeq.delete(id);
     }else{
       const c=this.calls.find(x=>x.id===e.id);if(!c)return;
+      const progressSequence=c.status==='generating'&&this.progressSeq.get(e.id)!==null&&this.progressSeq.has(e.id)
+        &&Number.isSafeInteger(e.seq)&&e.seq>this.progressSeq.get(e.id);
+      if(e.kind==='progress'){
+        const seq=this.progressSeq.get(e.id),value=generationProgress.normalize(e.generation_progress);
+        if(c.status!=='generating'||seq===null||seq===undefined||!Number.isSafeInteger(e.seq)||e.seq<=seq||!value||!value.repetition_indicator||!value.alert_emitted)return;
+        c.generation_progress=value;this.progressSeq.set(e.id,e.seq);return;
+      }
+      if(Number.isSafeInteger(e.seq)&&this.progressSeq.get(e.id)!==null&&e.seq>(this.progressSeq.get(e.id)??0))this.progressSeq.set(e.id,e.seq);
       if(e.kind==='thinking')c.text=(c.text+e.text).slice(0,retention.reasoning_chars);
       if(e.kind==='control')c.requested=e.requested;
-      if(e.kind==='finish')Object.assign(c,{status:e.status,usage:e.usage,thinking_chars:e.thinking_chars,display_truncated:e.display_truncated,finishedAt:Date.now()});
+      if(e.kind==='finish'){
+        Object.assign(c,{status:e.status,usage:e.usage,thinking_chars:e.thinking_chars,display_truncated:e.display_truncated,finishedAt:Date.now()});
+        const value=progressSequence?generationProgress.normalize(e.generation_progress):null;if(value)c.generation_progress=value;
+      }
     }
   }
-  clear(){this.calls=[];}
+  clear(){this.calls=[];this.progressSeq.clear();}
 }
 // Diagnostic text only: never imported into task memory, contracts or receipts.
 // Keep the archive small even when a model emits multi-byte Unicode or escapes.
@@ -161,6 +215,7 @@ class ActivityArchive extends ActivityLog{
       `Reasoning control: ${controlLabel(c.requested)}`,
       `Reasoning characters reported: ${c.thinking_chars??'not recorded'}`,
       `Tokens: ${c.usage?.input_tokens??'?'} input / ${c.usage?.output_tokens??'?'} output (includes reasoning)`,
+      ...(c.generation_progress?[generationProgress.describe(c.generation_progress)]:[]),
       c.display_truncated?'Display shortened at 16,000 characters; generation remains charged.':'',
       '', '--- Model commentary (plain text) ---', '',c.text||(c.status==='generating'?'No separate reasoning text received yet.':
         c.thinking_chars>0?'Reasoning was reported but its text is unavailable in this archive.':'No separate reasoning text received.'), ''].join('\n');
@@ -169,13 +224,15 @@ class ActivityArchive extends ActivityLog{
 function cleanCall(c){
   if(!c||!/^[a-f0-9]{32}$/.test(c.id)||typeof c.model!=='string'||typeof c.role!=='string'||!Number.isFinite(c.startedAt)||c.startedAt>Date.now()+60000)return null;
   const number=n=>Number.isSafeInteger(n)&&n>=0?n:null;
-  return {id:c.id,model:c.model.slice(0,160),role:c.role.slice(0,80),node_id:typeof c.node_id==='string'?c.node_id.slice(0,128):null,
+  const result={id:c.id,model:c.model.slice(0,160),role:c.role.slice(0,80),node_id:typeof c.node_id==='string'?c.node_id.slice(0,128):null,
     text:typeof c.text==='string'?c.text.slice(0,retention.reasoning_chars):'',status:['generating','accepted','withheld','interrupted'].includes(c.status)?c.status:'interrupted',
     startedAt:c.startedAt,updatedAt:Number.isFinite(c.updatedAt)?c.updatedAt:c.startedAt,finishedAt:Number.isFinite(c.finishedAt)?c.finishedAt:undefined,
     requested:typeof c.requested==='string'?c.requested.slice(0,80):typeof c.requested==='boolean'?c.requested:c.requested===null?null:undefined,
     thinking_chars:number(c.thinking_chars),
     usage:c.usage?{input_tokens:number(c.usage.input_tokens),output_tokens:number(c.usage.output_tokens)}:undefined,
     display_truncated:!!c.display_truncated,interruptedOnReload:!!c.interruptedOnReload};
+  const value=generationProgress.normalize(c.generation_progress);if(value)result.generation_progress=value;
+  return result;
 }
 function activityUri(directory,id){
   const key=path.basename(directory);

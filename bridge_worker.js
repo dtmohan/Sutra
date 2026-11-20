@@ -1,13 +1,35 @@
 'use strict';
 
+// A request owns this lease; an idle persistent worker never does. -i leaves
+// display sleep and explicit system sleep available. -w releases the assertion
+// if the extension host exits unexpectedly before its normal cleanup can run.
+function preventIdleSleep({spawn, platform = process.platform, pid = process.pid, report = () => {}}) {
+  if (platform !== 'darwin') return () => {};
+  let child, released = false;
+  const note = error => {try {report('Idle-sleep protection unavailable: ' + error.message);} catch {}};
+  try {
+    child = spawn('/usr/bin/caffeinate', ['-i', '-w', String(pid)],
+      {stdio:'ignore', env:{PATH:'/usr/bin:/bin'}});
+    child.once('error', error => {released = true;note(error);});
+    child.once('close', () => {released = true;});
+    child.unref?.();
+  } catch (error) {note(error);return () => {};}
+  return () => {
+    if (released) return;
+    released = true;
+    try {child.kill('SIGTERM');} catch (error) {note(error);}
+  };
+}
+
 class BridgeWorker {
-  constructor({spawn, command, args, options, activity, onSpawn = () => {}, onClose = () => {}}) {
+  constructor({spawn, command, args, options, activity, keepAwake = () => () => {}, onSpawn = () => {}, onClose = () => {}}) {
     this.pending = null;
     this.buffer = '';
     this.stderrBuffer = '';
     this.closed = false;
     this.exitTimer = null;
     this.activity = activity;
+    this.keepAwake = keepAwake;
     this.onClose = onClose;
     this.child = spawn(command, args, options);
     onSpawn(this.child);
@@ -82,6 +104,7 @@ class BridgeWorker {
     clearTimeout(pending.timer);
     clearTimeout(pending.killTimer);
     pending.cancellation?.dispose();
+    pending.releaseAwake?.();
     pending.events.end();
     pending.events.close();
     if (error) pending.reject(new Error(error.message + (pending.stderr ? '\n' + pending.stderr : '')));
@@ -111,12 +134,14 @@ class BridgeWorker {
     if (Buffer.byteLength(raw) + 1 > 200000) return Promise.reject(new Error('Request exceeds its transport allocation.'));
     return new Promise((resolve, reject) => {
       const pending = {resolve, reject, events:null, stderr:'', stderrEnded:false, response:null, timer:null, killTimer:null,
-        cancellation:null, stopReason:null};
+        cancellation:null, stopReason:null, releaseAwake:null};
       pending.events = this.activity(onActivity, text => {pending.stderr = (pending.stderr + text).slice(-10000);});
       this.pending = pending;
+      pending.releaseAwake = this.keepAwake();
       const cancel = reason => {
         if (this.pending !== pending || pending.stopReason) return;
         pending.stopReason = reason;
+        pending.releaseAwake?.();
         // The signal interrupts this request's lifecycle.deadline context. The
         // worker exits, dropping RAM, and later handles reconcile durable work.
         this.closed = true;
@@ -144,4 +169,4 @@ class BridgeWorker {
   }
 }
 
-module.exports = {BridgeWorker};
+module.exports = {BridgeWorker, preventIdleSleep};

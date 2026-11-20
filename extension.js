@@ -38,7 +38,7 @@ function activate(context) {
   const usageView=require('./usage_view');
   const capabilityUI=require('./capabilities');
   const strataStartup=require('./strata_startup');
-  const {BridgeWorker}=require('./bridge_worker');
+  const {BridgeWorker,preventIdleSleep}=require('./bridge_worker');
   const output = vscode.window.createOutputChannel('Sutra');
   function providerStartupAdmission(coldMemoryBytes){
     const config=vscode.workspace.getConfiguration('karma');
@@ -234,7 +234,8 @@ function activate(context) {
       const config=vscode.workspace.getConfiguration('karma');
       const python=config.get('pythonPath','')||(process.platform==='win32'?'python':'python3');
       const fixedTier=internal&&TIERED_REQUESTS.includes(payload.op)?payload.tier:undefined;
-      const thinking=thinkForTurn?'on':reasoningPreference(config,fixedTier);
+      const baseThinking=reasoningPreference(config,fixedTier);
+      const thinking=thinkForTurn?'on':baseThinking;
       const key=JSON.stringify([cwd,stateDir,python]);
       if(!requestWorker||requestWorker.closed||requestWorkerKey!==key){
         requestWorker?.dispose();requestWorkerKey=key;ramCompartments=undefined;
@@ -243,6 +244,7 @@ function activate(context) {
             '--workspace',cwd,'--storage',stateDir,'--request-stream'],
           options:{cwd,stdio:['pipe','pipe','pipe'],env:{...process.env}},
           activity:require('./model_activity').decoder,
+          keepAwake:()=>preventIdleSleep({spawn,report:message=>output.appendLine(message)}),
           onSpawn:child=>processes.add(child),onClose:child=>{processes.delete(child);if(requestWorker?.child===child)ramCompartments=undefined;}});
       }
       const ramSetting=config.inspect?.('ramMemoryMiB')?.globalValue;
@@ -251,7 +253,7 @@ function activate(context) {
       const environment={...runtimeEnvironment(cwd),
         KARMA_STORAGE_LIMIT_MIB:String(config.get('storageLimitMiB',512)),
         SUTRA_LOGIT_SENSOR:({'off':'','numbers':'1','tokens':'tokens'})[config.get('logitSensor','off')]||'',
-        SUTRA_ACTIVITY:'1',SUTRA_THINKING:thinking,KARMA_NODE:process.execPath,
+        SUTRA_ACTIVITY:'1',SUTRA_THINKING:thinking,SUTRA_CHILD_THINKING:thinkForTurn?baseThinking:null,KARMA_NODE:process.execPath,
         KARMA_TYPESCRIPT:path.join(context.extensionPath,'vendor','typescript','typescript.js'),
         SUTRA_RAM_CACHE_MIB:String(ramMiB)};
       const result=await requestWorker.send(payload,environment,{token,onActivity:event=>{usage?.activity(event);onActivity?.(event);}});
@@ -963,7 +965,14 @@ function activate(context) {
       async presentConversation(data){if(data.result.accepted_output.diagram)await diagrams.open(data);},
       async showDiff(change,iid){const before=vscode.Uri.parse('karma-preview:/'+iid+'/before.py'),after=vscode.Uri.parse('karma-preview:/'+iid+'/after.py');previewDocuments.set(before.toString(),change.before);previewDocuments.set(after.toString(),change.after);await vscode.commands.executeCommand('vscode.diff',before,after,'Sutra proposed edit: '+change.target);},
       onRoute(value){output.appendLine('KARMA_NATIVE_ROUTE '+JSON.stringify(value));},
-      onStatus(value){status.text=(value.routing?.active?'$(sync~spin) ':'$(shield) ')+value.label;status.tooltip=value.explanation+' '+value.reason+(value.routing?' Last Sutra request: '+value.routing.id+' · '+value.routing.stage:'');status.command='karma.openMonitor';panel?.webview.postMessage({type:'native-status',data:value});usage?.setStatus(value);}
+      onStatus(value){
+        status.name='Sutra controls';
+        status.text=(value.routing?.active?'$(sync~spin) ':value.enabled?'$(shield) ':'$(circle-slash) ')+value.label;
+        status.tooltip='Click for Sutra controls: enable/disable, chat, models and reasoning.\n'+value.explanation+'\n'+value.reason;
+        status.accessibilityInformation={label:value.label+'. Open Sutra controls.',role:'button'};
+        status.command='karma.nativeControls';
+        panel?.webview.postMessage({type:'native-status',data:value});usage?.setStatus(value);
+      }
     });context.subscriptions.push(nativeController);
   }
   const strataConfiguration=vscode.workspace.onDidChangeConfiguration?.(event=>{

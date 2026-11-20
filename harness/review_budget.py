@@ -37,7 +37,8 @@ def usage(s,session):
    used['operations']+=1;used['source_bytes']+=sum(len(p.get('text','').encode()) for p in json.loads(payload).get('pages',[]))
   from budget_accounting import used as settled_tokens
   receipt=json.loads(receipt_raw) if receipt_raw else {}
-  used['calls']+=1;used['tokens']+=settled_tokens(inv,receipt);used['seconds']+=receipt.get('elapsed_seconds',150)
+  from invocation_timing import reserved_seconds
+  used['calls']+=1;used['tokens']+=settled_tokens(inv,receipt);used['seconds']+=receipt.get('elapsed_seconds',reserved_seconds(inv))
  from allocation_recovery import effective
  amended,version,_=effective(s,session,limits)
  return {'limits':amended,'used':used,'base_limits':limits,'allocation_version':version}

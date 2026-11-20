@@ -71,9 +71,21 @@ def current_pages(s,meta,workspace):
 def status(s,meta,workspace,verify=True):
  sid=meta['active'];c=s.snapshot(sid)['constraints']
  # Coverage validation must notice newly added files even when merely opening
- # a saved report. Actual source dispatch still requires the committed catalog.
- repo.catalog(s,sid);names=repo.inventory(Path(workspace),c['allowed_paths'],automatic=True)
- sources=[p for p in names if Path(p).suffix in CODE];a=meta.setdefault('auto',{'pages':[],'failures':{}})
+ # a saved report. A failed scan remains a diagnostic receipt; it cannot grant
+ # access through an earlier catalog or hide the original failure behind status.
+ a=meta.setdefault('auto',{'pages':[],'failures':{}})
+ try:repo.catalog_snapshot(s,sid)
+ except repo.CatalogRefreshFailed as exc:
+  return {'status':'needs_attention','catalog_files':0,'source_files':0,
+          'mapped_files':0,'pending_files':0,'next_files':[],'metadata_only_files':0,
+          'pages':0,'retained_pages':len(a['pages']),'stale_pages':[],
+          'notes':[],'explained_sites':0,'failures':a.get('failures',{}),
+          'budget':budget.decision(s,sid),'last_page':a.get('last_page'),
+          'structural_pass_complete':False,'semantic_review_complete':False,
+          'catalog_unavailable':True,'catalog_receipt':exc.receipt,'error':str(exc),
+          'scope_notice':'Source coverage is unavailable until a fresh catalog succeeds. Saved pages and spending are retained.'}
+ excluded={};names=repo.inventory(Path(workspace),c['allowed_paths'],automatic=True,exclusions=excluded)
+ sources=[p for p in names if Path(p).suffix in CODE]
  valid,stale=current_pages(s,meta,workspace) if verify else (a['pages'],[])
  mapped=set(p for page in valid for p in page['primary_files']);mapped.intersection_update(sources)
  pending=ranked(set(sources)-mapped,s.snapshot(sid)['goal'],a.get('preferred',[]));notes=[]
@@ -83,7 +95,9 @@ def status(s,meta,workspace,verify=True):
     out=s.load_result(sid,page['invocation_id']);notes.append({'receipt':page['receipt'],'invocation_id':page['invocation_id'],'model':page['model'],'summary':out['summary'],'sites':page.get('explained_sites',[])})
    except (InvalidUpdate,PageFault,ValueError):pass
  frame=budget.decision(s,sid)
- return {'status':a.get('status','ready'),'catalog_files':len(names),'source_files':len(sources),'mapped_files':len(mapped),'pending_files':len(pending),'next_files':pending[:12],'metadata_only_files':len(names)-len(sources),'pages':len(valid),'stale_pages':stale,'notes':notes,'explained_sites':sum(len(n['sites']) for n in notes),'failures':a.get('failures',{}),'budget':frame,'last_page':a.get('last_page'),'structural_pass_complete':not pending,'semantic_review_complete':False,'scope_notice':'Counts describe supported source mapping. Notes explain sampled call sites, not every function. Non-code files are cataloged only.'}
+ scope_error=('No supported source files are available in the committed review scope. '+
+              '; '.join(p+' ('+why+')' for p,why in sorted(excluded.items()))) if not sources else None
+ return {'status':'needs_attention' if scope_error else a.get('status','ready'),'catalog_files':len(names),'source_files':len(sources),'mapped_files':len(mapped),'pending_files':len(pending),'next_files':pending[:12],'metadata_only_files':len(names)-len(sources),'pages':len(valid),'stale_pages':stale,'notes':notes,'explained_sites':sum(len(n['sites']) for n in notes),'failures':a.get('failures',{}),'budget':frame,'last_page':a.get('last_page'),'structural_pass_complete':not pending and not scope_error,'semantic_review_complete':False,'excluded':excluded,'error':scope_error or a.get('error'),'scope_notice':'Counts describe supported source mapping. Notes explain sampled call sites, not every function. Non-code files are cataloged only.'}
 
 def select_files(s,meta,workspace,st):
  names=repo.catalog(s,meta['active']);c=s.snapshot(meta['active'])['constraints'];cap=c['review_page_kib']*1024;a=meta['auto']
@@ -131,7 +145,8 @@ def step(s,meta,workspace,root,request,provider=None):
   retry=next((p for p in reversed(valid) if p.get('explanation_status')=='pending'),None) if request.get('explain',True) else None
   files,primary=(retry['files'],retry['primary_files']) if retry else select_files(s,meta,workspace,st)
   if not primary:
-   a['status']='structural_pass_complete' if st['pending_files']==0 else 'needs_attention'
+   a['status']='structural_pass_complete' if st['pending_files']==0 and st['source_files'] else 'needs_attention'
+   if st.get('error'):a['error']=st['error']
    return {'result':None,'auto':status(s,meta,workspace)}
   # Keep capacity for fresh evidence at synthesis. Optional breadth yields to
   # a smaller page before asking the user to increase the task ceiling.

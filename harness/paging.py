@@ -3,7 +3,7 @@
 Authority is assigned by the trusted host adapters, never by model output.
 Provenance and freshness are structural properties, not semantic confidence.
 """
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 import hashlib, json, math, pathlib, sqlite3, time, uuid
 from context_manager import ContextStore, Conflict, InvalidUpdate, ContextBudgetExceeded, canonical, sha
 from smriti_adapter import SmritiAdapter
@@ -37,6 +37,37 @@ class Budget:
     context_limit: int = 8192
     response_reserve: int = 1024
     template_reserve: int = 256
+    context_profile: InitVar[int] = 1
+    reservation_limit: InitVar[object] = None
+    context_window: InitVar[object] = None
+
+    def __post_init__(self, context_profile, reservation_limit, context_window):
+        if type(context_profile) is not int or context_profile not in (1, 2):
+            raise InvalidUpdate('Unsupported context budget profile')
+        if context_profile == 1:
+            if reservation_limit is not None or context_window is not None:
+                raise InvalidUpdate('Legacy context budget cannot carry an exact window')
+            return
+        from context_window import validate_window
+        validate_window(context_window)
+        if (type(reservation_limit) is not int or not 1 <= reservation_limit <= 2 ** 53 - 1
+                or type(self.context_limit) is not int or not 1 <= self.context_limit <= context_window['context_tokens']):
+            raise InvalidUpdate('Invalid exact context reservation allocation')
+        object.__setattr__(self, 'context_profile', context_profile)
+        object.__setattr__(self, 'reservation_limit', reservation_limit)
+        object.__setattr__(self, 'context_window', json.loads(canonical(context_window)))
+
+    @property
+    def input_limit(self):
+        return self.reservation_limit if self.context_profile == 2 else self.context_limit
+
+    def with_limits(self, *, context_limit=None, response_reserve=None, template_reserve=None, reservation_limit=None):
+        values = dict(vars(self))
+        for key, value in (('context_limit', context_limit), ('response_reserve', response_reserve),
+                           ('template_reserve', template_reserve), ('reservation_limit', reservation_limit)):
+            if value is not None:
+                values[key] = value
+        return Budget(**values)
 
     def charge(self, system, payload, schema):
         # Charge the same task-facing packet used by the local transport. Full
@@ -49,9 +80,9 @@ class Budget:
 
     def check(self, system, payload, schema):
         charge=self.charge(system,payload,schema)
-        measured=SmritiAdapter().context(charge,self.response_reserve,self.context_limit)
-        if charge+self.response_reserve>self.context_limit or measured['decision']!='ALLOW':
-            raise ContextBudgetExceeded(f'Conservative input charge {charge} + output reserve {self.response_reserve} exceeds {self.context_limit}')
+        measured=SmritiAdapter().context(charge,self.response_reserve,self.input_limit)
+        if charge+self.response_reserve>self.input_limit or measured['decision']!='ALLOW':
+            raise ContextBudgetExceeded(f'Conservative input charge {charge} + output reserve {self.response_reserve} exceeds {self.input_limit}')
         return charge
 
 class PagedContext(ContextStore):

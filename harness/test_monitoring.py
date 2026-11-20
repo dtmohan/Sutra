@@ -149,3 +149,90 @@ class TestProcessMonitoringTests(unittest.TestCase):
         self.assertEqual(observed, [(10, True, 1.5), (20, True, .5)])
         self.assertEqual(result['status'], 'resource_wait')
         kill.assert_called_once()
+
+
+class DashboardSnapshotTests(unittest.TestCase):
+    # Exercise the real allocation-prefix reader, not a replacement budget stub.
+    import test_source_scope_recovery as fixtures
+    setUp = fixtures.SourceScopeRecoveryTests.setUp
+    tearDown = fixtures.SourceScopeRecoveryTests.tearDown
+    provider = fixtures.SourceScopeRecoveryTests.provider
+    step = fixtures.SourceScopeRecoveryTests.step
+    until = fixtures.SourceScopeRecoveryTests.until
+    saved_bad_scope = fixtures.SourceScopeRecoveryTests.saved_bad_scope
+    amend = fixtures.SourceScopeRecoveryTests.amend
+    restart = fixtures.SourceScopeRecoveryTests.restart
+
+    def hardware(self):
+        return {'profile': 'hardware-v1', 'available': True, 'admitted': True,
+                'decision': 'ALLOW', 'reclaimable_estimate_gib': 24,
+                'sample': {'cpu_busy_pct': 20}}
+
+    def corrected(self):
+        saved = self.amend(self.saved_bad_scope())
+        return self.restart(saved)
+
+    def read(self):
+        with patch('monitoring.resource_state', return_value=self.hardware()), \
+                patch('runtime_memory.snapshot', return_value={'enabled': True, 'backend': 'sutra_engine'}):
+            return monitoring.dashboard(self.root)
+
+    def test_corrected_scope_allocation_prefix_and_quarantined_child_render_readonly(self):
+        import orchestration as m
+        import review_budget
+        restarted = self.corrected()
+        children = self.until('CHILDREN', restarted)
+        cid = children['children'][0]['id']
+        with self.s.db:
+            m.transition(self.s, cid, 'QUARANTINED', 'FIXTURE_REJECTED')
+        sid = self.meta['active']
+        before = review_budget.usage(self.s, sid)
+        changes = self.s.db.total_changes
+        rows = self.s.db.execute('SELECT * FROM page_audit').fetchall()
+        result = self.read()
+        self.assertEqual(result['diagnostic_errors'], [])
+        self.assertTrue(result['hardware']['available'])
+        self.assertEqual(result['runtime_memory']['backend'], 'sutra_engine')
+        self.assertEqual(result['review_budget']['used'], before['used'])
+        self.assertEqual(result['review_budget']['limits'], before['limits'])
+        self.assertEqual(result['review_budget']['allocation_version'], 1)
+        self.assertGreater(result['token_usage']['total_calls'], 0)
+        self.assertTrue(any(n['state'] == 'QUARANTINED' for n in result['orchestration']['nodes']))
+        self.assertEqual(self.s.db.total_changes, changes)
+        self.assertEqual(self.s.db.execute('SELECT * FROM page_audit').fetchall(), rows)
+
+    def test_failed_task_diagnostics_preserve_fresh_hardware_runtime_and_token_sections(self):
+        self.corrected()
+        with patch('review_budget.decision', side_effect=monitoring.InvalidUpdate('Task receipts unavailable')):
+            result = self.read()
+        self.assertTrue(result['hardware']['available'])
+        self.assertEqual(result['runtime_memory']['backend'], 'sutra_engine')
+        self.assertGreater(result['token_usage']['total_calls'], 0)
+        self.assertNotIn('review_budget', result)
+        self.assertEqual(result['diagnostic_errors'], [{'section': 'ledger', 'message': 'Task receipts unavailable'}])
+
+    def test_corrupt_allocation_proof_is_not_rendered_as_allow_or_silently_corrected(self):
+        self.corrected()
+        self.s.db.execute('DROP TRIGGER IF EXISTS immutable_page_audit_UPDATE')
+        self.s.db.execute("UPDATE page_audit SET payload_json='{}' WHERE seq=(SELECT MIN(seq) FROM page_audit)")
+        self.s.db.commit()
+        rows = self.s.db.execute('SELECT * FROM page_audit').fetchall()
+        result = self.read()
+        self.assertTrue(result['hardware']['available'])
+        self.assertNotIn('review_budget', result)
+        self.assertIn('corrupt', result['diagnostic_errors'][0]['message'])
+        self.assertEqual(self.s.db.execute('SELECT * FROM page_audit').fetchall(), rows)
+
+    def test_runtime_or_sqlite_failure_does_not_hide_independent_hardware(self):
+        import sqlite3
+        self.corrected()
+        with patch('ledger_sqlite.read_connection', side_effect=sqlite3.OperationalError('ledger busy')):
+            result = self.read()
+        self.assertTrue(result['hardware']['available'])
+        self.assertEqual(result['diagnostic_errors'], [{'section': 'ledger', 'message': 'ledger busy'}])
+        with patch('monitoring.resource_state', return_value=self.hardware()), \
+                patch('runtime_memory.snapshot', side_effect=ValueError('runtime inventory unavailable')):
+            result = monitoring.dashboard(self.root)
+        self.assertTrue(result['hardware']['available'])
+        self.assertEqual(result['review_budget']['allocation_version'], 1)
+        self.assertEqual(result['diagnostic_errors'], [{'section': 'runtime_memory', 'message': 'runtime inventory unavailable'}])

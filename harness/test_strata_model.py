@@ -1,5 +1,6 @@
 """Exercise the approved transport and ledger against a bounded HTTP/1.0 fixture."""
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import io
 import json
 import os
 from pathlib import Path
@@ -7,15 +8,17 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import conversation
-from context_manager import InvalidUpdate
+from context_manager import InvalidUpdate, canonical, sha
 from invocation_gateway import InvocationLedger
 from karma_adapter import KarmaAdapter
+from local_model import StructuredOutputRejected
 from model_routing import choose
 from review_budget import usage
-from strata_model import MODEL, StrataModel, append_catalog
+from strata_model import (HOST_JSON_DIRECTIVE, HOST_JSON_DIRECTIVE_BYTES, MODEL, StrataModel,
+                          _host_json_answer, _host_json_text, _stream, append_catalog)
 
 
 MODELS = {'low': 'installed-low', 'mid': 'installed-mid', 'high': MODEL}
@@ -23,6 +26,8 @@ SERVER_MODEL = 'qwen3.8-flash-next-q2_0'
 HELLO = {'page_requests': [], 'intent': 'conversation', 'escalation_reason': 'none',
          'diagram': None, 'answer': 'Hello. How can I help?',
          'summary': 'A hello exchange.'}
+PROMPT_VALIDATION = {'formats': ['json_object', 'json_schema'], 'method': 'prompt_and_validate',
+                     'constrained_decoding': False, 'stream_buffered': True}
 
 
 def frames(answer=HELLO, finish='stop', measured=True):
@@ -33,6 +38,12 @@ def frames(answer=HELLO, finish='stop', measured=True):
     if measured:
         final['usage'] = {'prompt_tokens': 124, 'completion_tokens': 30}
     return [initial, text, final]
+
+
+def text_frames(text, finish='stop'):
+    result = frames(finish=finish)
+    result[1]['choices'][0]['delta']['content'] = text
+    return result
 
 
 class BenchmarkServer(BaseHTTPRequestHandler):
@@ -174,6 +185,127 @@ class StrataTests(unittest.TestCase):
         self.assertIn('Strata rejected the structured reply', self.server.posts[1][0]['messages'][0]['content'])
         self.assertNotIn('generated JSON lacked', json.dumps(self.server.posts))
 
+    def test_backend_json_rejection_preserves_safe_cause_and_reported_usage(self):
+        cause = "invalid JSON: Expecting ',' delimiter: line 17 column 9 (char 804)"
+        self.server.frames = [[{'error': {'code': 'structured_output_failed',
+                                        'message': 'model did not return valid JSON: ' + cause[len('invalid JSON: '):]},
+                               'usage': {'prompt_tokens': 124, 'completion_tokens': 30,
+                                         'untrusted_detail': 'private-model-text'}}], frames()]
+        result = self.ask()
+        self.assertTrue(result['result']['admission']['admitted'])
+        repaired, first = result['result']['token_usage']['calls']
+        self.assertEqual(first['status'], 'quarantined')
+        self.assertEqual(first['source'], 'strata_response')
+        self.assertEqual((first['input_tokens'], first['output_tokens']), (124, 30))
+        self.assertEqual(first['accounting_settlement']['basis'], 'runtime_measured')
+        self.assertEqual(first['accounting_settlement']['used_tokens'], 154)
+        self.assertEqual(usage(self.ledger, result['session'])['used']['tokens'], 308)
+        self.assertIn(cause, self.server.posts[1][0]['messages'][0]['content'])
+        traces = [json.loads(path.read_text()) for path in (self.root / 'calls').glob('*.json')]
+        rejected, = [trace for trace in traces if not trace['ok']]
+        self.assertIn(cause, rejected['error'])
+        self.assertEqual(rejected['response']['eval_count'], 30)
+        self.assertNotIn('private-model-text', json.dumps(traces))
+        self.assertTrue(self.ledger.verify_invocations(result['session'], complete=True))
+
+    def test_verified_prompt_validation_uses_host_json_and_measured_repair(self):
+        from model_packet import build, descriptor
+        self.server.status['structured_output'] = dict(PROMPT_VALIDATION)
+        self.server.frames = [text_frames('{"private-model-text":}'), frames()]
+        result = self.ask()
+        self.assertTrue(result['result']['admission']['admitted'])
+        repaired, first = result['result']['token_usage']['calls']
+        self.assertEqual(first['status'], 'quarantined')
+        self.assertEqual(first['accounting_settlement']['basis'], 'runtime_measured')
+        self.assertEqual(first['accounting_settlement']['used_tokens'], 154)
+        self.assertEqual(usage(self.ledger, result['session'])['used']['tokens'], 308)
+        self.assertEqual(len(self.server.posts), 2)
+        self.assertIn('invalid JSON: Expecting value:', self.server.posts[1][0]['messages'][0]['content'])
+        self.assertNotIn('private-model-text', self.server.posts[1][0]['messages'][0]['content'])
+        sent = self.server.posts[0][0]
+        self.assertNotIn('response_format', sent)
+        self.assertEqual(sent['max_tokens'], 2048)
+        self.assertEqual(sent['reasoning_effort'], 'none')
+        raw, delivered = self.ledger.db.execute('SELECT i.record_json,d.payload_json FROM invocations i '
+            'JOIN deliveries d ON d.id=i.delivery_id ORDER BY i.rowid LIMIT 1').fetchone()
+        envelope = json.loads(raw)
+        packet = build(conversation.SYSTEM, json.loads(delivered), envelope['schema'])
+        inline_schema = json.loads(sent['messages'][0]['content'].split(HOST_JSON_DIRECTIVE)[1])
+        self.assertEqual(inline_schema, packet['schema'])
+        self.assertEqual(sent['messages'][0]['content'], packet['messages'][0]['content'] +
+                         HOST_JSON_DIRECTIVE + canonical(packet['schema']))
+        self.assertEqual(envelope['charge'], descriptor(packet, 256)['input_reservation'] + HOST_JSON_DIRECTIVE_BYTES)
+        self.assertEqual(envelope['budget_profile']['template_reserve'], 256 + HOST_JSON_DIRECTIVE_BYTES)
+        traces = [json.loads(path.read_text()) for path in (self.root / 'calls').glob('*.json')]
+        self.assertNotIn('private-model-text', json.dumps(traces))
+        for trace in traces:
+            self.assertEqual(trace['structured_output'], {'mode': 'host_json',
+                'basis': 'verified_prompt_and_validate', 'schema_sha256': sha(canonical(packet['schema'])),
+                'normalization': 'none'})
+        self.assertTrue(self.ledger.verify_invocations(result['session'], complete=True))
+
+    def test_host_json_capability_is_refreshed_before_dispatch(self):
+        provider = StrataModel(self.root / 'calls')
+        self.assertFalse(provider.host_json_mode)
+        self.server.status['structured_output'] = dict(PROMPT_VALIDATION)
+        self.assertTrue(self.ask(provider=provider)['result']['admission']['admitted'])
+        self.assertTrue(provider.host_json_mode)
+        self.assertNotIn('response_format', self.server.posts[0][0])
+
+    def test_unknown_and_constrained_providers_keep_the_provider_schema(self):
+        for capability in (None, {'method': 'prompt_and_validate'},
+                dict(PROMPT_VALIDATION, method='grammar'),
+                dict(PROMPT_VALIDATION, constrained_decoding=True),
+                dict(PROMPT_VALIDATION, stream_buffered=False),
+                dict(PROMPT_VALIDATION, formats=['json_object'])):
+            with self.subTest(capability=capability):
+                self.server.status['structured_output'] = capability
+                result = self.ask()
+                self.assertTrue(result['result']['admission']['admitted'])
+                sent = self.server.posts[-1][0]
+                self.assertEqual(sent['response_format']['type'], 'json_schema')
+                self.assertNotIn(HOST_JSON_DIRECTIVE, sent['messages'][0]['content'])
+
+    def test_host_json_keeps_gateway_shape_checks_and_output_limit_precedence(self):
+        self.server.status['structured_output'] = dict(PROMPT_VALIDATION)
+        self.server.frames = [frames(dict(HELLO, context_binding='forged')), frames()]
+        result = self.ask()
+        self.assertTrue(result['result']['admission']['admitted'])
+        self.assertEqual(result['result']['token_usage']['calls'][1]['status'], 'quarantined')
+        self.assertEqual(usage(self.ledger, result['session'])['used']['tokens'], 308)
+        self.server.frames = [text_frames('{"private-model-text":', finish='length')]
+        result = self.ask()['result']
+        self.assertFalse(result['admission']['admitted'])
+        self.assertEqual(result['failure_kind'], 'output_limit')
+        self.assertEqual(result['token_usage']['calls'][0]['accounting_settlement']['basis'], 'runtime_measured')
+        self.assertEqual(len(self.server.posts), 3)
+
+    def test_host_json_whole_fence_preserves_usage_and_records_wrapper_removal(self):
+        from storage_policy import write_trace
+        self.server.status['structured_output'] = dict(PROMPT_VALIDATION)
+        original = ' \n```json\n' + json.dumps(HELLO) + '\n```\n '
+        self.server.frames = [text_frames(original)]
+        with patch('storage_policy.write_trace', wraps=write_trace) as trace_writer:
+            result = self.ask()
+        self.assertEqual(trace_writer.call_args.args[2]['response']['message']['content'], original)
+        self.assertTrue(result['result']['admission']['admitted'])
+        self.assertEqual(result['result']['accepted_output']['answer'], HELLO['answer'])
+        self.assertEqual(usage(self.ledger, result['session'])['used']['tokens'], 154)
+        trace = json.loads(next((self.root / 'calls').glob('*.json')).read_text())
+        self.assertEqual(trace['structured_output']['normalization'], 'json_fence')
+
+    def test_host_json_malformed_fence_is_repaired_with_measured_usage(self):
+        self.server.status['structured_output'] = dict(PROMPT_VALIDATION)
+        self.server.frames = [text_frames('```json\n{"private-model-text":}\n```'), frames()]
+        result = self.ask()
+        self.assertTrue(result['result']['admission']['admitted'])
+        self.assertEqual(usage(self.ledger, result['session'])['used']['tokens'], 308)
+        traces = [json.loads(path.read_text()) for path in (self.root / 'calls').glob('*.json')]
+        rejected, = [trace for trace in traces if not trace['ok']]
+        self.assertEqual(rejected['structured_output']['normalization'], 'json_fence')
+        self.assertEqual(rejected['response']['eval_count'], 30)
+        self.assertNotIn('private-model-text', json.dumps(traces))
+
     def test_backend_authentication_body_and_invalid_key_are_redacted(self):
         self.server.post_error = True
         result = self.ask()['result']
@@ -193,6 +325,18 @@ class StrataTests(unittest.TestCase):
         self.assertFalse(result['admission']['admitted'])
         self.assertEqual(result['failure_kind'], 'output_limit')
         self.assertEqual(result['token_usage']['calls'][0]['accounting_settlement']['basis'], 'reserved_unmeasured')
+        self.assertEqual(len(self.server.posts), 1)
+
+    def test_output_exhaustion_keeps_its_classification_when_usage_is_reported(self):
+        self.server.frames = [[{'error': {'code': 'structured_output_failed',
+            'message': 'structured output was incomplete (finish_reason=length); increase the output budget'},
+            'usage': {'prompt_tokens': 124, 'completion_tokens': 2048}}]]
+        result = self.ask()['result']
+        self.assertFalse(result['admission']['admitted'])
+        self.assertEqual(result['failure_kind'], 'output_limit')
+        observed, = result['token_usage']['calls']
+        self.assertEqual(observed['accounting_settlement']['basis'], 'runtime_measured')
+        self.assertEqual(observed['accounting_settlement']['used_tokens'], 2172)
         self.assertEqual(len(self.server.posts), 1)
 
     def test_unloaded_and_wrong_variant_do_not_post_or_reserve(self):
@@ -230,6 +374,117 @@ class StrataTests(unittest.TestCase):
             result = handle(self.root, self.root, {'op': 'models'})
         self.assertEqual(result['suggested_tiers'], dict.fromkeys(MODELS, 'normal:latest'))
         self.assertEqual([row['name'] for row in result['models']], ['normal:latest', MODEL])
+
+
+class StrataStreamFailureTests(unittest.TestCase):
+    def reject(self, message, usage=None):
+        event = {'error': {'code': 'structured_output_failed', 'message': message}}
+        if usage is not None:
+            event['usage'] = usage
+        response = io.BytesIO(b'data: ' + json.dumps(event).encode() + b'\n\ndata: [DONE]\n\n')
+        with self.assertRaises(StructuredOutputRejected) as caught:
+            _stream(response, Mock(), time.monotonic(), 65536, lambda _: None)
+        return caught.exception
+
+    def test_schema_and_parser_details_do_not_echo_generated_keys_or_values(self):
+        cases = (
+            ('model did not return valid JSON: duplicate JSON key: private-source-key',
+             'duplicate JSON key (key withheld)'),
+            ("model output failed the JSON Schema at /private-source-path: 'private-source-value' is not of type 'object'",
+             "value is not of type 'object'"),
+            ("model output failed the JSON Schema at /private-source-path: 'private-source-key' is a required property",
+             'required property missing'),
+            ("model output failed the JSON Schema at /: Additional properties are not allowed ('private-source-key' was unexpected)",
+             'additional properties are not allowed'),
+            ('could not validate structured output: private-source-value',
+             'could not validate structured output'),
+            ('model did not return valid JSON: private-source-value\n\x1b[31mprivate-source-value',
+             'invalid JSON (provider detail withheld)'),
+        )
+        for message, expected in cases:
+            with self.subTest(message=message):
+                error = self.reject(message)
+                self.assertIn(expected, str(error))
+                self.assertNotIn('private-source', str(error))
+                self.assertNotIn('\n', str(error))
+                self.assertNotIn('\x1b', str(error))
+                self.assertLess(len(str(error)), 500)
+
+    def test_unknown_oversized_and_nontext_provider_details_are_withheld(self):
+        for message in ('private-source-value' * 500, {'source': 'private-source-value'}, None):
+            with self.subTest(message_type=type(message)):
+                error = self.reject(message)
+                self.assertIn('provider detail withheld', str(error))
+                self.assertNotIn('private-source', str(error))
+                self.assertLess(len(str(error)), 500)
+        repeated_types = "model output failed the JSON Schema at /: 'private-source-value' is not of type " + ", ".join(["'object'"] * 100)
+        error = self.reject(repeated_types)
+        self.assertIn('JSON Schema mismatch', str(error))
+        self.assertNotIn('private-source', str(error))
+        self.assertLess(len(str(error)), 500)
+
+    def test_partial_and_invalid_error_usage_do_not_claim_completed_generation(self):
+        error = self.reject('invalid JSON', {'prompt_tokens': 124, 'completion_tokens': True})
+        self.assertEqual(error.strata_response, {'done': False, 'done_reason': 'structured_output_failed',
+                                               'prompt_eval_count': 124, 'eval_count': None})
+        for value in (None, {}, {'prompt_tokens': -1, 'completion_tokens': '30'},
+                      {'prompt_tokens': 2 ** 53, 'completion_tokens': False}):
+            with self.subTest(usage=value):
+                self.assertIsNone(self.reject('invalid JSON', value).strata_response)
+
+    def test_malformed_sse_json_reports_a_parser_location_without_raw_event(self):
+        response = io.BytesIO(b'data: {"private-source-value":}\n\n')
+        with self.assertRaisesRegex(RuntimeError, 'Invalid Strata stream JSON: Expecting value: line 1 column') as caught:
+            _stream(response, Mock(), time.monotonic(), 65536, lambda _: None)
+        self.assertNotIn('private-source-value', str(caught.exception))
+
+    def test_host_json_rejects_ambiguous_or_nonfinite_values_without_salvage(self):
+        cases = ('{"private-source-key":1,"private-source-key":2}',
+                 '{"nested":{"private-source-key":1,"private-source-key":2}}',
+                 '{"value":NaN}', '{"value":Infinity}', '{"value":-Infinity}', '{"value":1e999}',
+                 '[]', 'null', 'true', '"private-source-value"',
+                 '{} {}', '{}\nprivate-source-value', 'private-source-value {}',
+                 'private-source-value\n```json\n{}\n```', '```json\n{}\n```\nprivate-source-value',
+                 '```json\n{}\n```\n```json\n{}\n```')
+        for text in cases:
+            with self.subTest(text=text):
+                projected, _ = _host_json_text(text)
+                with self.assertRaises(StructuredOutputRejected) as caught:
+                    _host_json_answer(projected)
+                self.assertNotIn('private-source', str(caught.exception))
+        for text in (' \n{"value":1}\t', '```json\n{"value":1}\n```', ' \n```\n{"value":1}\n```\n '):
+            projected, normalization = _host_json_text(text)
+            self.assertEqual(_host_json_answer(projected), {'value': 1})
+            self.assertEqual(normalization, 'json_fence' if '```' in text else 'none')
+
+    def test_structured_trace_metadata_is_bounded_and_omits_arbitrary_content(self):
+        from storage_policy import write_trace
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = {'mode': 'host_json', 'basis': 'verified_prompt_and_validate',
+                        'schema_sha256': 'a' * 64, 'normalization': 'json_fence', 'source': 'private-source-value'}
+            write_trace(tmp, 'valid', {'provider': 'strata', 'structured_output': metadata})
+            trace = json.loads((Path(tmp) / 'valid.json').read_text())
+            self.assertNotIn('private-source', json.dumps(trace))
+            self.assertEqual(set(trace['structured_output']), {'mode', 'basis', 'schema_sha256', 'normalization'})
+            for index, invalid in enumerate((dict(metadata, mode='private-source-value'),
+                    dict(metadata, basis='private-source-value'), dict(metadata, schema_sha256='private-source-value'))):
+                write_trace(tmp, str(index), {'provider': 'strata', 'structured_output': invalid})
+                trace = json.loads((Path(tmp) / (str(index) + '.json')).read_text())
+                self.assertNotIn('structured_output', trace)
+                self.assertNotIn('private-source', json.dumps(trace))
+
+    def test_strata_template_allowance_is_validated_before_context_planning(self):
+        from model_context import allocation
+        metadata = {'model_info': {'strata.context_length': 32768}, '_sutra_provider': 'strata',
+                    '_sutra_template_reserve': 256 + HOST_JSON_DIRECTIVE_BYTES}
+        budget, _ = allocation(metadata)
+        self.assertEqual(budget.template_reserve, 256 + HOST_JSON_DIRECTIVE_BYTES)
+        for value in (True, None, '479', 479.0, 255, 4097):
+            with self.subTest(value=value), self.assertRaisesRegex(InvalidUpdate, 'trusted Strata template allowance'):
+                allocation(dict(metadata, _sutra_template_reserve=value))
+        # This adapter-specific host setting does not affect other providers.
+        budget, _ = allocation(dict(metadata, _sutra_provider='ollama', _sutra_template_reserve='ignored'))
+        self.assertEqual(budget.template_reserve, 256)
 
 
 if __name__ == '__main__':

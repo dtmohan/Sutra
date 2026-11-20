@@ -83,7 +83,12 @@ class ClaimPageTests(unittest.TestCase):
         self.assertTrue(meta['all_reviewers_distinct'])
         from review_report import markdown
         self.assertIn('file://', markdown(report))
-        self.assertIn('#L1', markdown(report))
+        for entry in report['claim_evidence']:
+            self.assertIn('#L' + str(entry['start_line']), markdown(report))
+            file_lines = (self.ws / entry['path']).read_text().splitlines()
+            excerpt = source['excerpts'][entry['path']]
+            start = source['excerpt_locations'][entry['path']]['start_line']
+            self.assertEqual(file_lines[start-1], excerpt.splitlines()[0])
         self.assertTrue(self.s.verify_invocations(self.sid))
 
     def test_invalid_ids_exhaust_only_current_page_without_refund_or_restart(self):

@@ -12,7 +12,9 @@ SCHEMA = obj({'task_id': S, 'constraints': arr(obj({'key':S,'value':S})),
     'next_action': obj({'kind': {'type':'string','enum':['inspect','report','clarify']}, 'target': S}),
     'complete': {'type':'boolean','enum':[False]}})
 SCHEMA['properties']['findings']['maxItems']=4
-for key in ('completed','remaining'): SCHEMA['properties'][key]['maxItems']=4
+SCHEMA['properties']['completed']['maxItems']=4
+# Follow-up count is not an evidence or permission boundary. The complete
+# working note remains bounded by its 2200-byte allocation in validate().
 
 
 def review_schema(payload):

@@ -15,6 +15,7 @@ from governance import GovernedContext
 from paging import PageFault
 from invocation_roles import expected_request, validate_result
 from legacy_model import source_units
+from contextlib import nullcontext
 
 _permit = ContextVar('model_dispatch_permit', default=None)
 
@@ -39,6 +40,21 @@ def consume_dispatch(call_id, model, system, payload, schema, packet=None):
     permit['used'] = True
 
 
+def transport_seconds(default=150):
+    permit = _permit.get()
+    return permit.get('transport_seconds', default) if permit else default
+
+
+def transport_timeout(started, default=150):
+    from lifecycle import timeout
+    permit = _permit.get()
+    remaining = transport_seconds(default)-(time.monotonic()-started)
+    if permit and permit.get('transport_deadline') is not None:
+        remaining = min(remaining, permit['transport_deadline']-time.monotonic())
+    if remaining <= 0: raise TimeoutError('Model transport deadline reached')
+    return timeout(remaining)
+
+
 class InvocationLedger(GovernedContext):
     def __init__(self, path):
         super().__init__(path)
@@ -59,7 +75,7 @@ class InvocationLedger(GovernedContext):
                 self.db.execute(f"CREATE TRIGGER IF NOT EXISTS immutable_{table}_{op} BEFORE {op} ON {table} BEGIN SELECT RAISE(ABORT,'immutable invocation record'); END")
         self.db.commit()
 
-    def register(self, run_id, call_id, role, payload, system, schema, delivery_id, model, charge, budget=None, resource=None, model_identity=None, model_interface=None):
+    def register(self, run_id, call_id, role, payload, system, schema, delivery_id, model, charge, budget=None, resource=None, model_identity=None, model_interface=None, context_measurement=None, transport_timing=None):
         expected_system, expected_schema = expected_request(role, payload)
         if system != expected_system or schema != expected_schema:
             raise InvalidUpdate('Role system/schema mismatch')
@@ -68,6 +84,20 @@ class InvocationLedger(GovernedContext):
                     'system_hash': sha(system), 'schema': schema, 'payload_hash': sha(canonical(payload)),
                     'request_hash': request_hash(call_id, model, system, payload, schema),
                     'model_identity': model_identity, 'charge': charge, 'budget_profile':budget or {'context_limit':8192,'response_reserve':1024,'template_reserve':256}, 'created_at': time.time()}
+        from paging import Budget
+        from context_window import exact, validate_proof
+        allocation = Budget(**envelope['budget_profile'])
+        from invocation_timing import validate as validate_timing
+        call_seconds = validate_timing(transport_timing, role, payload, allocation.response_reserve)
+        if transport_timing is not None: envelope['transport_timing'] = copy.deepcopy(transport_timing)
+        if exact(allocation):
+            from strata_model import is_strata
+            if not is_strata(model):
+                raise InvalidUpdate('Exact Strata physical context requires the routed Strata provider')
+            validate_proof(context_measurement, allocation, system, payload, schema, model_identity)
+            envelope['physical_context'] = copy.deepcopy(context_measurement)
+        elif context_measurement is not None:
+            raise InvalidUpdate('Legacy invocation cannot carry an exact context proof')
         if model_interface is not None:
             from model_packet import REFERENCE_VERSIONS, build, descriptor
             packet = build(system, payload, schema)
@@ -155,6 +185,8 @@ class InvocationLedger(GovernedContext):
                     elif role == 'architect':
                         from architecture_role import request_check
                         request_check(self, session, payload)
+                        if payload.get('evidence_discovery_version') == 4 and payload.get('memory_budget') != envelope['budget_profile']:
+                            raise InvalidUpdate('Discovery context budget differs from provider')
                     else:
                         from review_role import check_request
                         check_request(self, session, payload)
@@ -167,7 +199,7 @@ class InvocationLedger(GovernedContext):
             envelope.update(session=session, revision=row[1], epoch=config['epoch'],
                             contract_hash=config['contract_hash'], logic_hash=config['logic_hash'])
             from review_budget import require
-            cost={'calls':1,'tokens':charge+envelope['budget_profile']['response_reserve'],'seconds':150}
+            cost={'calls':1,'tokens':charge+envelope['budget_profile']['response_reserve'],'seconds':call_seconds}
             if state['constraints'].get('native_task'):cost.update(operations=1,source_bytes=sum(len(p.get('text','').encode()) for p in payload.get('pages',[])))
             envelope['task_budget_kernel']=require(self,session,cost)
             from orchestration import admit
@@ -181,7 +213,7 @@ class InvocationLedger(GovernedContext):
         return envelope
 
     def finalize(self, envelope, payload, proposal, transport_error=None, elapsed_seconds=None, token_usage=None,
-                 accounting_settlement=None, failure_kind=None):
+                 accounting_settlement=None, failure_kind=None, generation_progress=None):
         session = envelope['session']; rid = envelope['delivery_id']
         model_proposal = copy.deepcopy(proposal)
         from task_observations import split, capture
@@ -222,8 +254,9 @@ class InvocationLedger(GovernedContext):
             admitted = result['admission']['admitted']
             previous = self.db.execute('SELECT seq,id FROM invocation_receipts WHERE session=? ORDER BY seq DESC LIMIT 1', (session,)).fetchone()
             seq, prev = previous if previous else (0, 'GENESIS')
+            from invocation_timing import reserved_seconds
             receipt = {'session': session, 'seq': seq + 1, 'invocation_id': envelope['id'],
-                       'elapsed_seconds':elapsed_seconds if elapsed_seconds is not None else 150,
+                       'elapsed_seconds':elapsed_seconds if elapsed_seconds is not None else reserved_seconds(envelope),
                        'token_usage': token_usage or {'source':'unavailable','input_tokens':None,'output_tokens':None},
                        'invocation_hash': row[1], 'role': envelope['role'],
                        'calibration_binding':envelope.get('calibration_binding'),
@@ -238,6 +271,52 @@ class InvocationLedger(GovernedContext):
             observation = capture(self, envelope, payload, proposal, observation_fields)
             if observation is not None:
                 receipt['task_observation'] = observation
+            # Coherence is bounded diagnostic work over this invocation's
+            # explicit artifacts. It cannot change the result above, start an
+            # inference/repair, or prevent settlement if its own check fails.
+            # Intentional lifecycle cancellation inherits BaseException and
+            # remains outside these ordinary diagnostic exception handlers.
+            coherence = None
+            coherence_started = time.perf_counter_ns()
+            try:
+                from coherence_observations import capture as capture_coherence
+                coherence = capture_coherence(self, envelope, payload, proposal, observation)
+                if coherence is not None:
+                    from karma_adapter import KarmaAdapter
+                    coherence['kernel'] = KarmaAdapter().coherence(coherence['signals'])
+                    coherence['gateway_status'] = receipt['status']
+                    coherence['model'] = str(envelope['model'])[:160]
+            except Exception:
+                coherence = {'format': 1, 'profile': 'stage-text-coherence-v1',
+                             'mode': 'observe_only', 'status': 'unavailable',
+                             'invocation_id': envelope['id'], 'role': envelope['role'],
+                             'model': envelope['model'], 'session': session,
+                             'gateway_status': receipt['status'],
+                             'issues': [{'code': 'coherence_unavailable', 'kind': 'structural',
+                                         'detail': 'The bounded coherence check is unavailable. Admission and accounting are unchanged.'}],
+                             'analysis_limits': {'free_text_coherence': 'unassessed',
+                                                 'source_entailment': 'unverified'}}
+            if coherence is not None:
+                coherence['elapsed_ns'] = time.perf_counter_ns() - coherence_started
+                receipt['coherence_observation'] = coherence
+                try:
+                    from accounting_metrics import record as record_timing
+                    record_timing(self, 'text_coherence', coherence['elapsed_ns'],
+                                  status=coherence['status'], role=envelope['role'])
+                except Exception:
+                    pass  # A diagnostic timing subscriber cannot strand work.
+            progress_observation = None
+            if generation_progress is not None:
+                try:
+                    from generation_progress import validate_snapshot
+                    from karma_adapter import KarmaAdapter
+                    progress_observation = {'mode': 'observe_only',
+                        'invocation_id': envelope['id'], 'session': session,
+                        'snapshot': validate_snapshot(generation_progress),
+                        'kernel': KarmaAdapter().generation_progress(generation_progress)}
+                    receipt['generation_progress_observation'] = progress_observation
+                except Exception:
+                    pass  # A malformed optional stream counter is not a grant or admission failure.
             if observation_fields:
                 receipt['observation_fields'] = observation_fields
             if envelope.get('model_interface') or observation_fields or (envelope['role'] == 'conversation' and payload.get('response_contract') == 2):
@@ -258,6 +337,10 @@ class InvocationLedger(GovernedContext):
                       model_proposal=model_proposal)
         if observation is not None:
             result['task_observation'] = observation
+        if coherence is not None:
+            result['coherence_observation'] = coherence
+        if progress_observation is not None:
+            result['generation_progress_observation'] = progress_observation
         return result
 
     def quarantine_invocation(self, session, invocation_id, reason):
@@ -267,7 +350,79 @@ class InvocationLedger(GovernedContext):
             self.db.execute('INSERT OR IGNORE INTO invocation_quarantine VALUES(?,?,?)', (invocation_id,reason,time.time()))
             self._audit('INVOCATION_QUARANTINE', {'id': invocation_id, 'reason': reason})
 
-    def load_result(self, session, invocation_id):
+    def _result_batch_stamp(self):
+        return (self._audit_identity(), self.logic_hash, self.db.total_changes,
+                self.db.execute('PRAGMA data_version').fetchone()[0],
+                self.db.execute('PRAGMA schema_version').fetchone()[0],
+                getattr(self, '_audit_guard_epoch', None), self.db.in_transaction)
+
+    def load_architect_results(self, session, invocation_ids):
+        """Verify one ancestry DAG; never retain success across this read batch.
+
+        Live dependencies are checked again before returning any result. A
+        caller-owned transaction keeps its existing snapshot and ownership;
+        this method never begins, commits or rolls it back.
+        """
+        invocation_ids = tuple(invocation_ids)
+        if not invocation_ids: return []
+        before = self._result_batch_stamp()
+        batch = {'owner': self, 'session': session, 'done': {}, 'visiting': set()}
+        results = [self.load_result(session, iid, _architect_batch=batch) for iid in invocation_ids]
+        self._architect_freshness(session, batch['done'].values())
+        if self._result_batch_stamp() != before:
+            raise PageFault('Architect result verification changed during its read batch')
+        return results
+
+    def _architect_freshness(self, session, checked):
+        """Recheck unique live dependencies, not the ancestry traversal."""
+        from calibration import assert_binding, EMPTY_HASH
+        contract = self.origin(session, bootstrap=True)['contract_hash']
+        revision = self.snapshot(session)['revision']
+        calibrations, pages, handoffs, sources = {}, {}, {}, {}
+        for receipt, env, payload in checked:
+            if self.db.execute('SELECT 1 FROM invocation_quarantine WHERE invocation_id=?', (env['id'],)).fetchone():
+                raise PageFault('Invocation result quarantined')
+            if receipt['resulting_contract_hash'] != contract or receipt['logic_hash'] != self.logic_hash:
+                raise PageFault('Invocation result has stale contract or validator')
+            if revision != env['revision']: raise PageFault('Invocation result has stale task state')
+            expected = env.get('calibration_binding', {'hash': EMPTY_HASH, 'profiles': []})
+            calibrations[canonical(expected)] = expected
+            for page_ref in payload.get('pages', []): pages[canonical(page_ref)] = page_ref
+            if payload.get('conversation_handoff'):
+                key = canonical([payload['conversation_handoff'], payload['request']])
+                handoffs[key] = payload
+            evidence = sources.setdefault(payload['workspace'], {})
+            for entry in payload['evidence']: evidence[canonical(entry)] = entry
+        for page_ref in pages.values():
+            page = self.read_page(session, page_ref['id'], page_ref['version'])
+            if page.content_hash != page_ref['hash']: raise PageFault('Invocation result has changed sources')
+        from conversation import check_workspace_handoff
+        for payload in handoffs.values():
+            check_workspace_handoff(self, session, payload)
+        from repository_tools import validate_evidence
+        for workspace, evidence in sources.items():
+            validate_evidence(self, session, workspace, list(evidence.values()))
+        for expected in calibrations.values():
+            try: assert_binding(self, session, expected)
+            except InvalidUpdate as exc: raise PageFault(str(exc)) from None
+
+    def load_result(self, session, invocation_id, *, _architect_batch=None):
+        if _architect_batch is None:
+            return self._load_result(session, invocation_id)
+        batch = _architect_batch
+        if batch['owner'] is not self or batch['session'] != session:
+            raise PageFault('Architect result batch belongs to another ledger or session')
+        if invocation_id in batch['done']:
+            return copy.deepcopy(batch['done'][invocation_id][0]['proposal'])
+        if invocation_id in batch['visiting']:
+            raise PageFault('Architect result ancestry contains a cycle')
+        batch['visiting'].add(invocation_id)
+        try:
+            return self._load_result(session, invocation_id, _architect_batch=batch)
+        finally:
+            batch['visiting'].remove(invocation_id)
+
+    def _load_result(self, session, invocation_id, _architect_batch=None):
         row = self.db.execute('SELECT record_json FROM invocation_receipts WHERE session=? AND invocation_id=?', (session,invocation_id)).fetchone()
         if not row: raise PageFault('Unknown, wrong-session or pending invocation')
         receipt = json.loads(row[0])
@@ -276,6 +431,8 @@ class InvocationLedger(GovernedContext):
         if receipt['resulting_contract_hash'] != self.origin(session, bootstrap=True)['contract_hash'] or receipt['logic_hash'] != self.logic_hash:
             raise PageFault('Invocation result has stale contract or validator')
         env = json.loads(self.db.execute('SELECT record_json FROM invocations WHERE id=?', (invocation_id,)).fetchone()[0])
+        if _architect_batch is not None and env['role'] != 'architect':
+            raise PageFault('Architect result batch requires architect ancestry')
         from calibration import assert_binding,EMPTY_HASH
         try:assert_binding(self,session,env.get('calibration_binding',{'hash':EMPTY_HASH,'profiles':[]}))
         except InvalidUpdate as exc:raise PageFault(str(exc)) from None
@@ -291,6 +448,14 @@ class InvocationLedger(GovernedContext):
         if env['role'] != 'parser' and self.snapshot(session)['revision'] != env['revision']:
             raise PageFault('Invocation result has stale task state')
         payload = json.loads(self.db.execute('SELECT payload_json FROM deliveries WHERE id=?', (env['delivery_id'],)).fetchone()[0])
+        from invocation_timing import validate as validate_timing
+        validate_timing(env.get('transport_timing'), env['role'], payload, env['budget_profile']['response_reserve'])
+        if env.get('budget_profile', {}).get('context_profile') == 2:
+            from paging import Budget
+            from context_window import validate_proof
+            system, _ = expected_request(env['role'], payload)
+            validate_proof(env.get('physical_context'), Budget(**env['budget_profile']), system, payload,
+                           env['schema'], env.get('model_identity'))
         for p in payload.get('pages', []):
             page = self.read_page(session, p['id'], p['version'])
             if page.content_hash != p['hash']: raise PageFault('Invocation result has changed sources')
@@ -298,7 +463,9 @@ class InvocationLedger(GovernedContext):
             from conversation import check_workspace_handoff
             check_workspace_handoff(self,session,payload)
         if env['role'] in ('reviewer','coder','architect'):
-            for parent in payload.get('derived_from', []): self.load_result(session, parent)
+            for parent in payload.get('derived_from', []):
+                if _architect_batch is None: self.load_result(session, parent)
+                else: self.load_result(session, parent, _architect_batch=_architect_batch)
         if env['role'] == 'architect':
             from repository_tools import validate_evidence
             validate_evidence(self, session, payload['workspace'], payload['evidence'])
@@ -325,6 +492,8 @@ class InvocationLedger(GovernedContext):
             from api_roles import check_sources
             check_sources(self,session,payload)
             if env['role']=='api_reviewer':self.load_result(session,payload['candidate_id'])
+        if _architect_batch is not None:
+            _architect_batch['done'][invocation_id] = (copy.deepcopy(receipt), env, payload)
         return receipt['proposal']  # Derived context only; never source authority.
 
     def verify_invocations(self, session, complete=True):
@@ -354,6 +523,24 @@ class InvocationLedger(GovernedContext):
             r = json.loads(raw); seq += 1
             env = self.db.execute('SELECT record_json,digest,delivery_id FROM invocations WHERE id=? AND session=?', (iid,session)).fetchone()
             if not env or sha('invocation-v1:' + env[0]) != env[1] or r['invocation_hash'] != env[1]: return False
+            envelope = json.loads(env[0])
+            if envelope.get('transport_timing') is not None:
+                from invocation_timing import validate as validate_timing
+                delivered = json.loads(self.db.execute('SELECT payload_json FROM deliveries WHERE id=?', (env[2],)).fetchone()[0])
+                try:
+                    validate_timing(envelope['transport_timing'], envelope['role'], delivered, envelope['budget_profile']['response_reserve'])
+                except (InvalidUpdate, KeyError, TypeError, ValueError):
+                    return False
+            if envelope.get('budget_profile', {}).get('context_profile') == 2:
+                from paging import Budget
+                from context_window import validate_proof
+                delivered = json.loads(self.db.execute('SELECT payload_json FROM deliveries WHERE id=?', (env[2],)).fetchone()[0])
+                try:
+                    system, _ = expected_request(envelope['role'], delivered)
+                    validate_proof(envelope.get('physical_context'), Budget(**envelope['budget_profile']), system,
+                                   delivered, envelope['schema'], envelope.get('model_identity'))
+                except (InvalidUpdate, KeyError, TypeError, ValueError):
+                    return False
             if n != seq or r['previous_hash'] != previous or sha('invocation-receipt-v1:' + raw) != digest: return False
             if sha(canonical(r['proposal'])) != r['response_hash']: return False
             if 'model_response_hash' in r:
@@ -516,20 +703,40 @@ class InvocationGateway:
             from model_packet import build, descriptor
             packet = build(system, payload, schema) if getattr(self.provider, 'model_interface', None) == 1 else None
             interface = descriptor(packet, self.provider.budget.template_reserve) if packet else None
-            envelope = ledger.register(self.run_id, call_id, role, payload, system, schema, delivery_id, name, charge, budget={'context_limit':self.provider.budget.context_limit,'response_reserve':self.provider.budget.response_reserve,'template_reserve':self.provider.budget.template_reserve},resource=resource,model_identity=identity,model_interface=interface)
+            from context_window import check as check_window, exact, validate_proof
+            measurement = None
+            if exact(self.provider.budget):
+                # A model can restart after its dispatch gate. Revalidate the
+                # live identity immediately before committing the invocation.
+                measurement = check_window(self.provider.budget, system, payload, schema,
+                                           thinking=getattr(self.provider, 'thinking', None))
+                validate_proof(measurement, self.provider.budget, system, payload, schema, identity)
+                self.provider.context_measurement = measurement
+            from invocation_timing import plan as timing_plan, require_headroom
+            timing = timing_plan(self.provider, role, payload)
+            require_headroom(timing)
+            envelope = ledger.register(self.run_id, call_id, role, payload, system, schema, delivery_id, name, charge,
+                budget=vars(self.provider.budget).copy(),resource=resource,model_identity=identity,model_interface=interface,
+                context_measurement=measurement, transport_timing=timing)
             if self._borrowed is not None and envelope.get('orchestration'):
                 nid = envelope['orchestration']['node_id']
                 self._borrow_owner = (nid, self._scope_record(ledger, nid, envelope['session']))
         finally: self._release_ledger(ledger)
         if self._borrowed is not None and self._borrow_state() != self._borrow_proof:
             raise InvalidUpdate('Borrowed gateway binding changed before inference')
-        permit = {'hash': envelope['request_hash'], 'used': False, 'packet_hash': (envelope.get('model_interface') or {}).get('packet_hash')}
-        token = _permit.set(permit); error = None; proposal = None; record = None;started=time.monotonic()
+        from invocation_timing import reserved_seconds
+        call_seconds = reserved_seconds(envelope)
+        started=time.monotonic()
+        permit = {'hash': envelope['request_hash'], 'used': False, 'packet_hash': (envelope.get('model_interface') or {}).get('packet_hash'),
+                  'transport_seconds': call_seconds,
+                  'transport_deadline': started+call_seconds if envelope.get('transport_timing') else None}
+        token = _permit.set(permit); error = None; proposal = None; record = None
         failure_kind = None
         repairable = False
         from model_activity import scope
         try:
-            with scope(envelope) as activity:
+            from lifecycle import call_deadline
+            with scope(envelope) as activity, (call_deadline(call_seconds) if envelope.get('transport_timing') else nullcontext()):
                 proposal, record = self.provider.call(call_id, system, copy.deepcopy(payload), copy.deepcopy(schema))
                 if isinstance(self.provider,LocalModel) and observe(name)!=identity:
                     raise InvalidUpdate('Model identity changed during inference')
@@ -548,8 +755,11 @@ class InvocationGateway:
             if not error: ledger.confirm_delivery(delivery_id)
             from token_usage import measured, history
             from budget_accounting import settlement
+            try: progress = activity.progress_snapshot(finish=True)
+            except Exception: progress = None
             result = ledger.finalize(envelope, payload, proposal, error, time.monotonic() - started,
-                                     measured(record), settlement(envelope, record), failure_kind)
+                                     measured(record), settlement(envelope, record), failure_kind,
+                                     progress)
             activity.finish(result['admission']['admitted'], measured(record))
             result['token_usage'] = history(ledger.db, run_id=self.run_id)
             if error and not repairable: result['blocked'] = error

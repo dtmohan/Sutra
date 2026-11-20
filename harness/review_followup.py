@@ -35,9 +35,29 @@ def schema(p):
 
 
 def key(p):
-    return sha(canonical([p['contract']['contract_hash'], p['workspace'], p['request'], p['review_flow'],
-                          (p.get('conversation_handoff') or {}).get('invocation_id'),
-                          p['snapshot_owner'], p['snapshot_receipts']]))
+    values = [p['contract']['contract_hash'], p['workspace'], p['request'], p['review_flow'],
+              (p.get('conversation_handoff') or {}).get('invocation_id'),
+              p['snapshot_owner'], p['snapshot_receipts']]
+    if p.get('parent_context_version') in (2, 3):
+        values.append({'parent_context_version': p['parent_context_version']})
+    return sha(canonical(values))
+
+
+def planning_candidates(p, paths, graph):
+    """Use child gaps as retrieval hints, never as new source authorization."""
+    from review_context import ordered_sources, query
+    version = p.get('parent_context_version', 1)
+    notes = [item for child in p.get('child_results', ())
+             for item in child.get('remaining_unverified', ())]
+    base = ordered_sources(paths, graph, query(p), version=version, latest='\n'.join(notes))
+    if version not in (2, 3):
+        return base[:40], []
+    from review_context import retrieval_hints
+    preferred, references = retrieval_hints(notes, paths)
+    # Every preferred path was resolved inside the existing catalog. The model
+    # sees these as unverified missing-evidence addresses, not completed reads.
+    return list(dict.fromkeys(preferred + base))[:40], {
+        'paths': preferred, 'references': references.split()}
 
 
 def check(s, sid, p):
@@ -93,6 +113,9 @@ def authorizes(s, sid, iid, path, line):
 
 def load(s, sid, p):
     """Resolve exact excerpts by their receipts and recheck source freshness."""
+    if p.get('evidence_discovery_version') == 4:
+        from review_discovery import load as load_discovery
+        return load_discovery(s, sid, p)
     bundle = p.get('followup_receipts')
     if not bundle:
         return {}
@@ -124,6 +147,10 @@ def load(s, sid, p):
         if (entry['path'] != path or entry['line'] != line or sha(text) != entry['sha256']
                 or repo.read_excerpt(text, line)[0] != entry['text']):
             raise FollowupSourceChanged('Follow-up source changed', path)
+        entry = dict(entry)
+        if p.get('parent_context_version') in (2, 3):
+            cursor = evidence.get('next_cursor')
+            entry['line_complete'] = cursor is None or cursor['column'] == 0
         result[path] = entry
     return result
 
@@ -150,18 +177,27 @@ def expand(s, sid, p, data, root, provider, real):
     else:
         from auto_review import CODE
         from chat_runtime import excerpts
-        from review_context import context_budget, ordered_sources, query
+        from review_context import context_budget
         paths = [path for path in repo.catalog(s, sid) if Path(path).suffix in CODE]
-        paths = ordered_sources(paths, data['graph'], query(p))[:40]
+        paths, hints = planning_candidates(p, paths, data['graph'])
         if not paths:
             return {}, None
         packet = {k: p[k] for k in ('request', 'contract', 'workspace', 'review_flow',
                                   'snapshot_owner', 'snapshot_receipts')}
+        version = p.get('parent_context_version', 1)
+        if version in (2, 3):
+            packet.update(parent_context_version=version, evidence_requests_unverified=hints)
         if p.get('conversation_handoff'):
             packet['conversation_handoff'] = p['conversation_handoff']
+        excerpt_options = ({'whole_lines': True, 'preferred_paths': hints['paths']}
+                           if version in (2, 3) else {})
+        if version >= 3:
+            excerpt_options.update(recipe_version=3, symbol_hints=' '.join(hints['references']))
+        symbol_query = p['request'] + ('\n' + ' '.join(hints['references']) if isinstance(hints, dict) else '')
         packet.update(read_key=read_key, planning_model=provider.model, readable_files=paths,
-                      excerpts=excerpts(data['sources'], p['request'], 1500, data['graph']),
-                      readable_symbols=_symbols(data['graph'], paths, p['request']))
+                      excerpts=excerpts(data['sources'], p['request'], 1500, data['graph'], **excerpt_options),
+                      readable_symbols=_symbols(data['graph'], paths, symbol_query, version=version,
+                                                latest=' '.join(hints['references']) if isinstance(hints, dict) else ''))
         old_budget = provider.budget
         old_thinking = getattr(provider, 'thinking', None)
         try:
@@ -172,8 +208,10 @@ def expand(s, sid, p, data, root, provider, real):
                 budget = provider.budget
                 # A model with unadvertised reasoning controls may spend output on thinking.
                 reserve = 512 if provider.thinking is False else min(2048, budget.response_reserve)
-                provider.budget = Budget(budget.context_limit, reserve, budget.template_reserve)
+                provider.budget = budget.with_limits(response_reserve=reserve)
             charge = provider.budget.check(SYSTEM, packet, schema(packet))
+            from context_window import check as check_window
+            check_window(provider.budget, SYSTEM, packet, schema(packet), planning=True)
             # This optional round cannot reserve the slots needed for drafting and review.
             frames = machine.gates(s, owner, {'calls': 3, 'tokens': charge + provider.budget.response_reserve,
                                                'seconds': 150})
@@ -211,13 +249,17 @@ def expand(s, sid, p, data, root, provider, real):
     return load(s, sid, p), usage
 
 
-def _symbols(graph, paths, prompt):
+def _symbols(graph, paths, prompt, *, version=1, latest=''):
     from review_context import EvidenceFocus
     focus = EvidenceFocus(prompt)
     result = {}
     for path in paths[:30]:
-        choices = [n for n in graph['nodes'] if n['path'] == path and n['name'] != '<module>']
-        choices.sort(key=lambda n: (focus.symbol(path, n['name']), -n['line']), reverse=True)
+        if version >= 3:
+            from review_context import ranked_declarations
+            choices = ranked_declarations(graph, path, prompt, latest)
+        else:
+            choices = [n for n in graph['nodes'] if n['path'] == path and n['name'] != '<module>']
+            choices.sort(key=lambda n: (focus.symbol(path, n['name']), -n['line']), reverse=True)
         if choices:
             result[path] = [[n['name'][:64], n['line']] for n in choices[:4]]
     return result

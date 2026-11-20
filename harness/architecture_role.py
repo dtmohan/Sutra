@@ -17,6 +17,8 @@ def quote_schema(items):
 def schema(payload):
  keys=sorted(payload['contract']['constraints']);ids=[e['id'] for e in payload['evidence']]
  kinds=['read','search','list','clarify'] if payload.get('phase','explore')=='explore' and payload['repository']['budget']['decision']=='ALLOW' else ['report','clarify']
+ if payload.get('evidence_discovery_version') == 4 and kinds == ['read','search','list','clarify']:
+  kinds=['read','search','list','report','clarify']
  fields={'task_id':S,'constraints':arr(obj({'key':{'type':'string','enum':keys},'value':S})),
  'summary':S,'findings':arr(obj({'page_id':{'type':'string','enum':ids or ['']},'quote':quote_schema(payload['evidence']),'note':S})),
  'completed':arr(S),'remaining':arr(S),
@@ -37,7 +39,8 @@ def schema(payload):
   by_file={}
   for e in payload['evidence']:by_file.setdefault(e['path'],[]).append(e['id'])
   fields['findings']=obj({name:obj({'page_id':{'type':'string','enum':ids},'quote':quote_schema([e for e in payload['evidence'] if e['path']==name]),'note':S}) for name,ids in by_file.items()})
- for k in ('completed','remaining'):fields[k]['maxItems']=3
+ fields['completed']['maxItems']=3
+ # Keep all unverified follow-ups; the 1600-byte note allocation still applies.
  return obj(fields)
 
 def reduce_handoff(handoff,level):
@@ -53,6 +56,10 @@ def request_check(s,session,payload):
  check(payload)
  check_request(s,session,payload,lambda h:reduce_handoff(h,payload.get('handoff_level',0)));repo.settings(s,session)
  if payload.get('phase') not in ('explore','report'):raise InvalidUpdate('Unknown architecture phase')
+ if payload.get('evidence_discovery_version') == 4:
+  from review_discovery import check_request as check_discovery
+  check_discovery(s,session,payload)
+  return
  if payload['repository'].get('last_tool')!=repo.feedback(s,session):raise InvalidUpdate('Repository result changed during inference')
  budget=repo.usage(s,session)
  if payload['repository']['budget']!=budget:raise InvalidUpdate('Repository budget changed during inference')
@@ -75,10 +82,16 @@ def validate(s,session,payload,proposal):
   if not f['quote'].strip() or f['quote'] not in supplied[f['page_id']]['text'] or not f['note'].strip():raise InvalidUpdate('Citation for '+supplied[f['page_id']]['path']+' must be an exact nonempty quote from its supplied evidence, with a note.')
   cited.add(f['page_id'])
  t=proposal['tool'];kind=t['kind']
- if kind in ('read','search','list'):repo.request_check(s,session,kind,t['target'],t['query'],t['line'],t.get('cursor'))
+ if kind in ('read','search','list'):
+  search_version=payload.get('discovery_search_version') if kind=='search' and payload.get('evidence_discovery_version')==4 else None
+  repo.request_check(s,session,kind,t['target'],t['query'],t['line'],t.get('cursor'),search_version=search_version)
  elif t['target'] or t['query'] or t['line']!=1 or t.get('cursor') is not None:raise InvalidUpdate('Report/clarify cannot request a tool')
  if kind=='report':
-  if len({supplied[i]['path'] for i in cited})<min(2,payload['repository']['total_files']):raise InvalidUpdate('Report requires cited inspection of at least two catalog files (or the sole file)')
+  if payload.get('evidence_discovery_version') == 4 and payload.get('discovery_selection_version') in (1, 2, 3):
+   from review_discovery import read_paths
+   if len(read_paths(s,session,payload)) < min(2,payload['repository']['total_files']):
+    raise InvalidUpdate('Discovery readiness requires actual current reads of at least two catalog files (or the sole file)')
+  elif len({supplied[i]['path'] for i in cited})<min(2,payload['repository']['total_files']):raise InvalidUpdate('Report requires cited inspection of at least two catalog files (or the sole file)')
  names=repo.catalog(s,session)
  for edge in proposal['edges']:
   if edge['from'] not in names or edge['to'] not in names or edge['page_id'] not in cited:raise InvalidUpdate('Diagram node or evidence is unsupported')

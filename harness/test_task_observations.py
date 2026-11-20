@@ -117,11 +117,16 @@ class ObservationTests(unittest.TestCase):
         self.assertFalse(out['result']['accepted_output']['complete'])
         self.assertEqual(len(out['result']['task_observation']['issues']),3)
 
-    def test_worker_omission_is_diagnostic_even_when_decoder_requests_field(self):
+    def test_worker_omission_is_optional_before_decoding_and_diagnostic_at_admission(self):
         routed,prompt=self.route();provider=Worker(MODELS['high'])
         out=chat_runtime.answer(self.s,self.meta,self.ws,self.storage,
             {'prompt':prompt,'models':MODELS,'tier':'high','conversation_id':routed['result']['invocation_id']},provider=provider)
-        self.assertIn(obs.FIELD,chat_runtime.schema(provider.payloads[0])['required'])
+        from model_packet import build
+        schema = chat_runtime.schema(provider.payloads[0])
+        packet = build(chat_runtime.SYSTEM, provider.payloads[0], schema)
+        self.assertNotIn(obs.FIELD, schema['required'])
+        self.assertNotIn(obs.FIELD, packet['schema']['required'])
+        self.assertEqual(packet['schema']['properties'][obs.FIELD], {})
         self.assertTrue(out['result']['admission']['admitted'])
         self.assertEqual(out['result']['task_observation']['status'],'missing')
         self.assertEqual(len(provider.payloads),1)
@@ -133,6 +138,32 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(out['result']['task_observation']['status'],'malformed')
         self.assertFalse(self.s.snapshot(self.sid)['constraints']['network_allowed'])
         self.assertTrue(self.s.verify_invocations(self.sid))
+
+    def test_decoder_observation_shape_cannot_block_commitments_or_assessments(self):
+        from model_packet import build
+        routed, prompt = self.route({'permissions': {'network_allowed': True}})
+        env = json.loads(self.s.db.execute('SELECT record_json FROM invocations WHERE id=?',
+            (routed['result']['invocation_id'],)).fetchone()[0])
+        payload = json.loads(self.s.db.execute('SELECT payload_json FROM deliveries WHERE id=?',
+            (env['delivery_id'],)).fetchone()[0])
+        wire = build(conversation.SYSTEM, payload, env['schema'])['schema']
+        self.assertNotIn(obs.FIELD, wire['required'])
+        self.assertEqual(wire['properties'][obs.FIELD], {})
+        self.assertEqual(routed['result']['task_observation']['status'], 'malformed')
+        for value in (None, {}, 'bad', 1.5, {'permissions': {'network_allowed': True}}):
+            with self.subTest(value=value):
+                good, request = self.route()
+                provider = Worker(MODELS['high'], lambda r,p:r.update({obs.FIELD: value}))
+                out = chat_runtime.answer(self.s, self.meta, self.ws, self.storage,
+                    {'prompt': request, 'models': MODELS, 'tier': 'high',
+                     'conversation_id': good['result']['invocation_id']}, provider=provider)
+                packet = build(chat_runtime.SYSTEM, provider.payloads[0],
+                               chat_runtime.schema(provider.payloads[0]))
+                self.assertEqual(packet['schema']['properties'][obs.FIELD], {})
+                self.assertEqual(out['result']['task_observation']['status'], 'malformed')
+                self.assertTrue(out['result']['admission']['admitted'])
+                self.assertEqual(len(provider.payloads), 1)
+                self.assertFalse(self.s.snapshot(self.sid)['constraints']['network_allowed'])
 
     def test_observation_cannot_hide_authoritative_constraint_failure(self):
         routed,prompt=self.route()
@@ -224,6 +255,14 @@ class ObservationFlowTests(unittest.TestCase):
                     self.assertEqual(p['conversation_handoff']['task_commitment'],obs.context(c))
                     self.assertEqual(p['request'],self.prompt)
                     self.assertEqual(p['contract']['constraints'],contract['constraints'])
+                    if stage == 'subagent':
+                        from model_packet import build
+                        import subagent_runtime
+                        packet = build(subagent_runtime.SYSTEM, p, subagent_runtime.schema(p))
+                        body = json.loads(packet['messages'][1]['content'])
+                        self.assertNotIn('task_commitment', body)
+                        self.assertNotIn(obs.FIELD, packet['schema']['properties'])
+                        self.assertNotIn('assess its criteria', packet['messages'][0]['content'])
         self.assertGreater(orchestration.spent(self.s,parent)['calls'],used['calls'])
         self.assertTrue(self.s.verify_invocations(sid))
 

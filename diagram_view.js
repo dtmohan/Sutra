@@ -35,14 +35,23 @@ function diagramHTML(root,{cspSource,nonce,stylesheet}){
 function install(vscode,context,read){
   let last=context.workspaceState?.get('karma.lastDiagram');
   async function open(data,source=false){
-    const d=validate(source?data.review_diagram:data.result.accepted_output.diagram),id=data.result.invocation_id;
-    last=source?{kind:'source',id,diagram:d}:id;await context.workspaceState?.update('karma.lastDiagram',last);
+    const views=(source?[data.review_flow_diagram,data.review_diagram].filter(Boolean):[data.result.accepted_output.diagram]).map(validate);
+    let selected=Number.isInteger(data.review_selected_view)&&data.review_selected_view>=0&&data.review_selected_view<views.length?data.review_selected_view:0,d=views[selected];const id=data.result.invocation_id;
+    async function remember(){last=source?{kind:'source',id,diagram:d,views,selected}:id;await context.workspaceState?.update('karma.lastDiagram',last);}
+    await remember();
     const panel=vscode.window.createWebviewPanel('karma.diagram',d.title,vscode.ViewColumn.Beside,{enableScripts:true,localResourceRoots:[vscode.Uri.file(path.join(context.extensionPath,'media'))]});
     const nonce=crypto.randomBytes(18).toString('base64'),web=panel.webview;
     const stylesheet=web.asWebviewUri(vscode.Uri.file(path.join(context.extensionPath,'media/diagram.css'))).toString();
     const html=diagramHTML(context.extensionPath,{cspSource:web.cspSource,nonce,stylesheet});
+    async function present(){await web.postMessage({type:'diagram',diagram:d,source:mermaidSource(d),receipt:id,
+      provenance:source?(data.review_flow_diagram&&selected===0?'review-flow':'source'):'conversation',
+      views:views.map(value=>value.title),selected});}
     web.onDidReceiveMessage(async message=>{try{
-      if(message.type==='ready'){await web.postMessage({type:'diagram',diagram:d,source:mermaidSource(d),receipt:id,provenance:source?'source':'conversation'});return;}
+      if(message.type==='ready'){await present();return;}
+      if(message.type==='view'){
+        if(!Number.isInteger(message.index)||message.index<0||message.index>=views.length)throw Error('Invalid diagram view');
+        selected=message.index;d=views[selected];panel.title=d.title;await remember();await present();return;
+      }
       if(message.type==='layout'){await web.postMessage({type:'source',source:mermaidSource(d,message.direction)});return;}
       if(message.type==='copy'){await vscode.env.clipboard.writeText(mermaidSource(d,message.direction));return;}
       if(message.type==='export'){
@@ -54,7 +63,10 @@ function install(vscode,context,read){
     web.html=html;
     context.subscriptions.push(panel);return panel;
   }
-  context.subscriptions.push(vscode.commands.registerCommand('karma.openLastDiagram',async()=>{if(!last){void vscode.window.showInformationMessage('Ask Sutra Auto to draw a diagram first.');return;}try{if(last.kind==='source')await open({review_diagram:{...last.diagram,note:'Saved review snapshot. '+last.diagram.note.slice(0,210)},result:{invocation_id:last.id}},true);else await open(await read(last));}catch(e){void vscode.window.showErrorMessage(e.message);}}));
+  context.subscriptions.push(vscode.commands.registerCommand('karma.openLastDiagram',async()=>{if(!last){void vscode.window.showInformationMessage('Ask Sutra Auto to draw a diagram first.');return;}try{if(last.kind==='source'){
+    const views=(last.views||[last.diagram]).map(value=>({...value,note:'Saved review snapshot. '+value.note.replace(/^(Saved review snapshot\. )+/,'').slice(0,210)}));await open({review_flow_diagram:views.length>1?views[0]:null,
+      review_diagram:views[views.length-1],review_selected_view:last.selected,result:{invocation_id:last.id}},true);
+  }else await open(await read(last));}catch(e){void vscode.window.showErrorMessage(e.message);}}));
   return {open,openReview:data=>open(data,true)};
 }
 module.exports={install,validate,mermaidSource,safeSVG,diagramHTML};

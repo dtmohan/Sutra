@@ -1,8 +1,8 @@
 'use strict';
-const vscode=acquireVsCodeApi(),el=id=>document.getElementById(id),T=KarmaTokens;
+const vscode=acquireVsCodeApi(),el=id=>document.getElementById(id),T=KarmaTokens,C=SutraCoherence,G=SutraGenerationProgress;
 const node=(tag,text,cls)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;};
 function setText(id,text){const element=el(id);if(element.textContent!==text)element.textContent=text;}
-let workflowSignature='',observationSignature='',usageSignature='';
+let workflowSignature='',observationSignature='',coherenceSignature='',usageSignature='';
 let snapshot,routing,native,error,filters={...vscode.getState()?.filters};
 const finite=n=>typeof n==='number'&&Number.isFinite(n);
 const decisions=new Set(['ALLOW','BRIDGE','FIN','COMPOUND_FIN']);
@@ -29,6 +29,40 @@ function renderTaskObservations(rows){
   if(o.issues.length)d.append(node('p','Observation issues: '+o.issues.join('; '),'notice'));
   box.append(d);
  }
+}
+function renderCoherenceObservations(value){
+ const rows=C.recent(value),signature=JSON.stringify(rows);
+ if(signature===coherenceSignature)return;coherenceSignature=signature;
+ const box=el('coherence-observations'),existing=new Map([...box.children].map(d=>[d.dataset.id,d]));
+ const focused=box.contains(document.activeElement)?document.activeElement.closest('details')?.dataset.id:undefined;
+ const desired=[];
+ rows.forEach((row,index)=>{
+  const o=row.observation,id=o.invocation_id||o.frame_hash||o.binding.session+':'+o.binding.task+':'+index;
+  const rowSignature=JSON.stringify(row),old=existing.get(id);
+  if(old?.dataset.signature===rowSignature){desired.push(old);return;}
+  const d=node('details');d.dataset.id=id;d.dataset.signature=rowSignature;d.open=!!old?.open;
+  const status=o.status==='unavailable'?'Diagnostic unavailable':o.status==='partial'?'Partial structured observation':'Structured observation';
+  d.append(node('summary',status+(o.role?' · '+o.role.replaceAll('_',' '):'')+(o.model?' · '+o.model:'')+(o.binding.task?' · '+o.binding.task.slice(0,48):'')+(o.invocation_id?' · '+o.invocation_id.slice(0,8):'')));
+  d.append(node('p','Task: '+(o.binding.task||'not recorded')+' · Chat: '+(o.binding.chat||'not recorded')+' · Session: '+(o.binding.session||'not recorded'),'plot-note'));
+  d.append(node('p','Gateway: '+row.gateway_status+' · observe only; no authorization or completion effect','muted'));
+  if(o.kernel)d.append(node('p','Suggested adapter frame: '+o.kernel.decision+' · diagnostic only','plot-note'));
+  if(o.issues.length){
+   const list=node('ul');
+   for(const issue of o.issues)list.append(node('li',C.issueLabel(issue)+(issue.detail?' — '+issue.detail:'')));
+   d.append(list);
+  }else d.append(node('p',o.status==='unavailable'?'This diagnostic could not be completed.':o.omitted_issues?'Recorded indicators exceed this diagnostic allowance.':'No issue was flagged in the supplied structured items. General prose coherence is unassessed.','plot-note'));
+  if(o.omitted_issues)d.append(node('p',o.omitted_issues+' additional indicators were omitted by the diagnostic allowance.','plot-note'));
+  const counts=Object.entries(o.coverage).slice(0,8).map(([key,n])=>key.replaceAll('_',' ')+': '+n);
+  if(counts.length)d.append(node('p','Structural counts · '+counts.join(' · '),'plot-note'));
+  d.append(node('p','Model interpretations and semantic indicators are unverified. Source references establish provenance, not truth.','plot-note'));
+  desired.push(d);
+ });
+ const kept=new Set(desired);
+ for(const child of [...box.children])if(!kept.has(child))child.remove();
+ desired.forEach((child,index)=>{if(box.children[index]!==child)box.insertBefore(child,box.children[index]||null);});
+ if(focused&&document.activeElement?.closest('details')?.dataset.id!==focused)
+  desired.find(d=>d.dataset.id===focused)?.querySelector('summary')?.focus();
+ el('coherence-empty').hidden=!!rows.length;
 }
 function renderLogicalMemory(m){
  const counts=m?.counters||{},events=m?.events||[];
@@ -66,8 +100,12 @@ function renderRamMemory(memory){
 function renderMonitor(){
  const d=snapshot?.monitor||{},h=d.hardware||{},s=h.sample||{},now=Date.now(),elapsed=(now-Date.parse(snapshot?.updatedAt))/1000;
  renderTaskObservations(d.task_observations);
+ renderCoherenceObservations(d.coherence_observations);
  renderLogicalMemory(d.logical_memory);
  renderRamMemory(d.ram_compartments);
+ const diagnosticErrors=Array.isArray(d.diagnostic_errors)?d.diagnostic_errors:[];
+ setText('diagnostic-errors',diagnosticErrors.map(issue=>issue.section+': '+issue.message).join(' · '));
+ el('diagnostic-errors').hidden=!diagnosticErrors.length;
  const snapshotFresh=!!snapshot&&!error&&finite(elapsed)&&elapsed>=0&&elapsed<=8;
  const hwFresh=snapshotFresh&&h.available===true&&T.freshAge(h.age_seconds,elapsed);
  const why=error?'Readings unavailable':!snapshotFresh&&snapshot?'Readings expired':h.reason||'Waiting for system readings';
@@ -140,7 +178,9 @@ function renderMonitor(){
  }
  }
  const c=d.context;
- el('context-packet').textContent=c?'Last workspace packet: '+T.number(c.conservative_input_charge)+' input charge + '+T.number(c.output_reserve)+' output reserve / '+T.number(c.limit)+' context allocation. Measured input: '+T.number(c.actual_prompt_tokens)+' tokens.':'No workspace model packet recorded. Conversation history and workspace task allocations are separate.';
+ el('context-packet').textContent=c?'Last workspace reservation: '+T.number(c.conservative_input_charge)+' conservative input units + '+T.number(c.output_reserve)+' output reserve / '+T.number(c.limit)+' reservation units. Measured input: '+T.number(c.actual_prompt_tokens)+' tokens.':'No workspace model packet recorded. Conversation history and workspace task allocations are separate.';
+ if(c?.context_profile===2)el('context-packet').textContent='Last workspace spending reservation: '+T.number(c.conservative_input_charge)+' conservative input units + '+T.number(c.output_reserve)+' output reserve / '+T.number(c.reservation_limit)+' reservation units. Measured runtime input: '+T.number(c.actual_prompt_tokens)+' tokens.';
+ if(c?.latest_physical_window){const p=c.latest_physical_window;el('context-packet').textContent+=' Latest exact physical window ('+p.model+' / '+p.role+'): '+T.number(p.prompt_tokens)+' prompt tokens + '+T.number(p.output_reserve)+' output reserved'+(p.protocol_margin?' + '+T.number(p.protocol_margin)+' protocol margin':'')+' / '+T.number(p.context_tokens)+' tokens · '+p.decision+'.';}
  if(c?.model_packet){const p=c.model_packet;el('context-packet').textContent+=' Model-facing prompt: '+T.number(p.prompt_utf8_bytes)+' UTF-8 bytes; schema allowance: '+T.number(p.schema_allowance)+'; template allowance: '+T.number(p.template_allowance)+'. Host governance records are excluded.';}
  if(c?.accounting_settlement){const a=c.accounting_settlement;el('context-packet').textContent+=' Task charge: '+T.number(a.used_tokens)+' ('+(a.basis==='runtime_measured'?'completed runtime counts':'reservation retained')+'). Unused reservation released: '+T.number(a.released_unused_reservation)+'.';}
  el('kernel-identity').textContent=d.kernel?'Kernel: '+d.kernel.name+' · SHA-256 '+d.kernel.sha256+' · check order '+(d.kernel.order||[]).join(' → '):'Kernel identity not available.';
@@ -210,7 +250,7 @@ function renderReasoningPreference(preference,fixed){
  }
  setText('tier-reasoning-summary',overrides.join(' | '));
  el('tier-reasoning-summary').hidden=!overrides.length;
- setText('reasoning-preference-note','Sutra Auto and inheriting tiers use the shared setting. In Adaptive, multi-file report synthesis can use thinking when there is room for the answer and a retry. Use Sutra: Think on Next Request in the Command Palette for a one-turn override.');
+ setText('reasoning-preference-note','Sutra Auto and inheriting tiers use the shared setting. In Adaptive, source-backed architecture planning and eligible multi-file report synthesis can use thinking within the existing allocation. Use Sutra: Think on Next Request in the Command Palette for a one-turn override of planning and answering; child tasks keep their configured reasoning.');
 }
 function fillOptions(key){
  const values=[...new Set((snapshot?.calls||[]).map(c=>c[key]))].sort();if(filters[key]&&!values.includes(filters[key]))values.push(filters[key]);
@@ -257,7 +297,8 @@ function renderActivity(calls){
   if(!card){
    card=node('details',undefined,'reasoning-card');card.dataset.id=c.id;
    const open=node('button','Open call details');open.onclick=()=>vscode.postMessage({type:'activity_details',id:c.id});
-   card.append(node('summary'),node('p',undefined,'plot-note'),node('pre'),node('p',undefined,'plot-note'),open);box.prepend(card);
+   const indicator=node('p',undefined,'plot-note');indicator.setAttribute('role','status');indicator.setAttribute('aria-live','polite');indicator.hidden=true;
+   card.append(node('summary'),node('p',undefined,'plot-note'),node('pre'),node('p',undefined,'plot-note'),indicator,open);box.prepend(card);
   }
   card.children[0].textContent=(c.role==='report_reviewer'?'Architecture claim review':c.role==='subagent'?'Child review':c.role==='chat_reviewer'?'Workspace review':c.role==='conversation'?'Conversation / routing':'Model call')+' · '+c.model+' · '+c.role+' · '+(c.status==='accepted'?'Protocol checks passed':c.status);
   card.children[1].textContent='Invocation '+c.id+(c.node_id?' · task '+c.node_id:'')+' · reasoning control: '+(c.requested===false?'off requested':c.requested===true?'on requested':c.requested===null?'model default':c.requested??'not reported');
@@ -265,6 +306,9 @@ function renderActivity(calls){
    'Reasoning was reported but its text is unavailable in this archive.':'No separate reasoning text received.');
   const usage=c.usage,elapsed=((c.finishedAt||Date.now())-c.startedAt)/1000;
   card.children[3].textContent=(usage?(usage.input_tokens??'?')+' input / '+(usage.output_tokens??'?')+' output tokens':c.status==='generating'?'Token counts available when the call finishes':'Token counts unavailable for this call')+' · '+elapsed.toFixed(1)+'s'+(c.display_truncated?' · Display shortened; generation remains charged.':'');
+  const generation=G.normalize(c.generation_progress);
+  card.children[4].hidden=!generation;card.children[4].textContent=generation?G.describe(generation):'';
+  if(generation?.repetition_indicator)card.children[0].textContent+=' · literal repetition observed';
  }
  el('reasoning-empty').hidden=calls.length>0;
 }

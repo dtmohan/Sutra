@@ -71,7 +71,7 @@ class ClaimReviewRecoveryTests(unittest.TestCase):
 
         with patch('claim_pages.partition', side_effect=split), patch.dict('os.environ', SUTRA_THINKING='on'):
             ready = self.until('SYNTHESIS')
-            paused = self.step(ready)
+            paused = self.until('PAUSED', ready)
         self.assertEqual(paused['state'], 'PAUSED', paused.get('stop'))
         self.assertEqual(paused['stop']['status'], 'claim_review_output_limit')
         self.assertEqual(paused['stop']['resume_phase'], 'SYNTHESIS')

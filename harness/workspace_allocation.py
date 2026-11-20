@@ -125,7 +125,7 @@ def try_amend(s, fid, meta):
     A missing measurement, another kind of stop or non-review flow yields None.
     """
     import orchestration as m
-    from allocation_recovery import _append, preview
+    from allocation_recovery import _append, child_increase, child_additions, preview
     from orchestration_flow import info, identity, recovery
     from review_budget import usage
 
@@ -182,21 +182,25 @@ def try_amend(s, fid, meta):
                     and record['proposal']['used'][dimension] == budget['used'][dimension]):
                 return dict(result, reason='no_progress')
 
-        # A replacement execution cannot inherit unfinished child work. Do not
-        # alter branch allowances or discard a pending action to reopen a budget.
-        if m.state(s, root['id']) != 'READY':
-            return dict(result, reason='pending_execution')
         for nid in m.descendants(s, root['id']):
             state = m.state(s, nid)
             if (state in ('RUNNING', 'EXECUTING_ACTION', 'CANCELLING')
-                    or nid != root['id'] and state not in m.TERMINAL
                     or s.db.execute(
                         'SELECT 1 FROM orchestration_charges c LEFT JOIN orchestration_settlements r '
                         'ON r.charge_id=c.id WHERE c.node_id=? AND r.charge_id IS NULL', (nid,),
                     ).fetchone()):
                 return dict(result, reason='pending_execution')
+        child = child_increase(s, data)
+        # Settled quantitative child stops amend the existing execution and branch.
+        # Other stops still require an idle execution before its renewal.
+        if not child and (m.state(s, root['id']) != 'READY'
+                          or any(m.state(s, nid) not in m.TERMINAL
+                                 for nid in m.descendants(s, root['id'])[1:])):
+            return dict(result, reason='pending_execution')
         step = max(MINIMUM_INCREASE[dimension], math.ceil(budget['base_limits'][dimension] / 4))
-        extra = min(room, max(minimum, step))
+        extra = child_additions(child)[dimension] if child else min(room, max(minimum, step))
+        if extra > room:
+            return dict(result, reason='workspace_limit', limit=ceilings[dimension], remaining=max(room, 0))
         gate = _workspace_gate(dimension, before, ceilings, extra)
         if gate['decision'] != 'ALLOW':
             return dict(result, reason='workspace_limit', limit=ceilings[dimension],

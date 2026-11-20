@@ -22,12 +22,22 @@ def initialize(s):
         s.db.execute(f"CREATE TRIGGER IF NOT EXISTS immutable_allocation_{op} BEFORE {op} ON allocation_amendments BEGIN SELECT RAISE(ABORT,'immutable allocation amendment'); END")
 
 
-def effective(s, sid, base):
+def effective(s, sid, base, *, contract_hash=None, _visited=()):
     """Read without migrations so the monitor can use a read-only connection."""
+    origin = contract_hash or s.origin(sid)['contract_hash']
+    if origin in _visited:
+        raise InvalidUpdate('Allocation carry contains a contract cycle')
     limits = dict(base); version = 0; previous = 'GENESIS'
+    from native_access import allocation_carry
+    carry = allocation_carry(s, sid, origin)
+    if carry:
+        saved = carry['carry_allocation']
+        inherited = effective(s, sid, base, contract_hash=carry['before'], _visited=(*_visited, origin))
+        if (saved['base_limits'] != base or inherited != (saved['limits'], saved['version'], saved['head'])):
+            raise InvalidUpdate('Read-scope correction allocation prefix differs from its receipts')
+        limits, version, previous = inherited
     if not s.db.execute("SELECT 1 FROM sqlite_master WHERE name='allocation_amendments'").fetchone():
         return limits, version, previous
-    origin = s.origin(sid)['contract_hash']
     for number, raw, digest in s.db.execute('SELECT version,record_json,digest FROM allocation_amendments WHERE session=? AND contract_hash=? ORDER BY version', (sid, origin)):
         r = json.loads(raw)
         p = r['proposal']
@@ -92,19 +102,114 @@ def eligible(s, fid, meta):
     return n, data, sid
 
 
+def child_additions(child):
+    """Keep historical token proposals unchanged; new dimensions are explicit."""
+    if child.get('format') == 2:
+        return dict(child['additions'])
+    return {'tokens': child['tokens']}
+
+
+def _quantitative_child_increase(s, data, stop, frame):
+    import orchestration as m
+    dimension = frame.get('limiting_dimension')
+    branch = (stop.get('child_repair') or {}).get('branch_id') or frame.get('node_id')
+    if (stop.get('status') != 'task_budget' or frame.get('profile') != 'task-allocations-v1'
+            or frame.get('adapter') != 'karma' or dimension not in MAXIMA
+            or dimension == 'tokens' or branch not in data.get('children', ())):
+        return None
+    try:
+        cost = frame['reserved_next']
+        required = cost.get(dimension, 0)
+        check = KarmaAdapter().allocations(frame['used'], frame['limits'], cost)
+        if (check['decision'] == 'ALLOW' or check['decision'] != frame.get('decision')
+                or check['limiting_dimension'] != dimension or type(required) not in (int, float)
+                or not math.isfinite(required) or required < 0):
+            raise ValueError('quantitative stop mismatch')
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise InvalidUpdate('The child allocation stop differs from its measured quantitative gate') from None
+    child = m.checked(s, branch); root = m.checked(s, data['root_node'])
+    if (child['kind'] != 'branch' or child['parent_id'] != root['id']
+            or m.state(s, child['id']) != 'READY' or root['kind'] != 'execution'
+            or m.state(s, root['id']) != 'WAITING_CHILDREN'):
+        raise InvalidUpdate('The saved child no longer owns this allocation stop')
+    frames = m.gates(s, child['id'], {})
+    if frame.get('node_id') not in {item['node_id'] for item in frames}:
+        raise InvalidUpdate('The child allocation stop is outside its execution ancestors')
+    extra = max(math.ceil(math.floor(item['used'][dimension] + required) + 1 - item['limits'][dimension])
+                for item in frames)
+    if extra <= 0:
+        raise InvalidUpdate('This child already has the measured capacity. Resume the saved review.')
+    gates = {}
+    for item in frames:
+        limits = dict(item['limits']); limits[dimension] += extra
+        gate = KarmaAdapter().allocations(item['used'], limits, cost)
+        if gate['decision'] != 'ALLOW':
+            raise InvalidUpdate('The child allocation cannot cover the measured request without another budget dimension')
+        gates[item['node_id']] = gate
+    return {'format': 2, 'branch': child['id'], 'execution': root['id'],
+            'dimension': dimension, 'additions': {dimension: extra},
+            'minimum_cost': dict(cost), 'kernel': gates}
+
+
+def quantitative_event_additions(s, node, event):
+    """Replay only additions bound to the same immutable amendment receipt."""
+    data = event['data']; additions = data.get('additions')
+    if (type(data.get('version')) is not int or data['version'] != 2
+            or not isinstance(additions, dict) or not additions
+            or set(additions) - (MAXIMA.keys() & node['limits'].keys())
+            or any(type(amount) is not int or amount <= 0 for amount in additions.values())):
+        raise InvalidUpdate('Invalid quantitative child allocation event')
+    row = s.db.execute('SELECT record_json FROM allocation_amendments WHERE digest=?',
+                       (data.get('allocation_receipt'),)).fetchone()
+    if not row or sha('allocation-amendment-v1:' + row[0]) != data.get('allocation_receipt'):
+        raise InvalidUpdate('Quantitative child allocation receipt is missing or changed')
+    record = json.loads(row[0]); proposal = record['proposal']; child = proposal.get('child_allocation') or {}
+    if (child.get('format') != 2 or child.get('additions') != additions or proposal['additions'] != additions
+            or node['id'] not in (child.get('branch'), child.get('execution'))
+            or node['session'] != proposal['session'] or node['binding'] != proposal['binding']
+            or proposal.get('proposal_id') != proposal_hash(proposal)
+            or event.get('kernel') != child.get('kernel', {}).get(node['id'])):
+        raise InvalidUpdate('Quantitative child allocation differs from its approved proposal')
+    gate = event['kernel']
+    if (gate.get('decision') != 'ALLOW'
+            or gate != KarmaAdapter().allocations(gate['used'], gate['limits'], child['minimum_cost'])):
+        raise InvalidUpdate('Quantitative child allocation kernel receipt changed')
+    return dict(additions)
+
+
 def child_increase(s, data):
-    """Measure an in-place token amendment for the paused, settled child."""
+    """Measure an in-place amendment for the paused, settled child."""
     import orchestration as m
     stop = data.get('workflow_stop') or {}
-    if stop.get('resume_phase') != 'CHILDREN':
+    if (stop.get('resume_phase') or stop.get('stage')) != 'CHILDREN':
         return None
+    frame = stop.get('frame') or {}
+    if frame.get('limiting_dimension') in MAXIMA and frame['limiting_dimension'] != 'tokens':
+        return _quantitative_child_increase(s, data, stop, frame)
     sizing = stop.get('child_context') or {}
     need = sizing.get('task_allocation_need') or {}
     required = need.get('required_context')
-    if (need.get('dimension') != 'tokens' or need.get('slots') != 1
-            or type(required) is not int or not 0 < required <= sizing.get('effective_context_tokens', 0)):
+    cost = {'tokens': required}
+    branch = sizing.get('branch_id')
+    if not sizing:
+        # A repair can exhaust its branch share after earlier replies have
+        # settled. Retain that branch and its checkpoints when adding capacity.
+        frame = stop.get('frame') or {}
+        branch = (stop.get('child_repair') or {}).get('branch_id') or frame.get('node_id')
+        if (stop.get('status') != 'task_budget' or frame.get('profile') != 'task-allocations-v1'
+                or frame.get('adapter') != 'karma' or frame.get('limiting_dimension') != 'tokens'
+                or branch not in data.get('children', ())):
+            return None
+        cost = frame.get('reserved_next') or {}
+        required = cost.get('tokens')
+        check = KarmaAdapter().allocations(frame['used'], frame['limits'], cost)
+        if (check['decision'] == 'ALLOW' or check['decision'] != frame.get('decision')
+                or check['limiting_dimension'] != 'tokens' or type(required) is not int or required <= 0):
+            raise InvalidUpdate('The child allocation stop differs from its measured token gate')
+    elif (need.get('dimension') != 'tokens' or need.get('slots') != 1
+          or type(required) is not int or not 0 < required <= sizing.get('effective_context_tokens', 0)):
         raise InvalidUpdate('This child stop has no measured task allocation increase. Select a model with a larger context or address the reported limit.')
-    child = m.checked(s, sizing['branch_id'])
+    child = m.checked(s, branch)
     root = m.checked(s, data['root_node'])
     if (child['id'] not in data.get('children', ()) or child['kind'] != 'branch'
             or child['parent_id'] != root['id'] or m.state(s, child['id']) != 'READY'
@@ -112,10 +217,9 @@ def child_increase(s, data):
         raise InvalidUpdate('The saved child no longer owns this allocation stop')
     frames = m.gates(s, child['id'], {})
     left = min(frame['limits']['tokens'] - frame['used']['tokens'] for frame in frames)
-    extra = math.ceil(required - left)
+    extra = math.ceil(required - left) + (0 if sizing else 1)
     if extra <= 0:
         raise InvalidUpdate('This child already has the measured capacity. Resume the saved review.')
-    cost = {'tokens': required}
     gates = {}
     for frame in frames:
         limit = dict(frame['limits'], tokens=frame['limits']['tokens'] + extra)
@@ -134,9 +238,10 @@ def preview(s, fid, meta, additions=None):
     budget = usage(s, sid)
     child = child_increase(s, data)
     if child:
-        permitted = {'tokens': child['tokens']}
+        permitted = child_additions(child)
         if additions is not None and additions != permitted:
-            raise InvalidUpdate('Only the measured child token increase can be approved for this stop')
+            raise InvalidUpdate('Only the measured child token increase can be approved for this stop' if child.get('format') != 2
+                                else 'Only the measured child quantitative increase can be approved for this stop')
         additions = permitted
     # Offer enough *additional* headroom to reach the initial allocation's
     # remaining capacity again. Usage stays charged; totals visibly increase.
@@ -187,9 +292,14 @@ def _append(s, fid, expected, workspace_policy=None):
     child = expected.get('child_allocation')
     if child:
         for nid in (child['execution'], child['branch']):
-            m.transition(s, nid, m.state(s, nid), 'CHILD_ALLOCATION_INCREASED',
-                         {'tokens': child['tokens'], 'allocation_receipt': digest},
-                         child['kernel'][nid])
+            if child.get('format') == 2:
+                m.transition(s, nid, m.state(s, nid), 'CHILD_QUANTITATIVE_ALLOCATION_INCREASED',
+                             {'version': 2, 'additions': child_additions(child), 'allocation_receipt': digest},
+                             child['kernel'][nid])
+            else:
+                m.transition(s, nid, m.state(s, nid), 'CHILD_ALLOCATION_INCREASED',
+                             {'tokens': child['tokens'], 'allocation_receipt': digest},
+                             child['kernel'][nid])
     else:
         renew_after_grant(s, fid)
     evidence = {'allocation_receipt': digest, 'allocation_version': version + 1,
@@ -197,7 +307,7 @@ def _append(s, fid, expected, workspace_policy=None):
     if child:
         from orchestration_flow import info
         stop = info(s, fid)[1]['workflow_stop']
-        evidence['workflow_stop'] = dict(stop, child_allocation_granted=child['tokens'])
+        evidence['workflow_stop'] = dict(stop, child_allocation_granted=child_additions(child) if child.get('format') == 2 else child['tokens'])
     m.transition(s, fid, 'PAUSED', 'ALLOCATION_INCREASED', evidence, expected['allocation_gate'])
     s._audit('ALLOCATION_INCREASED', {'session': expected['session'], 'receipt': digest,
                                      'version': version + 1, 'proposal_id': expected['proposal_id'],

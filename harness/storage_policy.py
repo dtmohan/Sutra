@@ -3,6 +3,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import time
 from context_manager import InvalidUpdate, canonical, sha
@@ -69,6 +70,15 @@ def write_trace(directory, call_id, record):
         compact['generation_limits'] = {
             key: request[key] for key in ('max_tokens', 'reasoning_budget_tokens')
             if type(request.get(key)) is int and 0 < request[key] <= 65536}
+        structured = record.get('structured_output')
+        if (isinstance(structured, dict) and
+                (structured.get('mode'), structured.get('basis')) in (
+                    ('host_json', 'verified_prompt_and_validate'), ('provider_json_schema', 'provider_default')) and
+                isinstance(structured.get('schema_sha256'), str) and
+                re.fullmatch(r'[0-9a-f]{64}', structured['schema_sha256'])):
+            compact['structured_output'] = {key: structured[key] for key in ('mode', 'basis', 'schema_sha256')}
+            if structured.get('normalization') in ('none', 'json_fence'):
+                compact['structured_output']['normalization'] = structured['normalization']
         compact['response']['first_answer_chunk_s'] = response.get('first_answer_chunk_s')
         timings = response.get('timings')
         if isinstance(timings, dict):

@@ -577,7 +577,22 @@ def _answer_step(s,meta,root,request,provider,axis):
                               'template_reserve': budget.template_reserve, 'summary_max_chars': cm.summary_limit(budget)}
     p['model_capacity'] = capacity if real else {'effective_context_tokens': budget.context_limit, 'source': 'injected_provider'}
     cm.materialize(s, sid, cm.history(s, sid, parent))
-    p['memory'] = cm.working_set(s, sid, parent, prompt, budget, p, SYSTEM, schema)
+    try:
+        p['memory'] = cm.working_set(s, sid, parent, prompt, budget, p, SYSTEM, schema)
+    except cm.ConversationContextExceeded as exc:
+        # Optional history has already been paged out. Recheck a hardware-limited
+        # allocation once before blaming the retained conversation or its pins.
+        if not real:
+            raise
+        from runtime_memory import refit_required_context
+        capacity = refit_required_context(provider, root, exc.budget)
+        if capacity is None:
+            raise
+        budget = provider.budget
+        p['model_capacity'] = capacity
+        p['memory_allocation'].update(context_limit=budget.context_limit,
+                                      response_reserve=budget.response_reserve)
+        p['memory'] = cm.working_set(s, sid, parent, prompt, budget, p, SYSTEM, schema)
     provider.thinking = p['reasoning']['requested']
     fmt = schema(p)
     provider.budget.check(SYSTEM, dict(p, repair={'errors': ['x' * 140] * 2}), fmt)

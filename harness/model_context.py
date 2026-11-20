@@ -23,7 +23,12 @@ def allocation(metadata):
         limit = min(limit, 8192)  # Explicit conservative fallback, not an invented capability.
     if limit < 4096:
         raise InvalidUpdate('Installed model context is too small for the conversation protocol')
-    budget = Budget(limit, min(4096, limit // 8), 256)
+    template_reserve = 256
+    if metadata.get('_sutra_provider') == 'strata':
+        template_reserve = metadata.get('_sutra_template_reserve', 256)
+        if type(template_reserve) is not int or not 256 <= template_reserve <= 4096:
+            raise InvalidUpdate('Invalid trusted Strata template allowance')
+    budget = Budget(limit, min(4096, limit // 8), template_reserve)
     return budget, {'model_context_tokens': maximum, 'configured_context_tokens': configured,
                     'runtime_context_cap': 65536, 'memory_context_cap':runtime_cap, 'effective_context_tokens': limit,
                     'output_reserve_tokens': budget.response_reserve,

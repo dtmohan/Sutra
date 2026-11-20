@@ -84,7 +84,7 @@ function host(fixture, buttons = {}) {
     },
     lm: {
       registerLanguageModelChatProvider: (_name, handler) => { provider = handler; return disposable(); },
-      registerTool: (_name, handler) => { tool = handler; return disposable(); },
+      registerTool: (name, handler) => { if (name === action) tool = handler; return disposable(); },
     },
   };
   const memento = path.join(profile, 'workspace-state.json');
@@ -105,8 +105,10 @@ function host(fixture, buttons = {}) {
     request: async request => {
       // These fixtures seed the original workspace task slot before native chat opens.
       // Use its bridge route so recovery exercises the exact preseeded contract.
+      // The read-only native-chat lookup keeps its actual chat scope; it must
+      // query the real host rather than reinterpret the legacy task slot.
       const bridgeRequest = {...request};
-      if (bridgeRequest.op === 'orchestrate') delete bridgeRequest.chat_key;
+      if (bridgeRequest.op === 'orchestrate' && bridgeRequest.event !== 'recoverable_review') delete bridgeRequest.chat_key;
       requests.push(structuredClone(request));
       try {
         const result = bridge(bridgeRequest);
@@ -276,7 +278,7 @@ async function reviewJourney(base) {
     await h.command('karma.armNative');
     assert(!h.controller.status().armed);
     assert.equal(h.prompts.length, 1);
-    assert(h.requests.slice(since).every(request => ['pending', 'inspect'].includes(request.event)),
+    assert(h.requests.slice(since).every(request => ['pending', 'inspect', 'recoverable_review'].includes(request.event)),
       'Declining authorization must stop before source and inference work');
     assert.deepEqual(fixture.snapshot(), evidenceStop);
 

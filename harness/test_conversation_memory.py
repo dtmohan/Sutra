@@ -106,6 +106,51 @@ class MemoryTests(unittest.TestCase):
         with self.assertRaises(ContextBudgetExceeded): self.ask('Continue', first['result']['invocation_id'], small)
         self.assertEqual(small.payloads, [])
 
+    def test_empty_pin_history_reports_packet_shortage_instead_of_claiming_pins(self):
+        first = self.ask('Hello')
+        small = Fake(); small.budget = Budget(4096, 512, 256)
+        before = self.s.db.execute('SELECT COUNT(*) FROM invocations').fetchone()[0]
+        with self.assertRaises(cm.ConversationContextExceeded) as stopped:
+            self.ask('Review this workspace.', first['result']['invocation_id'], small)
+        self.assertEqual(stopped.exception.budget['pinned_statements'], 0)
+        self.assertEqual(stopped.exception.budget['stage'], 'request_format')
+        self.assertNotIn('pinned', str(stopped.exception).lower())
+        self.assertGreater(stopped.exception.budget['required_context'], small.budget.context_limit)
+        self.assertEqual(small.payloads, [])
+        self.assertEqual(self.s.db.execute('SELECT COUNT(*) FROM invocations').fetchone()[0], before)
+
+    def test_true_pin_overflow_remains_mandatory_and_has_exact_budget_observation(self):
+        first = self.ask('Never remove this constraint: ' + ('z' * 1700))
+        sid = first['session']; parent = first['result']['invocation_id']
+        original = chat.contract(self.s, sid)
+        with self.assertRaises(cm.ConversationContextExceeded) as stopped:
+            cm.working_set(self.s, sid, parent, 'Continue', Budget(1024, 128, 0), {}, '', lambda _: {})
+        self.assertEqual(stopped.exception.budget['stage'], 'pinned_statements')
+        self.assertEqual(stopped.exception.budget['pinned_statements'], 1)
+        self.assertEqual(stopped.exception.budget['required_context'],
+                         stopped.exception.budget['required_input'] + 128)
+        self.assertEqual(chat.contract(self.s, sid), original)
+
+    def test_real_memory_capped_conversation_refits_once_before_inference(self):
+        first = self.ask('Hello')
+        model = Fake(); model.context_metadata = dict(model.context_metadata, _sutra_runtime_cap=4096)
+        def refit(provider, root, observation):
+            self.assertEqual(provider.payloads, [])
+            self.assertEqual(observation['pinned_statements'], 0)
+            provider.budget = Budget(24576, 512, 256)
+            return {'effective_context_tokens': 24576, 'source': 'measured_test_preflight'}
+        with patch('api_runtime.provider_for', return_value=model), \
+                patch('runtime_memory.refit_required_context', side_effect=refit) as plan, \
+                patch('monitoring.require_resources', return_value={'admitted': True}):
+            out = chat.answer(self.s, self.meta, self.storage, {'prompt': 'Hello again',
+                'parent': first['result']['invocation_id'], 'tier': 'low', 'models': fixture.MODELS})
+        self.assertTrue(out['result']['admission']['admitted'])
+        plan.assert_called_once()
+        self.assertEqual(len(model.payloads), 1)
+        self.assertEqual(model.payloads[0]['memory_allocation']['response_reserve'], 512)
+        self.assertEqual(model.payloads[0]['memory_allocation']['context_limit'], 24576)
+        self.assertEqual(model.payloads[0]['contract']['constraints']['network_allowed'], False)
+
     def test_fact_invention_and_out_of_ancestry_page_requests_rejected(self):
         for fault in (lambda r,p:r.update(facts=['UNSUPPORTED USER FACT']), lambda r,p:r.update(page_requests=['0'*32])):
             out=self.ask(provider=Fake(fault=fault))
@@ -146,3 +191,29 @@ class MemoryTests(unittest.TestCase):
             first=self.ask()
         self.s.logic_hash=current
         with self.assertRaises(PageFault): self.ask(parent=first['result']['invocation_id'])
+
+    def test_0502_data_restore_keeps_contract_and_spending_without_old_execution_authority(self):
+        import review_budget
+        previous=cm.RELEASE_POLICIES['0.50.2']
+        self.assertEqual(previous,'3e145efb75250ece2e2a0360d253d9bba8326ce6d26b289a4747b71fffab23c6')
+        current=self.s.logic_hash;self.s.logic_hash=previous
+        with patch('governance.policy_hash',return_value=previous):
+            first=self.ask('Never edit files. Remember retained request Q-502.')
+        sid=first['session'];iid=first['result']['invocation_id']
+        contract=self.s.current_contract(sid)
+        spent=review_budget.usage(self.s,sid)['used']
+        receipt=self.s.db.execute('SELECT record_json FROM invocation_receipts WHERE invocation_id=?',(iid,)).fetchone()[0]
+        self.s.logic_hash=current
+        with self.assertRaises(PageFault):self.s.load_result(sid,iid)
+        stronger=Fake('large')
+        out=self.ask('Continue that request',iid,stronger,'high')
+        self.assertEqual(out['session'],sid)
+        self.assertEqual(self.s.current_contract(sid),contract)
+        self.assertEqual(self.s.db.execute('SELECT record_json FROM invocation_receipts WHERE invocation_id=?',(iid,)).fetchone()[0],receipt)
+        memory=stronger.payloads[0]['memory']
+        self.assertTrue(memory['legacy_data_restored'])
+        self.assertIn('Q-502',canonical(memory))
+        self.assertFalse(stronger.payloads[0]['contract']['constraints']['edits_allowed'])
+        after=review_budget.usage(self.s,sid)['used']
+        self.assertTrue(all(after[key]>=value for key,value in spent.items()))
+        with self.assertRaises(PageFault):self.s.load_result(sid,iid)

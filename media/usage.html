@@ -12,29 +12,7 @@
 </style></head><body>
 <header><div><h1>Sutra Monitor</h1><p id="scope" class="muted">This workspace · loading recorded calls…</p></div><div class="actions"><span id="activity" role="status" aria-live="polite" class="pill">Waiting for data</span><button id="telemetry">Open Sutra workspace</button><button id="refresh" aria-label="Refresh monitor">Refresh</button></div></header>
 <div id="error" class="notice" role="status" hidden></div>
-<section class="kernel-section" aria-labelledby="saved-review-title">
-<div class="heading"><h2 id="saved-review-title">Tasks</h2><button id="open-tasks" type="button">Open tasks</button></div>
-<div id="saved-review" hidden>
-<p id="recovery-status" role="status"></p>
-<div id="recovery-controls" class="actions" hidden><button id="resume-workflow" aria-describedby="recovery-status">Resume saved request</button><button id="increase-allocation" hidden>Increase allocation…</button><button id="discard-workflow">Discard saved request</button></div>
-<p id="architecture-stops" role="status"></p>
-<button id="architecture-read-and-retry" aria-describedby="architecture-stops" hidden>Read another file and retry</button>
-</div>
-</section>
-<section class="kernel-section" aria-label="Live model activity"><div class="heading"><h2>Calls &amp; reasoning</h2><button id="reasoning-settings">Reasoning settings</button></div><p id="reasoning-preference" role="status">Shared reasoning: waiting</p><p id="tier-reasoning-summary" class="plot-note" hidden></p><p id="reasoning-preference-note" class="plot-note"></p><p class="plot-note">Unverified local-model commentary. Protocol checks validate structure and governance; they do not verify task completion or answer correctness. Recent calls are saved locally across reloads: up to 12 calls, 7 days and 1 MiB per workspace, with 16,000 characters per call. These plain-text diagnostics may mention source code; they are separate from task memory. Open a call’s details to inspect it beside chat. Token totals include reasoning; separate thinking-token counts are unavailable.</p><p id="reasoning-error" role="status" class="muted" hidden></p><p id="reasoning-empty" class="muted">No retained calls yet. You can enable model reasoning in Sutra → Settings.</p><div id="reasoning-calls"></div></section>
-<section aria-label="Context memory" class="kernel-section"><h2>Context memory</h2><p id="memory-summary" role="status">No recorded working sets yet.</p><p class="plot-note">Eviction removes pages from a prompt, never their saved originals. Refaults count pages brought back within the retained history; they do not prove model attention. Repeated refaults are diagnostic only.</p><details><summary>Faults, recovery and retention</summary><div id="memory-events"></div><div id="memory-retention"></div></details></section>
-<section class="kernel-section" aria-labelledby="ram-compartments-title">
-<h2 id="ram-compartments-title">RAM page retention</h2>
-<p id="ram-compartments-summary" role="status">Waiting for a host request.</p>
-<div class="cards">
-<div class="card"><span>Active RAM</span><strong id="ram-active">—</strong><small>Decoded items used in the latest request</small></div>
-<div class="card"><span>Warm RAM</span><strong id="ram-warm">—</strong><small>Recently used items available for reuse</small></div>
-<div class="card"><span>Retention limit</span><strong id="ram-limit">—</strong><small>Accounted Python objects and entry allowance</small></div>
-</div>
-<p id="ram-compartments-hits" class="plot-note"></p>
-<p id="ram-compartments-time" class="plot-note"></p>
-<p class="plot-note">Source freshness and receipt checks run on reuse. Durable originals are retained when RAM copies are evicted.</p>
-</section>
+<div id="diagnostic-errors" class="notice" role="status" hidden></div>
 <section aria-label="System telemetry" class="system-section">
 <div class="heading"><h2>System telemetry</h2><span id="resource" class="pill">System pressure unavailable</span></div>
 <p id="thermal" class="muted">Waiting for system readings</p>
@@ -45,22 +23,6 @@
 <div class="card"><span>Available memory</span><strong id="ram">—</strong><small id="ram-note">Reclaimable estimate</small></div>
 </div><p class="plot-note">Temperatures are the hottest readable sensors. Resource decisions use OS thermal pressure and memory; Celsius readings and CPU usage are advisory.</p>
 </section>
-<section class="kernel-section" aria-label="Runtime memory"><div class="heading"><h2>Runtime memory</h2><span id="model-allocation" role="status" class="pill">No model allocation yet</span></div><p id="memory-policy" class="muted">Waiting for runtime policy</p><div class="cards system-cards"><div class="card"><span>Compressed memory</span><strong id="compressed-memory">—</strong><small>Whole system · does not identify a single app</small></div><div class="card"><span>Swap used</span><strong id="swap-memory">—</strong><small>Disk-backed memory · pressure also depends on swap activity</small></div></div><h3>Resident models</h3><div id="resident-models"></div><p id="memory-plan" class="plot-note"></p><p id="memory-recovery" class="plot-note"></p><p class="plot-note">One Sutra inference slot across windows. Other provider clients are outside this coordination. Context is sized to the admitted packet; Smriti task memory and consumed budgets survive unloading and model changes.</p></section>
-<section class="kernel-section" aria-label="Kernel and context status"><div class="heading"><h2>Kernel &amp; adapters</h2><span id="adapter" class="muted">No task snapshot</span></div>
-<div id="gates" class="gates"></div>
-<p id="context-packet" class="plot-note">No workspace model packet recorded.</p>
-<p id="workspace-access" class="plot-note" role="status" aria-live="polite" aria-atomic="true">Workspace access unavailable.</p>
-<button id="workspace-access-choose" type="button" hidden aria-describedby="workspace-access">Workspace access…</button>
-<p id="native-request" class="plot-note">No Sutra request observed in this window.</p>
-<p id="compaction" class="plot-note">No VS Code compaction observed in this window.</p>
-<details><summary>Decision signals and context diagnostics</summary><div class="table-wrap"><table><thead><tr><th>Check</th><th>Decision</th><th>ω</th><th>σ</th><th>K</th><th>σ clause</th><th>Profile</th></tr></thead><tbody id="signals"></tbody></table></div><p id="kernel-identity" class="plot-note"></p>
-<p class="plot-note">Decision legend: ALLOW permits the next operation; BRIDGE requests adjustment; FIN stops this attempt; COMPOUND_FIN reports combined stopping conditions. Smriti manages selected context pages. The diagnostic values below are normalized adapter inputs.</p><p class="plot-note">These are separate checks, not a global task verdict. Last dispatch and conversation values describe recorded calls. Smriti's context decision is not exposed by this snapshot. VS Code uses an approximate offline tokenizer with headroom; the token cards below show measured provider counts. A retained checkpoint authenticates saved context, not the completeness of its summary.</p></details>
-</section>
-<section class="kernel-section" aria-label="Orchestration workflow"><div class="heading"><h2>Workflow &amp; child reviews</h2><span id="flow-status" class="muted">Not started</span></div>
-<p class="plot-note">Children inherit the task and a narrower source scope. Local workers run one at a time. Model changes retain context and spent budgets.</p>
-<p id="task-allocation"></p><div id="flow-nodes"></div></section>
-<section class="kernel-section" aria-label="Task observations"><h2>Task commitments &amp; assessments · Observe only</h2><p class="plot-note">Original requests and constraints remain authoritative. Self-assessments do not approve work or certify completion. Gateway acceptance is separate from final report publication.</p><p id="task-observation-empty" class="muted">No task observations yet. Greetings do not create commitments.</p><div id="task-observations"></div></section>
-<section class="kernel-section" aria-label="Optional tools"><h2>Optional tools</h2><p>Ruff lint and Pyright type checks run on approved Python snapshots. Installation and execution have separate permissions. Workspace preapprovals require your confirmation.</p><button id="manage-tools">Manage tools</button> <button id="tool-policy">Tool permissions</button></section>
 <h2 class="token-heading">Token usage</h2><p class="muted">Filters below affect token history only. System readings remain live.</p>
 <div class="cards" aria-label="Token totals for selected filters">
 <div class="card"><span>Input tokens</span><strong id="input" class="input">—</strong><small id="input-note">Waiting for measurements</small></div>
@@ -76,10 +38,54 @@
 <button id="reset">Reset filters</button></div>
 <p id="window" class="muted" role="status"></p>
 <div id="empty" hidden><h2 id="empty-title">No model calls yet</h2><p id="empty-detail" class="muted">Send a message using Sutra Auto. Recorded token counts will appear here.</p></div>
+
+<section class="kernel-section" aria-label="Kernel and context status"><div class="heading"><h2>Kernel &amp; adapters</h2><span id="adapter" class="muted">No task snapshot</span></div>
+<div id="gates" class="gates"></div>
+<p id="context-packet" class="plot-note">No workspace model packet recorded.</p>
+<p id="workspace-access" class="plot-note" role="status" aria-live="polite" aria-atomic="true">Workspace access unavailable.</p>
+<button id="workspace-access-choose" type="button" hidden aria-describedby="workspace-access">Workspace access…</button>
+<p id="native-request" class="plot-note">No Sutra request observed in this window.</p>
+<p id="compaction" class="plot-note">No VS Code compaction observed in this window.</p>
+<details><summary>Decision signals and context diagnostics</summary><div class="table-wrap"><table><thead><tr><th>Check</th><th>Decision</th><th>ω</th><th>σ</th><th>K</th><th>σ clause</th><th>Profile</th></tr></thead><tbody id="signals"></tbody></table></div><p id="kernel-identity" class="plot-note"></p>
+<p class="plot-note">Decision legend: ALLOW permits the next operation; BRIDGE requests adjustment; FIN stops this attempt; COMPOUND_FIN reports combined stopping conditions. Smriti manages selected context pages. The diagnostic values below are normalized adapter inputs.</p><p class="plot-note">These are separate checks, not a global task verdict. Last dispatch and conversation values describe recorded calls. Smriti's context decision is not exposed by this snapshot. VS Code uses an approximate offline tokenizer with headroom; the token cards below show measured provider counts. A retained checkpoint authenticates saved context, not the completeness of its summary.</p></details>
+</section>
+<section class="kernel-section" aria-labelledby="saved-review-title">
+<div class="heading"><h2 id="saved-review-title">Tasks</h2><button id="open-tasks" type="button">Open tasks</button></div>
+<div id="saved-review" hidden>
+<p id="recovery-status" role="status"></p>
+<div id="recovery-controls" class="actions" hidden><button id="resume-workflow" aria-describedby="recovery-status">Resume saved request</button><button id="increase-allocation" hidden>Increase allocation…</button><button id="discard-workflow">Discard saved request</button></div>
+<p id="architecture-stops" role="status"></p>
+<button id="architecture-read-and-retry" aria-describedby="architecture-stops" hidden>Read another file and retry</button>
+</div>
+</section>
+
+<section aria-label="Context memory" class="kernel-section"><h2>Context memory</h2><p id="memory-summary" role="status">No recorded working sets yet.</p><p class="plot-note">Eviction removes pages from a prompt, never their saved originals. Refaults count pages brought back within the retained history; they do not prove model attention. Repeated refaults are diagnostic only.</p><details><summary>Faults, recovery and retention</summary><div id="memory-events"></div><div id="memory-retention"></div></details></section>
+<section class="kernel-section" aria-labelledby="ram-compartments-title">
+<h2 id="ram-compartments-title">RAM page retention</h2>
+<p id="ram-compartments-summary" role="status">Waiting for a host request.</p>
+<div class="cards">
+<div class="card"><span>Active RAM</span><strong id="ram-active">—</strong><small>Decoded items used in the latest request</small></div>
+<div class="card"><span>Warm RAM</span><strong id="ram-warm">—</strong><small>Recently used items available for reuse</small></div>
+<div class="card"><span>Retention limit</span><strong id="ram-limit">—</strong><small>Accounted Python objects and entry allowance</small></div>
+</div>
+<p id="ram-compartments-hits" class="plot-note"></p>
+<p id="ram-compartments-time" class="plot-note"></p>
+<p class="plot-note">Source freshness and receipt checks run on reuse. Durable originals are retained when RAM copies are evicted.</p>
+</section>
+
+<section class="kernel-section" aria-label="Runtime memory"><div class="heading"><h2>Runtime memory</h2><span id="model-allocation" role="status" class="pill">No model allocation yet</span></div><p id="memory-policy" class="muted">Waiting for runtime policy</p><div class="cards system-cards"><div class="card"><span>Compressed memory</span><strong id="compressed-memory">—</strong><small>Whole system · does not identify a single app</small></div><div class="card"><span>Swap used</span><strong id="swap-memory">—</strong><small>Disk-backed memory · pressure also depends on swap activity</small></div></div><h3>Resident models</h3><div id="resident-models"></div><p id="memory-plan" class="plot-note"></p><p id="memory-recovery" class="plot-note"></p><p class="plot-note">One Sutra inference slot across windows. Other provider clients are outside this coordination. Context is sized to the admitted packet; Smriti task memory and consumed budgets survive unloading and model changes.</p></section>
+
+<section class="kernel-section" aria-label="Orchestration workflow"><div class="heading"><h2>Workflow &amp; child reviews</h2><span id="flow-status" class="muted">Not started</span></div>
+<p class="plot-note">Children inherit the task and a narrower source scope. Local workers run one at a time. Model changes retain context and spent budgets.</p>
+<p id="task-allocation"></p><div id="flow-nodes"></div></section>
+<section class="kernel-section" aria-label="Task observations"><h2>Task commitments &amp; assessments · Observe only</h2><p class="plot-note">Original requests and constraints remain authoritative. Self-assessments do not approve work or certify completion. Gateway acceptance is separate from final report publication.</p><p id="task-observation-empty" class="muted">No task observations yet. Greetings do not create commitments.</p><div id="task-observations"></div></section>
+<section class="kernel-section" aria-labelledby="coherence-title"><h2 id="coherence-title">Coherence indicators · Observe only</h2><p class="plot-note">These bounded checks describe explicit questions, claims and evidence references. Flags do not verify correctness or approve work. General prose coherence is unassessed; model interpretations remain unverified.</p><p id="coherence-empty" class="muted">No coherence observations recorded.</p><div id="coherence-observations"></div></section>
+<section class="kernel-section" aria-label="Optional tools"><h2>Optional tools</h2><p>Ruff lint and Pyright type checks run on approved Python snapshots. Installation and execution have separate permissions. Workspace preapprovals require your confirmation.</p><button id="manage-tools">Manage tools</button> <button id="tool-policy">Tool permissions</button></section>
 <div id="visuals" class="visuals" hidden>
 <section class="visual"><div class="heading"><h2>Recent calls</h2><div class="legend"><span><i></i>Input</span><span><i class="out"></i>Output</span></div></div><div id="timeline" role="group" aria-label="Input and output tokens for recent calls"></div><p class="plot-note">Last 20 matching calls, oldest → newest. Hover a pair for counts. A dashed top marks missing measurements.</p></section>
 <section class="visual"><h2>Where tokens go</h2><div id="stages"></div><p class="plot-note">Input and output by stage, on the same scale. Unknown counts are excluded from bar lengths.</p></section>
 </div>
 <details id="details" hidden><summary>Individual calls and allocations</summary><div class="table-wrap"><table><thead><tr><th>Time</th><th>Model / stage</th><th>Outcome</th><th>Input</th><th>Output</th><th>Input reserve / output reserve</th><th>Task charge</th></tr></thead><tbody id="rows"></tbody></table></div></details>
+<section class="kernel-section" aria-label="Live model activity"><div class="heading"><h2>Calls &amp; reasoning</h2><button id="reasoning-settings">Reasoning settings</button></div><p id="reasoning-preference" role="status">Shared reasoning: waiting</p><p id="tier-reasoning-summary" class="plot-note" hidden></p><p id="reasoning-preference-note" class="plot-note"></p><p class="plot-note">Unverified local-model commentary. Protocol checks validate structure and governance; they do not verify task completion or answer correctness. Recent calls are saved locally across reloads: up to 12 calls, 7 days and 1 MiB per workspace, with 16,000 characters per call. These plain-text diagnostics may mention source code; they are separate from task memory. Open a call’s details to inspect it beside chat. Token totals include reasoning; separate thinking-token counts are unavailable.</p><p id="reasoning-error" role="status" class="muted" hidden></p><p id="reasoning-empty" class="muted">No retained calls yet. You can enable model reasoning in Sutra → Settings.</p><div id="reasoning-calls"></div></section>
 <footer>Counts come from local model receipts and include structured output. They appear after a call finishes; live generated-token counts are not available. Unknown is not zero. New calls reserve capacity before dispatch, then settle to completed runtime counts. Missing counts and interrupted calls retain the reservation; historical calls retain their original charges. This view reads local counts only and does not send prompts.</footer>
-<script nonce="NONCE_VALUE" src="TOKENS_URI"></script><script nonce="NONCE_VALUE" src="SCRIPT_URI"></script></body></html>
+<script nonce="NONCE_VALUE" src="TOKENS_URI"></script><script nonce="NONCE_VALUE" src="COHERENCE_URI"></script><script nonce="NONCE_VALUE" src="PROGRESS_URI"></script><script nonce="NONCE_VALUE" src="SCRIPT_URI"></script></body></html>

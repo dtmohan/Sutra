@@ -18,6 +18,23 @@ LEGACY_POLICIES = {'2319f693bfd23c67bda96909572c6a5646d1a299497aa3ab9c23fc990721
                    'd71f0acf70b42a1d0cb1332c1413bfb85b90156d5820d590cdb19b41ea79ce04'}
 # Recomputed from the released VSIX policy manifests; never from an untrusted receipt.
 RELEASE_POLICIES = {
+    '0.51.9': '5bb4b8fc95805635d8fb1f9cdd3a60eb7f3cb0bd65febff3ebadaaba05179cea',
+    '0.51.8': 'e63b23d6bab1627348a8a50936fa01f25a6ab2ff4d2725e341a654bb831646ec',
+    '0.51.7': '3a5e04b47e39aa6ac212f26ebb480f57e8992c586f91f7a3cf90a565185bdd65',
+    '0.51.6': 'a7e36436f21552505829d9a7736c29ad9b4ad46c54375ed5d7b83e8ddd23959e',
+    '0.51.5': '1bb5a5ed0132ac2aa6c6d59484ce13ff522d40441b7b7a78562b1db358be6a65',
+    '0.51.4': 'cebcdae4854f4b43627bb7bf56aad08e39957e3df31372443e15e787eb37370d',
+    '0.51.3': '74aa5b1c3a22c643d36e636da8e94e2327b725d6014ed6eac7c79304ec4e6cc6',
+    '0.51.2': '1466b555d9f51b4d4009c20a52f847332a4740b6b81675698817b15573336e02',
+    '0.51.1': '8e53ae1baa49d6c68b6c33ad46f88dc8e56723848d3345958f9ca543cfa6919f',
+    '0.51.0': 'bfb561200a191d2fc2f45f27b30140a329fd0d77a86636023f3675f328e4f4b4',
+    '0.50.8': 'd7055e331789bb02128dfa85f39acc1715220ae5d4383dcc9bbb4da909dad80f',
+    '0.50.7': '9d3c82c739d43a21d2a6fa7b77ffc99816e252ed11d9b62a2e6d97e4a8ad5f0b',
+    '0.50.6': '02fb727fc301df26c24954592eb55cdd5eb07fa012e3e8f0e20df1d277b71c50',
+    '0.50.5': 'e6c01a14a02b61cb0670c37b89d0f2e92e365ff98ed7672633003566ffd99885',
+    '0.50.4': 'a99a0e4ab00295fa1394d160558c3ce50e2df87aaac12e0e7881c211ec506b73',
+    '0.50.3': 'ce1d62dd996f427dc94ffa084413fcd7fa939494a5d07c7c36b132f4bc5da6b7',
+    '0.50.2': '3e145efb75250ece2e2a0360d253d9bba8326ce6d26b289a4747b71fffab23c6',
     '0.45.4': '671ba69d370161a334e31636051a68565379a7fc7f84000172aff3428ae72983',
     '0.44.0': '71134890bb8b191ebef91385f5f170aff1f04f26b35d5b663f8eebd2f68185a2',
     '0.43.0': '42edde7c6b8f06cc3f21d5e19b7a20360b1ca1ec0702deccfddfa787bb654a3d',
@@ -195,6 +212,13 @@ def document_turns(rows, request, base):
     return rows
 
 
+class ConversationContextExceeded(ContextBudgetExceeded):
+    """A measured packet shortage, without inferred semantic importance."""
+    def __init__(self, message, budget):
+        self.budget = budget
+        super().__init__(message)
+
+
 def working_set(s, sid, parent, request, budget, base, system, schema_for, extra_bytes=None):
     base = {k: v for k, v in base.items() if k != 'repair'}
     lineage = history(s, sid, parent)
@@ -214,6 +238,25 @@ def working_set(s, sid, parent, request, budget, base, system, schema_for, extra
               'omitted_turns': len(lineage), 'legacy_data_restored': any(r['legacy'] for r in rows)}
 
     memory_ceiling = None
+    failed_charge = None
+
+    def shortage(stage, charge=None):
+        probe = dict(base, memory=memory, repair={'errors': ['x' * 140] * 2})
+        charge = budget.charge(system, probe, schema_for(probe)) if charge is None else charge
+        observation = {'stage': stage, 'required_input': charge,
+                       'output_reserve': budget.response_reserve,
+                       'required_context': charge + budget.response_reserve,
+                       'context_limit': budget.context_limit, 'pinned_statements': len(pins),
+                       'stored_turns': len(lineage)}
+        subject = ('The required request and response format' if stage == 'request_format'
+                   else 'The pinned conversation statements' if stage == 'pinned_statements'
+                   else 'The latest conversation turn' if stage == 'latest_turn'
+                   else 'The requested conversation page')
+        message = (subject + ' cannot fit the current context allocation: ' +
+                   str(charge) + ' conservative input units + ' + str(budget.response_reserve) +
+                   ' output reserve exceeds ' + str(budget.context_limit) +
+                   '. The original history, constraints and spent budget are retained.')
+        return ConversationContextExceeded(message, observation)
 
     def fits():
         probe = dict(base, memory=memory, repair={'errors': ['x' * 140] * 2})
@@ -227,10 +270,15 @@ def working_set(s, sid, parent, request, budget, base, system, schema_for, extra
         # A summary is a convenience; explicit statements/contract are mandatory.
         memory['summary_unverified'] = ''
     if not fits():
-        raise ContextBudgetExceeded('Pinned conversation statements and contract do not fit this model. Choose a larger context or start a separate conversation; no constraints were dropped.')
+        empty = dict(base, memory=None, repair={'errors': ['x' * 140] * 2})
+        base_charge = budget.charge(system, empty, schema_for(empty))
+        stage = ('request_format' if base_charge + budget.response_reserve > budget.context_limit or not pins
+                 else 'pinned_statements')
+        raise shortage(stage)
     selected = set()
 
     def add(row, field):
+        nonlocal failed_charge
         page = s.read_page(sid, 'conversation:' + row['id'])
         value = {'id': row['id'], 'page': page.key, 'version': page.version,
                  'hash': page.content_hash, 'user': row['user'], 'assistant_unverified': row['assistant']}
@@ -238,6 +286,8 @@ def working_set(s, sid, parent, request, budget, base, system, schema_for, extra
         memory['toc'] = [item for item in directory if item['id'] != row['id']]
         memory[field].append(value)
         if not fits():
+            probe = dict(base, memory=memory, repair={'errors': ['x' * 140] * 2})
+            failed_charge = budget.charge(system, probe, schema_for(probe))
             memory[field].pop()
             memory['toc'] = directory
             return False
@@ -246,7 +296,7 @@ def working_set(s, sid, parent, request, budget, base, system, schema_for, extra
 
     # Keep the latest in-scope turn intact.
     if rows and not add(rows[0], 'recent_turns'):
-        raise ContextBudgetExceeded('The latest turn and pinned statements cannot fit this model. Choose a larger context; the full turn is still saved.')
+        raise shortage('latest_turn', failed_charge)
     for iid in base.get('requested_memory_pages', []):
         if iid in selected:
             continue
@@ -254,7 +304,7 @@ def working_set(s, sid, parent, request, budget, base, system, schema_for, extra
         if row is None:
             raise PageFault('Requested conversation page is outside this ancestry', code='denied')
         if not add(row, 'retrieved_turns'):
-            raise ContextBudgetExceeded('The requested older page cannot fit with the latest turn and pinned statements. Choose a larger context.')
+            raise shortage('requested_page', failed_charge)
     if extra_bytes is not None:
         # Workspace roles prioritize fresh source over optional older dialogue.
         # Latest turn, all pins and explicitly requested pages above stay intact.

@@ -727,6 +727,40 @@ class EvidenceBridgeWorkflowTests(unittest.TestCase):
         self.assertIsNone(admitted['stop'])
         self.assertEqual(len(self.models), 1)
 
+    def test_broad_workspace_request_uses_user_target_instead_of_router_filenames(self):
+        self.router = lambda result, _: result.update(
+            intent='workspace', workspace_request={
+                'operation': 'read', 'paths': ['app.py', 'config.py', 'tools.py']})
+        prompt = ('can you review the workspace project and go through the tools logic and help me '
+                  'understand the architecture in detail? a few block diagrams would be great')
+        with patch('repository_tools.execute', side_effect=AssertionError('Workspace read before arming')):
+            admitted = self.request('start', prompt=prompt)
+        self.assertEqual(admitted['state'], 'NEED_ARM')
+        _, details = orchestration_flow.info(self.ledger, admitted['flow_id'])
+        self.assertEqual(details['source_roots'], ['.'])
+        self.assertEqual(details['permission'], {'operation': 'read', 'scope': 'workspace', 'paths': []})
+        session = admitted['conversation']['session']
+        before = usage(self.ledger, session)
+        self.tier = 'high'
+        bound = self.request('step', admitted, armed=True)
+        self.assertEqual(bound['state'], 'WORKSPACE')
+        self.assertEqual(self.ledger.pinned(bound['binding']['session'])['constraints']['allowed_paths'], ['.'])
+        self.assertEqual(usage(self.ledger, session), before)
+        self.assertEqual(len(self.models), 1)
+
+    def test_router_cannot_ignore_current_user_filename_scope(self):
+        self.router = lambda result, _: result.update(
+            intent='workspace', workspace_request={'operation': 'read', 'scope': 'workspace', 'paths': []})
+        with patch('repository_tools.execute', side_effect=AssertionError('Workspace read before scope confirmation')):
+            paused = self.request('start', prompt='Review only entry.py from this workspace.')
+        self.assert_evidence_bridge(paused, 'workspace')
+        sid = paused['conversation']['session']
+        before = usage(self.ledger, sid)
+        scoped = self.request('supply_evidence', paused, evidence_text='Workspace files:\nentry.py')
+        bound = self.request('step', scoped, armed=True)
+        self.assertEqual(self.ledger.pinned(bound['binding']['session'])['constraints']['allowed_paths'], ['entry.py'])
+        self.assertEqual(usage(self.ledger, sid), before)
+
     def test_workspace_evidence_can_narrow_scope_without_spending(self):
         self.router = lambda result, _: result.update(
             intent='workspace', workspace_request={'operation': 'read', 'paths': []})

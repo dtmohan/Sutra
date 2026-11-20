@@ -11,6 +11,7 @@ class StructuredOutputRejected(RuntimeError):
 
 class LocalModel:
     model_interface = 1
+    transport_deadline_cap = 360
     def __init__(self, log_dir, port=11435, model='qwen3:4b', health=None, budget=Budget(), thinking=False):
         self.log_dir=pathlib.Path(log_dir); self.log_dir.mkdir(parents=True,exist_ok=True)
         self.port=port; self.model=model; self.health=health; self.budget=budget; self.thinking=thinking
@@ -52,7 +53,9 @@ class LocalModel:
         record={'call_id':call_id,'request':body,'conservative_input_charge':charge,
                 'decoder_compatibility':getattr(self,'decoder_compatibility',None)}
         from lifecycle import timeout
-        c=http.client.HTTPConnection('127.0.0.1',self.port,timeout=timeout(150)); started=time.monotonic()
+        from invocation_gateway import transport_seconds, transport_timeout
+        call_seconds=transport_seconds()
+        c=http.client.HTTPConnection('127.0.0.1',self.port,timeout=timeout(call_seconds)); started=time.monotonic()
         if self.health: self.health.active=c
         try:
             c.request('POST','/api/chat',json.dumps(body),{'Content-Type':'application/json'})
@@ -67,9 +70,8 @@ class LocalModel:
             # does not replace num_predict or the gateway's reserved token budget.
             byte_limit=max(65536,self.budget.response_reserve*128)
             while True:
-                remaining=150-(time.monotonic()-started)
-                if remaining<=0: raise TimeoutError('Model transport deadline reached')
-                if c.sock: c.sock.settimeout(timeout(remaining))
+                remaining=transport_timeout(started)
+                if c.sock: c.sock.settimeout(remaining)
                 raw=r.readline(65537)
                 if not raw: break
                 if len(raw)>65536: raise RuntimeError('Model stream frame exceeds transport limit')

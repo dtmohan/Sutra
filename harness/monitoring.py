@@ -10,7 +10,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from context_manager import InvalidUpdate
+from context_manager import ContextStore, InvalidUpdate, canonical, sha
 from karma_adapter import KarmaAdapter, StaleHardwareSample
 
 
@@ -104,6 +104,58 @@ def require_resources(root, *, newer_than=None):
     return state
 
 
+
+class DiagnosticLedger:
+    """Query-only view with the history/proof methods budget readers require.
+
+    Never initialize the mutable ledger, install triggers, repair records or
+    promote a local seal to authority while rendering Monitor. The caller owns
+    one read transaction so all sections describe the same ledger snapshot.
+    """
+    def __init__(self, db):
+        self.db = db
+        self._histories = {}
+        self._audit_checked = None
+
+    def _contract_history(self, session):
+        if session not in self._histories:
+            from governance import GovernedContext
+            if not ContextStore.validate_chain(self, session):
+                raise InvalidUpdate('Task event chain is corrupt')
+            history = GovernedContext._contract_history(self, session)
+            rows = self.db.execute('SELECT record_json,digest FROM contract_epochs WHERE session=? ORDER BY epoch',
+                                   (session,)).fetchall()
+            if rows != [(canonical(record), digest) for record, digest in history]:
+                raise InvalidUpdate('Contract epoch commitment mismatch')
+            self._histories[session] = history
+        return self._histories[session]
+
+    def origin(self, session):
+        history = self._contract_history(session)
+        if not history:
+            raise InvalidUpdate('No user contract established')
+        record, digest = history[-1]
+        return dict(record, contract_hash=digest)
+
+    def snapshot(self, session):
+        return self.origin(session)['contract']
+
+    def audit_valid(self, deep=False):
+        if self._audit_checked is None or deep:
+            previous, expected = 'GENESIS', 1
+            for seq, event, raw, parent, digest in self.db.execute('SELECT * FROM page_audit ORDER BY seq'):
+                if seq != expected or parent != previous or sha(canonical([seq,event,raw,parent])) != digest:
+                    self._audit_checked = False
+                    return False
+                expected, previous = expected + 1, digest
+            self._audit_checked = True
+        return self._audit_checked
+
+
+def _diagnostic_error(data, section, error):
+    data['diagnostic_errors'].append({'section': section, 'message': str(error)[:1000]})
+
+
 def dashboard(root):
     root=Path(root);data={'time':time.time(),'hardware':resource_state(root),'runs':[],
                         'invocations':{'total':0,'accepted':0,'quarantined':0,'pending':0},'actions':[],
@@ -111,16 +163,23 @@ def dashboard(root):
                                     'test':'Sandboxed process observation only; assertions unverified','network':'test process always denied'},
                         'kernel':{'name':'Smriti four-decision','order':['COMPOUND_FIN','ALLOW','BRIDGE','FIN'],
                                   'sha256':hashlib.sha256((Path(__file__).parent/'stp_canonical/kernel.py').read_bytes()).hexdigest()},
-                        'context':None,'token_usage':{'calls':[],'total_calls':0,'limit':250},'scope':'This workspace and Karma calls only'}
+                        'context':None,'token_usage':{'calls':[],'total_calls':0,'limit':250},'diagnostic_errors':[],
+                        'scope':'This workspace and Karma calls only'}
     from runtime_memory import snapshot
-    data['runtime_memory']=snapshot()
+    try:data['runtime_memory']=snapshot()
+    except Exception as exc:_diagnostic_error(data,'runtime_memory',exc)
     from storage_policy import usage
-    data['storage']=usage(root)
+    try:data['storage']=usage(root)
+    except Exception as exc:_diagnostic_error(data,'storage',exc)
     path=root/'state.sqlite'
     if not path.exists():return data
     from ledger_sqlite import read_connection
-    db=read_connection(path, timeout=.2)
+    try:db=read_connection(path, timeout=.2)
+    except Exception as exc:
+        _diagnostic_error(data,'ledger',exc)
+        return data
     try:
+        db.execute('BEGIN')
         tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         from memory_layer import snapshot as memory_snapshot
         data['logical_memory']=memory_snapshot(db)
@@ -131,6 +190,9 @@ def dashboard(root):
         from task_observations import latest
         from types import SimpleNamespace
         data['task_observations']=latest(SimpleNamespace(db=db))
+        from coherence_observations import latest as latest_coherence
+        try:data['coherence_observations']=latest_coherence(SimpleNamespace(db=db))
+        except Exception as exc:_diagnostic_error(data,'coherence_observations',exc)
         meta=json.loads((root/'workspace.json').read_text()) if (root/'workspace.json').exists() else {}
         session=meta.get('active');data['session']=session;data['model']=meta.get('model');data['checkpoint']=meta.get('checkpoint')
         from types import SimpleNamespace
@@ -143,7 +205,7 @@ def dashboard(root):
             from review_budget import decision
             row=db.execute('SELECT record_json,digest FROM contract_epochs WHERE session=? ORDER BY epoch DESC LIMIT 1',(session,)).fetchone()
             if row:
-                contract=json.loads(row[0])['contract'];ledger=SimpleNamespace(db=db,snapshot=lambda _:contract,origin=lambda _:{'contract_hash':row[1]})
+                ledger=DiagnosticLedger(db)
                 data['review_budget']=decision(ledger,session)
             if meta.get('auto'):
                 data['automatic_review']={k:v for k,v in meta['auto'].items() if k not in ('pages','preferred')}
@@ -198,9 +260,29 @@ def dashboard(root):
             tokens=recorded.get('token_usage',{})
             data['context'].update(model_packet=env.get('model_interface'),accounting_settlement=recorded.get('accounting_settlement'))
             data['context'].update(output_reserve=env.get('budget_profile',{}).get('response_reserve',1024),limit=env.get('budget_profile',{}).get('context_limit',8192),actual_prompt_tokens=tokens.get('input_tokens'),output_tokens=tokens.get('output_tokens'))
+            profile = env.get('budget_profile', {})
+            data['context'].update(context_profile=profile.get('context_profile', 1),
+                                   reservation_limit=profile.get('reservation_limit'))
+            physical = db.execute("""SELECT record_json FROM invocations WHERE session=?
+                AND json_extract(record_json,'$.physical_context') IS NOT NULL
+                ORDER BY rowid DESC LIMIT 1""", (session,)).fetchone()
+            if physical:
+                measured_env = json.loads(physical[0]); measured = measured_env['physical_context']
+                data['context']['latest_physical_window'] = {
+                    'model': measured_env['model'], 'role': measured_env['role'],
+                    'prompt_tokens': measured['prompt_tokens'], 'output_reserve': measured['output_reserve'],
+                    'protocol_margin': measured.get('context_slack_tokens', 0),
+                    'context_tokens': measured['context_tokens'], 'basis': measured['basis'],
+                    'decision': measured['capacity']['decision']}
         data['adapter_health']='busy' if any(r['state'] not in ('ALLOW','FIN','RESOURCE_WAIT') for r in data['runs'][:1]) else 'idle'
         if data.get('repository_pending'):data['adapter_health']='repository operation pending; inspection required'
         if any(a['result']['status']=='pending' for a in data['actions']):data['adapter_health']='action running or interrupted; receipt pending'
         data['recent_gate_events']=[{'event':event,'data':json.loads(raw)} for event,raw in db.execute("SELECT event,payload_json FROM page_audit WHERE event IN ('RESOURCE_GATE','ACTION_PLAN_DENIED','ACTION_DENIED','INTERRUPTION_RECONCILED') ORDER BY seq DESC LIMIT 5")]
+        return data
+    except Exception as exc:
+        # Task diagnostics are not a dependency of hardware telemetry. Return
+        # the measured sections and expose the failed read; never infer ALLOW.
+        _diagnostic_error(data,'ledger',exc)
+        data['adapter_health']='Some task diagnostics are unavailable'
         return data
     finally:db.close()

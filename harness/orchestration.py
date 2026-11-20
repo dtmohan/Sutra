@@ -180,8 +180,13 @@ def effective_limits(s,n):
     if n['kind'] in ('execution', 'branch'):
         amendments = [event['data']['tokens'] for event in events(s, n['id'])
                       if event['kind'] == 'CHILD_ALLOCATION_INCREASED']
-        if amendments:
-            return dict(n['limits'], tokens=n['limits']['tokens'] + sum(amendments))
+        limits = dict(n['limits'], tokens=n['limits']['tokens'] + sum(amendments)) if amendments else n['limits']
+        for event in events(s, n['id']):
+            if event['kind'] == 'CHILD_QUANTITATIVE_ALLOCATION_INCREASED':
+                from allocation_recovery import quantitative_event_additions
+                additions = quantitative_event_additions(s, n, event)
+                limits = {key: value + additions.get(key, 0) for key, value in limits.items()}
+        return limits
     return n['limits']
 
 class OrchestrationStop(InvalidUpdate):
@@ -437,12 +442,67 @@ def complete(s,nid,result_id):
         if status!='complete':raise InvalidUpdate('Invalid child slice outcome')
         return transition(s,nid,'DONE','RESULT',data)
 
+def fork_children(s, nid):
+    """Current join members, including additive replacements of rejected children."""
+    history = events(s, nid)
+    position = max((i for i, e in enumerate(history) if e['kind'] == 'FORK'), default=None)
+    if position is None:
+        raise InvalidUpdate('Parent has no committed child fork')
+    children = list(history[position]['data']['children'])
+    for event in history[position + 1:]:
+        if event['kind'] != 'CHILD_REPLACED':
+            continue
+        old, new = event['data']['previous'], event['data']['replacement']
+        replacement = node(s, new)
+        if (old not in children or new in children or replacement['parent_id'] != nid
+                or replacement.get('replacement_of') != old):
+            raise InvalidUpdate('Child replacement membership is corrupt')
+        children[children.index(old)] = new
+    return children
+
+
+def replace_child(s, parent_id, previous, retry_route):
+    """Use only the rejected branch's unspent share for one new branch."""
+    with s.db:
+        s.db.execute('BEGIN IMMEDIATE')
+        parent = checked(s, parent_id)
+        children = fork_children(s, parent_id)
+        if previous not in children:
+            saved = next((e for e in reversed(events(s, parent_id))
+                          if e['kind'] == 'CHILD_REPLACED' and e['data']['previous'] == previous), None)
+            if saved and saved['data']['replacement'] in children:
+                return node(s, saved['data']['replacement'])
+            raise InvalidUpdate('The rejected child is no longer in this fork')
+        old = node(s, previous)
+        if (state(s, parent_id) != 'WAITING_CHILDREN' or old['parent_id'] != parent_id
+                or old['binding'] != parent['binding'] or state(s, previous) != 'QUARANTINED'
+                or not events(s, previous) or events(s, previous)[-1]['kind'] != 'CHILD_REJECTED'):
+            raise InvalidUpdate('Only a rejected child can receive a fresh bounded replacement')
+        slot = KarmaAdapter().counted_slots(1 if old.get('replacement_of') else 0, 1)
+        allowed([slot])
+        limits, used = effective_limits(s, old), spent(s, previous)
+        allowed([KarmaAdapter().allocations(used, limits)])
+        remaining = {key: limits[key] - used[key] for key in limits}
+        frames = gates(s, parent_id, remaining)
+        allowed(frames)
+        replacement = create(s, 'branch', old['session'], parent=parent_id,
+            binding=copy.deepcopy(old['binding']), permissions=copy.deepcopy(old['permissions']),
+            limits=remaining, objective=old['objective'], context=copy.deepcopy(old['context']),
+            context_hash=old['context_hash'], files=list(old['files']), roles=list(old['roles']),
+            slice_protocol=old.get('slice_protocol', SLICE_PROTOCOL), replacement_of=previous,
+            retry_route=retry_route)
+        transition(s, parent_id, 'WAITING_CHILDREN', 'CHILD_REPLACED',
+                   {'previous': previous, 'replacement': replacement['id'], 'old_spending': used,
+                    'remaining_allocation': remaining, 'repair_slot': slot, 'frames': frames}, frames[0])
+        return replacement
+
+
 def join(s,nid):
     with s.db:
         parent=checked(s,nid);results=[]
         forks=[e for e in events(s,nid) if e['kind']=='FORK']
         if state(s,nid)!='WAITING_CHILDREN' or not forks:raise InvalidUpdate('Parent is not awaiting a join')
-        for cid in forks[-1]['data']['children']:
+        for cid in fork_children(s, nid):
             if state(s,cid)!='DONE':raise InvalidUpdate('Child results are not ready to join')
             c=node(s,cid)
             if c['binding']!=binding(s,parent['session']):raise InvalidUpdate('Child context became stale')

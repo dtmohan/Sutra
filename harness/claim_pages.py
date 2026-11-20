@@ -12,6 +12,28 @@ from context_manager import canonical, sha, InvalidUpdate, ContextBudgetExceeded
 VERSION = 2
 
 
+def static_statements(source):
+    if type(source.get('claim_source_version')) is not int or source['claim_source_version'] != 2:
+        return []
+    from model_packet import projected_source_statements
+    return projected_source_statements(source)
+
+
+def source_paths(source):
+    return sorted(set(source['excerpts']) | {statement['path'] for statement in static_statements(source)})
+
+
+def _statement_in_excerpt(source, statement):
+    text = source['excerpts'].get(statement['path'], '')
+    start = source.get('excerpt_locations', {}).get(statement['path'], {}).get('start_line')
+    if type(start) is not int:
+        return False
+    offset = statement['line'] - start
+    lines = text.splitlines(True)
+    return (0 <= offset < len(lines) and statement['text'] in
+            ''.join(lines[offset:offset + statement['text'].count('\n') + 1]))
+
+
 def inventory(candidate_id, source):
     result = {}
     for path, text in sorted(source['excerpts'].items()):
@@ -29,6 +51,23 @@ def inventory(candidate_id, source):
                            'start_line': line + text[:offset].count('\n') if line else None,
                            'end_line': line + text[:end].count('\n') if line else None}
             offset = end
+    for statement in static_statements(source):
+        if _statement_in_excerpt(source, statement):
+            continue
+        path, text, line = (statement[key] for key in ('path', 'text', 'line'))
+        offset = 0
+        while offset < len(text):
+            end = min(len(text), offset + 512)
+            if end < len(text):
+                newline = text.rfind('\n', offset, end)
+                if newline >= offset + 128: end = newline + 1
+            eid = 'e' + sha(canonical(['delivered-static-source-v2', candidate_id, path, line,
+                                       sha(text), offset, end]))[:12]
+            result[eid] = {'kind': 'static_source_statement', 'path': path, 'text': text[offset:end],
+                           'start_line': line + text[:offset].count('\n'),
+                           'end_line': line + text[:end].count('\n'),
+                           'meaning': 'Exact delivered static source text; not proof of runtime execution or order.'}
+            offset = end
     return result
 
 
@@ -38,12 +77,15 @@ def affected(claims, evidence, ids):
 
 
 def source_hash(source):
-    return sha(canonical({k: source.get(k) for k in ('excerpts', 'excerpt_locations', 'snapshot_receipts')}))
+    value = {k: source.get(k) for k in ('excerpts', 'excerpt_locations', 'snapshot_receipts')}
+    if type(source.get('claim_source_version')) is int and source['claim_source_version'] == 2:
+        value.update(claim_source_version=2, static_source_statements=static_statements(source))
+    return sha(canonical(value))
 
 
 def packet(source, draft, candidate_id, plan, index, all_claims, evidence, separation, strict):
     item = plan['pages'][index]
-    return {'review_protocol': VERSION, 'review_plan': plan['id'], 'review_page': index,
+    result = {'review_protocol': VERSION, 'review_plan': plan['id'], 'review_page': index,
             'contract': copy.deepcopy(source['contract']), 'workspace': source['workspace'],
             'constraint_echo': copy.deepcopy(source['constraint_echo']), 'pages': [],
             'request': 'Review the supplied claims against this page of fresh source evidence.',
@@ -53,6 +95,16 @@ def packet(source, draft, candidate_id, plan, index, all_claims, evidence, separ
             'review_scope': {'page': index + 1, 'pages': len(plan['pages']),
                 'meaning': 'Only this evidence page is visible. Judge each whole claim using it; absence here is not absence in the repository. Other pages are checked separately.'},
             'reviewer_selection': separation, 'require_distinct_reviewer': strict}
+    if type(source.get('claim_timeout_recovery_version')) is int and source['claim_timeout_recovery_version'] == 1:
+        result['claim_timeout_recovery_version'] = 1
+    if type(source.get('review_transport_version')) is int and source['review_transport_version'] == 1:
+        result['review_transport_version'] = 1
+    if source.get('report_schema_version') == 2:
+        result['evidence_choice_version'] = 2
+    if type(source.get('claim_source_version')) is int and source['claim_source_version'] == 2:
+        result['review_scope']['meaning'] += (' Entries labelled static_source_statement are delivered source syntax, '
+                                             'not proof of runtime execution or order.')
+    return result
 
 
 def partition(claims, evidence, fits):

@@ -39,7 +39,7 @@ function monitorHost(){
  fs.mkdirSync(out,{recursive:true});const browser=await chromium.launch({headless:true,...(process.env.KARMA_BROWSER?{executablePath:process.env.KARMA_BROWSER}:{})});
  try{
  const page=await browser.newPage({viewport:{width:1140,height:720}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
- const html=saved=>fs.readFileSync(path.join(root,'media/usage.html'),'utf8').replaceAll('NONCE_VALUE','test-nonce').replace('<script nonce="test-nonce" src="TOKENS_URI"></script>','<script nonce="test-nonce">'+fs.readFileSync(path.join(root,'media/token_usage.js'),'utf8')+'</script>').replace('<script nonce="test-nonce" src="SCRIPT_URI"></script>','<script nonce="test-nonce">window.sent=[];window.saved='+JSON.stringify(saved||{})+';function acquireVsCodeApi(){return {postMessage:m=>sent.push(m),setState:s=>window.saved=s,getState:()=>window.saved}}\n'+fs.readFileSync(path.join(root,'media/usage.js'),'utf8')+'</script>');
+ const html=saved=>fs.readFileSync(path.join(root,'media/usage.html'),'utf8').replaceAll('NONCE_VALUE','test-nonce').replace('<script nonce="test-nonce" src="TOKENS_URI"></script>','<script nonce="test-nonce">'+fs.readFileSync(path.join(root,'media/token_usage.js'),'utf8')+'</script>').replace('<script nonce="test-nonce" src="COHERENCE_URI"></script>','<script nonce="test-nonce">'+fs.readFileSync(path.join(root,'media/coherence.js'),'utf8')+'</script>').replace('<script nonce="test-nonce" src="PROGRESS_URI"></script>','<script nonce="test-nonce">'+fs.readFileSync(path.join(root,'media/generation_progress.js'),'utf8')+'</script>').replace('<script nonce="test-nonce" src="SCRIPT_URI"></script>','<script nonce="test-nonce">window.sent=[];window.saved='+JSON.stringify(saved||{})+';function acquireVsCodeApi(){return {postMessage:m=>sent.push(m),setState:s=>window.saved=s,getState:()=>window.saved}}\n'+fs.readFileSync(path.join(root,'media/usage.js'),'utf8')+'</script>');
  await page.setContent(html());const send=data=>page.evaluate(d=>window.dispatchEvent(new MessageEvent('message',{data:d})),{type:'usage',...data,snapshot:data.snapshot?{...data.snapshot,updatedAt:data.aged?data.snapshot.updatedAt:new Date().toISOString()}:undefined});
  assert.deepEqual(await page.evaluate(()=>sent),[{type:'ready'}]);assert.equal(await page.locator('#input').textContent(),'—');
  await send({snapshot,reasoningPreference:'model-default'});
@@ -161,6 +161,47 @@ function monitorHost(){
  await page.screenshot({path:path.join(out,'Task-observations.png')});
  await send({snapshot});assert.equal(await page.locator('#task-observations details').count(),0);
  assert(await page.locator('#task-observation-empty').isVisible());
+ const coherenceObservation={format:1,profile:'stage-text-coherence-v1',mode:'observe_only',status:'partial',
+  binding:{session:'session-current',task:'Review <img src=x>',chat:'chat-current'},role:'chat_reviewer',model:'local-model',
+  kernel:{decision:'BRIDGE',observation_only:true,grant:'FORGED GRANT'},coverage:{sources:2,items:4,required_questions_open:1},
+  raw_source:'PRIVATE COHERENCE SOURCE',issues:[
+   {code:'possible_contradiction',kind:'semantic_indicator',detail:'<img src=x onerror=alert(1)> [run](command:evil)'},
+   {code:'circular_support',kind:'structural',detail:'A depends on B; B depends on A.'}]};
+ const coherenceRows=Array.from({length:20},(_,i)=>({gateway_status:'accepted',observation:{...coherenceObservation,invocation_id:'coherence-'+i}}));
+ const coherenceDashboard=rows=>({...monitor,token_usage:{calls,total_calls:300,limit:250},coherence_observations:rows});
+ host.view.setData(coherenceDashboard(coherenceRows),snapshot.workspace);
+ assert.equal(host.posted.snapshot.monitor.coherence_observations.length,12);
+ assert(!JSON.stringify(host.posted).includes('PRIVATE COHERENCE SOURCE'));
+ assert(!JSON.stringify(host.posted).includes('FORGED GRANT'));
+ await send(host.posted);
+ assert.equal(await page.locator('#coherence-observations details').count(),12);
+ assert((await page.locator('#coherence-observations').textContent()).includes('Possible conflicting statements (unverified)'));
+ assert((await page.locator('#coherence-observations').textContent()).includes('Chat: chat-current'));
+ assert((await page.locator('#coherence-observations').textContent()).includes('Suggested adapter frame: BRIDGE · diagnostic only'));
+ assert.equal(await page.locator('#coherence-observations img,#coherence-observations script,#coherence-observations a,#coherence-observations button').count(),0);
+ const firstCoherence=page.locator('#coherence-observations details[data-id="coherence-0"]'),firstCoherenceSummary=firstCoherence.locator('summary');
+ await firstCoherenceSummary.focus();await firstCoherenceSummary.press('Enter');
+ assert(await firstCoherence.evaluate(e=>e.open));
+ const beforeCoherenceMessages=await page.evaluate(()=>sent.length);
+ await send(host.posted);
+ assert(await firstCoherenceSummary.evaluate(e=>e===document.activeElement),'Unchanged diagnostics retain keyboard focus');
+ const reordered=[{gateway_status:'quarantined',observation:{...coherenceObservation,invocation_id:'new-coherence'}},...coherenceRows];
+ host.view.setData(coherenceDashboard(reordered),snapshot.workspace);await send(host.posted);
+ assert(await firstCoherenceSummary.evaluate(e=>e===document.activeElement),'New diagnostic rows preserve focus on the existing task');
+ assert(await firstCoherence.evaluate(e=>e.open));
+ assert.equal(await page.evaluate(()=>sent.length),beforeCoherenceMessages,'Read-only coherence details never issue host actions');
+ const changed=reordered.map(row=>row.observation.invocation_id==='coherence-0'
+  ? {...row,observation:{...row.observation,issues:[...row.observation.issues,{code:'missing_source',kind:'structural',detail:'Need source evidence'}]}}:row);
+ host.view.setData(coherenceDashboard(changed),snapshot.workspace);await send(host.posted);
+ assert(await firstCoherenceSummary.evaluate(e=>e===document.activeElement),'Updating a focused diagnostic retains its summary focus');
+ assert(await firstCoherence.evaluate(e=>e.open));
+ await page.locator('#coherence-observations').scrollIntoViewIfNeeded();
+ await page.screenshot({path:path.join(out,'Coherence-indicators.png')});
+ await send({snapshot:{...snapshot,monitor:{...monitor,coherence_observations:[{observation:{...coherenceObservation,invocation_id:'unavailable',status:'unavailable',issues:[]}}]}}});
+ assert((await page.locator('#coherence-observations').textContent()).includes('Diagnostic unavailable'));
+ assert(!(await page.locator('#coherence-observations').textContent()).includes('No issue was flagged'));
+ await send({snapshot});assert.equal(await page.locator('#coherence-observations details').count(),0);
+ assert(await page.locator('#coherence-empty').isVisible());
  await send({snapshot});assert.equal(await page.locator('#input').textContent(),'6,284');assert.equal(await page.locator('#output').textContent(),'362');assert.equal(await page.locator('#unknown').textContent(),'1');assert.equal(await page.locator('#calls').textContent(),'5');assert((await page.locator('#window').textContent()).includes('latest 5 of 300'));assert.equal(await page.locator('.call-bar').count(),5);
  assert.equal(await page.locator('#cpu-temp').textContent(),'48.2 °C');assert.equal(await page.locator('#gpu-temp').textContent(),'44.6 °C');assert.equal(await page.locator('#cpu-load').textContent(),'20%');assert.equal(await page.locator('#ram').textContent(),'24.5 GiB');assert.equal(await page.locator('#resource').textContent(),'System pressure: ALLOW');assert((await page.locator('#gates').textContent()).includes('BRIDGE'));
  assert.equal(await page.locator('#compressed-memory').textContent(),'6.0 GiB');assert.equal(await page.locator('#swap-memory').textContent(),'2.0 GiB');assert((await page.locator('#memory-policy').textContent()).includes('Shared Ollama'));assert((await page.locator('#resident-models').textContent()).includes('small <img'));assert.equal(await page.locator('#resident-models img').count(),0);assert((await page.locator('#memory-plan').textContent()).includes('8,192 context tokens'));assert((await page.locator('#memory-plan').textContent()).includes('Peak memory is not verified'));assert((await page.locator('#memory-recovery').textContent()).includes('observe only shared server'));assert((await page.locator('#memory-plan').textContent()).includes('MLX calibration aaaaaaaaaaaa'));assert((await page.locator('#memory-plan').textContent()).includes('16,384 tokens'));assert((await page.locator('#memory-plan').textContent()).includes('1.0 GiB uncertainty margin'));
@@ -224,6 +265,39 @@ function monitorHost(){
  assert(await child.evaluate(e=>e.open));assert.equal(await page.evaluate(()=>document.activeElement.tagName),'SUMMARY');assert.equal(await child.locator('img').count(),0);assert((await child.textContent()).includes('withheld'));assert((await child.textContent()).includes('80 output'));
  await child.getByRole('button',{name:'Open call details'}).click();
  assert.deepEqual((await page.evaluate(()=>sent)).at(-1),{type:'activity_details',id:'child-2'});
+ const literalProgress={profile:'literal-generation-progress-v1',received_chars:4096,observed_chars:4096,omitted_chars:0,
+  invalid_chars:0,invalid_feeds:0,long_units:32,duplicate_units:28,novel_units:4,recent_units:32,
+  recent_duplicate_fraction:.875,recent_novelty_fraction:.125,repetition_indicator:true,current_repetition:true,
+  alert:true,alert_emitted:true,analysis_complete:true,pending_chars:0,finished:false,semantic_assessment:'unassessed',
+  limits:{pending_chars:4096,digest_units:128,recent_units:32,min_unit_chars:40,min_long_units:32,min_observed_chars:2048,feed_chars:16384,duplicate_ratio:.8},
+  patterns:['PRIVATE REPETITION PATTERN'],text:'PRIVATE REPETITION TEXT'};
+ await child.locator('summary').focus();
+ const beforeLiteralMessages=await page.evaluate(()=>sent.length);
+ await send({snapshot,activity:activity.map(c=>c.id==='child-2'?{...c,generation_progress:literalProgress}:c)});
+ assert((await child.locator('summary').textContent()).includes('literal repetition observed'));
+ assert((await child.locator('[role="status"]').textContent()).includes('Repeated reasoning text observed (literal signal; correctness unverified)'));
+ assert((await child.locator('[role="status"]').textContent()).includes('87.5% of 32 long text units'));
+ assert(!(await child.textContent()).includes('PRIVATE REPETITION'));
+ assert(await child.evaluate(e=>e.open));assert.equal(await page.evaluate(()=>document.activeElement.tagName),'SUMMARY');
+ assert.equal(await page.evaluate(()=>sent.length),beforeLiteralMessages,'A literal repetition observation sends no control or cancellation action');
+ await page.locator('#reasoning-calls').scrollIntoViewIfNeeded();
+ await page.screenshot({path:path.join(out,'Literal-generation-progress.png')});
+ await send({snapshot,activity:activity.map(c=>c.id==='child-2'?{...c,generation_progress:{...literalProgress,recent_units:99}}:c)});
+ assert(!(await child.locator('summary').textContent()).includes('literal repetition observed'));
+ assert(await child.locator('[role="status"]').isHidden(),'Malformed metrics cannot create a live warning');
+ const endurance=await page.evaluate(({snapshot,metrics})=>{
+  const rows=[],shown=[];let maximum=0;const before=sent.length;
+  for(let i=0;i<220;i++){
+   const id='endurance-'+i;rows.push({id,role:'subagent',model:'model-'+i,status:'accepted',text:'',startedAt:Date.now(),finishedAt:Date.now(),generation_progress:{...metrics,alert:false,finished:true}});
+   if(rows.length>12)rows.shift();
+   window.dispatchEvent(new MessageEvent('message',{data:{type:'usage',snapshot:{...snapshot,updatedAt:new Date().toISOString()},activity:[...rows]}}));
+   const card=document.querySelector('#reasoning-calls details[data-id="'+id+'"]');
+   shown.push(!!card&&card.querySelector('summary').textContent.includes('literal repetition observed'));
+   maximum=Math.max(maximum,document.querySelectorAll('#reasoning-calls details').length);
+  }
+  return {allShown:shown.every(Boolean),maximum,extraActions:sent.length-before};
+ },{snapshot,metrics:literalProgress});
+ assert.deepEqual(endurance,{allShown:true,maximum:12,extraActions:0},'The Monitor remains live beyond200 sequential calls without growing its retained cards');
  await send({snapshot,activity,activityError:'Could not save diagnostic history'});assert((await page.locator('#reasoning-error').textContent()).includes('Could not save'));
  await page.screenshot({path:path.join(out,'Live-child-reasoning.png'),fullPage:true});
  await page.screenshot({path:path.join(out,'Sutra-monitor.png'),fullPage:true});
@@ -240,6 +314,13 @@ function monitorHost(){
  assert.equal(await page.locator('#workspace-access').textContent(),'Workspace access · No workspace access');
  await send({snapshot,routing:{active:true}});assert.equal(await page.locator('#activity').textContent(),'Request in progress');assert(!(await page.locator('#model').isDisabled()));
  assert((await page.locator('#flow-nodes').textContent()).includes('large.py: Static graph work-unit allocation exceeded'));
+ const partial=dashboard();partial.diagnostic_errors=[{section:'ledger',message:'Task budget proof unavailable'}];delete partial.review_budget;
+ host.view.setData(partial,snapshot.workspace);await send(host.posted);
+ assert((await page.locator('#diagnostic-errors').textContent()).includes('Task budget proof unavailable'));
+ assert(await page.locator('#diagnostic-errors').isVisible());assert(await page.locator('#error').isHidden());
+ assert.equal(await page.locator('#cpu-temp').textContent(),'48.2 °C');assert.equal(await page.locator('#cpu-load').textContent(),'20%');
+ assert.equal(await page.locator('#ram').textContent(),'24.5 GiB');assert.equal(await page.locator('#input').textContent(),'6,284');
+ await send({snapshot});assert(await page.locator('#diagnostic-errors').isHidden());
  await send({snapshot,error:'Reader unavailable'});assert((await page.locator('#error').textContent()).includes('last recorded snapshot'));assert.equal(await page.locator('#input').textContent(),'6,284');assert.equal(await page.locator('#cpu-temp').textContent(),'—');assert.equal(await page.locator('#resource').textContent(),'System pressure unavailable');
  await send({snapshot});assert(!(await page.locator('#error').isVisible()));await page.click('#refresh');await page.click('#telemetry');assert.deepEqual((await page.evaluate(()=>sent)).slice(-2),[{type:'refresh'},{type:'telemetry'}]);
  await page.setViewportSize({width:390,height:844});await page.locator('#details').evaluate(e=>e.open=true);assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));await page.screenshot({path:path.join(out,'Token-usage-narrow.png'),fullPage:true});

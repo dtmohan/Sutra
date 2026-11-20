@@ -20,6 +20,13 @@ class Activity:
         self.shown = 0
         self.total = 0
         self.last = 0
+        self.progress = None
+        self.progress_final = None
+        try:
+            from generation_progress import Progress
+            self.progress = Progress()
+        except Exception:
+            pass  # Optional observation must not prevent model dispatch.
 
     def emit(self, kind, **data):
         self.seq += 1
@@ -34,6 +41,9 @@ class Activity:
 
     def thinking(self, text):
         self.total += len(text)
+        if self.progress is not None:
+            try:self._progress_notice(self.progress.feed(text))
+            except Exception:self.progress = None
         available = max(0, MAX_THINKING - self.shown - len(self.pending))
         self.pending += text[:available]
         if time.monotonic() - self.last >= .2 or len(self.pending) >= 2048:
@@ -46,11 +56,32 @@ class Activity:
             self.emit('thinking', text=part)
         self.last = time.monotonic()
 
+    def _progress_notice(self, value):
+        if value.get('alert'):
+            from karma_adapter import KarmaAdapter
+            self.emit('progress', generation_progress=value,
+                      kernel=KarmaAdapter().generation_progress(value))
+
+    def progress_snapshot(self, *, finish=False):
+        if self.progress is None:
+            return None
+        try:
+            if finish and self.progress_final is None:
+                self.progress_final = self.progress.finish()
+                self._progress_notice(self.progress_final)
+            value = self.progress_final if self.progress_final is not None else self.progress.snapshot()
+            return value if value.get('received_chars') else None
+        except Exception:
+            self.progress = None
+            return None
+
     def finish(self, admitted, usage):
         self.flush()
+        progress = self.progress_snapshot(finish=True)
         self.emit('finish', status='accepted' if admitted else 'withheld',
                   usage=usage, thinking_chars=self.total,
-                  display_truncated=self.total > self.shown)
+                  display_truncated=self.total > self.shown,
+                  **({'generation_progress': progress} if progress is not None else {}))
 
 
 @contextmanager

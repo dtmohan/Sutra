@@ -15,6 +15,13 @@ class SourceReadLimitExceeded(InvalidUpdate):
 class RepositoryReceiptStale(InvalidUpdate):
  """An intact repository receipt was made under another contract or policy."""
 
+class CatalogRefreshFailed(InvalidUpdate):
+ """The latest verified catalog receipt records a failed scan, not source access."""
+ def __init__(self,receipt,error):
+  self.receipt=receipt
+  self.error=error
+  super().__init__('Catalog refresh failed: '+error)
+
 
 def initialize(s):
  s.db.executescript('''CREATE TABLE IF NOT EXISTS repository_ops(id TEXT PRIMARY KEY,session TEXT,request_id TEXT UNIQUE,record_json TEXT,digest TEXT);
@@ -75,7 +82,7 @@ def link_reason(metadata):
  return None
 
 def inventory(workspace,roots,automatic=False,exclusions=None):
- result=[];visited=0;started=time.monotonic()
+ result=[];visited=0;started=time.monotonic();observed={'.'}
  omitted={} if exclusions is None else exclusions
  for folder,dirs,files in os.walk(workspace,followlinks=False):
   visited+=1
@@ -86,6 +93,7 @@ def inventory(workspace,roots,automatic=False,exclusions=None):
    logical=(Path(relative)/name).as_posix()
    try:normalized(logical)
    except InvalidUpdate:continue
+   observed.add(logical)
    in_scope=scoped(logical,roots)
    descendants=[r for r in roots if r.startswith(logical+'/')]
    if not in_scope and not descendants:continue
@@ -103,6 +111,7 @@ def inventory(workspace,roots,automatic=False,exclusions=None):
    try:normalized(logical)
    except InvalidUpdate:continue
    if not scoped(logical,roots):continue
+   observed.add(logical)
    supported=Path(name).suffix.lower() in EXTENSIONS
    if not supported and logical not in roots:continue
    p=Path(folder)/name;st=p.lstat()
@@ -117,6 +126,8 @@ def inventory(workspace,roots,automatic=False,exclusions=None):
     continue
    result.append(logical)
    if not automatic and len(result)>MAX_FILES:raise InvalidUpdate('More than 128 code files; narrow the review roots')
+ for requested in roots:
+  if requested not in observed and requested not in omitted:omitted[requested]='missing'
  if not result and not omitted:raise InvalidUpdate('No supported code files in the review scope')
  return sorted(result)
 
@@ -141,7 +152,8 @@ def catalog_snapshot(s,session):
   row=s.db.execute("SELECT r.id FROM repository_ops o JOIN repository_receipts r ON r.operation_id=o.id WHERE o.session=? AND json_extract(o.record_json,'$.kind')='catalog' ORDER BY r.seq DESC LIMIT 1",(session,)).fetchone()
   if not row:raise InvalidUpdate('Automatic catalog absent')
   record=record_by_id(s,session,row[0])
-  if record['result']['status']!='ok':raise InvalidUpdate('Latest catalog refresh failed')
+  if record['result']['status']!='ok':
+   raise CatalogRefreshFailed(record['id'],str(record['result'].get('error') or 'Scan did not complete'))
  else:
   rows=[r for r in current_records(s,session) if r['operation']['kind']=='catalog' and r['result']['status']=='ok']
   if not rows:raise InvalidUpdate('Review catalog absent or stale; start a new architecture review')
@@ -172,7 +184,7 @@ def usage(s,session):
  allocation=task_usage(s,session)
  return budget_decision(used,allocation['limits']['operations'] if allocation else c['max_tools'])
 
-def request_check(s,session,kind,target='',query='',line=1,cursor=None):
+def request_check(s,session,kind,target='',query='',line=1,cursor=None,*,search_version=None):
  c=settings(s,session)
  if kind not in ('catalog','read','search','list','api_index','static_map'):raise InvalidUpdate('Unsupported repository operation')
  if type(line) is not int or line<1:raise InvalidUpdate('Line/offset must be positive')
@@ -198,7 +210,12 @@ def request_check(s,session,kind,target='',query='',line=1,cursor=None):
       for r in current_records(s,session)):
    raise InvalidUpdate('Unknown read continuation for this file. Use a cursor from a read receipt or start a new read.')
  elif kind=='search':
-  if target or not isinstance(query,str) or not 1<=len(query)<=80 or '\n' in query or line!=1:raise InvalidUpdate('Search requires one bounded literal query')
+  if search_version is None:
+   if target or not isinstance(query,str) or not 1<=len(query)<=80 or '\n' in query or line!=1:raise InvalidUpdate('Search requires one bounded literal query')
+  else:
+   if type(search_version) is not int or search_version!=1:raise InvalidUpdate('Unsupported repository search profile')
+   if not isinstance(query,str) or not 1<=len(query)<=80 or '\n' in query or line!=1:raise InvalidUpdate('Search needs one literal query of 1 to 80 characters and line=1')
+   if target:require_catalog_source(target,c['allowed_paths'],snapshot,'Search target outside committed catalog')
  elif target or query or line>len(snapshot['files']):raise InvalidUpdate('Invalid catalog page')
 
 def read_excerpt(text,line,column=0):
@@ -210,7 +227,34 @@ def read_excerpt(text,line,column=0):
   position-=len(lines[index]);index+=1
  return body,({'line':index+1,'column':position} if index<len(lines) else None)
 
-def _replay(s,session,request_id,arguments,cursor,invocation_id,automatic):
+def discovery_read_profile(budget_profile):
+ """Host page sizing from the same budget committed by the accepted decision."""
+ from paging import Budget
+ budget=Budget(**budget_profile)
+ return {'version':1,'max_bytes':min(16384,max(4,budget.input_limit//4)),'max_lines':256}
+
+def _read_position(lines,line,column,body):
+ index=line-1;position=column+len(body)
+ while index<len(lines) and position>=len(lines[index]):
+  position-=len(lines[index]);index+=1
+ return {'line':index+1,'column':position} if index<len(lines) else None
+
+def read_page(text,line,column,profile):
+ """One bounded page, partitioned into independently located receipt units."""
+ lines=text.splitlines(True)
+ if line>len(lines) or column>=len(lines[line-1]):raise InvalidUpdate('Requested position is beyond source')
+ body=''.join(lines[line-1:line-1+profile['max_lines']])[column:].encode()[:profile['max_bytes']].decode('utf-8','ignore')
+ remaining=body;position={'line':line,'column':column};units=[]
+ while remaining:
+  unit=remaining.encode()[:1200].decode('utf-8','ignore')
+  newline=unit.rfind('\n')
+  if newline>=0:unit=unit[:newline+1]
+  end=_read_position(lines,position['line'],position['column'],unit)
+  units.append(dict(position,text=unit,end_position=end,line_complete=end is None or end['column']==0))
+  remaining=remaining[len(unit):];position=end
+ return units,_read_position(lines,line,column,body)
+
+def _replay(s,session,request_id,arguments,cursor,invocation_id,automatic,read_profile=None,search_version=None):
  prior=s.db.execute("""SELECT o.session,r.id FROM repository_ops o
   LEFT JOIN repository_receipts r ON r.operation_id=o.id WHERE o.request_id=?""",(request_id,)).fetchone()
  if not prior:return None
@@ -221,19 +265,39 @@ def _replay(s,session,request_id,arguments,cursor,invocation_id,automatic):
  if (op['kind'],op['target'],op['query'],op['line'])!=arguments:raise InvalidUpdate('Replayed request has changed arguments')
  if op.get('cursor')!=cursor:raise InvalidUpdate('Replayed request has changed continuation')
  if op.get('invocation_id')!=invocation_id:raise InvalidUpdate('Replayed request has changed model invocation')
+ if canonical(op.get('read_profile'))!=canonical(read_profile):raise InvalidUpdate('Replayed request has changed read profile')
+ if op.get('search_version')!=search_version:raise InvalidUpdate('Replayed request has changed search profile')
  return dict(row,replayed=True)
 
 
-def execute(s,session,workspace,root,kind,*,target='',query='',line=1,cursor=None,invocation_id=None,request_id=None,resource_check=True):
+def accepted_search_version(s,session,invocation_id):
+ """A file-search capability comes only from an accepted architect delivery."""
+ if not invocation_id:return None
+ row=s.db.execute('SELECT d.payload_json FROM invocations i JOIN deliveries d ON d.id=i.delivery_id '
+  "WHERE i.id=? AND i.session=? AND json_extract(i.record_json,'$.role')='architect'",(invocation_id,session)).fetchone()
+ if not row:return None
+ request=json.loads(row[0])
+ if 'discovery_search_version' not in request:return None
+ if (type(request['discovery_search_version']) is not int or request['discovery_search_version']!=1
+     or request.get('evidence_discovery_version')!=4 or type(request.get('discovery_selection_version')) is not int
+     or request['discovery_selection_version']!=3):raise InvalidUpdate('Unsupported repository search profile')
+ s.load_result(session,invocation_id)
+ from review_discovery import authorize_tool
+ authorize_tool(s,session,request)
+ return 1
+
+
+def execute(s,session,workspace,root,kind,*,target='',query='',line=1,cursor=None,invocation_id=None,request_id=None,resource_check=True,read_profile=None):
  from lifecycle import timeout
  timeout(20)
  initialize(s);contract_hash=s.origin(session)['contract_hash'];c=settings(s,session);automatic=c.get('auto_review',False)
  request_id=request_id or uuid.uuid4().hex
  arguments=(kind,target,query,line)
- replayed=_replay(s,session,request_id,arguments,cursor,invocation_id,automatic)
- if replayed:return replayed
- request_check(s,session,kind,target,query,line,cursor)
- planned_read=False
+ search_version=accepted_search_version(s,session,invocation_id) if kind=='search' else None
+ replayed=_replay(s,session,request_id,arguments,cursor,invocation_id,automatic,read_profile,search_version)
+ if replayed and read_profile is None:return replayed
+ request_check(s,session,kind,target,query,line,cursor,search_version=search_version)
+ planned_read=False;discovery=False;request_payload=None;envelope=None
  if invocation_id:
   p=s.load_result(session,invocation_id)
   expected={'kind':kind,'target':target,'query':query,'line':line}
@@ -244,10 +308,38 @@ def execute(s,session,workspace,root,kind,*,target='',query='',line=1,cursor=Non
     raise InvalidUpdate('Follow-up source request differs from approved plan')
    planned_read=True
   elif p.get('tool')!=expected:raise InvalidUpdate('Tool request differs from accepted model proposal')
+  request=s.db.execute('SELECT d.payload_json,i.record_json FROM invocations i JOIN deliveries d ON d.id=i.delivery_id '
+      "WHERE i.id=? AND i.session=? AND json_extract(i.record_json,'$.role')='architect'",
+      (invocation_id,session)).fetchone()
+  if request:request_payload=json.loads(request[0]);envelope=json.loads(request[1])
+  discovery=bool(request_payload and request_payload.get('evidence_discovery_version')==4)
+  if discovery:
+   from review_discovery import authorize_tool
+   authorize_tool(s,session,request_payload)
+ if read_profile is not None or (kind=='read' and request_payload and request_payload.get('discovery_selection_version') in (2,3)):
+  if (kind!='read' or not automatic or not discovery or type(request_payload.get('discovery_selection_version')) is not int
+      or request_payload.get('discovery_selection_version') not in (2,3)
+      or not isinstance(read_profile,dict) or set(read_profile)!={'version','max_bytes','max_lines'}
+      or any(type(read_profile[key]) is not int for key in read_profile)
+      or canonical(read_profile)!=canonical(request_payload.get('read_profile'))
+      or canonical(read_profile)!=canonical(discovery_read_profile(envelope['budget_profile']))):
+   raise InvalidUpdate('Read profile differs from the admitted architect decision budget')
+ if replayed:return replayed
  from review_budget import require
  source_charge=sum((Path(workspace)/p).stat().st_size for p in target.split('\n')) if kind=='static_map' else 0 if kind in ('catalog','list') else MAX_FILE
  if planned_read:
   source_charge=min(MAX_FILE,max(1,(Path(workspace)/target).stat().st_size))
+ read_limit=source_charge if planned_read else MAX_FILE;source_limits={}
+ if automatic and discovery and kind in ('read','search'):
+  # This version already has a committed automatic catalog and a governed
+  # source-byte allocation. Keep the historical 64KB tool profile unchanged.
+  read_limit=c['review_page_kib']*1024
+  names=[target] if kind=='read' or (kind=='search' and search_version==1 and target) else catalog(s,session)
+  sizes=[(Path(workspace)/name).stat().st_size for name in names]
+  source_limits={name:max(1,size) for name,size in zip(names,sizes)}
+  source_charge=max(1,sum(sizes))
+  if kind=='read' and sizes[0]>read_limit:
+   raise SourceReadLimitExceeded(f'Source {target} needs {sizes[0]} bytes; scoped source-page allocation is {read_limit} bytes')
  from storage_policy import require_space
  require_space(root,max(16*1024**2,source_charge*32))
  cost={'operations':1,'source_bytes':source_charge,'seconds':20}
@@ -261,10 +353,12 @@ def execute(s,session,workspace,root,kind,*,target='',query='',line=1,cursor=Non
      'actor':'governed_model' if invocation_id else 'host_tool','kind':kind,'target':target,'query':query,'line':line,
      'contract_hash':contract_hash,'logic_hash':s.logic_hash,'resource':hardware,'task_cost':cost if automatic else {}}
  if cursor is not None:op['cursor']=cursor
+ if read_profile is not None:op['read_profile']=dict(read_profile)
+ if search_version is not None:op['search_version']=search_version
  with s.db:
   s.db.execute('BEGIN IMMEDIATE')
   if s.origin(session)['contract_hash']!=contract_hash:raise InvalidUpdate('Repository contract changed before dispatch')
-  replayed=_replay(s,session,request_id,arguments,cursor,invocation_id,automatic)
+  replayed=_replay(s,session,request_id,arguments,cursor,invocation_id,automatic,read_profile,search_version)
   if replayed:return replayed
   # Reserve against the current count under the lock that records the read.
   budget=usage(s,session)
@@ -274,7 +368,7 @@ def execute(s,session,workspace,root,kind,*,target='',query='',line=1,cursor=Non
    from orchestration import admit,ACTIVE,node
    if ACTIVE.get() and node(s,ACTIVE.get())['kind']=='branch' and kind not in ('read','api_index','static_map'):
     raise InvalidUpdate('Child repository operation requires an exact scoped target')
-   names=catalog(s,session) if kind in ('list','search') else None
+   names=([target] if kind=='search' and search_version==1 and target else catalog(s,session)) if kind in ('list','search') else None
    op.update(kernel=budget,task_budget_kernel=require(s,session,cost),started_at=time.time())
    op['orchestration']=admit(s,session,'repository',op['id'],cost,paths=target.split('\n') if target else [],resource=hardware)
    digest=sha('repository-op-v1:'+canonical(op))
@@ -299,12 +393,19 @@ def execute(s,session,workspace,root,kind,*,target='',query='',line=1,cursor=Non
    selected=[target] if kind=='read' else names;excerpts=[];versions={};started=time.monotonic();truncated=False;next_position=None
    for name in selected:
     if time.monotonic()-started>3:truncated=True;break
-    raw=read_bytes(workspace,name,limit=source_charge if planned_read else MAX_FILE);text=raw.decode();version=hashlib.sha256(raw).hexdigest();versions[name]=version;lines=text.splitlines(True)
+    if automatic and discovery and kind=='search' and (Path(workspace)/name).stat().st_size>read_limit:
+     truncated=True;continue
+    raw=read_bytes(workspace,name,limit=min(read_limit,source_limits.get(name,read_limit)));text=raw.decode();version=hashlib.sha256(raw).hexdigest();versions[name]=version;lines=text.splitlines(True)
     if kind=='read':
      if cursor and cursor['sha256']!=version:raise InvalidUpdate('Source changed since read continuation; restart the read')
      column=cursor['column'] if cursor else 0
-     body,next_position=read_excerpt(text,line,column)
-     excerpts.append({'path':name,'line':line,'column':column,'text':body,'sha256':version});truncated=next_position is not None
+     if read_profile is None:
+      body,next_position=read_excerpt(text,line,column)
+      excerpts.append({'path':name,'line':line,'column':column,'text':body,'sha256':version})
+     else:
+      units,next_position=read_page(text,line,column,read_profile)
+      excerpts.extend(dict(unit,path=name,sha256=version) for unit in units)
+     truncated=next_position is not None
     else:
      for n,body in enumerate(lines,1):
       if query in body:
@@ -346,7 +447,9 @@ def evidence(s,session,workspace):
   if row['result']['status']!='ok':continue
   for e in row['result'].get('excerpts',[]):
    try:
-    if e['path'] not in cache:cache[e['path']]=hashlib.sha256(read_bytes(workspace,e['path'])).hexdigest()
+    if e['path'] not in cache:
+     limit=max(MAX_FILE,row['operation'].get('task_cost',{}).get('source_bytes',MAX_FILE))
+     cache[e['path']]=hashlib.sha256(read_bytes(workspace,e['path'],limit=limit)).hexdigest()
    except InvalidUpdate:continue
    if cache[e['path']]==e['sha256']:result[e['id']]=dict(e,receipt=row['id'])
  return result

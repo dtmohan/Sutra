@@ -1,3 +1,231 @@
+Sutra 0.52.0 — Bounded coherence observations
+
+Sutra observes explicit questions, findings, assumptions and source references
+already present in model-stage artifacts. Bounded graph checks flag stale or
+missing evidence, circular support, unresolved commitments and possible conflicts
+between scoped values. Hypothetical, subject and time contexts remain separate.
+Model conclusions and completion claims remain unverified. These checks do not
+parse arbitrary prose, add inference, grant permissions or close tasks.
+
+A separate stream observer can flag sustained literal repetition in reasoning
+while a call is still running. It retains bounded fingerprints and counters;
+it does not judge correctness or automatically cancel or retry a generation.
+Indicators appear in chat and Sutra Monitor. Original receipts, spending,
+configured models and the canonical STP kernel remain unchanged.
+
+Sutra 0.51.9 — Source recall and thinking controls
+
+Discovery recalls relevant whole source units from current verified receipts,
+alongside its saved notes and directory. Required source and the fresh page
+prefix remain protected during fitting. Paging a saved unit reuses its repository
+receipt; each new model input still consumes its normal allocation.
+
+Source-backed architecture planning can use supported Adaptive thinking. Explicit
+On, Off and Model default choices are honored. The one-turn lightbulb boosts
+planning and answering; delegated child reviews keep their configured base
+reasoning. Settings, model tiers, permissions and consumed budgets are preserved.
+The STP kernel is unchanged.
+
+Sutra 0.51.8 — Review lookup and validation
+
+New architecture searches can target one authorized catalog file. Literal-query
+limits, path admission and source accounting still apply. Older recorded search
+requests retain their original behavior.
+
+New discovery calls retain a small linked directory and their latest working
+note. Relevant earlier notes can be recalled from accepted checkpoints after
+eviction, reloads and model switches. Directory references remain scoped to the
+current task and discovery journal; notes are unverified context.
+
+Architecture checkpoint validation shares ancestry work only within one bounded
+read pass. Source freshness, task identity and quarantine are checked before
+results return; success is never cached across model calls or ledger changes.
+
+The STP kernel, configured model tiers and consumed budgets remain unchanged.
+
+Sutra 0.51.7 — Review working memory
+
+New discovery notes use the existing complete-note byte allowance. Brief notes
+are encouraged without rejecting otherwise valid replies solely for a character
+count. Released note profiles retain their original validation and receipts.
+
+Discovery retains a bounded index of source ranges supplied to earlier accepted
+calls when their bodies leave the working window. This records delivery, not
+semantic review. Source reads and searches remain available.
+
+New parent synthesis packets distinguish financial allocation from physical
+context capacity before retiring earned source. Existing workspace limits govern
+additional allocation. The STP kernel, permissions and model tiers are unchanged.
+
+Sutra 0.51.6 — Latest review recovery
+
+An explicit Continue can offer recovery of the latest unpublished review before
+an older automatically restored open task. Recovery compares original request
+lineage, so restarting an older task does not make it a newer user ask.
+
+The confirmed restart uses the existing task-stack transition to park older work
+and retains the selected task's context, permissions and consumed spending. A
+newer user request, another chat or a changed contract still blocks recovery.
+Previous completed records remain unchanged. The STP kernel and model tiers are
+unchanged.
+
+Sutra 0.51.5 — Active source and review recovery
+
+Architecture discovery keeps its latest unread source page in the active working
+set and pages optional catalog metadata first. New discovery calls receive a
+bounded file index and short working notes; the full scoped catalog and source
+receipts remain available to the host.
+
+A physical context fit precedes financial allocation recovery, including providers
+using conservative byte accounting. Reviewer identity failures are isolated so an
+unavailable model cannot block an otherwise eligible available reviewer.
+
+Explicit Continue can offer a confirmed policy restart of the latest unpublished
+review in the same chat. It retains the original task and consumed spending;
+previous terminal records remain unchanged. The STP kernel and model tiers are
+unchanged.
+
+Sutra 0.51.4 — Targeted source discovery
+
+Architecture discovery receives exact declaration line addresses from its fresh
+source snapshot. It can jump to a supplied address or search for a missing link;
+a truncated read does not require scanning the rest of the file.
+
+New read pages follow the admitted context allowance, up to 16 KiB and 256 lines.
+Their full receipts retain exact source bytes in small units that can be paged
+when the working context changes. Accepted decisions bind page sizing, scope and
+source charges. Historical reads retain their original recipe.
+
+The STP kernel, model tiers, permissions and runtime retention settings are unchanged.
+
+Sutra 0.51.3 — Child allocation and review slices
+
+Saved child reviews can recover execution time and other quantitative allocations
+without replacing their checkpoints or resetting spending. The existing workspace
+ceilings and ancestor gates still govern every increase.
+
+New report and claim-review calls bind their transport deadline to the host's
+admitted duration. Long attempts yield between bridge steps while retaining the
+original retry ceiling. Historical calls and providers without shared deadline
+support keep the existing timing profile.
+
+Claim reviewers receive the exact static source statements delivered to the
+writer, including statements outside its excerpts. Their evidence IDs bind text,
+path and line. Static syntax does not prove runtime execution or semantic support.
+The STP kernel, permissions and configured model tiers are unchanged.
+
+Sutra 0.51.2 — Source decisions and review recovery
+
+Architecture discovery requests the next tool operation and a short working note.
+It no longer asks the same decision to produce report findings and citations.
+The existing gateway still checks scope, source receipts, cursors and budgets.
+Discovery pages optional context before requesting capacity within the configured
+workspace ceiling. Extra task capacity cannot override a physical context limit.
+
+Timed-out Adaptive claim reviews retain their accepted draft, source plan and
+remaining attempts. Interrupted or unknown usage remains charged. Historical
+response profiles, the STP kernel and configured model tiers are preserved.
+
+Sutra 0.51.1 — Checkpointed review stages
+
+Accepted architecture drafts are saved before claim review. The next bridge step
+checks source claims without replaying generation. Interrupted stages retain
+context, permissions, remaining attempts and consumed spending.
+
+Before drafting, the parent can request source reads, literal searches and catalog
+pages through the existing gateway. Each step returns a durable checkpoint, and
+later steps use actual tool results to choose what to inspect next. Discovery
+notes remain unverified; partial evidence is labelled when a boundary stops it.
+
+Report sections use the allocated output capacity instead of fixed item counts.
+References remain restricted to supplied evidence, and historical schemas keep
+their original rules. System and token totals are placed before deep diagnostics.
+The STP kernel and configured model tiers remain unchanged.
+
+Sutra 0.51.0 — Physical context and source discovery
+
+Verified local token counts govern physical review context separately from the
+existing task reservation and settlement units. Older receipts retain their
+original profiles. Unsupported providers keep conservative context planning.
+
+New source pages prefer requested symbols and central entry points, and continue
+past complete accepted pages. Historical evidence recipes remain available.
+Valid citations are bounded by supplied choices rather than a fixed four-item
+limit. Adaptive claim evaluation can use supported reasoning when the answer
+allocation has room. The preview offers request-flow and local-import views.
+The STP kernel and configured model tiers remain unchanged.
+
+Sutra 0.50.8 — Evidence paging and clearer review sources
+
+Child reviews use their accepted follow-up notes to retrieve missing evidence
+within the assigned source scope. New review packets retain complete source lines
+and avoid fragments that cannot explain an operation. Historical packets keep
+their original evidence recipe for receipt validation.
+
+Synthesis retains earlier findings while reducing repeated summaries and quoted
+citation overhead; complete evidence remains in the host record. Chat groups
+source links instead of repeating the full evidence-ID table. Context, permissions,
+consumed budgets, configured model tiers and the STP kernel are unchanged.
+
+Sutra 0.50.7 — Findings from children, reports from synthesis
+
+Child reviewers return their supported findings, citations and remaining checks.
+They no longer need to duplicate the final architecture report in every source
+partition. The parent synthesis retains its report format and evidence review.
+Context, permissions, spent budgets and the STP kernel remain unchanged.
+
+Sutra 0.50.6 — Host-owned response admission and child repair recovery
+
+Self-assessments are optional diagnostics. Child reviewers focus on their assigned
+source work instead of assessing the whole parent task. Prompt examples no longer
+supply unrelated project facts or filenames.
+
+For Strata runtimes that advertise prompt-and-validate output, Sutra receives the
+reply and measured usage before applying its own JSON/schema and evidence checks.
+Settled child repair pauses retain checkpoints, remaining attempts and all spending;
+allocation recovery extends the same branch without resetting sibling allowances.
+The STP kernel and your configured model tiers are unchanged.
+
+Sutra 0.50.5 — Retained worklists and active-request sleep protection
+
+Pending bridge requests hold a macOS idle-system-sleep assertion and release it
+when work settles or stops. Display sleep and explicit system sleep remain
+available. Deadlines and the STP kernel are unchanged.
+
+Informational remaining-work lists no longer reject useful child checkpoints
+for containing more than four entries. Individual text bounds, whole-response
+allocations, source/citation checks and permission checks still apply; all
+accepted follow-up items remain in the receipt and conversation pages.
+
+Sutra 0.50.4 — Reliable monitoring and bounded recovery
+
+Monitor keeps live system readings and usage visible when task diagnostics fail.
+Context admission records its memory plan before dispatch and distinguishes
+a base-packet shortage from pinned conversation facts. A rejected child review
+stops with its validation details and can use a bounded replacement without
+joining quarantined output or resetting spending. The STP kernel is unchanged.
+
+Sutra 0.50.3 — Native workspace consent and review recovery
+
+Sutra Auto asks for workspace reading in the native chat confirmation. Approve
+once to continue the same saved request automatically; the read grant is
+remembered for this workspace. Edits and tests retain separate confirmation.
+No copied key or manual continuation is needed after native approval.
+
+Whole-workspace reviews use the requested workspace scope instead of invented
+router filenames. Failed catalogs report the original cause and retain saved
+context and spending. A saved review with an incorrect router-generated scope
+can correct that scope through an explicitly confirmed restart, preserving
+its task history and consumed allocation. The STP kernel is unchanged.
+
+Sutra 0.50.2 — Controls in the bottom bar
+
+Click Sutra in the bottom status bar for enable/disable, chat, workspace access,
+models, reasoning and Monitor. Enable Sutra keeps your current chat. Enable and
+open Sutra chat explicitly starts a new Local chat with Sutra Auto; no prompt is
+sent and file access still requires authorization. Busy requests keep Monitor
+available while settings changes wait. Saved work and the STP kernel are preserved.
+
 Sutra 0.50.1 — Concurrent receipt verification
 
 WAL read snapshots keep receipt verification from blocking concurrent receipts.

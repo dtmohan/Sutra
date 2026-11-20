@@ -76,6 +76,40 @@ class AutomaticTests(unittest.TestCase):
    out=self.step(explain=False)
   self.assertEqual(out['auto']['status'],'resource_wait');self.assertFalse(out['auto']['failures'])
   self.assertEqual(self.step(explain=False)['auto']['mapped_files'],1)
+ def test_failed_catalog_retains_original_error_pages_and_charge_then_recovers(self):
+  self.step(explain=False)
+  contract=self.s.current_contract(self.sid);pages=copy.deepcopy(self.meta['auto']['pages'])
+  before=budget.usage(self.s,self.sid)['used']
+  with patch('repository_tools.inventory',side_effect=InvalidUpdate('Catalog scan bound reached; narrow the review roots')):
+   paused=self.step(explain=False)
+  self.assertEqual(paused['auto']['status'],'needs_attention')
+  self.assertIn('Catalog scan bound reached',paused['auto']['error'])
+  self.assertNotIn('Latest catalog refresh failed',paused['auto']['error'])
+  self.assertTrue(paused['auto']['catalog_unavailable'])
+  self.assertFalse(paused['auto']['structural_pass_complete'])
+  self.assertEqual(self.meta['auto']['pages'],pages)
+  charged=budget.usage(self.s,self.sid)['used']
+  self.assertEqual(charged['operations'],before['operations']+1)
+  self.assertEqual(charged['source_bytes'],before['source_bytes'])
+  with self.assertRaisesRegex(repo.CatalogRefreshFailed,'Catalog scan bound reached'):
+   repo.request_check(self.s,self.sid,'read','file000.py')
+  self.assertEqual(budget.usage(self.s,self.sid)['used'],charged)
+  # A reload does not erase the failed receipt or spend a new operation merely
+  # to render status. A later successful refresh uses the same task and pages.
+  self.s.close();self.s=InvocationLedger(self.storage/'state.sqlite')
+  loaded=auto.status(self.s,self.meta,self.ws)
+  self.assertEqual(loaded['catalog_receipt'],paused['auto']['catalog_receipt'])
+  self.assertEqual(budget.usage(self.s,self.sid)['used'],charged)
+  second=Fake();second.model='other-model'
+  recovered=self.step(second,explain=False)
+  self.assertEqual(recovered['auto']['mapped_files'],2)
+  self.assertEqual(self.s.current_contract(self.sid),contract)
+  self.assertEqual(self.meta['auto']['pages'][:len(pages)],pages)
+  final=budget.usage(self.s,self.sid)['used']
+  self.assertTrue(all(final[k]>=v for k,v in charged.items()))
+  receipts=repo.records(self.s,self.sid)
+  self.assertEqual(sum(r['result']['status']=='failed' for r in receipts),1)
+  self.assertTrue(self.s.audit_valid())
  def test_allocations_use_kernel_and_preserve_compound_priority(self):
   for cost in ({'tokens':1},{'tokens':300000},{'tokens':600000}):
    frame=budget.decision(self.s,self.sid,cost);self.assertEqual(frame['decision'],HarnessKernelAdapter().evaluate(frame['omega'],frame['sigma']).decision.value)

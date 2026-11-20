@@ -2,6 +2,7 @@
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
 const tokens=require('./media/token_usage');
 const {ActivityArchive,activityUri,parseActivityUri}=require('./model_activity');
+const coherence=require('./media/coherence');
 
 function currentArchitectureStop(runs){
   const event=runs?.[0]?.recent_events?.at(-1),stop=event?.data?.architecture_stop;
@@ -52,6 +53,8 @@ function install(vscode,context,deps){
     current.webview.html=fs.readFileSync(path.join(context.extensionPath,'media','usage.html'),'utf8')
       .replaceAll('NONCE_VALUE',nonce)
       .replace('TOKENS_URI',current.webview.asWebviewUri(vscode.Uri.file(path.join(media.fsPath,'token_usage.js'))).toString())
+      .replace('COHERENCE_URI',current.webview.asWebviewUri(vscode.Uri.file(path.join(media.fsPath,'coherence.js'))).toString())
+      .replace('PROGRESS_URI',current.webview.asWebviewUri(vscode.Uri.file(path.join(media.fsPath,'generation_progress.js'))).toString())
       .replace('SCRIPT_URI',current.webview.asWebviewUri(vscode.Uri.file(path.join(media.fsPath,'usage.js'))).toString());
     current.webview.onDidReceiveMessage(message=>{
       if(message?.type==='ready'){ready=true;publish();void refresh();}
@@ -88,7 +91,8 @@ function install(vscode,context,deps){
       const monitor={};
       // Monitoring and bounded, unverified task observations only. Observations
       // include the original request; source and executable action payloads stay out.
-      for(const key of ['logical_memory','ram_compartments','task_observations','runtime_memory','orchestration','hardware','kernel','review_budget','repository','action_budget','storage','context','adapter_health','session','contract'])monitor[key]=data[key];
+      for(const key of ['logical_memory','ram_compartments','task_observations','runtime_memory','orchestration','hardware','kernel','review_budget','repository','action_budget','storage','context','adapter_health','session','contract','diagnostic_errors'])monitor[key]=data[key];
+      monitor.coherence_observations=coherence.recent(data.coherence_observations);
       monitor.architecture_stop=currentArchitectureStop(data.runs);
       snapshot={...(data.token_usage||{calls:[],total_calls:0,limit:250}),monitor,workspace,updatedAt:new Date().toISOString()};error=undefined;publish();
     },

@@ -1,6 +1,7 @@
 """Host measurements for admitted handoff targets and missing evidence."""
 
 import json
+import re
 
 from context_manager import InvalidUpdate, sha
 from karma_adapter import KarmaAdapter
@@ -34,6 +35,46 @@ def workspace_roots(proposal):
         # The verified capability ID is the target. No repository catalog is needed.
         return 'resolved', ['.']
     return 'missing', []
+
+
+def workspace_target(proposal, prompt):
+    """Bind read scope to user targets, rather than invented router filenames.
+
+    A whole-project request names the authorized workspace as its target. A
+    router may suggest starting files, but those are not a narrower user scope.
+    Named paths still require an exact current-prompt reference; this helper
+    never searches source or grants access.
+    """
+    if proposal.get('operation') != 'read':
+        return proposal, *workspace_roots(proposal)
+    paths = proposal.get('paths', [])
+    # A filename, quoted directory or slash-delimited directory is an explicit
+    # target even when the router mistakenly asks for the whole workspace.
+    from repository_tools import EXTENSIONS
+    extension = '|'.join(re.escape(item) for item in sorted(EXTENSIONS, key=len, reverse=True))
+    def mentioned(name):
+        match = re.search(r'(?<![\w./-])' + re.escape(name) + r'(?![\w/-]|\.[\w])', prompt)
+        if not match:
+            return False
+        if '/' in name or any(name.endswith(suffix) for suffix in EXTENSIONS):
+            return True
+        # "project" and "tools logic" can be ordinary words, not directories.
+        # Require directory syntax rather than authorizing a model's guess.
+        return bool(re.search(r'[`"\']' + re.escape(name) + r'/?[`"\']|\b(?:under|folder|directory)\s+'
+                              + re.escape(name) + r'\b|(?<![\w./-])' + re.escape(name) + r'/', prompt))
+    named = [name for name in paths if mentioned(name)]
+    file_target = re.search(r'(?<![\w])[^\s`"\'<>]+(?:' + extension + r')(?![\w])', prompt)
+    directory_target = re.search(r'(?:\b[\w.-]+/)+(?:[\w.-]+/)?|[`"\'][\w.-]+/?[`"\']|\b(?:under|folder|directory)\s+[\w.-]+', prompt)
+    if paths and len(named) == len(paths):
+        return proposal, *workspace_roots(proposal)
+    if named or file_target or directory_target:
+        return proposal, 'missing', []
+    if re.search(r'\b(?:workspace|code[ -]?base|project|repository|repo)\b', prompt, re.IGNORECASE):
+        target = {'operation': 'read', 'scope': 'workspace', 'paths': []}
+        return target, *workspace_roots(target)
+    if paths:
+        return proposal, 'missing', []
+    return proposal, *workspace_roots(proposal)
 
 
 def record_document(store, session, flow, text, *, read=None):

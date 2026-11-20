@@ -75,6 +75,22 @@ class CatalogExclusionTests(unittest.TestCase):
             'files': ['large.py'], 'excluded': {'explicit.png': 'unsupported_extension'},
         })
 
+    def test_missing_roots_are_visible_and_do_not_authorize_other_files(self):
+        self.source('actual.py')
+        result, ledger, sid = self.review(['app.py', 'config.py', 'tools.py'], automatic=True)
+        self.assertEqual(repo.catalog_snapshot(ledger, sid), {
+            'files': [], 'excluded': {'app.py': 'missing', 'config.py': 'missing', 'tools.py': 'missing'},
+        })
+        self.assertEqual(result['auto']['status'], 'needs_attention')
+        self.assertFalse(result['auto']['structural_pass_complete'])
+        self.assertIn('app.py (missing)', result['auto']['error'])
+        before = repo.usage(ledger, sid)['used']
+        with self.assertRaisesRegex(InvalidUpdate, 'missing'):
+            self.execute(ledger, sid, 'read', target='app.py')
+        with self.assertRaisesRegex(InvalidUpdate, 'outside committed catalog'):
+            self.execute(ledger, sid, 'read', target='actual.py')
+        self.assertEqual(repo.usage(ledger, sid)['used'], before)
+
     @unittest.skipIf(os.name == 'nt', 'Symlink creation can require Windows developer mode')
     def test_link_exclusions_use_local_paths_without_following_link_targets(self):
         self.source('src/a.py')

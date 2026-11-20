@@ -39,18 +39,28 @@ def observation_schema(kind):
 
 
 def add_schema(schema, kind, payload=None):
-    # Ask workers to emit the diagnostic, but never require it for admission.
+    # Ask workers to emit the diagnostic, but never require it for decoding or admission.
     # Gateway extracts it before authoritative answer checks.
     if kind == 'assessment' and not (payload or {}).get('conversation_handoff', {}).get('task_commitment'):
         return schema
     schema['properties'][FIELD] = observation_schema(kind)
-    if kind == 'assessment':
-        schema['required'].append(FIELD)  # Decoder request, not an admission condition.
     return schema
 
 
+def decoder_schema(schema):
+    # Native decoders run before the gateway can split diagnostics from answers.
+    # Constraining this optional value there would let an invalid observation
+    # withhold valid work. capture() alone validates its recorded shape and size.
+    result = copy.deepcopy(schema)
+    if FIELD in result.get('properties', {}):
+        result['properties'][FIELD] = {}
+    if 'required' in result:
+        result['required'] = [key for key in result['required'] if key != FIELD]
+    return result
+
+
 def answer_schema(schema):
-    # The decoder asks workers to emit an assessment. Validation of the actual
+    # A worker may emit an assessment. Validation of the actual
     # answer must not depend on that diagnostic field being present or correct.
     result = copy.deepcopy(schema)
     result.get('properties', {}).pop(FIELD, None)

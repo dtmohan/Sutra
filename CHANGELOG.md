@@ -1,5 +1,131 @@
 # Changelog
 
+## 0.52.0
+
+- Observe bounded questions, findings, scoped facts and evidence links at existing model-stage boundaries, without adding model calls or required output fields.
+- Record missing or stale references, circular support, unresolved commitments and possible scoped conflicts; retain semantic judgments as unverified observations.
+- Flag sustained literal repetition in streamed reasoning with bounded fingerprints and counters, including live chat and Monitor feedback. Do not automatically cancel, retry or certify completion.
+- Keep inline activity working beyond 64 completed calls, with separate bounded active-call tracking and recent replay protection.
+- Keep observations in immutable receipts and inspect only a bounded recent window in the Monitor. Preserve source authority, permissions, configured tiers and consumed budgets.
+- Preserve released 0.51.9 conversation data and keep the canonical STP kernel unchanged.
+
+## 0.51.9
+
+- Recall relevant whole source bodies from verified current receipts, preserving their provenance, source focus and coherent fresh-prefix floors during context fitting.
+- Honor explicit discovery reasoning preferences and use supported Adaptive effort for source-backed architecture planning without changing output reserves or retry ceilings.
+- Scope the one-request thinking boost to orchestration; delegated children retain configured reasoning through isolated, restored request environments.
+- Preserve released 0.51.8 conversation data, original receipts and consumed spending. Keep the STP kernel, permissions and configured model tiers unchanged.
+
+## 0.51.8
+
+- Allow newly versioned architecture searches to target an authorized catalog file, with accepted-decision binding, scoped source charges and unchanged historical search behavior.
+- Retain a bounded linked directory and latest discovery note; recall scoped journal pages on demand across eviction, reloads and model switches without promoting notes to source evidence.
+- Validate each unique architect checkpoint ancestor once per read batch, with fresh dependency and mutation checks before returning results.
+- Preserve released 0.51.7 conversation data, original receipts and consumed spending. Keep the STP kernel and configured model tiers unchanged.
+
+## 0.51.7
+
+- Validate new discovery notes against the existing complete-note byte limit, with soft brevity guidance and unchanged legacy note profiles.
+- Keep a bounded source-delivery index when earlier bodies or notes leave discovery context; label supplied ranges without claiming semantic completion.
+- Distinguish physical context capacity from task allocation when fitting new parent packets, recovering funding through existing workspace policy before retiring useful earned source.
+- Preserve released 0.51.6 conversation data, original receipts and consumed spending. Keep the STP kernel and configured model tiers unchanged.
+
+## 0.51.6
+
+- Prefer an explicitly continued latest unpublished review over an older auto-restored task, comparing original request lineage rather than restart timestamps.
+- Park older work through the existing governed task-stack transition after confirmation; retain both tasks' permissions, receipts and consumed budgets.
+- Preserve current-focus idle checks and prevent recovery from superseding a genuinely newer ask, another chat, a published report or changed contract.
+- Preserve released 0.51.5 conversation data. Keep the STP kernel and model tiers unchanged.
+
+## 0.51.5
+
+- Keep the latest unread source page active across discovery calls; retire optional metadata first and use coherent prefixes when a smaller physical window requires paging.
+- Deliver a bounded catalog window and concise working notes to new discovery calls, with exact host receipt reconstruction and unchanged historical packet profiles.
+- Distinguish physical context overflow from task funding shortages before using existing allocation recovery, including conservative-count providers.
+- Isolate reviewer availability observations. Retain accepted candidates during an outage without spending a model attempt or weakening reviewer identity checks.
+- Offer confirmed policy recovery for the latest unpublished completed review on explicit Continue in the same chat, preserving the original task, permissions and consumed spending.
+- Preserve released 0.51.4 conversation data. Keep the STP kernel and configured model tiers unchanged.
+
+## 0.51.4
+
+- Supply receipt-backed declaration line addresses to new architecture discovery calls and distinguish optional continuation from targeted fresh reads or searches.
+- Admit coherent source pages from the decision's context allowance, up to 16 KiB and 256 lines, retaining byte-exact receipts in small independently pageable units. Keep historical 1,200-byte reads unchanged.
+- Bind page sizing to the accepted decision and preserve cursors, scope, source charges and smaller-model paging across retries and reloads.
+- Preserve released 0.51.3 conversation data during explicit policy recovery. Keep the STP kernel, model tiers and runtime retention settings unchanged.
+
+## 0.51.3
+
+- Recover quantitative child allocations in place through the existing workspace policy and ancestor gates; retain accepted checkpoints, permissions and consumed spending.
+- Give new report and claim-review calls a host-admitted transport allowance matched to their output reserve, with one long attempt per bridge step and unchanged retry ceilings. Historical calls and unsupported providers retain the 150-second profile.
+- Include exact static source statements actually delivered to the writer in versioned claim-review evidence, with source-linked IDs and explicit static-syntax labels. Omitted graph data remains unavailable.
+- Preserve released 0.51.2 conversation data during explicit policy recovery. Keep the STP kernel and configured model tiers unchanged.
+
+## 0.51.2
+
+- Separate architecture tool selection from report writing and citation generation; preserve the existing gateway, scoped tools and historical response profiles.
+- Recover timed-out Adaptive claim reviews through saved candidates and remaining attempts, retaining unknown usage and consumed spending.
+- Page optional discovery context before requesting additional task capacity through the existing workspace policy; require a physical fit and retain all consumed charges.
+- Preserve known 0.51.1 conversation data during explicit policy recovery. Keep the STP kernel and configured model tiers unchanged.
+
+## 0.51.1
+
+- Follow missing architecture evidence with resumable read/search/list decisions through the existing gateway, retaining source receipts and distinguishing partial discovery from completion.
+- Checkpoint accepted parent drafts before claim review and advance bounded review pages through the central workflow, retaining context, permissions, attempts and spending.
+- Preserve the remaining writer repair attempts across pauses and model switches; re-fit retries against settled spending while retaining a separate reviewer allowance.
+- Remove arbitrary informational report counts; bound references by supplied evidence and retain historical schemas exactly.
+- Surface system and token totals before deep diagnostics and show concise workflow progress in chat. Keep the STP kernel and model tiers unchanged.
+
+## 0.51.0
+
+- Separate verified physical review-context token counts from existing task reservations and settlements, preserving legacy profiles and the STP kernel.
+- Version central-symbol selection and full-page continuation; retain historical evidence recipes, context, permissions and spending across recovery/model switches.
+- Accept valid citations up to the supplied evidence choices; use supported Adaptive reasoning for substantive claim evaluation when answer capacity permits.
+- Offer a single preview with request-flow explanation and local-import views, retaining source links and explicit provenance.
+
+## 0.50.8
+
+- Follow accepted child requests for missing evidence within the existing branch scope, and deliver complete source lines instead of byte fragments. Preserve legacy receipt recipes.
+- Reduce repeated child-note and quote overhead in synthesis while retaining earlier findings and full host evidence. Use the released context for fresh source.
+- Group source links in chat and retain full claim/evidence mappings in review details. Keep context, permissions, consumed spending, configured model tiers and the STP kernel unchanged.
+
+## 0.50.7
+
+- Give child source reviews a findings-only response contract instead of requiring the parent architecture report for each completed slice. Preserve source citations, checkpoint rules and parent publication checks.
+- Preserve known 0.50.6 conversation data through explicit policy recovery, retaining context, permissions and consumed spending. Keep the STP kernel unchanged.
+
+## 0.50.6
+
+- Make task observations optional at the model boundary and keep global self-assessments out of child prompts. Remove unrelated example devices and filenames from routing prompts.
+- Receive complete Strata prompt-and-validate replies and usage before host JSON/schema admission; retain bounded parser diagnostics for repair. Keep grammar-backed provider behavior and host evidence/permission checks.
+- Preserve settled child repair checkpoints and remaining attempts through token allocation recovery, reloads and model switches. Retain consumed charges and sibling allowances.
+- Preserve known 0.50.5 conversation data during policy recovery. Keep the STP kernel and configured model tiers unchanged.
+
+## 0.50.5
+
+- Prevent idle-system sleep only while a bridge request is pending; release the assertion on every completion, cancellation and failure path. Leave display sleep, explicit sleep, deadlines and the STP kernel unchanged.
+- Retain informational remaining-work lists within existing output/transport/note budgets instead of rejecting a useful checkpoint solely for having a fifth item. Keep individual text, source, citation and permission checks.
+- Preserve known 0.50.4 conversation data during policy recovery without trusting its executable worker results under the new policy.
+
+## 0.50.4
+
+- Restore Monitor budget/history reads and keep live hardware, runtime and usage sections available when individual task diagnostics fail.
+- Record memory/context plans before inference and distinguish mandatory prompt capacity from actual pinned-memory overflow, without dropping constraints or weakening resource gates.
+- Stop rejected child reviews with structured validation details and support bounded replacement using remaining capacity, preserving quarantine, checkpoints and spending.
+- Preserve model settings and the STP kernel; keep child failures distinct from user cancellation.
+
+## 0.50.3
+
+- Request workspace access through native chat confirmation and continue the saved request automatically after approval; reuse the workspace grant across reloads and model switches.
+- Bind broad read requests to the user’s workspace and keep explicitly named paths narrow, instead of promoting invented router filenames into review scope.
+- Preserve original catalog errors, missing-root exclusions, saved pages and spending; failed catalogs cannot authorize stale reads or claim source coverage.
+- Offer explicit, versioned recovery for a saved read-only review with an incorrect router-generated scope, preserving effective allocation and consumed spending. Keep the STP kernel unchanged.
+
+## 0.50.2
+
+- Click the Sutra status in the bottom bar for enable/disable, chat, workspace access, models, reasoning and Monitor.
+- Enable without replacing the current chat, or explicitly enable and open a new Sutra Auto chat. Preserve saved tasks, workspace grants and consumed budgets.
+- Keep busy controls read-only, recheck stale selections and managed settings, and label the status as an accessible button. The STP kernel is unchanged.
+
 ## 0.50.1
 
 - Let consistent receipt-verification snapshots coexist with receipt writes through local SQLite WAL, retaining FULL synchronization and deferring busy legacy migration.
