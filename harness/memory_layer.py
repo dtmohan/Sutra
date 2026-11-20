@@ -121,6 +121,47 @@ def _refs(payload):
     return sorted(set(refs))
 
 
+def _wire_refs(payload, envelope):
+    """Describe delivered semantic units, never cache residency or comprehension.
+
+    Read the final versioned model projection. Host-only receipts, trimmed notes
+    and omitted source bodies must not appear as delivered context in telemetry.
+    Unversioned legacy transports keep their historical diagnostic recipe.
+    """
+    if not envelope.get('model_interface'):
+        return _refs(payload)
+    from invocation_roles import expected_request
+    from model_packet import build
+    system, schema = expected_request(envelope['role'], payload)
+    packet = build(system, payload, schema)
+    refs = []
+    def visit(value, address):
+        if isinstance(value, dict):
+            # Bodies, notes and directory nodes have separate observable units.
+            if any(key in value for key in ('text', 'section_text', 'summary_unverified',
+                                            'pinned_user_statements', 'answer_unverified', 'note', 'links',
+                                            'toc', 'user', 'assistant_unverified')):
+                identity = value.get('ref') or value.get('id') or value.get('path') or address
+                refs.append(('wire:' + str(identity), 0, sha(canonical(value))))
+            if address.endswith('/excerpts'):
+                for path, text in value.items():
+                    refs.append(('wire:excerpt:' + path, 0, sha(canonical(text))))
+            for key, child in value.items():
+                visit(child, address + '/' + key)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                visit(child, address + '/' + str(index))
+    for index, message in enumerate(packet['messages']):
+        if message.get('role') == 'system':
+            continue
+        try:
+            body = json.loads(message['content'])
+        except (TypeError, ValueError):
+            body = {'text': message['content']}
+        visit(body, str(index))
+    return sorted(set(refs))
+
+
 def _cached_refs(raw):
     # A disposable index is not trusted evidence. Damage limits diagnostic
     # history rather than aborting a governed call after inference succeeded.
@@ -144,13 +185,21 @@ def observe_delivery(db, rid):
     """
     session, raw = db.execute('SELECT session,payload_json FROM deliveries WHERE id=?', (rid,)).fetchone()
     payload = json.loads(raw)
-    refs = _refs(payload)
     tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     env = {}
     if 'invocations' in tables:
         row = db.execute('SELECT record_json FROM invocations WHERE delivery_id=?', (rid,)).fetchone()
         if row:
             env = json.loads(row[0])
+    try:
+        refs = _wire_refs(payload, env)
+    except Exception as exc:
+        # Optional telemetry cannot revoke an otherwise successful delivery.
+        # Do not count host-only context as a substitute for an unavailable
+        # final-wire manifest, and never serialize arbitrary exception text.
+        event(db, 'working_set_unavailable', session,
+              {'delivery_id': rid, 'exception_type': type(exc).__name__, 'diagnostic_only': True})
+        return
     owner = str(env.get('role', 'pages')) + ':' + str((env.get('orchestration') or {}).get('node_id') or '')
     if env.get('role') == 'conversation':
         owner = 'conversation'  # Receipt ancestry, rather than per-call node, isolates forks.
@@ -207,6 +256,8 @@ def snapshot(db):
             value = json.loads(raw)
             if not isinstance(value, dict):raise ValueError('Malformed diagnostic')
             result['events'].append(dict(value, at=at, kind=kind, session=sid))
+            if kind == 'working_set_unavailable':
+                result['diagnostic_issues'] += 1
         except (ValueError, TypeError):
             result['diagnostic_issues'] += 1
     return result

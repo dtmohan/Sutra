@@ -45,6 +45,9 @@ def candidate(s, sid, iid):
     env = json.loads(s.db.execute('SELECT record_json FROM invocations WHERE id=? AND session=?', (iid, sid)).fetchone()[0])
     if env['role'] != 'chat_reviewer' or 'report' not in draft: raise InvalidUpdate('Architecture review requires a current structured draft')
     source = json.loads(s.db.execute('SELECT payload_json FROM deliveries WHERE id=?', (env['delivery_id'],)).fetchone()[0])
+    from retained_context import requests as context_requests
+    if context_requests(source, draft):
+        raise InvalidUpdate('This draft is waiting for retained context; it cannot be reviewed or published yet')
     return draft, env, source
 
 
@@ -234,6 +237,11 @@ def published(s, sid, candidate_id, reviewer_id):
         reason = {'budget_boundary': 'reached its reserved allocation',
                   'proposal_rejected': 'could not obtain another valid tool proposal',
                   'operation_failed': 'encountered an unsuccessful repository operation',
+                  'governor_repeated_acquisition': 'reached a checkpoint after repeated source acquisition',
+                  'governor_stage_allowance': 'reached its bounded discovery allowance and preserved capacity for synthesis',
+                  'governor_downstream_holdback': 'preserved its remaining capacity for synthesis and claim review',
+                  'governor_selector_capacity': 'preserved the earned source when the next selector packet needed more allocation',
+                  'governor_downstream_measurement': 'yielded to a fresh writer fit when downstream planning was unavailable',
                   'clarification': 'ended with unresolved evidence questions'}.get(discovery.get('stop_reason'),
                       'ended before evidence discovery was complete')
         result['publication_note'] += (' Evidence discovery ' + reason +

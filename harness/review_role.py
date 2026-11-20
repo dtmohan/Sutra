@@ -54,6 +54,20 @@ def check_request(store, session, payload, handoff_transform=None):
         expected=compact(prior)
     if handoff_transform is not None:expected=handoff_transform(expected)
     if payload.get('handoff') != expected: raise InvalidUpdate('Handoff differs from accepted checkpoint')
+    if 'conversation_context_version' in payload:
+        if (type(payload['conversation_context_version']) is not int or payload['conversation_context_version']!=1
+                or not payload.get('conversation_handoff') or not isinstance(payload.get('memory_budget'),dict)):
+            raise InvalidUpdate('Invalid native conversation context profile')
+        from paging import Budget
+        from retained_context import conversation_view
+        if 'mode' in payload:
+            from coding_role import SYSTEM as system,coding_schema as schema_for
+        else:
+            system,schema_for=SYSTEM,review_schema
+        try:budget=Budget(**payload['memory_budget'])
+        except (TypeError,ValueError) as exc:raise InvalidUpdate('Invalid native memory budget') from exc
+        if payload.get('memory')!=conversation_view(store,payload,budget,system=system,schema_for=schema_for):
+            raise InvalidUpdate('Native conversation memory differs from retained receipts')
 
 
 def findings(proposal):

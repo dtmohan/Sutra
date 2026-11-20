@@ -12,6 +12,8 @@ from context_manager import canonical, sha, InvalidUpdate
 from protocol import obj
 
 FIELD = 'task_observation'
+PLACEMENT = '_host_placement'
+REPORT_PLACEMENT = 'report.task_observation'
 ROLES = {'conversation', 'chat_reviewer', 'subagent', 'coder'}
 NOTICE = 'Observe only. Model claims are unverified; the original request and host contract remain authoritative.'
 ASSESSMENT_GUIDE = ' Assess saved task_commitment criteria in task_observation. Claims only; pending actions are not completed.'
@@ -70,10 +72,35 @@ def answer_schema(schema):
 
 
 def split(role, proposal):
-    if role not in ROLES or not isinstance(proposal, dict) or FIELD not in proposal:
+    if role not in ROLES or not isinstance(proposal, dict):
         return proposal, {}
-    clean = dict(proposal)
-    return clean, {FIELD: clean.pop(FIELD)}
+    if FIELD in proposal:
+        # An ambiguous top-level plus nested diagnostic is NOT repaired: the
+        # nested unknown report field remains subject to strict answer checks.
+        clean = dict(proposal)
+        return clean, {FIELD: clean.pop(FIELD)}
+    report = proposal.get('report')
+    if role == 'chat_reviewer' and isinstance(report, dict) and FIELD in report:
+        clean = dict(proposal); clean['report'] = dict(report)
+        return clean, {FIELD: clean['report'].pop(FIELD), PLACEMENT: REPORT_PLACEMENT}
+    return proposal, {}
+
+
+def restore(role, proposal, raw_fields):
+    """Reconstruct the exact raw response for hashing, never answer admission."""
+    if (role not in ROLES or not isinstance(proposal, dict) or FIELD in proposal
+            or not isinstance(raw_fields, dict)):
+        raise InvalidUpdate('Invalid observation reconstruction')
+    if set(raw_fields) == {FIELD}:
+        original = dict(proposal); original[FIELD] = raw_fields[FIELD]
+        return original  # Historical top-level receipt representation.
+    if (set(raw_fields) != {FIELD, PLACEMENT} or role != 'chat_reviewer'
+            or raw_fields[PLACEMENT] != REPORT_PLACEMENT
+            or not isinstance(proposal.get('report'), dict) or FIELD in proposal['report']):
+        raise InvalidUpdate('Invalid nested observation placement')
+    original = dict(proposal); original['report'] = dict(proposal['report'])
+    original['report'][FIELD] = raw_fields[FIELD]
+    return original
 
 
 def receipt(s, iid):

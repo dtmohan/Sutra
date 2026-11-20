@@ -566,11 +566,19 @@ class InvocationLedger(GovernedContext):
                             original['citations'] = recover_citation_references(envelope['schema'], original['citations'])
                         except (KeyError, TypeError, ValueError):
                             return False
+                    from model_packet import RETAINED_ARCHITECT_VERSION, recover_architect_references
+                    if (envelope.get('model_interface') or {}).get('version') == RETAINED_ARCHITECT_VERSION:
+                        try:
+                            original['findings'] = recover_architect_references(envelope['schema'], original['findings'])
+                        except (KeyError, TypeError, ValueError):
+                            return False
                 observed = r.get('observation_fields', {})
                 if observed:
-                    from task_observations import FIELD, ROLES
-                    if r['role'] not in ROLES or set(observed) != {FIELD} or not isinstance(original, dict) or FIELD in original: return False
-                    original.update(observed)
+                    from task_observations import restore
+                    try:
+                        original = restore(r['role'], original, observed)
+                    except (InvalidUpdate, ValueError, TypeError, KeyError):
+                        return False
                 if sha(canonical(original)) != r['model_response_hash']: return False
             if json.loads(env[0]).get('model_interface'):
                 from budget_accounting import used

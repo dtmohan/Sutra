@@ -1,3 +1,56 @@
+# Sutra 0.53.1 — Retained context handoffs
+
+Discovery notes and exact source spans now share a scoped contents directory
+with report writers. Smaller contexts defer whole units behind retrievable
+references; reloads and model changes preserve the journal, permissions and
+consumed spending. Native workspace calls receive verified conversation context
+and a paginated source index. Document extraction also receives prior user
+criteria while its source quotations remain bound to the current section.
+Independent reviewers receive source evidence rather than the writer's notes.
+
+See [the consumer audit](docs/qa/MEMORY-CONSUMER-AUDIT-0.53.1.md) for scope,
+remaining navigation limitations and the distinction between retained data,
+delivered context and model understanding.
+
+Architecture discovery observes actual source ranges and scoped tool requests.
+Green adds no model-facing feedback. Yellow supplies one concise acquisition
+update per accepted episode. Persistent repetition reaches a partial synthesis
+checkpoint, preserving unresolved questions and all source receipts.
+
+A planning holdback targets a writer and one claim-review page. Discovery also
+has a finite allowance anchored in its first invocation, derived from the initial
+writer and declared reviewer allowance. Reloads, model switches and later task grants
+do not replenish it. Actual writing, additional review pages and repairs still
+need fresh admission; this is not a guarantee of complete publication.
+
+The existing Karma adapter and STP kernel govern the transitions. No semantic
+truth, completion, permissions or additional allocation are inferred from text
+novelty. Legacy execution profiles retain their original behavior.
+
+Initial tuning warns after two consecutive non-advancing operations and attempts
+partial synthesis after four. Two advancing operations clear a warning. These
+are structural acquisition heuristics, not a contradiction detector. The initial
+discovery allowance is twice the initial writer plus declared reviewer allowance;
+the multiplier is an explicit initial policy, not a model capability guarantee.
+
+Reviewer planning headroom is capped at twice a representative page probe and
+the declared financial allowance. It is a measured heuristic, not a promise
+that an unknown draft or future reviewer page fits. The stage ceiling keeps
+its original declared-allowance basis; tuning headroom does not replenish or
+silently shrink an established discovery allowance. Initial planning counts
+and hashes are retained once in the audit trail, linked from the allowance.
+
+An unchanged failed child JSON repair checkpoints its remaining attempt before
+repeating the same request. A material input, model or generation-control change
+can resume the same child. A financial increase alone cannot. Bounded format
+diagnostics retain categories and parser positions, with generated text omitted.
+
+An optional self-assessment placed inside an architecture report is extracted
+as an observation before answer validation. Malformed diagnostics remain
+observe-only. Their original placement and response hash are retained for
+replay; other unknown report fields and duplicate placements still fail checks.
+The report, citations, permissions and claim-publication gates remain in force.
+
 # Sutra 0.52.0 — Bounded coherence observations
 
 Sutra observes explicit questions, findings, assumptions and source references

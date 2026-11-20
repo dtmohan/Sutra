@@ -70,9 +70,21 @@ def request_check(s,session,payload):
  names=repo.catalog(s,session)
  if payload['repository']['catalog']!=names[:20] or payload['repository']['total_files']!=len(names):raise InvalidUpdate('Repository catalog mismatch')
  repo.validate_evidence(s,session,Path(payload['workspace']),payload['evidence'])
+ if 'retained_context_version' in payload:
+  from retained_context import check, source_units
+  view=check(s,session,payload)
+  if payload['evidence']!=source_units(view):raise InvalidUpdate('Architecture source view differs from retained memory')
+ if payload.get('retained_conversation_version') == 1:
+  from retained_context import conversation_view
+  from paging import Budget
+  if payload.get('memory') != conversation_view(s,payload,Budget(**payload['memory_budget']),system=SYSTEM,schema_for=schema):
+   raise InvalidUpdate('Architecture conversation context changed')
 
 def validate(s,session,payload,proposal):
  request_check(s,session,payload)
+ from retained_context import requests as context_requests, validate_requests
+ requested=context_requests(payload,proposal)
+ if requested:validate_requests(s,session,payload,requested)
  if proposal['task_id']!=payload['contract']['task_id'] or sorted(proposal['constraints'],key=lambda r:r['key'])!=constraint_rows(payload['contract']):raise InvalidUpdate('Task or constraint omitted, duplicated or changed')
  if not proposal['summary'].strip() or len(canonical(compact(proposal)).encode())>1600:raise InvalidUpdate('Architecture note must be nonempty and under 1600 bytes')
  supplied={e['id']:e for e in payload['evidence']};cited=set()

@@ -322,7 +322,11 @@ class DiscoveryRecoveryTests(unittest.TestCase):
 
         context_window._counts.clear()
         with machine.scope(p['snapshot_owner']), patch.object(context_window, '_rpc', counter.rpc), \
-                patch.object(review_budget, 'require', side_effect=stop_before_protected_calls):
+                patch.object(review_budget, 'require', side_effect=stop_before_protected_calls), \
+                patch.object(discovery, 'GOVERNOR_VERSION', 0):
+            # This captures the historical three-call require() recipe before
+            # dispatch. The current governor has separate measured gate tests;
+            # its planning path deliberately does not request this old funding.
             with self.assertRaises((machine.OrchestrationStop, review_budget.BudgetStop)):
                 discovery.advance(self.s, sid, p, data, self.root, model, True)
         self.assertTrue(protected)

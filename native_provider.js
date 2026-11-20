@@ -579,6 +579,8 @@ function install(vscode,context,deps){
       guidance=stop.retryable
         ?'Send **continue** to try one bounded replacement for this partition. Completed work, checkpoints, permissions and spending are retained. Auto may use another configured model.'
         :'This partition has used its repair allowance. Its validation details and the rest of the review are saved; rejected output remains quarantined.';
+    }else if(stop.status==='child_repair_unchanged_request'){
+      guidance='The next repair would repeat the same failed model request. Choose a different configured model or change the request before continuing. The same child checkpoint and unused repair attempt are saved; a budget increase alone does not change this request.';
     }else if(stop.status==='child_slice_timeout'){
       const checkpoint=stop.slice_ordinal>1?'Resume from the last completed child checkpoint.':'Resume to retry the first child slice.';
       guidance=checkpoint+' You can select a different Sutra model tier before resuming.';

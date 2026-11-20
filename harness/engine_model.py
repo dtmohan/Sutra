@@ -141,7 +141,12 @@ class EngineModel(LocalModel):
             self.fresh_context_metadata()
             try:
                 answer = json.loads(content)
-            except ValueError:
+            except ValueError as failure:
+                try:
+                    from output_shape import observe
+                    record['output_shape'] = observe(content, thinking, failure)
+                except Exception:
+                    pass  # Advisory diagnostics must not replace the parser failure.
                 raise StructuredOutputRejected('Sutra engine reply is not one JSON value matching the supplied schema.') from None
             record.update(answer=answer, ok=True)
         except Exception as error:

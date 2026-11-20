@@ -22,6 +22,7 @@ SEARCH_VERSION = 1
 MEMORY_VERSION = 1
 REASONING_VERSION = 1
 SOURCE_RECALL_VERSION = 1
+GOVERNOR_VERSION = 1
 
 
 def _lineage(s, owner):
@@ -126,15 +127,9 @@ def _notes(accepted):
 
 
 def memory(s, p, budget, *, materialize=False):
-    iid = (p.get('conversation_handoff') or {}).get('invocation_id')
-    if not iid: return None
-    import conversation_memory as cm
-    row = s.db.execute('SELECT session FROM invocations WHERE id=?', (iid,)).fetchone()
-    if not row: raise InvalidUpdate('Missing discovery conversation receipt')
-    if materialize: cm.materialize(s, row[0], cm.history(s, row[0], iid))
-    base = {k: v for k, v in p.items() if k not in ('memory', 'repair')}
-    return cm.working_set(s, row[0], iid, p['request'], budget, base, role.SYSTEM, role.schema, extra_bytes=0)
-
+    import retained_context
+    return retained_context.conversation_view(s, p, budget, system=role.SYSTEM,
+                                               schema_for=role.schema, materialize=materialize)
 
 def _protected_cost(budget, packet, schema):
     return {'calls': 3, 'tokens': 3*(budget.charge(role.SYSTEM, packet, schema)+budget.response_reserve),
@@ -187,7 +182,7 @@ def _request_funding(s, sid, owner, budget, packet, schema, cause, *, provider=N
     require(s, sid, _protected_cost(budget, probe, schema))
 
 
-def _fund_active_source(s, sid, owner, budget, packet, schema, provider):
+def _fund_active_source(s, sid, owner, budget, packet, schema, provider, *, planning_only=False):
     """Distinguish financial shortage from physical overflow for a new page.
 
     The current provider's trusted metadata supplies a conservative physical
@@ -241,6 +236,11 @@ def _fund_active_source(s, sid, owner, budget, packet, schema, provider):
         from smriti_adapter import SmritiAdapter
         capacity = SmritiAdapter().context(charge, budget.response_reserve, physical.context_limit)
         basis = 'conservative_utf8_upper_bound'
+    if planning_only:
+        from smriti_adapter import SmritiAdapter
+        return {'physical_fit': True, 'basis': basis, 'physical_capacity': capacity,
+            'allocation_capacity': SmritiAdapter().context(
+                budget.charge(role.SYSTEM, probe, schema), budget.response_reserve, budget.input_limit)}
     with s.db:
         s._audit('DISCOVERY_ACTIVE_PAGE_FIT', {'session': sid, 'owner': owner['id'],
             'model': getattr(provider, 'model', None), 'basis': basis,
@@ -253,9 +253,12 @@ def _fund_active_source(s, sid, owner, budget, packet, schema, provider):
     return True
 
 
-def _state(key, accepted, receipts, *, complete=False, reason=None):
-    return {'version': VERSION, 'key': key, 'invocations': [iid for iid, _, _ in accepted],
-            'receipts': [r['id'] for r in receipts], 'complete': complete, 'stop_reason': reason}
+def _state(key, accepted, receipts, *, complete=False, reason=None, control=None):
+    result = {'version': VERSION, 'key': key, 'invocations': [iid for iid, _, _ in accepted],
+              'receipts': [r['id'] for r in receipts], 'complete': complete, 'stop_reason': reason}
+    if control is not None:
+        result['governor_stop'] = copy.deepcopy(control)
+    return result
 
 
 def _entries(s, sid, workspace, receipts):
@@ -406,9 +409,9 @@ def supplied_source_progress(s, sid, workspace, receipts, accepted, limit):
     return _progress_view(_supplied_progress_rows(s, sid, workspace, receipts, accepted), limit)
 
 
-def _memory_graph(sid, key, accepted, receipts):
-    """Address the verified journal, without turning its notes into authority."""
-    pages, note_refs, source_refs, parents = {}, {}, {}, {}
+def memory_directory(sid, key):
+    """Shared bounded content-addressed directory; labels never replace leaves."""
+    pages, parents = {}, {}
     work = {'pages_built': 0, 'index_pages_built': 0, 'historical_roots_checked': 0}
     def put(body):
         ref = sha('discovery-memory-v1:' + canonical([sid, key, body]))
@@ -446,6 +449,16 @@ def _memory_graph(sid, key, accepted, receipts):
                       'ref': put({'kind': 'index', 'label': name, 'links': group})}
                      for n, group in enumerate(groups)]
         return put({'kind': 'index', 'label': name, 'links': level})
+    return {'pages': pages, 'parents': parents, 'put': put, 'index': index,
+            'label': label, 'work': work}
+
+
+def _memory_graph(sid, key, accepted, receipts):
+    """Address the verified journal, without turning its notes into authority."""
+    directory = memory_directory(sid, key)
+    pages, parents, work = (directory[k] for k in ('pages', 'parents', 'work'))
+    put, index, label = (directory[k] for k in ('put', 'index', 'label'))
+    note_refs, source_refs = {}, {}
     notes = _notes(accepted)
     note_links = []
     for ordinal, ((iid, packet, proposal), note) in enumerate(zip(accepted, notes)):
@@ -720,14 +733,21 @@ def _coverage(s, sid, p, accepted, receipts, reason):
               'tool_results': len(receipts), 'exhaustive_semantic_review': False}
     if p.get('discovery_selection_version') in (1, 2, 3):
         result['read_files'] = read_paths(s, sid, p)
+    if reason and reason.startswith('governor_'):
+        from discovery_control import observe
+        result['governor'] = observe(sid, p, p['evidence_discovery']['key'], receipts, len(repo.catalog(s, sid)))
+        result['partial_source_sample'] = True
+        result['governor_stop'] = copy.deepcopy(p['evidence_discovery'].get('governor_stop'))
     return result
 
 
-def _finish(s, sid, p, key, accepted, receipts, reason):
-    checkpoint = _state(key, accepted, receipts, complete=True, reason=reason)
+def _finish(s, sid, p, key, accepted, receipts, reason, *, control=None):
+    checkpoint = _state(key, accepted, receipts, complete=True, reason=reason, control=control)
     p['evidence_discovery'] = checkpoint
     p['discovery_notes_unverified'] = _notes(accepted)
     p['discovery_coverage'] = _coverage(s, sid, p, accepted, receipts, reason)
+    import retained_context
+    retained_context.bind(s, sid, p, owner=p.get('discovery_owner', p['snapshot_owner']))
     record = {'session': sid, 'owner': p['snapshot_owner'], 'checkpoint': checkpoint}
     if not s.db.execute("SELECT 1 FROM page_audit WHERE event='PARENT_DISCOVERY_CHECKPOINT' AND payload_json=?",
                         (canonical(record),)).fetchone():
@@ -743,7 +763,8 @@ def load(s, sid, p):
     records = history(s, sid, key)
     accepted = _accepted(s, sid, records)
     receipts = _tool_receipts(s, sid, accepted)
-    expected = _state(key, accepted, receipts, complete=checkpoint.get('complete'), reason=checkpoint.get('stop_reason'))
+    expected = _state(key, accepted, receipts, complete=checkpoint.get('complete'),
+                      reason=checkpoint.get('stop_reason'), control=checkpoint.get('governor_stop'))
     if checkpoint != expected or not checkpoint['complete']:
         raise InvalidUpdate('Evidence discovery checkpoint changed')
     audit = s.db.execute("SELECT 1 FROM page_audit WHERE event='PARENT_DISCOVERY_CHECKPOINT' "
@@ -753,11 +774,16 @@ def load(s, sid, p):
     if (p.get('discovery_notes_unverified') != _notes(accepted)
             or p.get('discovery_coverage') != _coverage(s, sid, p, accepted, receipts, checkpoint['stop_reason'])):
         raise InvalidUpdate('Evidence discovery notes or coverage changed')
+    return earned_sources(s, sid, p['workspace'], receipts)
+
+
+def earned_sources(s, sid, workspace, receipts):
+    """Existing exact read merge, shared by downstream planning and dispatch."""
     result = {}
     # Keep a real contiguous excerpt. Nonadjacent spans never become one fake
     # source location; earlier tool results remain in the immutable receipts.
     reads = [record for record in receipts if record['operation']['kind'] == 'read']
-    for entry in _entries(s, sid, p['workspace'], reads):
+    for entry in _entries(s, sid, workspace, reads):
         if not entry['text'].strip(): continue
         current = dict(entry)
         record = next(r for r in receipts if r['id'] == entry['receipt'])
@@ -806,6 +832,14 @@ def check_request(s, sid, p):
     previous = accepted[-1][0] if accepted else None
     if p.get('discovery_previous') != previous or p.get('derived_from') != ([previous] if previous else []):
         raise InvalidUpdate('Evidence discovery previous checkpoint changed')
+    from discovery_control import check as check_control, validate_envelope
+    check_control(sid, p, key, _tool_receipts(s, sid, accepted), accepted)
+    original = next((packet['discovery_envelope'] for _, packet, _ in history(s, sid, key)
+                     if packet.get('discovery_envelope') is not None), None)
+    if original is not None and p.get('discovery_envelope') != original:
+        raise InvalidUpdate('Discovery stage allowance cannot be removed or replenished by retry or model switch')
+    if p.get('discovery_envelope') is not None:
+        validate_envelope(p['discovery_envelope'], sid, key, s=s)
     if 'discovery_memory_version' in p:
         if (type(p['discovery_memory_version']) is not int or p['discovery_memory_version'] != 1
                 or type(p.get('discovery_selection_version')) is not int
@@ -912,21 +946,24 @@ def check_request(s, sid, p):
         raise InvalidUpdate('Discovery pinned conversation context changed')
 
 
-def advance(s, sid, p, data, root, provider, real):
+def advance(s, sid, p, data, root, provider, real, *, writer_provider=None):
     p['discovery_owner'] = machine.ACTIVE.get()
     p['discovery_selection_version'] = SELECTION_VERSION
     machine.checked(s, p['discovery_owner'])
     owner, key = scope(s, sid, p)
     if machine.ACTIVE.get() != owner['id']: raise InvalidUpdate('Evidence discovery requires its parent execution')
-    accepted = _accepted(s, sid, history(s, sid, key))
+    records = history(s, sid, key)
+    accepted = _accepted(s, sid, records)
     receipts = _tool_receipts(s, sid, accepted)
     terminal = s.db.execute("SELECT payload_json FROM page_audit WHERE event='PARENT_DISCOVERY_CHECKPOINT' "
         "AND json_extract(payload_json,'$.checkpoint.key')=? ORDER BY seq DESC LIMIT 1", (key,)).fetchone()
     if terminal:
         checkpoint = json.loads(terminal[0])['checkpoint']
-        if checkpoint != _state(key, accepted, receipts, complete=True, reason=checkpoint['stop_reason']):
+        if checkpoint != _state(key, accepted, receipts, complete=True, reason=checkpoint['stop_reason'],
+                                control=checkpoint.get('governor_stop')):
             raise InvalidUpdate('Completed discovery history changed')
-        return _finish(s, sid, p, key, accepted, receipts, checkpoint['stop_reason'])
+        return _finish(s, sid, p, key, accepted, receipts, checkpoint['stop_reason'],
+                       control=checkpoint.get('governor_stop'))
     # Recover the accepted-decision -> repository-effect gap before any new call.
     missing = [(iid, packet, proposal) for iid, packet, proposal in accepted
                if proposal['tool']['kind'] in ('read', 'search', 'list')
@@ -959,6 +996,22 @@ def advance(s, sid, p, data, root, provider, real):
         return _finish(s, sid, p, key, accepted, receipts, 'proposal_rejected')
     remaining_ops = repo.usage(s, sid)
     if remaining_ops['decision'] != 'ALLOW': return _finish(s, sid, p, key, accepted, receipts, 'budget_boundary')
+    controlled = bool(GOVERNOR_VERSION == 1 and SELECTION_VERSION == 3)
+    if controlled:
+        # Verify current source before deriving any navigation recommendation.
+        _entries(s, sid, p['workspace'], receipts)
+        from discovery_control import observe
+        progress = observe(sid, p, key, receipts, len(repo.catalog(s, sid)))
+        from karma_adapter import KarmaAdapter
+        routing = KarmaAdapter().discovery(progress)
+        if routing['decision'] in ('BRIDGE', 'FIN') and routing['suggested_recovery'] == 'synthesize_partial':
+            return _finish(s, sid, p, key, accepted, receipts, 'governor_repeated_acquisition',
+                           control={'version': 1, 'reason': 'persistent_acquisition_stagnation', 'kernel': routing})
+    writer = writer_provider or provider
+    writer_budget = copy.deepcopy(writer.budget)
+    from invocation_timing import seconds as downstream_seconds
+    writer_seconds = downstream_seconds(writer, 'chat_reviewer', p)
+    reviewer_seconds = downstream_seconds(writer, 'report_reviewer', dict(p, review_protocol=2))
     old_budget, old_thinking = provider.budget, getattr(provider, 'thinking', None)
     try:
         if real:
@@ -1021,6 +1074,9 @@ def advance(s, sid, p, data, root, provider, real):
                     packet['discovery_source_recall']['focused_unit_ids'], prefix)
         packet['discovery_child_start'] = 0
         if failed: packet['repair'] = {'errors': failed[-1][2]['admission']['errors'][:2]}
+        if controlled:
+            from discovery_control import attach
+            attach(sid, p, packet, key, receipts, accepted)
         from review_reasoning import bind
         bind(provider, packet, bounded_selection=True)
         while True:
@@ -1039,8 +1095,17 @@ def advance(s, sid, p, data, root, provider, real):
                 if packet['discovery_selection_version'] == 3:
                     if _shrink_optional(packet, data, p['request'], latest, active, prefix, pages, progress_rows):
                         continue
-                    physical_fit = _request_funding(s, sid, owner, provider.budget, packet, fmt, exc,
-                                                    provider=provider)
+                    if controlled:
+                        proof = _fund_active_source(s, sid, owner, provider.budget, packet, fmt,
+                                                    provider, planning_only=True)
+                        if proof:
+                            return _finish(s, sid, p, key, accepted, receipts, 'governor_selector_capacity',
+                                control={'version': 1, 'reason': 'selector_financial_fit',
+                                         'kernel': proof['allocation_capacity'], 'physical_proof': proof})
+                        physical_fit = False
+                    else:
+                        physical_fit = _request_funding(s, sid, owner, provider.budget, packet, fmt, exc,
+                                                        provider=provider)
                     minimum_prefix = 1
                     if packet.get('discovery_source_recall_version') == 1:
                         required_ids = set(packet['discovery_source_recall']['required_unit_ids'])
@@ -1073,18 +1138,53 @@ def advance(s, sid, p, data, root, provider, real):
                 else:
                     _request_funding(s, sid, owner, provider.budget, packet, fmt, exc)
                     raise
-        # Leave financial/call capacity for the writer and its claim reviewer.
-        frames = machine.gates(s, owner['id'], _protected_cost(provider.budget, packet, fmt))
-        if any(frame['decision'] != 'ALLOW' for frame in frames):
-            if packet.get('discovery_selection_version') == 3 or (packet.get('discovery_selection_version') in (1, 2) and provider.budget.context_profile == 2):
-                machine.allowed(frames)
-            return _finish(s, sid, p, key, accepted, receipts, 'budget_boundary')
+        # New discovery profiles preserve a measured, uncharged downstream
+        # holdback and a first-invocation stage allowance. A shortfall moves to
+        # synthesis; it does not automatically enlarge discovery's allocation.
+        if controlled:
+            from discovery_capacity import measure, gate
+            from discovery_control import envelope, stage_gate
+            planning_data = dict(data, followups=earned_sources(s, sid, p['workspace'], receipts))
+            planning_parent = dict(p, discovery_notes_unverified=_notes(accepted))
+            plan = measure(s, sid, planning_parent, planning_data, writer_budget,
+                writer_seconds=writer_seconds, reviewer_seconds=reviewer_seconds)
+            if plan['status'] == 'unavailable':
+                from karma_adapter import KarmaAdapter
+                recovery = KarmaAdapter().evidence_admission(target_status='resolved',
+                    evidence_status='missing', recovery_possible=True)
+                return _finish(s, sid, p, key, accepted, receipts, 'governor_downstream_measurement',
+                    control={'version': 1, 'reason': 'downstream_planning_view_unavailable',
+                             'kernel': recovery, 'downstream_plan': plan,
+                             'meaning': 'Attempt the existing writer fit with earned evidence; no physical failure or semantic completion is asserted.'})
+            allowance = envelope(s, sid, key, records, plan)
+            if allowance is not None:
+                packet['discovery_envelope'] = allowance
+            next_cost = {'calls': 1, 'tokens': charge + provider.budget.response_reserve,
+                         'operations': 1}
+            stage = stage_gate(s, sid, owner['id'], allowance, records, next_cost)
+            if stage is not None and not stage['fits']:
+                return _finish(s, sid, p, key, accepted, receipts, 'governor_stage_allowance',
+                    control={'version': 1, 'reason': 'stage_allowance', 'kernel': stage['kernel'],
+                             'stage': stage, 'allowance': allowance})
+            capacity = gate(s, sid, owner['id'], plan, next_cost)
+            if capacity['capacity_fits'] is False:
+                return _finish(s, sid, p, key, accepted, receipts, 'governor_downstream_holdback',
+                    control={'version': 1, 'reason': capacity['reason'], 'capacity': capacity,
+                             'downstream_plan': plan})
+        # Historical profiles retain their original reservation recipe.
+        if not controlled:
+            frames = machine.gates(s, owner['id'], _protected_cost(provider.budget, packet, fmt))
+            if any(frame['decision'] != 'ALLOW' for frame in frames):
+                if packet.get('discovery_selection_version') == 3 or (packet.get('discovery_selection_version') in (1, 2) and provider.budget.context_profile == 2):
+                    machine.allowed(frames)
+                return _finish(s, sid, p, key, accepted, receipts, 'budget_boundary')
+            from review_budget import require, BudgetStop
+            try:
+                require(s, sid, _protected_cost(provider.budget, packet, fmt))
+            except BudgetStop:
+                if packet.get('discovery_selection_version') == 3 or (packet.get('discovery_selection_version') in (1, 2) and provider.budget.context_profile == 2): raise
+                return _finish(s, sid, p, key, accepted, receipts, 'budget_boundary')
         from review_budget import require, BudgetStop
-        try:
-            require(s, sid, _protected_cost(provider.budget, packet, fmt))
-        except BudgetStop:
-            if packet.get('discovery_selection_version') == 3 or (packet.get('discovery_selection_version') in (1, 2) and provider.budget.context_profile == 2): raise
-            return _finish(s, sid, p, key, accepted, receipts, 'budget_boundary')
         from invocation_gateway import InvocationGateway
         run = s.begin_run(sid, p['request'], [], None, max_calls=1, max_repairs=0)
         s.reserve(run, 'ATTEMPT', {'attempt': len(failed)})

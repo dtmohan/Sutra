@@ -2,6 +2,8 @@
 
 Temporary governed ledgers and deterministic providers; no inference or user
 state. These tests distinguish financial capacity from model context capacity.
+The inherited WorkingSet fixture explicitly pins the pre-governor policy: it
+tests the historical funding path, rather than the new yield-to-writer policy.
 """
 import copy
 import os
@@ -77,6 +79,33 @@ class ConservativeFundingTests(unittest.TestCase):
                 patch.object(machine, 'gates', side_effect=AssertionError('Physical overflow cannot ask for funds')):
             self.assertIs(discovery._request_funding(*captured['args'], **captured['kwargs']), False)
         self.assertEqual(review_budget.usage(self.s, sid), before)
+
+    def test_current_governor_yields_on_conservative_financial_fit_without_reacquiring_paid_page(self):
+        out, parent, data, record = self.first_page()
+        self.pay_to(out, 225000)
+        self.discovery_budget = Budget(7000, 512, 256)
+        worker = self.provider('synthesis').discovery_provider
+        sid = self.meta['active']; before = review_budget.usage(self.s, sid)
+        pins = self.s.pinned(sid)
+        receipts = self.s.db.execute('SELECT id,record_json FROM invocation_receipts ORDER BY seq').fetchall()
+        source_receipt = self.s.db.execute('SELECT record_json FROM repository_receipts WHERE id=?', (record['id'],)).fetchone()
+        with machine.scope(parent['snapshot_owner']), patch.object(discovery, 'GOVERNOR_VERSION', 1), \
+                patch.object(discovery, '_request_funding', side_effect=AssertionError('Controlled discovery yields without funding')), \
+                patch('repository_tools.execute', side_effect=AssertionError('Paid source is not reacquired')), \
+                patch.object(workspace_allocation, 'try_amend', side_effect=AssertionError('No automatic allocation increase')):
+            result = discovery.advance(self.s, sid, parent, data, self.root, worker, False)
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['checkpoint']['stop_reason'], 'governor_selector_capacity')
+        proof = result['checkpoint']['governor_stop']['physical_proof']
+        self.assertEqual(proof['basis'], 'conservative_utf8_upper_bound')
+        self.assertTrue(proof['physical_fit'])
+        self.assertEqual(proof['physical_capacity']['decision'], 'ALLOW')
+        self.assertNotEqual(proof['allocation_capacity']['decision'], 'ALLOW')
+        self.assertEqual(self.s.pinned(sid), pins)
+        self.assertEqual(review_budget.usage(self.s, sid), before)
+        self.assertEqual(self.s.db.execute('SELECT id,record_json FROM invocation_receipts ORDER BY seq').fetchall(), receipts)
+        self.assertEqual(self.s.db.execute('SELECT record_json FROM repository_receipts WHERE id=?', (record['id'],)).fetchone(), source_receipt)
+        self.assertEqual(len(self.calls), 1)
 
 
 if __name__ == '__main__': unittest.main()

@@ -31,13 +31,27 @@ def turn(s,meta,workspace,root,request,provider=None):
     def score(p):
         text=s.read_page(sid,p['id']).payload['text'].lower()
         return (-sum(w in (p['path'].lower()+' '+text) for w in words),p['path'],p['id'])
-    pages=sorted(pages,key=score)[:4]
+    requested=request.get('pages',[])
+    by_id={p['id']:p for p in pages}
+    if (not isinstance(requested,list) or any(not isinstance(pid,str) for pid in requested)
+            or len(set(requested))!=len(requested) or not set(requested)<=set(by_id)):
+        raise InvalidUpdate('Requested source pages are outside the current native scope')
+    # Explicit page addresses and exact file names are required evidence, not
+    # competitors in a four-page keyword sample. The actual context gate decides
+    # whether the complete requested set fits; no pins or permissions are shed.
+    named={p['path'] for p in pages if re.search(
+        r'(?<![A-Za-z_0-9./-])'+re.escape(p['path'])+r'(?![A-Za-z_0-9/-]|\.[A-Za-z_0-9])',prompt)}
+    required=[by_id[pid] for pid in requested]
+    required.extend(p for p in pages if p['path'] in named and p['id'] not in requested)
+    required_ids={p['id'] for p in required}
+    ranked=sorted((p for p in pages if p['id'] not in required_ids),key=score)
+    pages=required+ranked[:max(0,4-len(required))]
     if not pages:raise InvalidUpdate('No current source pages in the armed scope')
     choice=KarmaAdapter().route(prompt,request['models'],request.get('tier','auto'),{'source_files':len(st['sources']),'selected_files':len({p['path'] for p in pages}),'unresolved_calls':0})
     if provider is not None and provider.model!=choice['model']:raise InvalidUpdate('Provider differs from native route')
     record={'session':sid,'contract_hash':s.origin(sid)['contract_hash'],'request_hash':sha(prompt),'choice':choice}
     with s.db:s._audit('NATIVE_ROUTE',record)
     route={'record':record,'receipt':s.db.execute('SELECT event_hash FROM page_audit ORDER BY seq DESC LIMIT 1').fetchone()[0]}
-    result=dispatch(s,meta,workspace,root,{'op':'work','mode':'auto','prompt':prompt,'model':choice['model'],'pages':[p['id'] for p in pages],'native_route':route,'conversation_id':request.get('conversation_id')},provider=provider)
+    result=dispatch(s,meta,workspace,root,{'op':'work','mode':'auto','prompt':prompt,'model':choice['model'],'pages':[p['id'] for p in pages],'native_route':route,'conversation_id':request.get('conversation_id'),'toc_offset':request.get('toc_offset',0)},provider=provider)
     from review_budget import decision
     result.update(route=choice,native_budget=decision(s,sid));return result

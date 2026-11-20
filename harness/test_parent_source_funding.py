@@ -93,7 +93,25 @@ class ParentSourceFundingTests(unittest.TestCase):
         self.assertEqual(packet.get('child_results', []), children)
         from model_packet import build
         wire = json.loads(build(chat.SYSTEM, packet, chat.schema(packet))['messages'][1]['content'])
-        self.assertEqual(wire['discovery_notes_unverified'], [])
+        self.assertNotIn('discovery_notes_unverified', wire)
+        view = wire['retained_context']
+        self.assertEqual(view['totals']['notes'], len(notes))
+        self.assertEqual(view['deferred']['notes'], 0)
+        note_pages = [page for page in view['pages'] if page['kind'] == 'working_note_unverified']
+        self.assertEqual([page['note'] for page in note_pages], notes)
+        import retained_context
+        for page in note_pages:
+            self.assertEqual(retained_context.lookup(self.s, sid, packet, page['ref'], owner=original['id']), page)
+        from claim_pages import covered_by_excerpt
+        for page in view['pages']:
+            if page['kind'] != 'retained_source_unit': continue
+            original_unit = next(unit for unit in retained_context.source_units(packet['retained_context'])
+                                 if unit['id'] == page['evidence']['id'])
+            if covered_by_excerpt(packet, original_unit):
+                self.assertNotIn('text', page['evidence'])
+                self.assertEqual(page['delivered_in']['field'], 'excerpts')
+            else:
+                self.assertEqual(page['evidence']['text'], original_unit['text'])
         self.assertFalse(wire.get('child_analysis_unverified'))
         self.assertEqual(packet['evidence_coverage']['child_reports'], 0)
         self.assertEqual(packet['memory_budget']['context_limit'], 65536)

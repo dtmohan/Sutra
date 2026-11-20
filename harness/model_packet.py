@@ -11,6 +11,7 @@ VERSION = 1
 CITATION_REFERENCE_VERSION = 2
 DERIVED_REVIEW_SUMMARY_VERSION = 3
 REFERENCE_VERSIONS = {CITATION_REFERENCE_VERSION, DERIVED_REVIEW_SUMMARY_VERSION}
+RETAINED_ARCHITECT_VERSION = 14
 DISCOVERY_NOTE_BYTES = 1600
 # Canonical compact note with empty summary, one empty gap, and empty host
 # findings/completed arrays is 120 bytes. One Unicode codepoint needs at most
@@ -120,6 +121,10 @@ def model_schema(role, payload, schema, version=VERSION):
     if version in REFERENCE_VERSIONS:
         fmt['properties']['citations']['items'] = {
             'type': 'integer', 'enum': list(range(1, len(citation_choices(schema)) + 1))}
+    if version == RETAINED_ARCHITECT_VERSION:
+        for path, finding in fmt['properties']['findings']['properties'].items():
+            choices = schema['properties']['findings']['properties'][path]['properties']['quote']['enum']
+            finding['properties']['quote'] = {'type': 'integer', 'enum': list(range(len(choices)))}
     if (role == 'architect' and payload.get('evidence_discovery_version') == 4
             and payload.get('discovery_selection_version') == 3):
         fields = fmt['properties']
@@ -307,6 +312,8 @@ def build(system, payload, schema):
     if role is None: return None
     use_references = citation_references(role, payload)
     version = DERIVED_REVIEW_SUMMARY_VERSION if use_references else VERSION
+    if role == 'architect' and payload.get('retained_context_version') == 1 and payload.get('phase') == 'report':
+        version = RETAINED_ARCHITECT_VERSION
     fmt = model_schema(role, payload, schema, version)
     if role == 'conversation':
         from conversation_prompt import messages
@@ -317,6 +324,8 @@ def build(system, payload, schema):
         messages_out = messages(system, p, fmt)
     elif role == 'document_extract':
         body = select(payload, ('request', 'section_text', 'repair'))
+        if payload.get('conversation_context_version') == 1:
+            body['conversation_criteria_unverified'] = memory_view(payload.get('memory'))
         messages_out = [{'role': 'system', 'content': system}, {'role': 'user', 'content': canonical(body)}]
     elif role == 'document_verdict_reviewer':
         body = select(payload, ('request', 'quotes', 'answer', 'basis', 'citation_ids', 'repair'))
@@ -346,6 +355,8 @@ def build(system, payload, schema):
                     'pages': copy.deepcopy(payload['discovery_memory_pages'])}
             if payload.get('discovery_progress_version') == 1:
                 body.update(select(payload, ('supplied_source_progress',)))
+            if payload.get('discovery_control_version') == 1 and payload.get('host_feedback'):
+                body['host_feedback'] = copy.deepcopy(payload['host_feedback'])
             if payload.get('active_source_page'):
                 body['source_page_view'] = source_page_view(payload['active_source_page'])
             if payload.get('source_page_toc'):
@@ -356,6 +367,32 @@ def build(system, payload, schema):
         if role == 'report_reviewer' and payload.get('review_protocol') == 2:
             body.update(select(payload, ('source_evidence', 'review_scope')))
         body['memory'] = memory_view(payload.get('memory'))
+        if payload.get('retained_context_version') == 1 and role in ('architect', 'chat_reviewer', 'subagent', 'coder', 'reviewer'):
+            body['retained_context'] = select(payload['retained_context'], ('root', 'pages', 'totals', 'deferred', 'requested_refs'))
+            body.pop('discovery_notes_unverified', None)  # These exact notes are in the bound directory.
+            from claim_pages import covered_by_excerpt
+            for page in body['retained_context']['pages']:
+                if page['kind'] != 'retained_source_unit':
+                    continue
+                unit = page['evidence']
+                # A source body appears once. Its bound address and exact
+                # position remain visible where another field carries it.
+                # Equal text at a different span never justifies elision.
+                if role == 'architect' and unit in payload.get('evidence', []):
+                    unit.pop('text', None)
+                    page['delivered_in'] = {'field': 'evidence', 'path': unit['path'],
+                                            'start_line': unit['line'], 'column': unit.get('column', 0)}
+                elif covered_by_excerpt(payload, unit):
+                    location = payload['excerpt_locations'][unit['path']]
+                    unit.pop('text', None)
+                    page['delivered_in'] = {'field': 'excerpts', 'path': unit['path'],
+                                            'start_line': location['start_line'], 'column': location.get('column', 0)}
+        if payload.get('source_directory_version') == 1 and role in ('coder', 'reviewer'):
+            body['source_directory'] = select(payload, ('toc', 'toc_offset', 'toc_next_offset', 'toc_total'))
+        if version == RETAINED_ARCHITECT_VERSION:
+            body['quote_choices'] = {
+                path: [dict(id=index, quote=quote) for index, quote in enumerate(finding['properties']['quote']['enum'])]
+                for path, finding in schema['properties']['findings']['properties'].items()}
         body['earlier_work_unverified'] = note_view(payload.get('handoff'))
         if (role == 'architect' and payload.get('discovery_memory_version') == 1
                 and payload.get('evidence_discovery_version') == 4):
@@ -419,6 +456,13 @@ def build(system, payload, schema):
                 feedback['target_file_count'] = len(manifest.splitlines()) if manifest else 0
         if payload.get('repair'): body['repair'] = payload['repair']
         wire_system = system if role == 'review_reader' else SYSTEMS[role]
+        if payload.get('retained_context_version') == 1 and role in ('architect', 'chat_reviewer'):
+            wire_system += (' retained_context indexes saved notes and source. To recall a deferred page, '
+                            'put exactly Recall context: <ref> in remaining using its supplied reference. '
+                            'Notes are unverified; only supplied source bodies support citations.')
+        if version == RETAINED_ARCHITECT_VERSION:
+            wire_system += (' Return each finding\'s integer quote ID from its file\'s quote_choices; '
+                            'the host restores the exact source quotation.')
         selection_only = (role == 'architect' and payload.get('evidence_discovery_version') == 4
                           and payload.get('discovery_selection_version') in (1, 2, 3))
         if selection_only:
@@ -445,6 +489,10 @@ def build(system, payload, schema):
                     wire_system += (' Evidence may include whole source units recalled from earlier repository receipts. '
                                     'Use their actual text and supplied positions; a source index alone is not body evidence. '
                                     'Choose another read or search whenever the supplied bodies leave a gap.')
+                if payload.get('discovery_control_version') == 1 and payload.get('host_feedback'):
+                    wire_system += (' host_feedback contains bounded source-acquisition observations. '
+                                    'Use the actual evidence to draft what is supported or identify a specific missing source; '
+                                    'the observations do not establish understanding or close unresolved questions.')
                 if payload.get('discovery_search_version') == 1:
                     wire_system = wire_system.replace(
                         'search uses a bounded literal query, empty target and line=1;',
@@ -457,12 +505,22 @@ def build(system, payload, schema):
             wire_system += (' Prefer the supplied function start lines that expose caller and callee operations. '
                             'Use line 1 only when module initialization itself is the missing evidence.')
         if use_references:
-            body['citation_choices'] = [
-                {'id': index, 'path': choice['path'],
-                 'line_in_excerpt': next((i for i, line in enumerate(body['excerpts'][choice['path']].splitlines(), 1)
-                                          if line.startswith(choice['quote'])), 1)}
-                for index, choice in enumerate(citation_choices(schema), 1)
-            ]
+            body['citation_choices'] = []
+            for index, choice in enumerate(citation_choices(schema), 1):
+                text = body.get('excerpts', {}).get(choice['path'], '')
+                address = {'id': index, 'path': choice['path']}
+                line_key = 'line_in_excerpt'
+                if choice['quote'] not in text and payload.get('retained_context_version') == 1:
+                    page = next(page for page in payload['retained_context']['pages']
+                                if page['kind'] == 'retained_source_unit'
+                                and page['evidence']['path'] == choice['path']
+                                and choice['quote'] in page['evidence']['text'])
+                    text = page['evidence']['text']
+                    address['source_ref'] = page['ref']
+                    line_key = 'line_in_source_unit'
+                address[line_key] = next((i for i, line in enumerate(text.splitlines(), 1)
+                                          if line.startswith(choice['quote'])), 1)
+                body['citation_choices'].append(address)
             if body['task']['goal'] == body['request']:
                 del body['task']['goal']
             if (body.get('task_commitment') or {}).get('request') == body['request']:
@@ -470,6 +528,8 @@ def build(system, payload, schema):
             citation_format = fmt['properties']['citations']
             instruction = REFERENCE_CITATIONS.format(minimum=citation_format['minItems'],
                                                        maximum=citation_format['maxItems'])
+            if payload.get('retained_context_version') == 1:
+                instruction += ' A source_ref points to a retained source unit; line_in_source_unit counts within that exact body.'
             wire_system = wire_system.replace(QUOTE_CITATIONS + '; otherwise cite exact supplied source quotations; ',
                                               instruction + ' ')
             wire_system = wire_system.replace(' ' + QUOTE_CITATIONS + '.', '')
@@ -547,7 +607,20 @@ def bind_output(role, payload, schema, raw, version=VERSION):
     if version in REFERENCE_VERSIONS:
         choices = citation_choices(schema)
         bound['citations'] = [copy.deepcopy(choices[number - 1]) for number in raw['citations']]
+    if version == RETAINED_ARCHITECT_VERSION:
+        bound['findings'] = copy.deepcopy(raw['findings'])
+        for path, finding in bound['findings'].items():
+            choices = schema['properties']['findings']['properties'][path]['properties']['quote']['enum']
+            finding['quote'] = choices[finding['quote']]
     return bound, fields
+
+
+def recover_architect_references(schema, findings):
+    result = copy.deepcopy(findings)
+    for path, finding in result.items():
+        choices = schema['properties']['findings']['properties'][path]['properties']['quote']['enum']
+        finding['quote'] = choices.index(finding['quote'])
+    return result
 
 
 def recover_citation_references(schema, bound):

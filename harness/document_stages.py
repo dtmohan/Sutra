@@ -50,7 +50,7 @@ def _sections(raw):
     return sections
 
 
-def _build(doc, prompt, parent, tier, models, *, version=2):
+def _build(doc, prompt, parent, tier, models, *, version=2, context_version=1):
     raw = doc['text'].encode('utf-8')
     if len(raw) <= DIRECT_DOCUMENT_BYTES:
         return None
@@ -66,13 +66,18 @@ def _build(doc, prompt, parent, tier, models, *, version=2):
     synthesis = extraction
     if tier == 'auto' and version == 1:
         synthesis = next((rank for rank in reversed(TIERS[1:]) if models[rank] != models[extraction]), extraction)
-    return {
+    result = {
         'version': version, 'document_ref': {k: v for k, v in doc.items() if k != 'text'},
         'prompt': prompt, 'prompt_hash': sha(prompt), 'parent': parent, 'mode': tier,
         'models': selection['models'], 'extract_tier': extraction, 'extract_model': models[extraction],
         'synthesis_tier': synthesis, 'synthesis_model': models[synthesis],
         'sections': _sections(raw),
     }
+    if context_version is not None:
+        if type(context_version) is not int or context_version != 1:
+            raise InvalidUpdate('Unsupported document extraction context profile')
+        result['extraction_context_version'] = context_version
+    return result
 
 
 def plan(s, sid, prompt, document_ref, parent, tier, models):
@@ -114,7 +119,8 @@ def _committed(s, sid, flow_id):
     if type(saved.get('version')) is not int or saved['version'] not in (1, 2):
         raise InvalidUpdate('Unsupported document stage plan version')
     expected = _build(doc, flow['prompt'], flow.get('conversation_parent'), saved['mode'],
-                      saved['models'], version=saved['version'])
+                      saved['models'], version=saved['version'],
+                      context_version=saved.get('extraction_context_version'))
     if expected is None or saved != expected or data.get('document_stage_plan') != saved:
         raise InvalidUpdate('Document stage plan differs from approved evidence or routing')
     receipt_ids = []
@@ -239,14 +245,40 @@ def _check_notes(text, proposal):
             raise InvalidUpdate('Each document evidence note needs an exact quotation from this section')
 
 
-def _delivery(s, sid, flow_id, saved, raw, section):
+def _delivery(s, sid, flow_id, saved, raw, section, *, budget=None, materialize=False):
     from conversation import contract
 
-    return {
+    result = {
         'contract': contract(s, sid), 'request': saved['prompt'], 'pages': [],
         'document_stage_flow': flow_id, 'document_stage_plan_hash': sha(canonical(saved)),
         'model': saved['extract_model'], 'section': section, 'section_text': _section_text(raw, section),
     }
+    if saved.get('extraction_context_version') == 1:
+        if budget is None:
+            raise InvalidUpdate('Document extraction memory requires its admitted context budget')
+        parent = saved['parent']
+        if parent:
+            row = s.db.execute('SELECT session FROM invocations WHERE id=?', (parent,)).fetchone()
+            if not row or row[0] != sid:
+                raise InvalidUpdate('Document extraction context belongs to another conversation')
+        from retained_context import conversation_view
+        result.update(conversation_context_version=1, retained_conversation_parent=parent,
+                      memory_budget=vars(budget).copy())
+        result['memory'] = conversation_view(s, result, budget, system=SYSTEM, schema_for=schema,
+                                             materialize=materialize)
+    return result
+
+
+def _delivery_budget(saved, payload):
+    if saved.get('extraction_context_version') != 1:
+        return None
+    raw = payload.get('memory_budget')
+    if not isinstance(raw, dict):
+        raise InvalidUpdate('Document extraction memory budget is missing')
+    try:
+        return Budget(**raw)
+    except (TypeError, ValueError) as exc:
+        raise InvalidUpdate('Document extraction memory budget is invalid') from exc
 
 
 def request_check(s, sid, payload):
@@ -259,7 +291,8 @@ def request_check(s, sid, payload):
         raise InvalidUpdate('Document extraction requires an active conversation workflow')
     if len(receipts) >= len(saved['sections']):
         raise InvalidUpdate('Document extraction is complete')
-    expected = _delivery(s, sid, fid, saved, raw, saved['sections'][len(receipts)])
+    expected = _delivery(s, sid, fid, saved, raw, saved['sections'][len(receipts)],
+                         budget=_delivery_budget(saved, payload))
     if {key: value for key, value in payload.items() if key not in ('repair', 'reasoning')} != expected:
         raise InvalidUpdate('Document extraction packet differs from its committed section')
     validate_reasoning(payload['reasoning'])
@@ -286,7 +319,7 @@ def _accepted(s, sid, invocation, fid, saved, raw, section):
     if not row:
         raise PageFault('Document extraction receipt is unavailable', code='missing')
     envelope, receipt, delivered = (json.loads(row[i]) for i in (0, 2, 4))
-    expected = _delivery(s, sid, fid, saved, raw, section)
+    expected = _delivery(s, sid, fid, saved, raw, section, budget=_delivery_budget(saved, delivered))
     actual = {key: value for key, value in delivered.items() if key not in ('repair', 'reasoning')}
     if (envelope['role'] != ROLE or envelope['model'] != saved['extract_model']
             or sha('invocation-v1:' + row[0]) != row[1] or receipt['invocation_hash'] != row[1]
@@ -346,10 +379,12 @@ def extract(s, sid, root, flow_id, plan, receipt_ids, provider=None):
         provider = provider[saved['extract_model']]
     if provider.model != saved['extract_model']:
         raise InvalidUpdate('Document extraction model differs from the committed route')
-    payload = _delivery(s, sid, flow_id, saved, raw, section)
+    payload = _delivery(s, sid, flow_id, saved, raw, section, budget=provider.budget, materialize=True)
     payload['reasoning'] = make(capabilities(getattr(provider, 'context_metadata', {})), 'off')
     provider.thinking = payload['reasoning']['requested']
     fmt = schema(payload)
+    from context_window import check as check_window
+    check_window(provider.budget, SYSTEM, payload, fmt, planning=True)
     run = s.begin_run(sid, payload['request'], [], None, max_calls=2, max_repairs=1)
     for attempt in range(2):
         charge = provider.budget.check(SYSTEM, payload, fmt)

@@ -1395,6 +1395,10 @@ def _handle(s,meta,workspace,root,req,providers=None):
             latest = {'last_child': child, 'last_model': out['route']['model']}
             if m.state(s, child) in ('QUARANTINED', 'CANCELLED'):
                 return child_rejection(s, fid, child)
+            if out.get('child_repair_pending'):
+                stop = out['child_repair_pending']
+                move(s, fid, 'PAUSED', 'CHILD_SLICE_STOPPED', workflow_stop=stop, **latest)
+                return response(s, fid, child=out)
             if out.get('slice_status') == 'timeout':
                 reason = out.get('slice_reason', 'timeout')
                 message = {
@@ -1428,6 +1432,8 @@ def _handle(s,meta,workspace,root,req,providers=None):
         if phase == 'SYNTHESIS' and provenance_changed(s, workspace, fid, d):
             return response(s, fid)
         request={'prompt':prompt,'models':models,'tier':effective(d,models,tier),'conversation_id':d['conversation_id'],**d['binding'],'child_results':d.get('child_results',[]),'orchestration_parent':d.get('result_parent',parent['id']), '_parent_step': phase == 'SYNTHESIS'}
+        if phase == 'SYNTHESIS' and d.get('context_recall'):
+            request['context_recall'] = d['context_recall']
         claim_retry = d.get('claim_review_retry') if phase == 'SYNTHESIS' else None
         try:
             with m.scope(parent['id']):
@@ -1441,7 +1447,7 @@ def _handle(s,meta,workspace,root,req,providers=None):
                 else:
                     from chat_runtime import answer, recover_parent_checkpoint, resume_parent_review
                     checkpoint = d.get('parent_checkpoint')
-                    if phase == 'SYNTHESIS' and not checkpoint:
+                    if phase == 'SYNTHESIS' and not checkpoint and not d.get('context_recall'):
                         checkpoint = recover_parent_checkpoint(s, sid, workspace, request)
                         if checkpoint:
                             move(s, fid, 'SYNTHESIS', 'PARENT_CANDIDATE_RECOVERED', parent_checkpoint=checkpoint)
@@ -1481,6 +1487,12 @@ def _handle(s,meta,workspace,root,req,providers=None):
         if phase == 'SYNTHESIS':
             if provenance_changed(s, workspace, fid, d):
                 return response(s, fid)
+            if out.get('retained_context_pending'):
+                move(s, fid, 'SYNTHESIS', 'RETAINED_CONTEXT_REQUESTED',
+                     context_recall=out['retained_context_pending'], parent_checkpoint=None)
+                save(root, meta)
+                return response(s, fid, progress='Recalling saved context for the next review step.',
+                                claim_review_usage=workflow_usage(s, fid))
             if out.get('evidence_discovery_pending'):
                 move(s, fid, 'SYNTHESIS', 'PARENT_EVIDENCE_CHECKPOINT',
                      parent_evidence=out['evidence_discovery_pending'])
@@ -1496,6 +1508,7 @@ def _handle(s,meta,workspace,root,req,providers=None):
             if out.get('parent_checkpoint'):
                 move(s, fid, 'SYNTHESIS', 'PARENT_REVIEW_CHECKPOINT',
                      parent_checkpoint=out['parent_checkpoint'], claim_review_retry=None,
+                     context_recall=None,
                      parent_review_progress=out.get('claim_review_pending'))
                 save(root, meta)
                 return response(s, fid, progress='Draft saved. Continuing the claim review.',

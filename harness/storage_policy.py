@@ -79,6 +79,12 @@ def write_trace(directory, call_id, record):
             compact['structured_output'] = {key: structured[key] for key in ('mode', 'basis', 'schema_sha256')}
             if structured.get('normalization') in ('none', 'json_fence'):
                 compact['structured_output']['normalization'] = structured['normalization']
+        if record.get('output_shape') is not None:
+            try:
+                from output_shape import validate
+                compact['output_shape'] = validate(record['output_shape'])
+            except Exception:
+                pass  # Invalid advisory metadata must not widen or block the trace.
         compact['response']['first_answer_chunk_s'] = response.get('first_answer_chunk_s')
         timings = response.get('timings')
         if isinstance(timings, dict):

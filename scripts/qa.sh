@@ -84,6 +84,9 @@ if [ -z "$KARMA_NODE" ]; then
 fi
 
 gate "release metadata" python3 -B scripts/check-release.py
+gate "discovery replay evaluator" python3 -B scripts/test-evaluate-discovery-governor.py
+gate "discovery live experiment runner" python3 -B scripts/test-experiment-discovery-convergence.py
+gate "model context origin coverage" python3 -B scripts/test-audit-context-paths.py
 gate "python harness" python_suite
 if [ "$WITH_ENGINE_CODEC" -eq 1 ]; then
   gate "installed engine codec (opt-in)" engine_codec_suite

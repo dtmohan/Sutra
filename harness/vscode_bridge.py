@@ -170,8 +170,11 @@ def dispatch(s,meta,workspace,root,request,provider=None):
     chosen=request.get('pages',[])
     catalog=[p for row in st['sources'] for p in row['pages']]
     ids={p['id'] for p in catalog}
-    if not isinstance(chosen,list) or not 1<=len(chosen)<=4 or len(set(chosen))!=len(chosen) or not set(chosen)<=ids:
-        raise InvalidUpdate('Select 1..4 current source pages from the table of contents')
+    if not isinstance(chosen,list) or not 1<=len(chosen)<=len(ids) or len(set(chosen))!=len(chosen) or not set(chosen)<=ids:
+        raise InvalidUpdate('Select unique current source pages from the table of contents')
+    toc_offset=request.get('toc_offset',0)
+    if type(toc_offset) is not int or not 0<=toc_offset<len(catalog):
+        raise InvalidUpdate('Source directory offset is outside the current table of contents')
     model_name=request.get('model',meta.get('model','local-assistant:latest'))
     from strata_model import is_strata
     from engine_profiles import is_engine
@@ -205,12 +208,15 @@ def dispatch(s,meta,workspace,root,request,provider=None):
         page={'id':key,'version':p.version,'hash':p.content_hash,'authority':p.authority,**p.payload}
         if request.get('op')=='work':page['path']=next(row['path'] for row in st['sources'] if any(item['id']==key for item in row['pages']))
         pages.append(page)
-    # TOC is metadata only, bounded to the first 24 current pages. The UI exposes
-    # every page and lets the user explicitly page in additional bodies.
+    # The bounded directory has an explicit next offset. Required selected pages
+    # may lie outside this window; their bodies are never replaced by its prefix.
+    toc_window=catalog[toc_offset:toc_offset+24]
     payload={'contract':s.pinned(session),'request':prompt,'pages':pages,
-             'toc':[{'id':p['id'],'lines':p['lines']} for p in catalog[:24]],
+             'toc':[{'id':p['id'],'path':p['path'],'lines':p['lines']} for p in toc_window],
              'toc_total':len(catalog),'derived_from':[parent] if parent else [],
              'handoff':compact(st['last_result']) if parent else None}
+    payload.update(source_directory_version=1,toc_offset=toc_offset,
+                   toc_next_offset=toc_offset+len(toc_window) if toc_offset+len(toc_window)<len(catalog) else None)
     if request.get('native_route'):
         from review_reasoning import bind
         payload['native_route']=request['native_route']
@@ -226,7 +232,15 @@ def dispatch(s,meta,workspace,root,request,provider=None):
             source_versions={k:v['sha256'] for k,v in files_at(s,session,workspace).items()})
         schema=coding_schema(payload)
     else:schema=review_schema(payload)
+    if payload.get('conversation_handoff'):
+        from retained_context import conversation_view
+        payload['conversation_context_version']=1
+        payload['memory_budget']=vars(provider.budget).copy()
+        payload['memory']=conversation_view(s,payload,provider.budget,system=system,
+                                           schema_for=lambda p:schema,materialize=True)
     provider.budget.check(system,payload,schema)
+    from context_window import check as check_window
+    check_window(provider.budget,system,payload,schema,planning=True)
     run=s.begin_run(session,prompt,[],None,max_calls=3,max_repairs=2)
     meta['model']=model_name;last=None
     for attempt in range(3):

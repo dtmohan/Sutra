@@ -370,6 +370,22 @@ function setup(saved={}){
   assert.equal(rejected.controller.status().routing.stage,'paused');assert(!rejected.token.token.isCancellationRequested);
   checks.push('rejected child output is a saved validation pause with bounded-retry guidance rather than a failed or cancelled parent request');
  }
+ {
+  const repeated=setup();await repeated.arm();const original=repeated.deps.request;
+  repeated.deps.request=async(m,t)=>{
+   const result=await original(m,t);
+   if(m.op==='orchestrate'&&result.state==='CODING')return {...result,state:'PAUSED',stop:{status:'child_repair_unchanged_request',resume_phase:'CHILDREN',branch_id:'saved-child',error:'Identical JSON repair would repeat.'}};
+   return result;
+  };
+  const parts=await repeated.send();
+  assert(parts.some(p=>p.value?.includes('unused repair attempt are saved')));
+  assert(parts.some(p=>p.value?.includes('budget increase alone does not change this request')));
+  assert(!parts.some(p=>p.value?.includes('one bounded replacement')));
+  assert.equal(repeated.controller.status().pending.stop.branch_id,'saved-child');
+  assert.equal(repeated.controller.status().routing.stage,'paused');
+  assert(!repeated.token.token.isCancellationRequested);
+  checks.push('an unchanged failed child request stays paused with the same checkpoint and material-change guidance, without a replacement or automatic retry');
+ }
  const missing=setup();missing.v.lm.selectChatModels=async()=>[];await assert.rejects(missing.commands['karma.useNativeChat'](),/not available/);assert.equal(missing.cfg.defaultModel,undefined);checks.push('failed discovery cannot save an unavailable default');
  const policy=setup();policy.policies.defaultToCopilotHarness=true;await assert.rejects(policy.commands['karma.useNativeChat'](),/organization manages/);assert.equal(policy.cfg.defaultModel,undefined);assert.equal(policy.uiCalls.length,0);
  const override=setup();override.overrides.defaultToCopilotHarness=true;await assert.rejects(override.commands['karma.useNativeChat'](),/overrides/);assert.equal(override.cfg.defaultModel,undefined);assert.equal(override.cfg['editor.preferCopilotHarness'],undefined);assert.equal(override.uiCalls.length,0);

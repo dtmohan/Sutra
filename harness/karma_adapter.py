@@ -69,6 +69,52 @@ class KarmaAdapter:
                     observation_only=True, authority='host_observation_not_permission',
                     signal='literal_repetition', semantic_correctness_verified=False,
                     suggested_recovery='checkpoint_and_reassess' if repeated else 'continue')
+
+    def discovery(self, progress):
+        """Govern source-acquisition routing, without certifying understanding."""
+        if (not isinstance(progress, dict) or progress.get('profile') != 'discovery-progress-v1'
+                or progress.get('format') != 1 or type(progress.get('format')) is not int
+                or progress.get('status') not in ('green', 'yellow', 'partial_synthesis')):
+            raise ValueError('Unknown discovery progress profile')
+        status = progress['status']
+        repeat = progress.get('same_request_streak')
+        ceiling = (progress.get('policy') or {}).get('synthesize_after')
+        if type(repeat) is not int or type(ceiling) is not int or not 0 <= repeat <= 128 or not 1 <= ceiling <= 64:
+            raise ValueError('Invalid discovery progress streak')
+        persistent = status == 'partial_synthesis' and repeat >= ceiling
+        omega = 3 * self.boundary.k if persistent else 2 * self.boundary.k if status != 'green' else 0.
+        result = self.frame('discovery-governor-v1', omega, 0.)
+        return dict(result, scope='source_acquisition_stage',
+                    suggested_recovery='synthesize_partial' if status == 'partial_synthesis' else
+                        'host_feedback' if status == 'yellow' else 'continue',
+                    semantic_completion_verified=False, grants_permissions=False,
+                    task_closed=False, persistent_unchanged_request=persistent)
+    def child_repair(self, observation):
+        """Checkpoint a proven unchanged failed format repair, without a grant."""
+        fields = {'profile', 'version', 'status', 'fingerprint', 'failure_class',
+                  'attempts_used', 'remaining_attempts'}
+        if (not isinstance(observation, dict) or set(observation) != fields
+                or observation['profile'] != 'child-repair-governor-v1'
+                or type(observation['version']) is not int or observation['version'] != 1
+                or observation['status'] != 'unchanged_failed_request'
+                or observation['failure_class'] != 'invalid_json'):
+            raise ValueError('Unknown child repair observation')
+        fingerprint = observation['fingerprint']
+        if (not isinstance(fingerprint, str) or len(fingerprint) != 64
+                or any(c not in '0123456789abcdef' for c in fingerprint)):
+            raise ValueError('Invalid child repair request fingerprint')
+        if (type(observation['attempts_used']) is not int
+                or not 1 <= observation['attempts_used'] <= 3
+                or type(observation['remaining_attempts']) is not int
+                or not 1 <= observation['remaining_attempts'] <= 3
+                or observation['attempts_used'] + observation['remaining_attempts'] != 3):
+            raise ValueError('Invalid child repair attempt accounting')
+        return dict(self.frame('child-repair-governor-v1', 2 * self.boundary.k, 0.),
+                    observation=dict(observation), scope='child_format_repair',
+                    suggested_recovery='change_input_or_model_then_resume',
+                    semantic_completion_verified=False, grants_permissions=False,
+                    task_closed=False)
+
     def evidence_admission(self, *, target_status, evidence_status, recovery_possible, budget_exhausted=False):
         """Map host-verified target, evidence and recovery facts into STP."""
         if target_status not in ('resolved', 'missing', 'invalid'):

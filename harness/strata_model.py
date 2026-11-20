@@ -155,10 +155,12 @@ def _host_json_answer(text):
             constant(value)
         return result
 
+    position = None
     try:
         answer = json.loads(text, object_pairs_hook=pairs, parse_constant=constant, parse_float=number)
     except json.JSONDecodeError as exc:
         cause = 'invalid JSON: ' + _json_failure_cause(str(exc))
+        position = {'line': exc.lineno, 'column': exc.colno, 'offset': exc.pos}
     except ValueError as exc:
         cause = str(exc) if str(exc) in ('duplicate JSON key (key withheld)', 'non-finite JSON number') else 'invalid JSON value'
     except (OverflowError, RecursionError):
@@ -167,8 +169,11 @@ def _host_json_answer(text):
         if isinstance(answer, dict):
             return answer
         cause = 'expected one JSON object'
-    raise StructuredOutputRejected('Strata rejected the structured reply. Cause: ' + cause +
-        '. Return one JSON object matching the supplied schema.') from None
+    failure = StructuredOutputRejected('Strata rejected the structured reply. Cause: ' + cause +
+        '. Return one JSON object matching the supplied schema.')
+    if position is not None:
+        failure.json_error_position = position
+    raise failure from None
 
 
 def _host_json_text(text):
@@ -593,12 +598,21 @@ class StrataModel(LocalModel):
                 raise RuntimeError('Strata usage exceeds the admitted context or output budget')
             if self.native_profile is not None and _identity(status(self.port, self.server_identity['server_model']), self.model) != self.server_identity:
                 raise InvalidUpdate('Native Strata server changed during inference')
-            if self.host_json_mode:
-                text, normalization = _host_json_text(result['message']['content'])
-                record['structured_output']['normalization'] = normalization
-                answer = _host_json_answer(text)
-            else:
-                answer = json.loads(result['message']['content'])
+            try:
+                if self.host_json_mode:
+                    text, normalization = _host_json_text(result['message']['content'])
+                    record['structured_output']['normalization'] = normalization
+                    answer = _host_json_answer(text)
+                else:
+                    answer = json.loads(result['message']['content'])
+            except (ValueError, StructuredOutputRejected) as failure:
+                try:
+                    from output_shape import observe
+                    record['output_shape'] = observe(result['message']['content'],
+                        result['message'].get('thinking', ''), failure)
+                except Exception:
+                    pass  # Advisory diagnostics must not replace the parser failure.
+                raise
             record.update(answer=answer, ok=True)
         except Exception as exc:
             if getattr(exc, 'strata_response', None) is not None:

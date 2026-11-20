@@ -1,0 +1,278 @@
+{
+  "format": "retained-context-live-pair-v1",
+  "interpretation": {
+    "corrected_overview": "Echoed the current request.",
+    "delivered_context_verified": true,
+    "limits": [
+      "Marker-only source fixture lacks demonstrated inter-file calls; not a real architecture-quality benchmark.",
+      "No inference of dropped memory from absence of a citation to a particular delivered marker.",
+      "Two fresh bindings and small timing difference do not establish a latency comparison.",
+      "No original user task ledger or C4 trial was modified.",
+      "All synthetic and live spending remained charged; source effects were not replayed."
+    ],
+    "original_overview": "Copied an unrelated dummy fixture summary.",
+    "synthesis_improvement_established": false
+  },
+  "observations": [
+    {
+      "after": {
+        "allocation_version": 0,
+        "base_limits": {
+          "calls": 40,
+          "operations": 1000,
+          "seconds": 1800,
+          "source_bytes": 67108864,
+          "tokens": 250000
+        },
+        "limits": {
+          "calls": 40,
+          "operations": 1000,
+          "seconds": 1800,
+          "source_bytes": 67108864,
+          "tokens": 250000
+        },
+        "used": {
+          "calls": 11,
+          "operations": 13,
+          "seconds": 20.606901002,
+          "source_bytes": 127135,
+          "tokens": 36105
+        }
+      },
+      "artifact_directory": "/var/folders/fy/x8qdt8yx3mn57b2pmjj6c0zc0000gn/T/tmpfvv7skxs/live-proof",
+      "artifacts_sha256": {
+        "manifest.json": "3293d97e84bba88e8fa0b17d784d155aae3cae9335f4cd33069a1a53420588ac",
+        "outcome.json": "5ce899475a78f4d1953be24ec62f4e1aa7c8bbb7bc1d3c88daad76e2dde5bc9f",
+        "provisional-report.md": "1f0459db3f1b45eaebabdd4543ab97028c35871028808ef27500a445d1aa7472",
+        "response.json": "5b8b9a8835417ce6d1a85b3f0c7245054f4560343239a916f3456580333fedd2",
+        "wire-11.json": "e4dbdf97ee6fc1b6e45e977e406ef1df6a15b3da6187c2ba31c356ebfded9974"
+      },
+      "before": {
+        "allocation_version": 0,
+        "base_limits": {
+          "calls": 40,
+          "operations": 1000,
+          "seconds": 1800,
+          "source_bytes": 67108864,
+          "tokens": 250000
+        },
+        "limits": {
+          "calls": 40,
+          "operations": 1000,
+          "seconds": 1800,
+          "source_bytes": 67108864,
+          "tokens": 250000
+        },
+        "used": {
+          "calls": 10,
+          "operations": 13,
+          "seconds": 0.05265954299999978,
+          "source_bytes": 127135,
+          "tokens": 22980
+        }
+      },
+      "final_projection_replay": {
+        "difference": "Explicit delivered_in pointers identify the single already-delivered source body.",
+        "final_policy_hash": "38650a62712bdb107be53772b034780a099988c108f583e4ba63199d3a4b6a12",
+        "method": "Read-only delivery projection; not invocation re-admission or old-policy ledger replay.",
+        "no_new_model_or_source_call": true,
+        "quote_choices_unchanged": true,
+        "source_and_note_contents_unchanged": true
+      },
+      "fixture": "original_dummy_parent",
+      "live_attempts": [
+        {
+          "deferred": {
+            "notes": 0,
+            "pages": 0,
+            "source_units": 0
+          },
+          "elapsed_seconds": 20.554241459,
+          "errors": [],
+          "invocation_id": "c52a029ed0a04041bf3e8a7416c46fb9",
+          "notes_total": 8,
+          "settlement": {
+            "basis": "runtime_measured",
+            "overrun_tokens": 0,
+            "released_unused_reservation": 37040,
+            "reserved_tokens": 50165,
+            "used_tokens": 13125,
+            "version": 1
+          },
+          "source_paths": [
+            "child.py",
+            "entry.py",
+            "kernel.py",
+            "memory.py",
+            "publication.py"
+          ],
+          "status": "accepted",
+          "usage": {
+            "input_tokens": 12782,
+            "output_tokens": 343,
+            "source": "ollama_response"
+          },
+          "wire_contains_earlier_anchor_as_source": true,
+          "wire_matches_committed_descriptor": true
+        }
+      ],
+      "main_flow_state": "SYNTHESIS",
+      "model": "qwen3:4b",
+      "policy_hash": "ddd1dc8cdc1f91bd610e7310b682a881f478b7e0a90277f3fba1b969717517da",
+      "preserved": {
+        "allocation_version": true,
+        "flow_cursor": true,
+        "limits": true,
+        "live_call_cap": true,
+        "permissions": true,
+        "pins": true,
+        "policy": true,
+        "prior_receipts": true,
+        "repository_receipts": true,
+        "source_operations": true,
+        "source_spending": true
+      },
+      "prompt": "Explain the project architecture: kernel enforcement, memory recovery, child checkpoints and publication. Remember project Cedar, ticket CED724. Keep this read only. No network or new dependencies.",
+      "receipt_chains_valid": true,
+      "report": "# Synthetic retained-context transport proof\n\nThis is a small fixture, not a full Sutra architecture review or independent claim publication.\n\n# Architecture review\n\nRouted through Sutra | task review-e3bf9617f695 | model qwen3:4b\nInvocation: c52a029ed0a04041bf3e8a7416c46fb9\nReceipt: c52b2c0953b5352abd1e126594a8fe32ee1677576b0a586303f49ab3af60a0a9\n\n## Overview\n\nUser prefers short answers; project nickname is Marigold.\n\n## Source evidence\n\n- Child function returns 'CHILD' \u2014 child.py:1\n  > return \"CHILD\"\n- Entry function returns 'ENTRY' \u2014 entry.py:1\n  > return \"ENTRY\"\n- Initial gate returns 'INITIAL_INTERFACE' \u2014 kernel.py:1\n  > return \"INITIAL_INTERFACE\"\n- Memory function returns 'MEMORY' \u2014 memory.py:1\n  > return \"MEMORY\"\n- Publication function returns 'PUBLICATION' \u2014 publication.py:1\n  > return \"PUBLICATION\"\n\n## Remaining questions\n\n- publication.py\n- entry.py\n\nSource quotations and versions were checked. Diagram relationships and explanatory prose remain model interpretations.\n",
+      "source_hashes": {
+        "child.py": "8e96e01a5df41a5b6b200daf595f84917debc43ab3dbb49286998423803a4d53",
+        "entry.py": "ce872017a0bbf187e679e60970610c8dba34df7f6da07251c744f3ac60cf32d3",
+        "kernel.py": "549df4b0a7f89491d4bbccaa7a86d30c6e5cc2a3de082af85948b527d4caa120",
+        "memory.py": "6d4e012330c4022bc59cdf8f154d4da4a5394c527fac1e0d82702d2e45e41a94",
+        "publication.py": "9b9f3b1befbabe3fc0a348dcd5bc48c07b39b959676624d68450dca3015a4527"
+      },
+      "thinking": "adaptive"
+    },
+    {
+      "after": {
+        "allocation_version": 0,
+        "base_limits": {
+          "calls": 40,
+          "operations": 1000,
+          "seconds": 1800,
+          "source_bytes": 67108864,
+          "tokens": 250000
+        },
+        "limits": {
+          "calls": 40,
+          "operations": 1000,
+          "seconds": 1800,
+          "source_bytes": 67108864,
+          "tokens": 250000
+        },
+        "used": {
+          "calls": 11,
+          "operations": 13,
+          "seconds": 20.518021002999994,
+          "source_bytes": 127135,
+          "tokens": 36700
+        }
+      },
+      "artifact_directory": "/var/folders/fy/x8qdt8yx3mn57b2pmjj6c0zc0000gn/T/tmpqgqmx0xf/live-proof",
+      "artifacts_sha256": {
+        "manifest.json": "9c381399c17bf71033fee30897df7d348f64fd1867df70cd56a88417274e2675",
+        "outcome.json": "dcd6421300117c19158ac37d6f8c924b59d0c3eea621a7f18803bc03932d7295",
+        "provisional-report.md": "6aa30296499bd9c32314e12fa1cf53eff21638ba76bced75ca13ba73d7fd957b",
+        "response.json": "fc2ccac0103bf529b0b2e6492d7c4cae452927b3a532f08ffb00f47d235328d8",
+        "wire-11.json": "fa5adac49b35d54e87415abc5606920b8d210107bce484525d26170bc3b93c67"
+      },
+      "before": {
+        "allocation_version": 0,
+        "base_limits": {
+          "calls": 40,
+          "operations": 1000,
+          "seconds": 1800,
+          "source_bytes": 67108864,
+          "tokens": 250000
+        },
+        "limits": {
+          "calls": 40,
+          "operations": 1000,
+          "seconds": 1800,
+          "source_bytes": 67108864,
+          "tokens": 250000
+        },
+        "used": {
+          "calls": 10,
+          "operations": 13,
+          "seconds": 0.052210544000000206,
+          "source_bytes": 127135,
+          "tokens": 23540
+        }
+      },
+      "final_projection_replay": {
+        "difference": "Explicit delivered_in pointers identify the single already-delivered source body.",
+        "final_policy_hash": "38650a62712bdb107be53772b034780a099988c108f583e4ba63199d3a4b6a12",
+        "method": "Read-only delivery projection; not invocation re-admission or old-policy ledger replay.",
+        "no_new_model_or_source_call": true,
+        "quote_choices_unchanged": true,
+        "source_and_note_contents_unchanged": true
+      },
+      "fixture": "corrected_current_request_parent",
+      "live_attempts": [
+        {
+          "deferred": {
+            "notes": 0,
+            "pages": 0,
+            "source_units": 0
+          },
+          "elapsed_seconds": 20.465810459,
+          "errors": [],
+          "invocation_id": "6be64a4789234a82a61c700843a21523",
+          "notes_total": 8,
+          "settlement": {
+            "basis": "runtime_measured",
+            "overrun_tokens": 0,
+            "released_unused_reservation": 37285,
+            "reserved_tokens": 50445,
+            "used_tokens": 13160,
+            "version": 1
+          },
+          "source_paths": [
+            "child.py",
+            "entry.py",
+            "kernel.py",
+            "memory.py",
+            "publication.py"
+          ],
+          "status": "accepted",
+          "usage": {
+            "input_tokens": 12786,
+            "output_tokens": 374,
+            "source": "ollama_response"
+          },
+          "wire_contains_earlier_anchor_as_source": true,
+          "wire_matches_committed_descriptor": true
+        }
+      ],
+      "main_flow_state": "SYNTHESIS",
+      "model": "qwen3:4b",
+      "policy_hash": "ddd1dc8cdc1f91bd610e7310b682a881f478b7e0a90277f3fba1b969717517da",
+      "preserved": {
+        "allocation_version": true,
+        "flow_cursor": true,
+        "limits": true,
+        "live_call_cap": true,
+        "permissions": true,
+        "pins": true,
+        "policy": true,
+        "prior_receipts": true,
+        "repository_receipts": true,
+        "source_operations": true,
+        "source_spending": true
+      },
+      "prompt": "Explain the project architecture: kernel enforcement, memory recovery, child checkpoints and publication. Remember project Cedar, ticket CED724. Keep this read only. No network or new dependencies.",
+      "receipt_chains_valid": true,
+      "report": "# Synthetic retained-context transport proof\n\nThis is a small fixture, not a full Sutra architecture review or independent claim publication.\n\n# Architecture review\n\nRouted through Sutra | task review-2e50d000269e | model qwen3:4b\nInvocation: 6be64a4789234a82a61c700843a21523\nReceipt: 1232d77a6e8b263032c5441fb9bd3dc8718993bbb641f22025994091263700b4\n\n## Overview\n\nExplain the project architecture: kernel enforcement, memory recovery, child checkpoints and publication. Remember project Cedar, ticket CED724. Keep this read only. No network or new dependencies.\n\n## Source evidence\n\n- Child checkpoint abstraction defined as 'CHILD' \u2014 child.py:1\n  > return \"CHILD\"\n- Entry abstraction defined as 'ENTRY' \u2014 entry.py:1\n  > return \"ENTRY\"\n- Initial gate mechanism defined as 'INITIAL_INTERFACE' \u2014 kernel.py:1\n  > return \"INITIAL_INTERFACE\"\n- Memory abstraction defined as 'MEMORY' \u2014 memory.py:1\n  > return \"MEMORY\"\n- Publication abstraction defined as 'PUBLICATION' \u2014 publication.py:1\n  > return \"PUBLICATION\"\n\n## Remaining questions\n\n- publication.py\n- entry.py\n\nSource quotations and versions were checked. Diagram relationships and explanatory prose remain model interpretations.\n",
+      "source_hashes": {
+        "child.py": "8e96e01a5df41a5b6b200daf595f84917debc43ab3dbb49286998423803a4d53",
+        "entry.py": "ce872017a0bbf187e679e60970610c8dba34df7f6da07251c744f3ac60cf32d3",
+        "kernel.py": "549df4b0a7f89491d4bbccaa7a86d30c6e5cc2a3de082af85948b527d4caa120",
+        "memory.py": "6d4e012330c4022bc59cdf8f154d4da4a5394c527fac1e0d82702d2e45e41a94",
+        "publication.py": "9b9f3b1befbabe3fc0a348dcd5bc48c07b39b959676624d68450dca3015a4527"
+      },
+      "thinking": "adaptive"
+    }
+  ]
+}

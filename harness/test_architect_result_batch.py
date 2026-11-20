@@ -14,11 +14,19 @@ import test_discovery_selection as fixture
 
 
 class ArchitectResultBatchTests(unittest.TestCase):
-    setUp = fixture.SelectionWireTests.setUp
     tearDown = fixture.SelectionWireTests.tearDown
     provider = fixture.SelectionWireTests.provider
     step = fixture.SelectionWireTests.step
     until = fixture.SelectionWireTests.until
+
+    def setUp(self):
+        fixture.SelectionWireTests.setUp(self)
+        # These historical DAG fixtures deliberately retain twenty repeated
+        # reads, then a twenty-first real dispatch, to measure ancestor loading
+        # and transaction ownership. Convergence policy must not truncate the
+        # integrity/performance input; its finite behavior is tested separately.
+        legacy_control = patch.object(discovery, 'GOVERNOR_VERSION', 0)
+        legacy_control.start(); self.addCleanup(legacy_control.stop)
 
     def chain(self, count=4):
         self.actions = [{'kind': 'read', 'target': 'part0.py'}] * count

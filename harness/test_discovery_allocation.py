@@ -80,7 +80,7 @@ class DiscoveryAllocationTests(unittest.TestCase):
     def prepare(self):
         ready = self.until('SYNTHESIS')
         captured = {}
-        def stop(*args):
+        def stop(*args, **kwargs):
             captured['packet'] = copy.deepcopy(args[2]); captured['data'] = copy.deepcopy(args[3])
             raise Interrupted('Capture the prepared parent before inference')
         with patch.object(discovery, 'advance', side_effect=stop):

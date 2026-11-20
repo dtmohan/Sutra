@@ -20,7 +20,46 @@ def static_statements(source):
 
 
 def source_paths(source):
-    return sorted(set(source['excerpts']) | {statement['path'] for statement in static_statements(source)})
+    return sorted(set(source['excerpts']) | {statement['path'] for statement in static_statements(source)}
+                  | {unit['path'] for unit in retained_sources(source)})
+
+
+def retained_sources(source):
+    if source.get('retained_context_version') != 1:
+        return []
+    from retained_context import source_units
+    return source_units(source['retained_context'])
+
+
+def covered_by_excerpt(source, unit):
+    """A fresh delivered excerpt already contains this exact source position.
+
+    Callers validate freshness before assembling either view. Equal text at a
+    different line/column is not the same span. Unknown positions never justify
+    eliding a body; no source or receipt is read by this projection helper.
+    """
+    path, text = unit.get('path'), unit.get('text')
+    excerpt = source.get('excerpts', {}).get(path)
+    location = source.get('excerpt_locations', {}).get(path, {})
+    start, line = location.get('start_line'), unit.get('line')
+    base_column, column = location.get('column', 0), unit.get('column', 0)
+    if (not isinstance(text, str) or not text or not isinstance(excerpt, str)
+            or type(start) is not int or start < 1 or type(line) is not int or line < start
+            or type(base_column) is not int or base_column < 0
+            or type(column) is not int or column < 0):
+        return False
+    known_version = source.get('source_versions', {}).get(path)
+    if known_version is not None and unit.get('sha256') != known_version:
+        return False
+    rows = excerpt.splitlines(keepends=True)
+    relative_line = line - start
+    if relative_line >= len(rows):
+        return False
+    relative_column = column - (base_column if relative_line == 0 else 0)
+    if not 0 <= relative_column < len(rows[relative_line]):
+        return False
+    offset = sum(map(len, rows[:relative_line])) + relative_column
+    return excerpt.startswith(text, offset)
 
 
 def _statement_in_excerpt(source, statement):
@@ -48,6 +87,33 @@ def inventory(candidate_id, source):
             eid = 'e' + sha(canonical([candidate_id, path, sha(text), offset, end]))[:12]
             line = source.get('excerpt_locations', {}).get(path, {}).get('start_line')
             result[eid] = {'path': path, 'text': quote, 'excerpt_start': offset, 'excerpt_end': end,
+                           'start_line': line + text[:offset].count('\n') if line else None,
+                           'end_line': line + text[:end].count('\n') if line else None}
+            offset = end
+    # Retained source units can contain disjoint windows from the same file.
+    # Each has already passed the writer's scoped receipt/freshness check.
+    # Independent reviewers receive these exact bodies, never saved model notes.
+    seen_retained = set()
+    for unit in retained_sources(source):
+        text = unit['text']
+        if covered_by_excerpt(source, unit):
+            continue
+        version = unit.get('sha256')
+        if (isinstance(version, str) and len(version) == 64
+                and all(char in '0123456789abcdef' for char in version)):
+            identity = (unit['path'], version, unit.get('line'), unit.get('column', 0), text)
+            if identity in seen_retained:
+                continue
+            seen_retained.add(identity)
+        offset = 0
+        while offset < len(text):
+            end = min(len(text), offset + 512)
+            if end < len(text):
+                newline = text.rfind('\n', offset, end)
+                if newline >= offset + 128: end = newline + 1
+            eid = 'e' + sha(canonical(['retained-source-v1', candidate_id, unit['id'], sha(text), offset, end]))[:12]
+            line = unit.get('line')
+            result[eid] = {'kind': 'retained_source_unit', 'path': unit['path'], 'text': text[offset:end],
                            'start_line': line + text[:offset].count('\n') if line else None,
                            'end_line': line + text[:end].count('\n') if line else None}
             offset = end
@@ -80,6 +146,8 @@ def source_hash(source):
     value = {k: source.get(k) for k in ('excerpts', 'excerpt_locations', 'snapshot_receipts')}
     if type(source.get('claim_source_version')) is int and source['claim_source_version'] == 2:
         value.update(claim_source_version=2, static_source_statements=static_statements(source))
+    if source.get('retained_context_version') == 1:
+        value.update(retained_context_version=1, retained_source_units=retained_sources(source))
     return sha(canonical(value))
 
 

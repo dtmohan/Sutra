@@ -26,15 +26,26 @@ def citation_quotes(p):
     # Small, source-derived choices prevent the model from reconstructing code.
     # Cross-file attribution and current snapshot checks still apply independently.
     quotes=[]
-    for text in p['excerpts'].values():
+    for _, text in source_texts(p):
         lines=[line[:160] for line in text.splitlines() if line.strip()][:2]
         for quote in lines or [text[:160]]:
             if quote and quote not in quotes:quotes.append(quote)
     return quotes
 
 def citation_options(p):
-    return [{'path':name,'quote':quote} for name,text in p['excerpts'].items()
+    return [{'path':name,'quote':quote} for name,text in source_texts(p)
             for quote in citation_quotes({'excerpts':{name:text}})]
+
+
+def source_texts(p):
+    items = list(p['excerpts'].items())
+    if p.get('retained_context_version') == 1:
+        from retained_context import source_units
+        for unit in source_units(p['retained_context']):
+            item = (unit['path'], unit['text'])
+            if item not in items:
+                items.append(item)
+    return items
 
 def schema(p):
     options = citation_options(p)
@@ -321,7 +332,34 @@ def conversation_pages(s,p,budget,materialize=False,mandatory_only=False):
     base={k:v for k,v in p.items() if k not in ('memory','repair')}
     extra = (p.get('parent_memory_extra_bytes', budget.context_limit//16)
              if p.get('parent_source_funding_version') == 1 else budget.context_limit//16)
-    return cm.working_set(s,row[0],iid,p['request'],budget,base,SYSTEM,schema,extra_bytes=0 if mandatory_only else extra)
+    from retained_context import conversation_view
+    return conversation_view(s, p, budget, system=SYSTEM, schema_for=schema,
+                             materialize=materialize, extra_bytes=0 if mandatory_only else extra)
+
+
+def trim_retained_context(s, sid, p):
+    """Defer whole optional units behind the same verified directory."""
+    if p.get('retained_context_version') != 1:
+        return False
+    from retained_context import refit
+    view = p['retained_context']
+    if not view['pages']:
+        return False
+    try:
+        refit(s, sid, p, max(256, view['limit_bytes'] * 3 // 4))
+    except ContextBudgetExceeded:
+        from retained_context import minimum_bytes
+        floor = minimum_bytes(view)
+        if floor >= view['limit_bytes']:
+            return False
+        refit(s, sid, p, floor)
+    return p['retained_context'] != view
+
+
+def expand_retained_context(s, sid, p, budget):
+    if p.get('retained_context_version') == 1:
+        from retained_context import refit, MAX_LIMIT
+        refit(s, sid, p, min(MAX_LIMIT, budget.input_limit))
 
 def request_check(s,sid,p):
     from review_reasoning import check
@@ -340,6 +378,9 @@ def request_check(s,sid,p):
         _check_parent_repair(s, sid, p)
     from conversation import check_workspace_handoff
     check_workspace_handoff(s,sid,p)
+    if 'retained_context_version' in p:
+        from retained_context import check as check_retained
+        check_retained(s, sid, p)
     if p.get('memory_budget') and p.get('memory')!=conversation_pages(s,p,Budget(**p['memory_budget'])):raise InvalidUpdate('Parent synthesis memory changed')
     if p['contract']!=s.validation_contract(sid) or p['constraint_echo']!=constraint_rows(p['contract']):raise InvalidUpdate('Chat task or constraints changed')
     if not re.fullmatch('[a-f0-9]{32}',p['_request_nonce']):raise InvalidUpdate('Missing fresh chat identity')
@@ -379,9 +420,13 @@ def request_check(s,sid,p):
 
 def validate(s,sid,p,proposal):
     request_check(s,sid,p)
+    from retained_context import requests as context_requests, validate_requests
+    requested = context_requests(p, proposal)
+    if requested:
+        validate_requests(s, sid, p, requested)
     if proposal['task_id']!=p['contract']['task_id'] or sorted(proposal['constraints'],key=lambda x:x['key'])!=constraint_rows(p['contract']):raise InvalidUpdate('Chat omitted or changed task constraints')
     for cite in proposal['citations']:
-        if cite['quote'] not in citation_quotes(p) or cite['quote'] not in p['excerpts'].get(cite['path'],''):raise InvalidUpdate('Chat citation is not in supplied fresh source')
+        if cite not in citation_options(p):raise InvalidUpdate('Chat citation is not in supplied fresh source')
     if '```mermaid' in proposal['answer'].lower():raise InvalidUpdate('Only host-generated diagrams are supported')
     report.validate(p, proposal)
     return {'admission':{'admitted':True,'errors':[],'semantic_correctness_verified':False},'checks':['schema','contract','calibration_binding','fresh_source','route_commitment','citations','handoff'],'provisional':True}
@@ -422,6 +467,8 @@ def _trim_parent_optional(p):
         p['map_bytes'] = max(512, p['map_bytes'] * 4 // 5)
         return True
     for key in ('parent_discovery_note_limit', 'parent_child_note_limit'):
+        if key == 'parent_discovery_note_limit' and p.get('retained_context_version') == 1:
+            continue
         if p[key]:
             p[key] -= 1
             return True
@@ -442,12 +489,16 @@ def _fit_source_funded_packet(s, sid, p, data, provider):
     allocation = context.context_budget(provider, s, sid, slots=2, physical_first=True)
     allocation.update(reviewer_slots_reserved=1, repair_slots_reserved=0)
     p['memory_budget'] = vars(provider.budget).copy()
+    expand_retained_context(s, sid, p, provider.budget)
     p['excerpt_bytes'] = max(64, min(65536, (provider.budget.input_limit -
                                           provider.budget.response_reserve - provider.budget.template_reserve) // 2))
     p['map_bytes'] = max(512, min(65536, provider.budget.input_limit // 3))
     if focused_architecture(p):
         p['map_bytes'] = min(p['map_bytes'], 1024)
-    p['parent_discovery_note_limit'] = len(p.get('discovery_notes_unverified', []))
+    # The bound directory is the only projected discovery-note view. This
+    # counter describes the retired flat copy, not directory retention.
+    p['parent_discovery_note_limit'] = (0 if p.get('retained_context_version') == 1
+                                        else len(p.get('discovery_notes_unverified', [])))
     p['parent_child_note_limit'] = len(p.get('child_results', []))
     p['parent_memory_extra_bytes'] = min(4096, provider.budget.context_limit // 16)
     while True:
@@ -462,6 +513,8 @@ def _fit_source_funded_packet(s, sid, p, data, provider):
             probe = dict(p, repair={'errors': ['x'*140]*2})
             charge = provider.budget.check(SYSTEM, probe, fmt)
         except ContextBudgetExceeded as exc:
+            if trim_retained_context(s, sid, p):
+                continue
             if _trim_parent_optional(p):
                 continue
             if p['excerpt_bytes'] == 64:
@@ -503,6 +556,7 @@ def fit_packet(s, sid, p, data, provider, real):
         if allocation and structured:
             allocation.update(reviewer_slots_reserved=1, repair_slots_reserved=slots-2)
         p['memory_budget'] = vars(provider.budget).copy()
+        expand_retained_context(s, sid, p, provider.budget)
         p['excerpt_bytes'] = max(64, min(65536, provider.budget.input_limit//3))
         p['map_bytes'] = max(512, min(65536, provider.budget.input_limit//3))
         if focused_architecture(p):
@@ -522,6 +576,8 @@ def fit_packet(s, sid, p, data, provider, real):
                 check_window(provider.budget, SYSTEM, probe, fmt, planning=True)
                 return fmt, (3 if incremental else min(3, slots-int(structured))) if real else 3
             except ContextBudgetExceeded as exc:
+                if trim_retained_context(s, sid, p):
+                    continue
                 if p['excerpt_bytes'] == 64 and p['map_bytes'] == 512:
                     if not real: raise
                     if not expand:
@@ -593,6 +649,13 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
     import orchestration as machine
     owner = machine.ACTIVE.get() or machine.task(s, sid)['id']
     parent_step = bool(request.get('_parent_step') and machine.node(s, owner)['kind'] == 'execution')
+    if parent_step and not request.get('context_recall'):
+        # An accepted request can outlive a bridge crash before its UI/flow
+        # checkpoint is saved. Recover from that receipt, never regenerate it.
+        from retained_context import recover_requests
+        recovered = recover_requests(s, sid, owner, request)
+        if recovered:
+            request = dict(request, context_recall=recovered)
     repair_state = recover_parent_repair(s, sid, workspace, request) if parent_step else None
     if repair_state and repair_state['remaining'] == 0:
         return _finish_answer(s, meta, workspace, root, request, repair_state['result'],
@@ -707,7 +770,7 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
     if parent_step and discoverer and report.requested(p):
         from review_discovery import advance
         p['evidence_discovery_version'] = 4
-        discovery = advance(s, sid, p, data, root, discoverer, real)
+        discovery = advance(s, sid, p, data, root, discoverer, real, writer_provider=provider)
         if not discovery['complete'] or (discovery.get('token_usage') or {}).get('total_calls', 0):
             # A final architect decision still ends this bridge unit. The next
             # step loads its committed completion before drafting the report.
@@ -718,6 +781,10 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
     elif reader and report.requested(p):
         from review_followup import expand
         data['followups'], followup_usage = expand(s, sid, p, data, root, reader, real)
+    if request.get('context_recall'):
+        from retained_context import apply_recall
+        expand_retained_context(s, sid, p, provider.budget)
+        apply_recall(s, sid, p, request['context_recall'])
     import report_review
     resumed = report_review.pending_candidate(s, sid, p)
     if resumed:
@@ -827,6 +894,9 @@ def recover_parent_checkpoint(s, sid, workspace, request):
         if (not prior_owner or machine.node(s, prior_owner).get('flow_id') != flow_id
                 or packet.get('request') != request['prompt']):
             continue
+        from retained_context import requests as context_requests
+        if context_requests(packet, s.load_result(sid, env['id'])):
+            continue  # A context request is a checkpoint, never a publishable draft.
         _parent_candidate(s, sid, workspace, request, env['id'])
         return parent_checkpoint(s, sid, env['id'])
     return None
@@ -944,6 +1014,12 @@ def _finish_answer(s, meta, workspace, root, request, out, p, data, reviewer, *,
     claim_review_pending = None
     if out['admission']['admitted']:
         checkpoint=out['invocation_id']; reviewer_id=None
+        from retained_context import requests as context_requests, validate_requests
+        requested = context_requests(p, out['accepted_output'])
+        if requested:
+            validate_requests(s, sid, p, requested)
+            return {'retained_context_pending': {'invocation_id': checkpoint, 'refs': requested},
+                    'token_usage': out.get('token_usage'), 'route': choice}
         if 'report' in out['accepted_output'] and defer_review:
             claim_review_pending = {'status': 'parent_candidate_saved', 'candidate_id': checkpoint}
         elif 'report' in out['accepted_output']:

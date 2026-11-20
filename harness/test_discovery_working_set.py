@@ -1,4 +1,9 @@
-"""Fresh-page retention uses immutable source receipts and governed packet budgets."""
+"""Pre-governor source paging retains receipts and its original financial policy.
+
+The deliberately tiny selector must expose a whole known page before these
+fixtures exercise eviction, physical sizing and historical allocation recovery.
+Default discovery-to-writer governance has separate integration regressions.
+"""
 import copy
 import json
 import os
@@ -42,6 +47,8 @@ class DiscoveryWorkingSetTests(unittest.TestCase):
     until = fixture.OrchestrationTests.until
 
     def setUp(self):
+        legacy = patch.object(discovery, 'GOVERNOR_VERSION', 0)
+        legacy.start(); self.addCleanup(legacy.stop)
         pages_fixture.GovernedReadTests.setUp(self)
         self.prompt = 'Explain part0.request_flow and the architecture. ' + self.prompt
         for i in range(387):

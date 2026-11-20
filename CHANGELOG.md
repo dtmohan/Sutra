@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.53.1
+
+- Share scoped retained-context directories between discovery, report writers and architecture reports, preserving whole notes and nonadjacent source spans.
+- Recall deferred pages into later governed calls without rereading unchanged files, resetting spending or widening permissions.
+- Supply native workspace calls with verified conversational context, explicit source selections and paginated source indexes.
+- Carry prior user criteria into document extraction while preserving exact-section quotation checks and independent verdict review.
+- Bind retained source citations and independent claim evidence to the actual delivered spans; use host-restored quote choices for architecture reports.
+- Measure delivered model context from the final wire projection and isolate optional diagnostic failures from inference settlement.
+- Audit every model role and call origin; test small-window recall, reloads, model switches and cross-task isolation. Keep the canonical STP kernel unchanged.
+
+## 0.53.0
+
+- Govern discovery at existing invocation boundaries: quiet green, concise yellow feedback and checkpointed partial synthesis after persistent repetitive acquisition.
+- Measure source ranges independently of receipt IDs; keep unlocated search snippets, source recall and semantic understanding distinct.
+- Plan writer and first-reviewer headroom, and anchor a finite discovery allowance so later grants or model switches cannot silently refill it.
+- Tune reviewer headroom from a measured page probe rather than its entire financial call ceiling; retain the original stage-ceiling basis and full initial plan audit.
+- Preserve decisive kernel frames in partial-discovery checkpoints; retain original context, permissions, receipts and consumed spending across recovery.
+- Checkpoint an identical failed child JSON repair before another dispatch; resume the same child after a material request/model/control change, preserving its unused attempt.
+- Retain bounded parser-output shape diagnostics without generated prefixes.
+- Extract a misplaced optional report self-assessment as observe-only metadata, retaining its raw hash/placement while enforcing the unchanged report, citation and publication checks.
+- Add reproducible saved-trace replay and real gateway tests. Keep historical profiles, configured model tiers and the canonical STP kernel unchanged.
+
 ## 0.52.0
 
 - Observe bounded questions, findings, scoped facts and evidence links at existing model-stage boundaries, without adding model calls or required output fields.

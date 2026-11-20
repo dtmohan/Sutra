@@ -1,3 +1,21 @@
+Sutra 0.53.1 — Retained context handoffs
+
+Discovery and report writers share a verified contents directory of saved notes
+and exact source spans. Small windows defer whole units for recall. Native work
+receives conversation context and paginated source addresses; document extraction
+keeps prior user criteria separate from documentary evidence. Reloads, model
+changes and recall preserve permissions and spending. Independent reviewers
+receive source evidence, without inheriting writer notes as verdict evidence.
+
+Green discovery adds no feedback. Yellow provides a bounded acquisition update;
+persistent repetition or the finite discovery allowance reaches partial synthesis.
+Original evidence, context, permissions and consumed spending are preserved.
+Writing and one reviewer page have an uncharged planning estimate, with reviewer
+headroom capped at twice its probe and the declared financial allowance. It does
+not guarantee future pages fit; all actual work still needs fresh admission.
+Initial plan measurements are retained in the audit trail. The STP kernel and
+configured tiers are unchanged.
+
 Sutra 0.52.0 — Bounded coherence observations
 
 Sutra observes explicit questions, findings, assumptions and source references

@@ -20,8 +20,10 @@ def state(s,meta,workspace):
    proposal=s.load_result(session,checkpoint)
    env=json.loads(s.db.execute('SELECT record_json FROM invocations WHERE id=?',(checkpoint,)).fetchone()[0])
    routing=route(s,session,checkpoint,env['model'])
-   if proposal.get('tool',{}).get('kind')=='report':
-    payload=json.loads(s.db.execute('SELECT payload_json FROM deliveries WHERE id=?',(env['delivery_id'],)).fetchone()[0]);report=role.markdown(proposal,payload['evidence'],routing)
+   payload=json.loads(s.db.execute('SELECT payload_json FROM deliveries WHERE id=?',(env['delivery_id'],)).fetchone()[0])
+   from retained_context import requests as context_requests
+   if proposal.get('tool',{}).get('kind')=='report' and not context_requests(payload, proposal):
+    report=role.markdown(proposal,payload['evidence'],routing)
   except (ValueError,InvalidUpdate) as exc:warning='Architecture checkpoint withheld: '+str(exc);checkpoint=None
   except PageFault as exc:warning='Architecture checkpoint withheld: '+str(exc);checkpoint=None
  last=s.db.execute("""SELECT record_json FROM protocol_events WHERE run_id=(
@@ -88,20 +90,37 @@ def recovery_target(s,session,names,available):
  return min(options,key=lambda name:sum(row['operation']['kind']=='read'
             and row['operation']['target']==name for row in prior))
 
-def fit_packet(payload,budget):
+def fit_packet(payload,budget,s=None,session=None):
  # Preserve the contract and minimum source coverage before model-authored notes.
+ if s is not None:
+  from chat_runtime import expand_retained_context
+  expand_retained_context(s, session, payload, budget)
  while True:
-  schema=role.schema(payload)
   try:
+   if payload.get('retained_conversation_version') == 1:
+    from retained_context import conversation_view
+    payload['memory_budget'] = vars(budget).copy()
+    payload['memory'] = conversation_view(s, payload, budget, system=role.SYSTEM, schema_for=role.schema)
+   schema=role.schema(payload)
    budget.check(role.SYSTEM,dict(payload,repair={'errors':['x'*140,'x'*140]}),schema)
    return schema
   except ContextBudgetExceeded:
+   if payload.get('retained_context_version') == 1 and s is not None:
+    from chat_runtime import trim_retained_context
+    if trim_retained_context(s, session, payload):
+     from retained_context import source_units
+     payload['evidence'] = source_units(payload['retained_context'])
+     continue
    handoff=payload.get('handoff')
    if handoff:
     level=payload.get('handoff_level',0)+1
     payload['handoff']=role.reduce_handoff(handoff,level);payload['handoff_level']=level
     payload['handoff_window_limited']=True
     continue
+   # A bound view only changes through the resolver. Do not silently slice its
+   # source bodies into a second, inconsistent memory window.
+   if payload.get('retained_context_version') == 1:
+    raise ContextBudgetExceeded('Contract and retained-memory directory cannot fit this allocation; original context remains saved.')
    items=payload['evidence']
    if not items:raise
    longest=max(items,key=lambda e:len(e['text']))
@@ -183,13 +202,40 @@ def dispatch(s,meta,workspace,root,request,provider=None):
                 'scope':'committed catalog; source bodies require read/search receipts','last_tool':repo.feedback(s,session)},
   'evidence':evidence}
  try:
+  if request.get('conversation_id'):
+   from conversation import workspace_handoff
+   payload['conversation_handoff'] = workspace_handoff(s, session, request['conversation_id'], prompt)
+   payload['retained_conversation_version'] = 1
+  import orchestration as machine
+  import retained_context
+  owner = machine.ACTIVE.get() or machine.task(s, session)['id']
+  prior_refs = request.get('context_refs', [])
+  if not isinstance(prior_refs, list):raise InvalidUpdate('Context references must be a list')
+  retained_context.bind(s, session, payload, owner=owner, limit=retained_context.MAX_LIMIT, required_refs=prior_refs)
+  payload['retained_context_owner'] = owner
+  if phase == 'report':
+   # A report cannot make progress from a directory alone. Preserve the same
+   # minimum distinct-file evidence required by the authoritative validator.
+   chosen = {}
+   for page in payload['retained_context']['pages']:
+    if page['kind'] == 'retained_source_unit':
+     chosen.setdefault(page['evidence']['path'], page['ref'])
+   if len(chosen) < minimum:
+    raise ContextBudgetExceeded('Minimum whole source evidence does not fit the retained-memory window; original receipts remain saved.')
+   retained_context.refit(s, session, payload, payload['retained_context']['limit_bytes'],
+                          required_refs=list(chosen.values())[:minimum])
+  payload['evidence'] = retained_context.source_units(payload['retained_context'])
   if real:
    from api_runtime import provider_for
    from review_context import context_budget
    provider=provider_for(root,model,review=True)
    context_budget(provider,s,session,slots=3)
    bind(provider,payload)
-  schema=fit_packet(payload,provider.budget)
+  if request.get('context_recall'):
+   from chat_runtime import expand_retained_context
+   expand_retained_context(s, session, payload, provider.budget)
+   retained_context.apply_recall(s, session, payload, request['context_recall'])
+  schema=fit_packet(payload,provider.budget,s,session)
  except ResourceWait as exc:
   s.event(run,'RESOURCE_WAIT',{'reason':str(exc),'measurement':exc.state,'architecture_stop':previous_stop})
   raise
@@ -223,6 +269,10 @@ def dispatch(s,meta,workspace,root,request,provider=None):
   s.event(run,'BRIDGE',{'reason':'bounded_output_repair' if length_retry else 'bounded_repair','attempt':attempt+1})
  last.pop('record',None);last.pop('model_proposal',None);last.update(model=model,run_id=run)
  if last['admission']['admitted']:
+  requested = retained_context.requests(payload, last['accepted_output'])
+  if requested:
+   retained_context.validate_requests(s,session,payload,requested)
+   last['retained_context_pending'] = {'invocation_id': last['invocation_id'], 'refs': requested}
   t=last['accepted_output']['tool']
   if t['kind'] in ('read','search','list'):
    tool=repo.execute(s,session,workspace,root,t['kind'],target=t['target'],query=t['query'],line=t['line'],cursor=t.get('cursor'),

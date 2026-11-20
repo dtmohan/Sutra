@@ -1,5 +1,5 @@
 """Read-only child reviews with inherited contracts and receipt-backed Smriti pages."""
-import copy,json,os,uuid
+import copy,json,os,re,uuid
 from context_manager import InvalidUpdate,ContextBudgetExceeded,canonical,sha
 from paging import Budget
 from invocation_gateway import InvocationGateway
@@ -24,6 +24,130 @@ Return only the requested JSON object. Echo task_id, branch_id and every constra
 SLICE_OUTPUT_TOKENS = 2048
 REPAIR_ALLOWANCE = {'errors': ['x' * 140] * 2}
 CHILD_EVIDENCE_VERSION = 3
+CHILD_REPAIR_CONTROL_VERSION = 1
+
+
+def _json_syntax_failure(errors):
+    """Classify only known parser diagnostics, never generated prose or keys."""
+    if not isinstance(errors, list):
+        return None
+    reasons = ("Expecting value", "Extra data", "Expecting property name enclosed in double quotes",
+               "Invalid \\escape", "Invalid control character at", "Unterminated string starting at",
+               "Expecting ',' delimiter", "Expecting ':' delimiter")
+    for error in errors[:2]:
+        if not isinstance(error, str) or not error.startswith('StructuredOutputRejected:'):
+            continue
+        for reason in reasons:
+            found = re.search(re.escape(reason) + r': line ([0-9]{1,12}) column ([0-9]{1,12}) '
+                              r'\(char ([0-9]{1,12})\)', error[:2048])
+            if found:
+                return {'kind': 'invalid_json', 'reason': reason,
+                        'line': int(found[1]), 'column': int(found[2]), 'offset': int(found[3])}
+    return None
+
+
+def _repair_feedback(payload, out, recovery):
+    if recovery is not None:
+        return recovery
+    syntax = (_json_syntax_failure(out['admission']['errors'])
+              if payload.get('child_repair_control_version') == 1 else None)
+    if syntax:
+        return {'errors': [
+            'The prior reply failed JSON parsing at line ' + str(syntax['line']) +
+            ', column ' + str(syntax['column']) + '. No valid proposal was admitted.',
+            'Return exactly one object matching the supplied schema. Start with { and end with }. '
+            'No Markdown, commentary or text outside JSON.']}
+    return {'errors': [e[:140] for e in out['admission']['errors'][:2]]}
+
+
+def _known_repair_identity(provider, previous):
+    """Reuse only already obtained identity observations; no provider queries."""
+    declared = getattr(provider, 'model_identity', None)
+    if isinstance(declared, dict):
+        return declared
+    native = getattr(provider, 'native_profile', None)
+    if isinstance(native, dict):
+        from strata_model import profile_identity
+        return profile_identity(provider.model, native)
+    profile = getattr(provider, 'profile', None)
+    if isinstance(profile, dict) and profile.get('profile_hash'):
+        from engine_profiles import identity
+        return identity(provider.model, profile)
+    server = getattr(provider, 'server_identity', None)
+    if isinstance(server, dict):
+        return server
+    observed = getattr(provider, 'dispatch_identity', None)
+    if isinstance(observed, dict):
+        return observed
+    digest = getattr(provider, 'manifest_digest', None)
+    if digest and previous.get('manifest_digest') == digest:
+        return previous
+    from local_model import LocalModel
+    if not isinstance(provider, LocalModel):
+        from model_identity import unknown
+        return unknown(provider.model)  # Same injected-provider identity as the gateway.
+    return None
+
+
+def _repair_fingerprint(model, identity, packet, fmt, budget, thinking):
+    from model_packet import build
+    projected = build(SYSTEM, packet, fmt)
+    if projected is None:
+        return None
+    # Financial grants alone do not change a generation. Preserve the actual
+    # source-bearing wire and physical/output controls, but not its financial
+    # reservation_limit, which can change after settlement without new input.
+    controls = {key: budget[key] for key in ('context_limit', 'response_reserve', 'template_reserve')}
+    controls['context_window'] = budget.get('context_window')
+    return sha(canonical({'packet': projected, 'model': model, 'identity': identity,
+                          'thinking': thinking, 'generation_limits': controls}))
+
+
+def _repair_governor(s, node, packet, fmt, provider, cursor, remaining):
+    """Prove a third unchanged syntax repair before reserving another attempt."""
+    if (packet.get('child_repair_control_version') != 1 or not packet.get('repair')
+            or remaining != 1 or getattr(provider, 'model_interface', None) != 1):
+        return None
+    rows = s.db.execute("SELECT id FROM invocations WHERE session=? "
+        "AND json_extract(record_json,'$.role')='subagent' "
+        "AND json_extract(record_json,'$.orchestration.node_id')=? ORDER BY rowid DESC LIMIT 2",
+        (node['session'], node['id'])).fetchall()
+    if len(rows) != 2:
+        return None
+    records = [machine._child_receipt(s, node, row[0]) for row in reversed(rows)]
+    failures = []
+    for env, receipt, delivered in records:
+        if (receipt['status'] != 'quarantined' or receipt.get('failure_kind') is not None
+                or delivered.get('child_slice') != cursor
+                or delivered.get('child_repair_control_version') != 1):
+            return None
+        failure = _json_syntax_failure(receipt['admission'].get('errors'))
+        if failure is None:
+            return None
+        failures.append(failure)
+    if failures[0] != failures[1]:
+        return None
+    previous, _, delivered = records[-1]
+    if not delivered.get('repair'):
+        return None
+    identity = _known_repair_identity(provider, previous['model_identity'])
+    if identity is None or identity != previous['model_identity']:
+        return None
+    from model_packet import build
+    projected = build(SYSTEM, delivered, previous['schema'])
+    if (previous.get('model_interface') or {}).get('packet_hash') != sha(canonical(projected)):
+        raise InvalidUpdate('Child repair model-packet binding changed')
+    actual = _repair_fingerprint(previous['model'], identity, delivered, previous['schema'],
+        previous['budget_profile'], (delivered.get('reasoning') or {}).get('requested'))
+    candidate = _repair_fingerprint(provider.model, identity, packet, fmt, vars(provider.budget),
+                                    getattr(provider, 'thinking', None))
+    if candidate is None or candidate != actual:
+        return None
+    observation = {'profile': 'child-repair-governor-v1', 'version': 1,
+        'status': 'unchanged_failed_request', 'fingerprint': candidate,
+        'failure_class': 'invalid_json', 'attempts_used': 2, 'remaining_attempts': remaining}
+    return {'observation': observation, 'kernel': KarmaAdapter().child_repair(observation),
+            'syntax': failures[-1], 'previous_invocations': [record[0]['id'] for record in records]}
 
 
 def schema(p):
@@ -217,6 +341,9 @@ def _fit_packet(s, sid, packet, data, provider, preferred_slots):
 
 
 def request_check(s,sid,p):
+    if 'child_repair_control_version' in p and (type(p['child_repair_control_version']) is not int
+            or p['child_repair_control_version'] != 1):
+        raise InvalidUpdate('Unsupported child repair control profile')
     from review_reasoning import check
     check(p)
     from conversation import check_workspace_handoff
@@ -278,13 +405,15 @@ def _advance_slice(s, nid, out, route, cursor, recovered=False):
     return result
 
 
-def _pause_repair(s, nid, rid, packet, cursor, remaining, output_repaired):
+def _pause_repair(s, nid, rid, packet, cursor, remaining, output_repaired, *, governor=None):
     """Close a denied repair run after its dispatched calls have settled."""
     from execution_sessions import idle
     checkpoint = {'version': 1, 'branch_id': nid, 'run_id': rid,
                   'child_slice': cursor, 'remaining_attempts': remaining,
                   'repair': copy.deepcopy(packet.get('repair')),
                   'output_repaired': output_repaired}
+    if governor is not None:
+        checkpoint['governor'] = copy.deepcopy(governor)
     with s.db:
         s.db.execute('BEGIN IMMEDIATE')
         idle(s, nid)
@@ -294,7 +423,8 @@ def _pause_repair(s, nid, rid, packet, cursor, remaining, output_repaired):
         if remaining != run['config']['max_calls'] - sum(e['kind'] == 'DISPATCH' for e in run['events']):
             raise InvalidUpdate('Child repair checkpoint changed the remaining dispatch slots')
         s._event(rid, 'FIN', {'reason': 'child_budget_pause', 'repair_checkpoint': checkpoint})
-        machine.transition(s, nid, 'READY', 'CHILD_REPAIR_PAUSED', checkpoint)
+        machine.transition(s, nid, 'READY', 'CHILD_REPAIR_PAUSED', checkpoint,
+                           (governor or {}).get('kernel'))
     return checkpoint
 
 
@@ -377,6 +507,8 @@ def run(s,meta,workspace,root,nid,models,tier='auto',provider=None):
         p = {'contract': s.pinned(sid), 'branch': machine.packet(n), 'workspace': str(workspace),
              'request': request['prompt'], 'pages': [], 'child_evidence_version': CHILD_EVIDENCE_VERSION,
              'citation_policy_version': 2}
+        if CHILD_REPAIR_CONTROL_VERSION == 1:
+            p['child_repair_control_version'] = 1
         if cursor:
             p.update(child_slice=cursor, child_checkpoint=checkpoint_context(s, nid, cursor, evidence_version=CHILD_EVIDENCE_VERSION))
         recovered_notes = recovery_checkpoints(s, n, evidence_version=CHILD_EVIDENCE_VERSION)
@@ -405,6 +537,17 @@ def run(s,meta,workspace,root,nid,models,tier='auto',provider=None):
         rid=s.begin_run(sid,p['request'],[],None,max_calls=attempts,max_repairs=attempts-1)
         output_repaired = saved_repair['output_repaired'] if saved_repair else False
         for attempt in range(attempts):
+            governor = _repair_governor(s, n, p, fmt, provider, cursor, attempts - attempt)
+            if governor is not None:
+                checkpoint = _pause_repair(s, nid, rid, p, cursor, attempts - attempt,
+                                           output_repaired, governor=governor)
+                return {'route': route, 'branch_id': nid,
+                    'child_repair_pending': {'status': 'child_repair_unchanged_request',
+                        'resume_phase': 'CHILDREN', 'branch_id': nid, 'repair_checkpoint': checkpoint,
+                        'governor': governor, 'automatic_retry': False,
+                        'error': ('The repaired request and JSON syntax failure are unchanged. '
+                                  'Sutra saved the unused attempt. Change the model or generation control '
+                                  'before resuming; prior spending remains charged.')}}
             s.reserve(rid,'ATTEMPT',{'attempt':attempt})
             if real:
                 from monitoring import require_resources
@@ -436,7 +579,7 @@ def run(s,meta,workspace,root,nid,models,tier='auto',provider=None):
                 break
             request_check(s,sid,p)
             s.event(rid,'BRIDGE',{'reason':'bounded_output_repair' if recovery else 'bounded_child_repair'})
-            p['repair'] = recovery or {'errors':[e[:140] for e in out['admission']['errors'][:2]]}
+            p['repair'] = _repair_feedback(p, out, recovery)
             output_repaired = output_repaired or recovery is not None
         return {'result':out,'route':route,'branch_id':nid}
 

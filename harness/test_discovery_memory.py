@@ -116,6 +116,11 @@ class MemoryGatewayTests(unittest.TestCase):
 
     def setUp(self):
         fixture.SelectionWireTests.setUp(self)
+        # These fixtures deliberately collect a fifteen-call pre-governor
+        # history to test eviction/recall. New convergence behavior has its
+        # own gateway cases in test_discovery_control.
+        legacy_control = patch.object(discovery, 'GOVERNOR_VERSION', 0)
+        legacy_control.start(); self.addCleanup(legacy_control.stop)
         trusted = patch.dict(os.environ, KARMA_NODE=shutil.which('node'),
             KARMA_TYPESCRIPT=str(Path(__file__).resolve().parent.parent/'vendor/typescript/typescript.js'))
         trusted.start(); self.addCleanup(trusted.stop)
