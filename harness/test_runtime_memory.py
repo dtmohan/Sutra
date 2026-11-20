@@ -209,11 +209,103 @@ class RuntimeMemoryTests(unittest.TestCase):
         finally:child.kill();child.wait();child.stdout.close()
         with rm.lease():pass
 
-    def test_orphaned_inference_requires_observed_release(self):
+    def test_shared_orphan_residency_does_not_block_explicit_dispatch(self):
         self.owned(active={'model':'large','call_id':'old'})
-        with patch('monitoring.require_resources',return_value=self.healthy),patch.object(rm,'running',return_value=[self.row]):
-            with self.assertRaisesRegex(ResourceWait,'interrupted'):
-                with rm.dispatch(self.provider(),self.root,'new','system',{},{}):self.fail('orphaned call still resident')
+        payload = {'constraints': {'network_allowed': False}, 'request': 'hello'}
+        original = copy.deepcopy(payload)
+        p = self.provider(); budget = p.budget
+        with patch.object(rm,'fresh_resources',return_value=self.healthy) as fresh, \
+                patch.object(rm,'running',return_value=[self.row]), patch.object(rm,'api') as api:
+            with rm.dispatch(p,self.root,'new','system',payload,{}) as plan:
+                self.assertEqual(plan['decision'],'ALLOW')
+                self.assertEqual(rm.read_state()['active']['call_id'],'new')
+                p.runtime_completed = True
+        fresh.assert_called_once_with(self.root)
+        api.assert_not_called()
+        saved = rm.read_state()
+        self.assertIsNone(saved['active']); self.assertIsNone(saved['owned'])
+        self.assertEqual(saved['interrupted']['latest_call_id'],'old')
+        self.assertFalse(saved['interrupted']['backend_completion_verified'])
+        self.assertIn('interrupted_dispatch_detached',[row['event'] for row in saved['events']])
+        self.assertEqual(payload,original); self.assertEqual(p.budget,budget)
+
+    def test_shared_orphan_does_not_bypass_hardware_or_model_admission(self):
+        self.owned(active={'model':'large','call_id':'old','uncertain':True})
+        before = rm.read_state()
+        with patch.object(rm,'fresh_resources',side_effect=ResourceWait(self.blocked)):
+            with self.assertRaises(ResourceWait):
+                with rm.dispatch(self.provider(),self.root,'new','system',{},{}):
+                    self.fail('hardware pressure must still block')
+        self.assertEqual(rm.read_state(),before)
+        low_memory = dict(self.healthy,sample={'free_bytes':rm.GIB,'inactive_bytes':0})
+        with patch.object(rm,'fresh_resources',return_value=low_memory), \
+                patch.object(rm,'running',return_value=[self.row]):
+            with self.assertRaises(ResourceWait) as stopped:
+                with rm.dispatch(self.provider(),self.root,'new','system',{},{}):
+                    self.fail('memory allocation must still block')
+        self.assertEqual(stopped.exception.category,'model_admission')
+        saved = rm.read_state()
+        self.assertEqual(saved['active'],before['active'])
+        self.assertEqual(saved['interrupted']['latest_call_id'],'old')
+        self.assertNotIn('dispatch',[row['event'] for row in saved['events']])
+
+    def test_shared_orphan_still_requires_fresh_manifest_identity(self):
+        self.owned(active={'model':'large','call_id':'old','uncertain':True})
+        p = self.provider(); p.manifest_digest = 'weights1'
+        with patch.object(rm,'fresh_resources',return_value=self.healthy), \
+                patch.object(rm,'running',return_value=[self.row]), \
+                patch.object(rm,'api',return_value={'models':[dict(self.row,digest='replaced')]}):
+            with self.assertRaises(ResourceWait) as stopped:
+                with rm.dispatch(p,self.root,'new','system',{},{}):
+                    self.fail('changed manifest must still block')
+        self.assertEqual(stopped.exception.category,'runtime_uncertain')
+        self.assertEqual(rm.read_state()['active']['call_id'],'old')
+
+    def test_exclusive_orphan_still_requires_confirmed_ownership(self):
+        self.owned(active={'model':'large','call_id':'old','uncertain':True})
+        with patch.dict(os.environ, SUTRA_MEMORY_OWNERSHIP='exclusive'), \
+                patch.object(rm,'fresh_resources',return_value=self.healthy), \
+                patch.object(rm,'running',return_value=[self.row]):
+            with self.assertRaises(ResourceWait) as stopped:
+                with rm.dispatch(self.provider(),self.root,'new','system',{},{}):
+                    self.fail('exclusive ownership is not established')
+        self.assertEqual(stopped.exception.category,'runtime_uncertain')
+
+    def test_interrupted_empty_inventory_and_new_success_never_grant_unload(self):
+        p = self.provider()
+        with patch.object(rm,'fresh_resources',return_value=self.healthy), \
+                patch.object(rm,'running',return_value=[]):
+            with self.assertRaises(TimeoutError):
+                with rm.dispatch(p,self.root,'old','system',{},{}):
+                    raise TimeoutError('no completion receipt')
+        saved = rm.read_state()
+        self.assertTrue(saved['active']['uncertain'])
+        self.assertFalse(saved['interrupted']['backend_completion_verified'])
+        # Empty inventory does not prove a request is not queued. A new explicit
+        # dispatch can finish, but cannot authorize unloading that older work.
+        with patch.dict(os.environ, SUTRA_MEMORY_OWNERSHIP='exclusive'), \
+                patch.object(rm,'fresh_resources',return_value=self.healthy), \
+                patch.object(rm,'running',side_effect=[[],[self.row]]):
+            with rm.dispatch(p,self.root,'new','system',{},{}):
+                p.runtime_completed = True
+        self.assertIsNone(rm.read_state()['owned'])
+        with patch.dict(os.environ, SUTRA_MEMORY_OWNERSHIP='exclusive'), \
+                patch.object(rm,'running',return_value=[self.row]), patch.object(rm,'api') as api, \
+                patch('monitoring.resource_state',return_value=self.healthy), \
+                patch.object(rm,'stable_resources',return_value=self.healthy):
+            result = rm.recover(self.root)
+        api.assert_not_called()
+        self.assertEqual(result['action'],'no_confirmed_idle_owned_model')
+        self.assertEqual(rm.read_state()['interrupted']['latest_call_id'],'old')
+
+    def test_recovery_independently_refuses_owned_model_with_sticky_uncertainty(self):
+        self.owned(interrupted={'latest_call_id':'old','backend_completion_verified':False})
+        with patch.dict(os.environ, SUTRA_MEMORY_OWNERSHIP='exclusive'), \
+                patch.object(rm,'running',return_value=[self.row]), patch.object(rm,'api') as api, \
+                patch('monitoring.resource_state',return_value=self.healthy), \
+                patch.object(rm,'stable_resources',return_value=self.healthy):
+            rm.recover(self.root)
+        api.assert_not_called()
 
     def test_transport_and_inventory_failures_are_recoverable(self):
         with patch.object(rm.http.client.HTTPConnection,'request',side_effect=OSError('offline')):

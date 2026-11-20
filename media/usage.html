@@ -13,6 +13,12 @@
 <header><div><h1>Sutra Monitor</h1><p id="scope" class="muted">This workspace · loading recorded calls…</p></div><div class="actions"><span id="activity" role="status" aria-live="polite" class="pill">Waiting for data</span><button id="telemetry">Open Sutra workspace</button><button id="refresh" aria-label="Refresh monitor">Refresh</button></div></header>
 <div id="error" class="notice" role="status" hidden></div>
 <div id="diagnostic-errors" class="notice" role="status" hidden></div>
+<section class="kernel-section" aria-label="Persistent runner">
+<div class="heading"><h2>Runner</h2><span id="runner-state" class="pill" role="status" aria-live="polite">Not connected</span></div>
+<p id="runner-detail" class="plot-note">Accepted work survives a chat disconnect. Send continue in the original chat to reconnect.</p>
+<div id="runner-jobs" class="gates"></div>
+<button id="stop-runner" type="button" hidden>Stop runner request</button>
+</section>
 <section aria-label="System telemetry" class="system-section">
 <div class="heading"><h2>System telemetry</h2><span id="resource" class="pill">System pressure unavailable</span></div>
 <p id="thermal" class="muted">Waiting for system readings</p>

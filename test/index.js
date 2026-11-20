@@ -2,12 +2,17 @@
 const vscode=require('vscode'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),assert=require('node:assert/strict');
 const {execFile}=require('node:child_process');const {promisify}=require('node:util');const exec=promisify(execFile);
 exports.run=async()=>{
- const report={checks:[]},out=process.env.KARMA_SMOKE_OUTPUT;
+ const report={checks:[]},out=process.env.KARMA_SMOKE_OUTPUT;let cleanupRunner;
  try{
   const extension=vscode.extensions.getExtension('deepak-local.karma-local-harness');
   const workspace=vscode.workspace.workspaceFolders[0].uri.fsPath;
   const globalStorage=path.join(process.env.KARMA_SMOKE_PROFILE,'User','globalStorage','deepak-local.karma-local-harness');
   const storage=path.join(globalStorage,crypto.createHash('sha256').update(workspace).digest('hex').slice(0,24));
+  cleanupRunner=async()=>{
+    const file=path.join(storage,'coordinator','endpoint.json');if(!fs.existsSync(file))return;
+    const client=require(path.join(extension.extensionPath,'coordinator_client'));
+    await client.rpc(client.privateJSON(file),'shutdown');
+  };
   const {createStore}=require(path.join(extension.extensionPath,'workspace_authorization'));
   const authorization=createStore(vscode,{globalStorageUri:vscode.Uri.file(globalStorage)});
   authorization.write({id:crypto.randomUUID(),scope:authorization.scope(),profile:'read_only'});
@@ -41,6 +46,9 @@ exports.run=async()=>{
   for(const id of ['engine-manager','engine-profile','engine-setup','engine-load','engine-unload'])assert(html.includes('id="'+id+'"'));
   for(const name of ['engine_management.js','harness/engine_service.py','harness/engine_process.py','requirements-engine.txt'])assert(fs.existsSync(path.join(extension.extensionPath,name)),name);
   report.checks.push('Sutra-owned engine manager and direct worker ship with the runtime package');
+  for(const name of ['coordinator_service.js','coordinator_client.js'])assert(fs.existsSync(path.join(extension.extensionPath,name)),name);
+  for(const name of ['karma.stopRunner','karma.dismissRunnerResult'])assert((await vscode.commands.getCommands(true)).includes(name));
+  report.checks.push('persistent coordinator, reconnect client and explicit runner controls ship in the package');
   assert(!html.includes('id="extra"'));report.checks.push('tabbed overview, labelled settings and troubleshooting ship without a JSON constraint editor');
   report.checks.push('recovery commands and discover-defaults controls ship in the packaged extension');
   report.checks.push('native chat API registers @sutra; model setup command available','simple prompt precedes collapsed advanced controls');
@@ -96,6 +104,13 @@ exports.run=async()=>{
   assert(data.auto.budget.used.operations>before.auto.budget.used.operations);assert.equal(data.auto.budget.used.calls,0);
   await vscode.commands.executeCommand('karma.openAutomaticReport');report.checks.push('governed agent tool maps fresh source through packaged bridge and bundled TypeScript','task contract and allocation preserved','report opens in VS Code without a model call');
   const after=await api.getState();assert.equal(after.auto.pending_files,0);assert.deepEqual(after.calibration.binding,before.calibration.binding);
+  const coordinator=require(path.join(extension.extensionPath,'coordinator_client'));
+  const endpoint=coordinator.privateJSON(path.join(storage,'coordinator','endpoint.json'));
+  assert.notEqual(endpoint.pid,process.pid,'Execution belongs to an independent coordinator process');
+  assert.equal(endpoint.runtime_hash,coordinator.runtimeHash(extension.extensionPath));
+  const runner=await coordinator.rpc(endpoint,'status',{all:true});
+  assert.equal(runner.queued,0);assert.equal(runner.active,null);
+  report.checks.push('real packaged source operations execute through an independent authenticated coordinator with no outstanding work');
   report.checks.push('both domain adapters evaluate selected synthetic profiles through packaged bridge','calibration commands declared and receipts verify','calibration selection preserved during governed source mapping');
   await vscode.commands.executeCommand('karma.disarmNative');
   assert.equal(api.getRoutingStatus().accessProfile,null);
@@ -106,5 +121,5 @@ exports.run=async()=>{
   report.checks.push('revocation blocks contributed source tools and retains the task contract and cumulative spending');
   report.calibration=after.calibration;report.state=after.auto;report.passed=true;token.dispose();
  }catch(error){report.passed=false;report.error=String(error.stack||error);throw error;}
- finally{fs.writeFileSync(out,JSON.stringify(report,null,2)+'\n');}
+ finally{try{await cleanupRunner?.();}catch(error){report.cleanup_error=String(error.message||error);}fs.writeFileSync(out,JSON.stringify(report,null,2)+'\n');}
 };

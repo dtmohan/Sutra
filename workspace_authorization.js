@@ -49,6 +49,23 @@ function createStore(vscode, context, dependencies = {}) {
       fs.rmSync(temp, {force: true});
     }
   }
+  function evidence(expected) {
+    const file=location();
+    const descriptor=fs.openSync(file,fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW||0)|(fs.constants.O_NONBLOCK||0));
+    try {
+      const info=fs.fstatSync(descriptor);
+      if(!info.isFile()||info.nlink!==1||info.size>8192||
+          (process.getuid&&info.uid!==process.getuid())||
+          (process.platform!=='win32'&&(info.mode&0o077)))throw new Error('Workspace authorization record is not private.');
+      const bytes=Buffer.alloc(8193),count=fs.readSync(descriptor,bytes,0,bytes.length,0);
+      if(count>8192)throw new Error('Workspace authorization record exceeds its bound.');
+      const grant=JSON.parse(bytes.subarray(0,count).toString('utf8'));
+      if(!expected||grant.id!==expected.generation||grant.scope!==expected.scope||grant.profile!==expected.profile)
+        throw new Error('Workspace permission changed before submission.');
+      const canonicalFile=path.join(fs.realpathSync.native(path.dirname(file)),path.basename(file));
+      return {path:canonicalFile,digest:crypto.createHash('sha256').update(bytes.subarray(0,count)).digest('hex')};
+    } finally {fs.closeSync(descriptor);}
+  }
   function onDidChange(listener) {
     fs.mkdirSync(directory, {recursive: true, mode: 0o700});
     let watcher;
@@ -72,7 +89,7 @@ function createStore(vscode, context, dependencies = {}) {
       cancelSchedule(poll);
     }};
   }
-  return {scope, read, write, onDidChange};
+  return {scope, read, write, evidence, onDidChange};
 }
 
 module.exports = {createStore, profiles};

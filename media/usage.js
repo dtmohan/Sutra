@@ -97,8 +97,33 @@ function renderRamMemory(memory){
   ? `JSON decoding ${((last.decode_ns||0)/1000000).toFixed(2)} ms · copy ${((last.copy_ns||0)/1000000).toFixed(2)} ms · lookup ${((last.lookup_ns||0)/1000000).toFixed(2)} ms`
   : '');
 }
+let runnerStopId,runnerJobsSignature;
+function renderRunner(runner,fresh){
+ const jobs=Array.isArray(runner?.jobs)?runner.jobs.slice(0,8):[];
+ const active=jobs.find(job=>['running','cancelling'].includes(job.state))||jobs.find(job=>job.state==='queued');
+ setText('runner-state',runner?.error?'Connection unavailable':!fresh&&runner?'Status stale':active?active.state==='cancelling'?'Cancellation requested':'Working':runner?.instance_id?'Ready':'Not started');
+ setText('runner-detail',runner?.error||(!fresh&&runner?'Refresh runner status. The displayed states are the last observation, not current execution status.':'Accepted work survives a chat disconnect. Send continue in the original chat to reconnect. Stopping display does not cancel execution.'));
+ const displayJobs=jobs.filter(job=>!job.acknowledged);
+ const signature=JSON.stringify([fresh,displayJobs.map(job=>[job.id,job.operation,job.state])]);
+ if(signature!==runnerJobsSignature){
+ const list=el('runner-jobs');list.replaceChildren();
+ for(const job of displayJobs){
+  const label=node('span',String(job.operation||'Request')+' · '+String(job.state||'unknown'));
+  if(fresh&&['completed','cancelled','interrupted','failed'].includes(job.state)){
+   const dismiss=node('button','Dismiss');dismiss.type='button';dismiss.title='Keeps saved task history and consumed spending';
+   dismiss.setAttribute('aria-label','Dismiss '+String(job.operation||'request')+' runner notification');
+   dismiss.onclick=()=>vscode.postMessage({type:'dismiss_runner',id:job.id});label.append(dismiss);
+  }
+  label.className='gate';list.append(label);
+ }
+ runnerJobsSignature=signature;
+ }
+ runnerStopId=fresh&&active&&active.state!=='cancelling'?active.id:undefined;
+ el('stop-runner').hidden=!active;el('stop-runner').disabled=!runnerStopId;
+}
 function renderMonitor(){
  const d=snapshot?.monitor||{},h=d.hardware||{},s=h.sample||{},now=Date.now(),elapsed=(now-Date.parse(snapshot?.updatedAt))/1000;
+ renderRunner(d.runner,!error&&finite(elapsed)&&elapsed>=0&&elapsed<=8);
  renderTaskObservations(d.task_observations);
  renderCoherenceObservations(d.coherence_observations);
  renderLogicalMemory(d.logical_memory);
@@ -238,6 +263,7 @@ function renderRuntimeMemory(m,s,hwFresh,snapshotFresh){
 for(const key of ['model','stage','status','time']){el(key).value=filters[key]||'';el(key).onchange=()=>{filters[key]=el(key).value;vscode.setState({filters});render();};}
 el('reset').onclick=()=>{filters={};for(const key of ['model','stage','status','time'])el(key).value='';vscode.setState({filters});render();};
 el('refresh').onclick=()=>vscode.postMessage({type:'refresh'});
+el('stop-runner').onclick=()=>{if(runnerStopId)vscode.postMessage({type:'stop_runner',id:runnerStopId});};
 el('telemetry').onclick=()=>vscode.postMessage({type:'telemetry'});
 el('reasoning-settings').onclick=()=>vscode.postMessage({type:'reasoning_settings'});
 function renderReasoningPreference(preference,fixed){

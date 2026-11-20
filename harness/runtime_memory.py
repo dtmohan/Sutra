@@ -94,6 +94,33 @@ def note(data, event, **fields):
     write_state(data)
 
 
+def retain_interruption(data, active):
+    """Detach host ownership without asserting that the backend request stopped.
+
+    This bounded, sticky summary is diagnostic, not an accounting ledger. A free
+    OS lease proves only that no Sutra dispatcher holds the slot. Model inventory
+    cannot identify requests, so neither absence nor a later successful call
+    clears uncertainty or grants permission to unload a model.
+    """
+    previous = data.get('interrupted') or {}
+    if (previous.get('latest_call_id') == active.get('call_id')
+            and previous.get('latest_model') == active.get('model')):
+        return
+    now = time.time()
+    data['interrupted'] = {
+        'first_call_id': previous.get('first_call_id', active.get('call_id')),
+        'first_observed_at': previous.get('first_observed_at', now),
+        'latest_call_id': active.get('call_id'),
+        'latest_model': active.get('model'),
+        'last_observed_at': now,
+        'backend_completion_verified': False,
+    }
+    data['owned'] = None
+    note(data, 'interrupted_dispatch_detached', call_id=active.get('call_id'),
+         model=active.get('model'), backend_completion_verified=False,
+         automatic_inference=False)
+
+
 def denied(reason, **extra):
     from monitoring import ResourceWait
     state = extra.get('plan') or KarmaAdapter().frame(PROFILE, 2 * KarmaAdapter().boundary.k, 0.)
@@ -353,8 +380,13 @@ def dispatch(provider, root, call_id, system, payload, schema):
         hardware = fresh_resources(root)
         models = running()
         interrupted=data.get('active')
-        if interrupted and any(m['name']==interrupted.get('model') for m in models):
-            denied('An interrupted Sutra call may still be running in Ollama. Wait for its model to unload before resuming.', kind='interrupted')
+        if interrupted:
+            retain_interruption(data, interrupted)
+            if ownership() == 'exclusive' and any(m['name']==interrupted.get('model') for m in models):
+                denied('The interrupted request has no confirmed completion; exclusive runtime ownership is still uncertain.', kind='interrupted')
+        # In shared mode residency is not request liveness: other clients can
+        # keep the same model loaded. An explicit request may proceed through
+        # fresh admission under our OS lease; Ollama schedules its own queue.
         weights = getattr(provider, 'memory_weights', None)
         if not positive(weights):
             tags = api('/api/tags').get('models', [])
@@ -383,8 +415,8 @@ def dispatch(provider, root, call_id, system, payload, schema):
             note(data, 'allocation_paused', model=provider.model, decision=plan['decision'])
             denied('Runtime memory allocation requires recovery before loading this model.', plan=plan,
                    kind='model_capacity',stage='dispatch',inference_started=False)
-        # An active marker surviving process death never grants permission to
-        # unload: the server might still be finishing the interrupted request.
+        # Detached interruptions never grant permission to unload, including
+        # after a later successful dispatch or a shared-to-exclusive switch.
         data.update(active={'call_id':call_id,'model':provider.model,'pid':os.getpid()}, owned=None)
         note(data, 'dispatch', call_id=call_id, model=provider.model, context_tokens=provider.runtime_context_tokens,
              calibration_sha256=calibration['sha256'] if calibration else None)
@@ -399,15 +431,19 @@ def dispatch(provider, root, call_id, system, payload, schema):
                 resident = next((m for m in rows if m['name'] == provider.model), None)
                 complete = getattr(provider, 'runtime_completed', False)
                 data['owned'] = ({'name':resident['name'],'digest':resident['digest'],'completed_at':time.time()}
-                                 if resident and complete and ownership() == 'exclusive' else None)
+                                 if resident and complete and ownership() == 'exclusive'
+                                 and not data.get('interrupted') else None)
                 release = 'still_resident' if resident else 'unloaded'
-                if resident and not complete:
+                if not complete:
                     release = 'interrupted_ownership_unknown'
                     data['active']={'call_id':call_id,'model':provider.model,'uncertain':True}
+                    retain_interruption(data, data['active'])
             except Exception:
                 data['owned'] = None; release = 'verification_unavailable'
                 if not getattr(provider,'runtime_completed',False):
                     data['active']={'call_id':call_id,'model':provider.model,'uncertain':True}
+                    try: retain_interruption(data, data['active'])
+                    except OSError: pass
             # Failure to collect diagnostics must not turn a settled model result
             # into a new request error. The OS lease still releases in all cases.
             try: note(data, 'release_observed', call_id=call_id, status=release)
@@ -451,7 +487,7 @@ def recover(root, audit=None):
         candidate = next((m for m in rows if owned and m['name']==owned.get('name') and m['digest']==owned.get('digest')), None)
         action = 'observe_only_shared_server' if ownership() == 'shared' else 'no_confirmed_idle_owned_model'
         kernel=None
-        if ownership() == 'exclusive' and not data.get('active') and candidate:
+        if ownership() == 'exclusive' and not data.get('active') and not data.get('interrupted') and candidate:
             # The explicit exclusive-server grant is required in addition to
             # completed-call ownership and a fresh matching manifest identity.
             kernel = KarmaAdapter().counted_slots(0, 1)
@@ -473,7 +509,7 @@ def recover(root, audit=None):
 def snapshot():
     if not enabled(): return {'enabled':False}
     data = read_state()
-    result = {k:data.get(k) for k in ('profile','updated_at','active','plan','events')}
+    result = {k:data.get(k) for k in ('profile','updated_at','active','interrupted','plan','events')}
     result.update(enabled=True, ownership=ownership())
     if os.environ.get('SUTRA_ENGINE_ONLY') == '1':
         import engine_client

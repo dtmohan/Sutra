@@ -38,7 +38,7 @@ function activate(context) {
   const usageView=require('./usage_view');
   const capabilityUI=require('./capabilities');
   const strataStartup=require('./strata_startup');
-  const {BridgeWorker,preventIdleSleep}=require('./bridge_worker');
+  const {CoordinatorClient}=require('./coordinator_client');
   const output = vscode.window.createOutputChannel('Sutra');
   function providerStartupAdmission(coldMemoryBytes){
     const config=vscode.workspace.getConfiguration('karma');
@@ -99,7 +99,7 @@ function activate(context) {
     }
   }
   const processes = new Set();
-  let dashboardWorker, requestWorker, requestWorkerKey, ramCompartments;
+  let dashboardWorker, requestWorker, requestWorkerKey, ramCompartments, workspaceAuthorization;
   function runtimeEnvironment(cwd) {
     const config = vscode.workspace.getConfiguration('karma');
     const strataPort = config.inspect?.('strata.port')?.globalValue;
@@ -143,6 +143,53 @@ function activate(context) {
   };
   const storage = () => path.join(context.globalStorageUri.fsPath,
     crypto.createHash('sha256').update(workspace()).digest('hex').slice(0,24));
+  function coordinator() {
+    const cwd=workspace(),directory=storage();
+    fs.mkdirSync(directory,{recursive:true});
+    const config=vscode.workspace.getConfiguration('karma');
+    const python=config.get('pythonPath','')||(process.platform==='win32'?'python':'python3');
+    const key=JSON.stringify([cwd,directory,python]);
+    if(!requestWorker||requestWorker.detached||requestWorkerKey!==key){
+      requestWorker?.dispose();requestWorkerKey=key;ramCompartments=undefined;
+      requestWorker=new CoordinatorClient({workspace:cwd,storage:directory,python,
+        extensionPath:context.extensionPath,report:message=>output.appendLine(message)});
+    }
+    return requestWorker;
+  }
+  function bridgeResult(result) {
+    if(result.host_memory)ramCompartments=result.host_memory;
+    if(!result.ok)throw Object.assign(new Error(result.error||'Bridge request failed'),{code:'COORDINATOR_FAILED'});
+    updateReports(result.data);
+    if(result.data?.result?.token_usage)usage?.recordResponse(result.data.result.token_usage);
+    return result.data;
+  }
+  async function stopRunner(id) {
+    const startedWorkspace=workspace(),worker=coordinator(),current=await worker.snapshot();
+    const jobs=(current.jobs||[]).filter(job=>['queued','running','cancelling'].includes(job.state));
+    let selected;
+    if(id!==undefined){
+      if(typeof id!=='string'||!/^[a-f0-9]{32}$/.test(id))throw new Error('Invalid runner request.');
+      selected=jobs.find(job=>job.id===id);
+    }else if(jobs.length===1)selected=jobs[0];
+    else if(jobs.length)selected=(await vscode.window.showQuickPick(jobs.map(job=>({
+      label:job.operation+' · '+job.state,description:new Date(job.created_at).toLocaleTimeString(),job
+    })),{placeHolder:'Choose the runner request to stop'}))?.job;
+    if(!selected){void vscode.window.showInformationMessage('No selected runner request is still executing.');return;}
+    if(workspace()!==startedWorkspace)throw new Error('The workspace changed. Refresh runner status before stopping a request.');
+    const stopped=await worker.cancel({id:selected.id,chatKey:selected.chat_key});
+    void refreshDashboard();
+    void vscode.window.showInformationMessage(stopped.state==='cancelled'
+      ? 'Runner request cancelled. Context, permissions and consumed spending are retained.'
+      : 'Cancellation requested. Sutra Monitor will show the worker acknowledgement; shared-provider completion remains unverified.');
+  }
+  async function dismissRunnerResult(id) {
+    if(typeof id!=='string'||!/^[a-f0-9]{32}$/.test(id))throw new Error('Invalid runner request.');
+    const worker=coordinator(),current=await worker.snapshot();
+    const job=(current.jobs||[]).find(value=>value.id===id);
+    if(!job||!['completed','cancelled','interrupted','failed'].includes(job.state))throw new Error('Only a finished runner notification can be dismissed.');
+    await worker.ack({id:job.id,chatKey:job.chat_key});
+    void refreshDashboard();
+  }
   function startTelemetry() {
     const directory=storage();
     if(telemetry && telemetryDir===directory)return;
@@ -206,13 +253,14 @@ function activate(context) {
     dashboardInFlight=true;
     try{
       const data=await request({op:'dashboard'});
+      try{data.runner=await coordinator().snapshot();}catch(error){data.runner={running:false,error:error.message};}
       if(ramCompartments)data.ram_compartments=ramCompartments;
       panel?.webview.postMessage({type:'dashboard',data});
       usage?.setData(data,path.basename(workspace()));
     }catch(e){output.appendLine('Dashboard: '+e.message);panel?.webview.postMessage({type:'dashboard-error',message:e.message});usage?.setError(e.message);}
     finally{dashboardInFlight=false;}
   }
-  async function request(message, token, internal=false, onActivity) {
+  async function request(message, token, internal=false, onActivity, transport) {
     if(token?.isCancellationRequested)throw new Error("Sutra request cancelled before dispatch.");
     const {think_for_turn:thinkForTurn,conversation_step:conversationStep,...payload}=message||{};
     if(thinkForTurn!==undefined&&(thinkForTurn!==true||!internal||message.op!=='orchestrate'||!['start','step'].includes(message.event)))throw new Error('Invalid Sutra reasoning override.');
@@ -232,21 +280,10 @@ function activate(context) {
     try {
       if(message.op==='conversation')await waitForTelemetry(stateDir,token);
       const config=vscode.workspace.getConfiguration('karma');
-      const python=config.get('pythonPath','')||(process.platform==='win32'?'python':'python3');
       const fixedTier=internal&&TIERED_REQUESTS.includes(payload.op)?payload.tier:undefined;
       const baseThinking=reasoningPreference(config,fixedTier);
       const thinking=thinkForTurn?'on':baseThinking;
-      const key=JSON.stringify([cwd,stateDir,python]);
-      if(!requestWorker||requestWorker.closed||requestWorkerKey!==key){
-        requestWorker?.dispose();requestWorkerKey=key;ramCompartments=undefined;
-        requestWorker=new BridgeWorker({spawn,command:python,
-          args:['-B',path.join(context.extensionPath,'harness','vscode_bridge.py'),
-            '--workspace',cwd,'--storage',stateDir,'--request-stream'],
-          options:{cwd,stdio:['pipe','pipe','pipe'],env:{...process.env}},
-          activity:require('./model_activity').decoder,
-          keepAwake:()=>preventIdleSleep({spawn,report:message=>output.appendLine(message)}),
-          onSpawn:child=>processes.add(child),onClose:child=>{processes.delete(child);if(requestWorker?.child===child)ramCompartments=undefined;}});
-      }
+      const worker=coordinator();
       const ramSetting=config.inspect?.('ramMemoryMiB')?.globalValue;
       const ramMiB=ramSetting===undefined?64:ramSetting;
       if(!Number.isInteger(ramMiB)||ramMiB<0||ramMiB>1024)throw new Error('Sutra RAM allocation must be 0..1024 MiB in User Settings.');
@@ -256,13 +293,12 @@ function activate(context) {
         SUTRA_ACTIVITY:'1',SUTRA_THINKING:thinking,SUTRA_CHILD_THINKING:thinkForTurn?baseThinking:null,KARMA_NODE:process.execPath,
         KARMA_TYPESCRIPT:path.join(context.extensionPath,'vendor','typescript','typescript.js'),
         SUTRA_RAM_CACHE_MIB:String(ramMiB)};
-      const result=await requestWorker.send(payload,environment,{token,onActivity:event=>{usage?.activity(event);onActivity?.(event);}});
-      if(result.host_memory)ramCompartments=result.host_memory;
-      if(!result.ok)throw new Error(result.error||'Bridge request failed');
+      const authorization=!managementRead?nativeController?.permissionEvidence(transport?.authority):undefined;
+      const result=await worker.send(payload,environment,{token,transport,authorization,onActivity:event=>{usage?.activity(event);onActivity?.(event);}});
       output.appendLine(new Date().toISOString()+' '+message.op+' completed');
-      updateReports(result.data);
-      if(result.data?.result?.token_usage){usage?.recordResponse(result.data.result.token_usage);void refreshDashboard();}
-      return result.data;
+      const data=bridgeResult(result);
+      if(data?.result?.token_usage)void refreshDashboard();
+      return data;
     } finally {if(!diagnostic){busy=false;panel?.webview.postMessage({type:'busy',value:sequence});}}
   }
   function publishReview(data) {
@@ -931,6 +967,8 @@ function activate(context) {
     vscode.commands.registerCommand('karma.revokeCalibration',()=>revokeCalibration()),
     vscode.commands.registerCommand('karma.evaluateCalibration',()=>evaluateCalibration()),
     vscode.commands.registerCommand('karma.switchModel',switchModel),{dispose(){clearInterval(dashboardTimer);requestWorker?.dispose();telemetry?.kill();for(const p of processes)p.kill('SIGTERM');}});
+  context.subscriptions.push(vscode.commands.registerCommand('karma.stopRunner',id=>stopRunner(id).catch(error=>vscode.window.showErrorMessage(error.message))));
+  context.subscriptions.push(vscode.commands.registerCommand('karma.dismissRunnerResult',id=>dismissRunnerResult(id).catch(error=>vscode.window.showErrorMessage(error.message))));
   const diagrams=diagramView.install(vscode,context,id=>request({op:'conversation_read',invocation_id:id}));
   usage=usageView.install(vscode,context,{refresh:refreshDashboard,storage,activityChanged:uri=>previewChanges.fire(uri)});
   dashboardTimer=setInterval(refreshDashboard,2000);
@@ -958,7 +996,12 @@ function activate(context) {
       if(data.tool_receipt)output.appendLine('KARMA_TOOL_RECEIPT '+data.tool_receipt.id);return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify(data))]);}
   }));
   if(vscode.lm.registerLanguageModelChatProvider){
-    nativeController=nativeProvider.install(vscode,context,{authorization:require('./workspace_authorization').createStore(vscode,context),request:(m,t,a)=>request(m,t,true,a),workspace,isBusy:()=>busy||sequence||strataChanging||strataSetupRunning||engineChanging,
+    workspaceAuthorization=require('./workspace_authorization').createStore(vscode,context);
+    nativeController=nativeProvider.install(vscode,context,{authorization:workspaceAuthorization,request:(m,t,a,r)=>request(m,t,true,a,r),workspace,isBusy:()=>busy||sequence||strataChanging||strataSetupRunning||engineChanging,
+      allocateRequest:chatKey=>coordinator().allocate(chatKey),
+      async resumeRequest(ticket,token,onActivity){return bridgeResult(await coordinator().resume(ticket,{token,onActivity:event=>{usage?.activity(event);onActivity?.(event);}}));},
+      ackRequest:ticket=>coordinator().ack(ticket),cancelRequest:ticket=>coordinator().cancel(ticket),
+      cancelWorkspaceRequests:()=>coordinator().cancelAll(),
       approveCapability:(p,t)=>toolController.approve(p,t),capabilityReport:capabilityUI.report,
       activityLink:event=>usage?.activityLink(event),modelSettings,configureModels:(force,t,options)=>configureModels(force,t,true,options),simpleChat,publishReview,
       async presentReview(data){await diagrams.openReview(data);},

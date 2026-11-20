@@ -64,6 +64,7 @@ function observationText(observations, final=false){
 }
 function install(vscode,context,deps){
 
+  let disposed=false;
   let allocationPending=false,thinkingForNextRequest=false,resumeSubmission,controlsOpen=false,nativeSetting=false;
   let armPromise,accessEpoch=0,armingStep='',armed,activeCancel,arming=false,running=false,selecting=false,lastRoute='',routing,reason='Open Sutra chat to talk. Choose workspace access on first use.';
   const memory=new NativeMemory(context);let lastCompaction;
@@ -92,7 +93,18 @@ function install(vscode,context,deps){
     tickets.clear();
     accessTickets.clear();
     completed.clear();
-    if(cancel)activeCancel?.cancel();
+    if(cancel){
+      activeCancel?.cancel();
+      if(typeof deps.cancelWorkspaceRequests==='function'){
+        // Revocation also covers approved source/actions without chat tickets.
+        // This is separate from a UI disconnect, which never cancels execution.
+        try{void Promise.resolve(deps.cancelWorkspaceRequests()).catch(()=>{});}catch{}
+      }else if(typeof deps.cancelRequest==='function'){
+        for(const ticket of Object.values(transportTickets())){
+          if(ticket.workspace===deps.workspace())void Promise.resolve(deps.cancelRequest(ticket)).catch(()=>{});
+        }
+      }
+    }
     reason=why;
   }
   function refreshAccess(){
@@ -108,7 +120,7 @@ function install(vscode,context,deps){
     const valid=grant?.scope===scope && typeof scope==='string' &&
       typeof grant.id==='string' && Object.hasOwn(profiles,grant.profile);
     if(armed && (!valid || grant.id!==armed.generation || scope!==armed.scope || grant.profile!==armed.profile)){
-      clearAccess('Workspace access changed. The saved request and budget are retained.');
+      clearAccess('Workspace access changed. The saved request and budget are retained.',armed.workspace===deps.workspace());
     }
     if(valid && !armed){
       armed={scope,workspace:deps.workspace(),generation:grant.id,profile:grant.profile};
@@ -132,7 +144,7 @@ function install(vscode,context,deps){
       permissionPending,permissionCanChoose:permissionPending&&!arming&&!selecting&&!running&&!live&&!deps.isBusy(),
       working:nativeSetting||allocationPending||running||live,session:routing?.session,scope:'Sutra native chat and its workspace tools',defaultModel:chat.get('defaultModel',''),defaultsReady,reason,lastRoute,label,explanation,routing:routing?{...routing}:null,compaction:lastCompaction,pending,openTaskCount:context.workspaceState.get('sutra.openTaskCount')};
   }
-  function publish(){deps.onStatus(status());}
+  function publish(){if(!disposed)deps.onStatus(status());}
   async function setNativeEnabled(value){
     if(nativeSetting)throw new Error('A Sutra enable/disable change is already in progress.');
     const config=vscode.workspace.getConfiguration('karma');
@@ -150,7 +162,7 @@ function install(vscode,context,deps){
           await current.update('nativeEnabled',inspected?.globalValue,vscode.ConfigurationTarget.Global);
         throw new Error('A workspace or managed setting overrides Sutra chat. Sutra is still '+(enabled()?'on':'off')+'.');
       }
-      clearAccess(value?'Sutra chat enabled. Select Sutra Auto to route prompts.':'Sutra chat disabled. Saved tasks, permissions and consumed budgets are retained.');
+      clearAccess(value?'Sutra chat enabled. Select Sutra Auto to route prompts.':'Sutra chat disabled. Saved tasks, permissions and consumed budgets are retained.',!value);
       changed.fire();
     }finally{nativeSetting=false;publish();}
   }
@@ -163,8 +175,11 @@ function install(vscode,context,deps){
     controlsOpen=true;
     try{
       const before=status(),epoch=accessEpoch,workspace=controlsWorkspace(),busy=controlsBusy();
+      const stopRunner=typeof deps.resumeRequest==='function'&&typeof deps.cancelWorkspaceRequests==='function'&&
+        (busy||Object.values(transportTickets()).some(ticket=>ticket.workspace===workspace))?
+        [{id:'stop-runner',label:'$(debug-stop) Stop runner request',detail:'Cancel the runner’s current or queued request. Receipts and consumed spending stay retained.'}]:[];
       const items=busy?[
-        {id:'monitor',label:'$(dashboard) Open Monitor',detail:'View the active request. Settings can change after it finishes.'}
+        {id:'monitor',label:'$(dashboard) Open Monitor',detail:'View the active request. Settings can change after it finishes.'},...stopRunner
       ]:[
         ...(before.enabled?[
           {id:'chat',label:'$(comment-discussion) Open Sutra chat',detail:'Open a new Local chat with Sutra Auto. Existing chats stay in history.'},
@@ -176,6 +191,7 @@ function install(vscode,context,deps){
         {id:'models',label:'$(settings-gear) Model settings…',detail:'Choose the saved Low, Mid and High models.'},
         {id:'reasoning',label:'$(lightbulb) Reasoning…',detail:'Choose Adaptive thinking or reasoning for a fixed tier.'},
         {id:'monitor',label:'$(dashboard) Open Monitor',detail:'View usage, system telemetry and kernel status.'},
+        ...stopRunner,
         ...(before.enabled?[{id:'disable',label:'$(circle-slash) Disable Sutra',detail:'Turn off Sutra chat. Saved tasks, permissions and consumed budgets are retained.'}]:[])
       ];
       const picked=await vscode.window.showQuickPick(items,{
@@ -190,6 +206,7 @@ function install(vscode,context,deps){
       if(current.enabled!==before.enabled||accessEpoch!==epoch||controlsWorkspace()!==workspace){
         return vscode.window.showInformationMessage('Sutra or the workspace changed while controls were open. Click the Sutra status again.');
       }
+      if(action==='stop-runner')return vscode.commands.executeCommand('karma.stopRunner');
       if(controlsBusy())return vscode.window.showInformationMessage('Wait for the current Sutra operation to finish before changing controls.');
       if(action==='enable'||action==='enable-chat'){
         await setNativeEnabled(true);
@@ -215,6 +232,7 @@ function install(vscode,context,deps){
     return access;
   }
   function assertCurrent(access,token){
+    if(disposed)throw Object.assign(new Error('Sutra chat disconnected. The runner retains its request for reconnection.'),{code:'COORDINATOR_DETACHED'});
     if(nativeSetting)throw new Error('Sutra chat controls are updating. Wait for the change to finish.');
     if(refreshAccess()!==access || !enabled() || token?.isCancellationRequested)
       throw new Error('Sutra request cancelled or workspace permission changed.');
@@ -301,6 +319,32 @@ function install(vscode,context,deps){
     return {operation:descriptor.operation,paths,test_paths};
   }
   const pendingKey='sutra.pendingOrchestration';
+  const transportKey='sutra.coordinatorRequests.v1';
+  function transportTickets(){
+    const saved=context.workspaceState.get(transportKey);
+    return saved&&typeof saved==='object'&&!Array.isArray(saved)?saved:{};
+  }
+  function transportFor(stackChat,chatKey){
+    const ticket=transportTickets()[stackChat];
+    return ticket&&/^[a-f0-9]{32}$/.test(ticket.id)&&ticket.workspace===deps.workspace()&&
+      ticket.stackChat===stackChat&&(!ticket.nativeChat||!chatKey||ticket.nativeChat===chatKey)?ticket:undefined;
+  }
+  async function saveTransport(ticket){
+    const current=transportTickets();
+    if(!current[ticket.stackChat]&&Object.keys(current).length>=32)
+      throw new Error('Sutra has 32 retained runner requests. Reconnect or stop an existing request before starting another.');
+    await context.workspaceState.update(transportKey,{...current,[ticket.stackChat]:ticket});
+  }
+  async function clearTransport(ticket){
+    const current={...transportTickets()};
+    if(current[ticket.stackChat]?.id!==ticket.id)return;
+    delete current[ticket.stackChat];
+    await context.workspaceState.update(transportKey,current);
+  }
+  async function acknowledgeTransport(ticket){
+    if(typeof deps.ackRequest==='function')await deps.ackRequest(ticket);
+    await clearTransport(ticket);
+  }
   const stackKey='sutra.taskStackChat';
   const restartableReview=flow=>flow?.state==='DONE'&&flow.recovery?.terminal_review===true&&
     flow.recovery?.kind==='policy_changed'&&flow.recovery?.restart_allowed===true;
@@ -506,6 +550,7 @@ function install(vscode,context,deps){
   }
   let activityProgress;
   async function flowEvent(flow,event,tier,token,extra,thinkForTurn,chatKey,stackChat,onFallback){
+    if(disposed)throw Object.assign(new Error('Sutra chat disconnected. The runner retains its request for reconnection.'),{code:'COORDINATOR_DETACHED'});
     const access=refreshAccess();
     const models=['inspect','pending','recoverable_review','cancel','locate_document','approve_document'].includes(event)?undefined:await deps.configureModels(false,token,{tier,onFallback});
     const workspaceStep=['step','resume','grant','capability_grant','restart_review','accept_provenance'].includes(event) && !classifying(flow);
@@ -514,11 +559,37 @@ function install(vscode,context,deps){
       assertArmed();
     }
     const binding=flow?.binding||flow?.bound_task;
-    const next=await deps.request({op:'orchestrate',event,flow_id:flow?.flow_id,cursor:flow?.cursor,
+    const message={op:'orchestrate',event,flow_id:flow?.flow_id,cursor:flow?.cursor,
       ...(thinkForTurn&&['start','step'].includes(event)?{think_for_turn:true}:{}),
       ...(flow?.state==='CLASSIFYING'&&event==='step'?{conversation_step:true}:{}),
-      armed:!!access,binding,models,tier,...(stackChat?{chat_key:stackChat}:{}),...extra},token,activityProgress);
-    await rememberFlow(next,event==='pending'?undefined:thinkForTurn,event==='pending'&&!next.task_stack?undefined:chatKey,stackChat);return next;
+      armed:!!access,binding,models,tier,...(stackChat?{chat_key:stackChat}:{}),...extra};
+    let ticket;
+    if(typeof deps.resumeRequest==='function'&&typeof deps.allocateRequest==='function'&&stackChat&&
+        !['inspect','pending','recoverable_review','task_list'].includes(event)){
+      if(transportFor(stackChat,chatKey))
+        throw new Error('This chat has a retained runner request. Send continue to reconnect before starting another request.');
+      if(Object.keys(transportTickets()).length>=32)
+        throw new Error('Sutra has 32 retained runner requests. Reconnect or stop an existing request before starting another.');
+      const allocated=await deps.allocateRequest(stackChat);
+      if(!/^[a-f0-9]{32}$/.test(allocated?.id))throw new Error('The runner did not allocate a valid request identity.');
+      ticket={id:allocated.id,workspace:deps.workspace(),nativeChat:chatKey,chatKey:stackChat,stackChat,
+        prompt:extra?.prompt||flow?.prompt,event,flow_id:flow?.flow_id,thinkForTurn};
+      // Save before submission: reload can happen before the backend creates a
+      // flow pointer. The ticket grants no permissions and never replays work.
+      await saveTransport(ticket);
+    }
+    let next;
+    try{
+      const transport={...(ticket?{id:ticket.id,chatKey:stackChat}:{}),...(access?{authority:access}:{})};
+      next=await deps.request(message,token,activityProgress,Object.keys(transport).length?transport:undefined);
+    }catch(error){
+      if(ticket&&!disposed&&['COORDINATOR_INTERRUPTED','COORDINATOR_CANCELLED','COORDINATOR_FAILED'].includes(error?.code))
+        await acknowledgeTransport(ticket);
+      throw error;
+    }
+    await rememberFlow(next,event==='pending'?undefined:thinkForTurn,event==='pending'&&!next.task_stack?undefined:chatKey,stackChat);
+    if(ticket&&!disposed&&!token?.isCancellationRequested)await acknowledgeTransport(ticket);
+    return next;
   }
   const shownHostPhases=new WeakMap();
   function showHostProgress(flow, progress){
@@ -770,7 +841,7 @@ function install(vscode,context,deps){
       if(running||deps.isBusy())throw new Error('Another Sutra operation started.');
       if(token.isCancellationRequested)throw new Error('Sutra action cancelled.');
       tickets.delete(options.input.ticket);running=true;activeCancel=new vscode.CancellationTokenSource();const cancel=token.onCancellationRequested(()=>activeCancel?.cancel());publish();
-      try{const access=assertArmed();const data=await deps.request({op:'native_execute',...t.binding,...t.flowScope,invocation_id:t.invocation_id},activeCancel.token);const result={...data.action_receipt,assertions_verified:false};assertCurrent(access,activeCancel.token);completed.set(t.callId,{prompt:t.prompt,conversationId:t.conversationId,result,generation:t.generation,binding:t.binding,thinkForTurn:t.thinkForTurn,flowScope:t.flowScope,nativeChat:t.nativeChat});if(data.task_stack)await rememberFlow(data,undefined,t.nativeChat,t.flowScope.chat_key);deps.publishReview(data);
+      try{const access=assertArmed();if(access.generation!==t.generation)throw new Error('Workspace permission changed before submitting this action.');const data=await deps.request({op:'native_execute',...t.binding,...t.flowScope,invocation_id:t.invocation_id},activeCancel.token,undefined,{authority:access});const result={...data.action_receipt,assertions_verified:false};assertCurrent(access,activeCancel.token);completed.set(t.callId,{prompt:t.prompt,conversationId:t.conversationId,result,generation:t.generation,binding:t.binding,thinkForTurn:t.thinkForTurn,flowScope:t.flowScope,nativeChat:t.nativeChat});if(data.task_stack)await rememberFlow(data,undefined,t.nativeChat,t.flowScope.chat_key);deps.publishReview(data);
         return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify({receipt:result.id,status:result.result.status,target:t.preview.target,returncode:result.result.returncode,assertions_verified:false,note:'A zero exit status is a process observation, not verified test assertions.'}))]);
       }finally{cancel.dispose();activeCancel.dispose();activeCancel=undefined;running=false;publish();}
     }
@@ -963,7 +1034,7 @@ function install(vscode,context,deps){
         renderActivity(e);
       };
       try{
-        let data,flow,restartReview=false,resuming=false;
+        let data,flow,restartReview=false,resuming=false,retiredTransport=false;
         async function confirmReviewRestart(old){
           await rememberFlow(old,undefined,chatKey,old.stackChat||stackChat);
           const recovery=old.recovery;
@@ -993,10 +1064,54 @@ function install(vscode,context,deps){
           progress.report(new vscode.LanguageModelTextPart('Workspace access approved. Continuing your request.\n\n'));
         }
         if(!request.results){
+          const retained=requestedResume&&typeof deps.resumeRequest==='function'?transportFor(stackChat,chatKey):undefined;
+          if(retained){
+            progress.report(new vscode.LanguageModelTextPart('Reconnecting to the runner’s saved request. No work is being submitted again.\n\n'));
+            try{
+              flow=await deps.resumeRequest(retained,activeCancel.token,activityProgress);
+              if(!flow?.flow_id)throw new Error('The retained runner response has no workflow identity.');
+              const cachedFlow=flow;
+              const inspected=await deps.request({op:'orchestrate',event:'inspect',flow_id:flow.flow_id,
+                chat_key:stackChat},activeCancel.token,activityProgress);
+              if(inspected.flow_id!==flow.flow_id)throw new Error('The runner response no longer matches the current workflow identity.');
+              if(inspected.cursor!==flow.cursor||inspected.state!==flow.state){
+                await rememberFlow(inspected,retained.thinkForTurn,chatKey,stackChat);
+                if(!disposed&&!activeCancel.token.isCancellationRequested)await acknowledgeTransport(retained);
+                resumeUnavailable('The saved workflow advanced after this runner step. Its current checkpoint is retained. Send continue to use that checkpoint; the older cached answer was not published.');
+                return;
+              }
+              flow={...cachedFlow,task_stack:inspected.task_stack,focused_flow:inspected.focused_flow,
+                recovery:inspected.recovery};
+              await rememberFlow(flow,retained.thinkForTurn,chatKey,stackChat);
+              if(!disposed&&!activeCancel.token.isCancellationRequested)await acknowledgeTransport(retained);
+              prompt=flow.prompt||retained.prompt||prompt;
+              audit.memoryUsed=true;
+              managed ||= !!flow.task_stack;
+              if(flow.claim_review_usage)recordUsage({token_usage:flow.claim_review_usage});
+              recordCoherence(flow.coherence_observation);
+              if(inspected.recovery){
+                if(!await confirmReviewRestart(inspected))return;
+              }else conversationId=flow.conversation_id;
+              audit.conversationInvocationId=conversationId;
+              resuming=true;
+            }catch(error){
+              const terminal=['COORDINATOR_INTERRUPTED','COORDINATOR_CANCELLED','COORDINATOR_FAILED'].includes(error?.code);
+              const missing=error?.code==='COORDINATOR_REQUEST_MISSING';
+              if(error?.code!=='COORDINATOR_RESULT_RETIRED'&&!terminal&&!missing)throw error;
+              if(terminal)await acknowledgeTransport(retained);
+              else await clearTransport(retained);
+              retiredTransport=true;
+              progress.report(new vscode.LanguageModelTextPart(terminal?
+                'The runner confirmed this execution has stopped. Checking the durable workflow checkpoint; consumed spending remains charged and no operation will be replayed.\n\n':
+                missing?'The transport record is unavailable. Checking the durable workflow checkpoint; no operation will be resubmitted.\n\n':
+                'The runner has retired the acknowledged transport response. Checking the durable workflow checkpoint; no operation will be replayed.\n\n'));
+            }
+          }
           if(unidentifiedResume){
             resumeUnavailable('Choose the saved request in Open Sutra tasks, or return to the chat that started it.');
             return;
           }
+          if(!flow){
           let pending=context.workspaceState.get(pendingKey);
           const resumeId=prompt.trim().match(RESUME_PROMPT)?.[1];
           let submission;
@@ -1070,8 +1185,13 @@ function install(vscode,context,deps){
               progress.report(new vscode.LanguageModelTextPart('Resuming the saved Sutra workflow with its context and remaining budget.\n\n'));
             }
           }
+          if(!flow&&retiredTransport){
+            resumeUnavailable('The previous runner request has no available response and no active workflow was recovered. Its receipts and spending remain retained. Open its conversation details or submit a new request.');
+            return;
+          }
           if(!flow)flow=await advance(null,'start',{prompt,parent:request.parent,
             prior_prompt:!chatKey&&!request.parent?request.priorPrompt:undefined});
+          }
           if(resuming&&flow.state==='PAUSED'&&flow.stop?.resume_phase==='CLASSIFYING'){
             flow=await advance(flow,'resume');
           }
@@ -1254,10 +1374,13 @@ function install(vscode,context,deps){
         }
         const stopped=activeCancel.token.isCancellationRequested;
         activityOpen=false;activityProgress=undefined;cancellation.dispose();activeCancel.dispose();activeCancel=undefined;running=false;publish();
-        if(stopped){try{const key=legacyResume?undefined:stackChat;
+        if(stopped&&!disposed){try{const key=legacyResume?undefined:stackChat;
           await rememberFlow(await deps.request({op:'orchestrate',event:'pending',...(key?{chat_key:key}:{})}),undefined,chatKey,key);
         }catch{} }
-        if(stopped&&context.workspaceState.get(pendingKey))void vscode.window.showInformationMessage('Sutra stopped. The saved request, context and consumed budget are retained. Resume or Discard from Sutra Monitor.');
+        if(stopped&&!disposed){
+          if(transportFor(stackChat,chatKey))void vscode.window.showInformationMessage('Stopped displaying this request. The runner retains it. Send continue to reconnect, or stop the runner request in Sutra Monitor.');
+          else if(context.workspaceState.get(pendingKey))void vscode.window.showInformationMessage('Sutra stopped. The saved request, context and consumed budget are retained. Resume or Discard from Sutra Monitor.');
+        }
       }
       });
     }
@@ -1286,7 +1409,7 @@ function install(vscode,context,deps){
     vscode.commands.registerCommand('karma.armNative',()=>chooseWorkspaceAccess().catch(error=>vscode.window.showErrorMessage?.(error.message))),
     vscode.commands.registerCommand('karma.disarmNative',()=>revoke()),
     vscode.commands.registerCommand('karma.toggleNative',()=>setNativeEnabled(!enabled())));
-  const listener=vscode.workspace.onDidChangeConfiguration?.(e=>{if(e.affectsConfiguration('karma.nativeEnabled')){if(!enabled())void setNextThinking(false);clearAccess('Native chat setting changed.');changed.fire();publish();}else if(e.affectsConfiguration('karma.models'))changed.fire();if(e.affectsConfiguration('chat'))publish();});if(listener)context.subscriptions.push(listener);
+  const listener=vscode.workspace.onDidChangeConfiguration?.(e=>{if(e.affectsConfiguration('karma.nativeEnabled')){if(!enabled())void setNextThinking(false);clearAccess('Native chat setting changed.',!enabled());changed.fire();publish();}else if(e.affectsConfiguration('karma.models'))changed.fire();if(e.affectsConfiguration('chat'))publish();});if(listener)context.subscriptions.push(listener);
   void setNextThinking(false);
   // Populate VS Code's model registry at activation, including after reload.
   // Discovery reads this provider's metadata only; it never starts inference.
@@ -1318,9 +1441,17 @@ function install(vscode,context,deps){
     vscode.workspace.onDidGrantWorkspaceTrust?.(publish),
   ].filter(Boolean);
   publish();
-  return {status,publish,withWorkspaceAccess,requestWorkspaceAccess:()=>chooseWorkspaceAccess(),dispose(){
+  return {status,publish,withWorkspaceAccess,requestWorkspaceAccess:()=>chooseWorkspaceAccess(),
+    permissionEvidence(expected){
+      const access=refreshAccess();
+      if(expected&&(!access||expected.generation!==access.generation||expected.scope!==access.scope||
+          expected.profile!==access.profile||expected.workspace&&expected.workspace!==deps.workspace()))
+        throw new Error('Workspace permission changed before submission.');
+      return access?authorization.evidence(expected||access):undefined;
+    },dispose(){
+    disposed=true;
     for(const subscription of subscriptions)subscription.dispose();
-    clearAccess('Extension stopped.');
+    clearAccess('Chat disconnected. The runner retains its current request.',false);
   }};
 }
 module.exports={install,latestRequest,observationText,conversationMarkdown};

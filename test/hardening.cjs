@@ -17,14 +17,14 @@ let nativeRequest,nativeStatus,architectureDispatch,fixtureCatalog,allowModelSav
 const nativeProvider={install(_vscode,_context,deps){
  nativeRequest=deps.request;
  nativeStatus=deps.onStatus;
- return {status:()=>({working:false}),publish(){},dispose(){}};
+ return {status:()=>({working:false}),permissionEvidence:()=>undefined,publish(){},dispose(){}};
 }};
 let state={contract:{contract_hash:'fixture-contract',contract:{constraints:{}}},calibration:{binding:{hash:'fixture-calibration'}},session:'fixture',model:'fixture-model',report:'architecture v1',api:{report:'API v1'}};
 const disposable=()=>({dispose(){}}),uri=value=>({scheme:'file',fsPath:value,toString(){return value;}});
 class Emitter{event=(cb)=>{this.cb=cb;return disposable();};fire(value){changes.push(value.toString());this.cb?.(value);}dispose(){}}
 function spawn(exe,args,options){
  const streaming=args.includes('--dashboard-stream'),requestStreaming=args.includes('--request-stream');if(streaming)dashboardSpawns++;if(requestStreaming)requestSpawns++;
- const child=new EventEmitter();child.stdout=new EventEmitter();child.stderr=new EventEmitter();child.stdin=new EventEmitter();child.kill=()=>true;
+ const child=new EventEmitter();child.stdout=new EventEmitter();child.stderr=new EventEmitter();child.stdin=new EventEmitter();child.kill=signal=>{queueMicrotask(()=>child.emit('close',0,signal));return true;};
  child.stdin.end=child.stdin.write=raw=>{const envelope=streaming?null:JSON.parse(raw),req=streaming?{op:'dashboard'}:requestStreaming?envelope.request:envelope;requests.push(req);bridgeCount++;
   const environment=requestStreaming?envelope.environment:options.env;
   bridgeAllocations.push(environment.SUTRA_WORKSPACE_ALLOCATION);
@@ -39,6 +39,38 @@ function spawn(exe,args,options){
   if(req.op==='dashboard'&&holdDashboard)pendingDashboard=finish;else queueMicrotask(finish);
  };return child;
 }
+// Keep the real worker envelope/activity ordering in this host boundary test,
+// while replacing the detached socket service with a fixture-owned coordinator.
+// Real process/socket reconnection is exercised by coordinator-client.cjs.
+const coordinatorOwners=new Map(),coordinatorClients=[];
+class CoordinatorFixture {
+ constructor(options){
+  this.detached=false;this.options=options;coordinatorClients.push(this);
+  const key=JSON.stringify([options.workspace,options.storage,options.python]);
+  if(!coordinatorOwners.has(key)){
+   const {BridgeWorker}=require('../bridge_worker');
+   const worker=new BridgeWorker({spawn,command:options.python,
+    args:['-B',path.join(options.extensionPath,'harness','vscode_bridge.py'),'--workspace',options.workspace,'--storage',options.storage,'--request-stream'],
+    options:{cwd:options.workspace,stdio:['pipe','pipe','pipe'],env:{...process.env}},activity:require('../model_activity').decoder});
+   coordinatorOwners.set(key,{worker,busy:false,jobs:[],issued:0});
+  }
+  this.owner=coordinatorOwners.get(key);
+ }
+ async send(request,environment,{token,onActivity}={}){
+  if(this.detached)throw Error('Fixture UI is detached');
+  if(token?.isCancellationRequested)throw Error('Sutra request cancelled before submission.');
+  if(this.owner.busy)throw Error('A coordinator-owned bridge request is already running.');
+  this.owner.busy=true;
+  try{return await this.owner.worker.send(request,environment,{onActivity});}
+  finally{this.owner.busy=false;}
+ }
+ async snapshot(){return {instance_id:'f'.repeat(32),busy:this.owner.busy,jobs:this.owner.jobs};}
+ async allocate(){return {id:(++this.owner.issued).toString(16).padStart(32,'0'),instance_id:'f'.repeat(32)};}
+ async resume(){throw Error('Unexpected resume in the extension hardening fixture');}
+ async ack(){return {acknowledged:true};}
+ async cancelAll(){return {cancelled_queued:0,busy:this.owner.busy};}
+ dispose(){this.detached=true;}
+}
 const vscode={
  EventEmitter:Emitter,Uri:{file:uri,parse:uri},StatusBarAlignment:{Right:1},ViewColumn:{One:1},
  env:{appRoot:'/must/not/load/internal/typescript'},
@@ -52,7 +84,7 @@ const vscode={
  lm:{registerTool(n,t){tools.set(n,t);return disposable();}},LanguageModelToolResult:class{constructor(content){this.content=content;}},LanguageModelTextPart:class{constructor(value){this.value=value;}}
 };
 const moduleFixture={exports:{}};
-const context={module:moduleFixture,exports:moduleFixture.exports,require:n=>n==='vscode'?vscode:n==='node:child_process'?{spawn}:n==='./model_activity'?require('../model_activity'):n==='./media/token_usage'?require('../media/token_usage'):n==='./usage_view'?require('../usage_view'):n==='./diagram_view'?require('../diagram_view'):n==='./model_selection'?require('../model_selection'):n==='./strata_startup'?require('../strata_startup'):n==='./strata_management'?require('../strata_management'):n==='./engine_management'?{create:()=>({command:async()=>({ok:true,models:[],environment_ready:false,running:false})})}:n==='./strata_setup'?require('../strata_setup'):n==='./bridge_worker'?require('../bridge_worker'):n==='./capabilities'?require('../capabilities'):n==='./native_provider'?nativeProvider:n==='./workspace_authorization'?require('../workspace_authorization'):require(n),process,Buffer,console,queueMicrotask,structuredClone,
+const context={module:moduleFixture,exports:moduleFixture.exports,require:n=>n==='vscode'?vscode:n==='node:child_process'?{spawn}:n==='./coordinator_client'?{CoordinatorClient:CoordinatorFixture}:n==='./model_activity'?require('../model_activity'):n==='./media/token_usage'?require('../media/token_usage'):n==='./usage_view'?require('../usage_view'):n==='./diagram_view'?require('../diagram_view'):n==='./model_selection'?require('../model_selection'):n==='./strata_startup'?require('../strata_startup'):n==='./strata_management'?require('../strata_management'):n==='./engine_management'?{create:()=>({command:async()=>({ok:true,models:[],environment_ready:false,running:false})})}:n==='./strata_setup'?require('../strata_setup'):n==='./bridge_worker'?require('../bridge_worker'):n==='./capabilities'?require('../capabilities'):n==='./native_provider'?nativeProvider:n==='./workspace_authorization'?require('../workspace_authorization'):require(n),process,Buffer,console,queueMicrotask,structuredClone,
  setInterval:fn=>{intervals.push(fn);return fn;},clearInterval(){},setTimeout:(fn,ms)=>{timers.push({fn,ms});return fn;},clearTimeout(){}};
 context.process={...process,env:{...process.env,SUTRA_WORKSPACE_ALLOCATION:'{"tokens":999999}',SUTRA_ENGINE_APPROVALS:JSON.stringify({'sutra:engine/inherited':'f'.repeat(64)})}};
 vm.runInNewContext(fs.readFileSync(path.join(root,'extension.js'),'utf8'),context,{filename:'extension.js'});
@@ -301,4 +333,4 @@ const subscriptions=[];
  assert.equal(prompts.length,promptsAfterApproval+1,'Changed engine identity requires approval again');
  assert.equal(userEngineApprovals[ref],'a'.repeat(64),'Dismissal preserves the prior approval instead of widening it');
  console.log(JSON.stringify({passed:true,checks:['runtime settings validate before saving and never dispatch or change the task','greeting with legacy task requires no model or state mutation','legacy task yields actionable guidance without duplicate error or model discovery','explicit /new creates a separate review and dispatches','new-review command arguments cannot bypass user goal entry','first-open model picker waits for webview readiness','status renders measured CPU/GPU Celsius','real errors render once','restricted public API','command arguments cannot bypass user input','calibration commands require user selection','no agent calibration mutation tools','agent tool boundary','native @sutra uses private bridge and configured models, never VS Code inference or transcript replay','cancelled native chat never dispatches','one-request reasoning boosts orchestration while delegated children keep configured preferences','fixed tiers keep distinct saved reasoning without affecting Auto','model discovery preserves configured choices; command arguments cannot replace them','live report refresh and invalidation','persistent single-flight dashboard','Darwin reclaimable-memory parser','report and calibration commands declared']},null,2));
-})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>{for(const d of subscriptions)d.dispose?.();fs.rmSync(tmp,{recursive:true,force:true});});
+})().catch(e=>{console.error(e);process.exitCode=1;}).finally(async()=>{for(const d of subscriptions)d.dispose?.();for(const owner of coordinatorOwners.values())owner.worker.dispose();await new Promise(setImmediate);fs.rmSync(tmp,{recursive:true,force:true});});

@@ -77,7 +77,7 @@ def wait_category(state):
         return 'model_admission'
     if runtime.get('kind')=='busy':
         return 'runtime_busy'
-    if runtime.get('kind')=='identity_changed':
+    if runtime.get('kind') in ('identity_changed', 'interrupted'):
         return 'runtime_uncertain'
     return 'hardware_pressure' if state.get('available') and state.get('sample') else 'measurement_unavailable'
 

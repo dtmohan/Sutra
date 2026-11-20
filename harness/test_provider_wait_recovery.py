@@ -1,7 +1,9 @@
 """Provider timeouts save the classifier request, without retrying inference."""
 import copy
 import json
+import os
 import unittest
+from unittest.mock import patch
 
 from context_manager import InvalidUpdate
 from invocation_gateway import InvocationLedger, consume_dispatch
@@ -9,6 +11,7 @@ from model_packet import build
 import orchestration_flow as flow
 import conversation
 import review_budget
+import runtime_memory
 import test_orchestration as fixture
 from test_conversation import Fake, MODELS
 
@@ -57,6 +60,9 @@ class ProviderWaitRecoveryTests(unittest.TestCase):
             result['facts'] = [self.fact]
 
     def test_charged_timeout_reloads_and_resumes_same_parent_on_another_model(self):
+        self.assert_saved_timeout_recovery()
+
+    def assert_saved_timeout_recovery(self):
         self.fail_provider = False
         self.phase = 'response_headers'
         self.fact = 'Remember that Cedar uses ticket CED724.'
@@ -119,6 +125,63 @@ class ProviderWaitRecoveryTests(unittest.TestCase):
         self.assertEqual(final['used']['operations'], charged['used']['operations'])
         self.assertEqual(final['limits'], charged['limits'])
         self.assertTrue(self.s.verify_invocations(sid))
+
+    def test_shared_runtime_timeout_resumes_saved_workflow_with_resident_model(self):
+        original_provider = self.provider
+        observations = []
+        metadata = {'details': {'format': 'gguf', 'runner': 'ggml'},
+                    'model_info': {'general.architecture': 'qwen3',
+                                   'qwen3.context_length': 32768}}
+        healthy = {'available': True, 'admitted': True, 'decision': 'ALLOW',
+                   'sample': {'wall_time': 1, 'free_bytes': 64 * runtime_memory.GIB,
+                              'inactive_bytes': 0}}
+        resident = [{'name': name, 'digest': 'fixture-' + name,
+                     'size': runtime_memory.GIB, 'context_length': 32768,
+                     'runner': 'ggml', 'expires_at': '9999-01-01T00:00:00Z'}
+                    for name in (MODELS['low'], MODELS['high'])]
+
+        def provider(stage):
+            model = original_provider(stage)
+            model.port = 11434
+            model.memory_weights = runtime_memory.GIB
+            model.context_metadata = metadata
+            call = model.call
+
+            def dispatched(cid, system, packet, schema):
+                try:
+                    with runtime_memory.dispatch(model, self.root, cid, system, packet, schema):
+                        result = call(cid, system, packet, schema)
+                        model.runtime_completed = True
+                        return result
+                finally:
+                    observations.append((model.model, runtime_memory.read_state()))
+
+            model.call = dispatched
+            return model
+
+        self.provider = provider
+        environment = {'SUTRA_RUNTIME_DIR': str(self.root / 'runtime'),
+                       'SUTRA_MEMORY_OWNERSHIP': 'shared'}
+        with patch.dict(os.environ, environment), \
+                patch.object(runtime_memory, 'fresh_resources', return_value=healthy), \
+                patch.object(runtime_memory, 'running', return_value=resident), \
+                patch.object(runtime_memory, 'api', side_effect=AssertionError('Unexpected HTTP')) as api:
+            # Reuse the full saved-workflow assertions, including ledger reload,
+            # immutable receipts, pinned context and every consumed budget.
+            self.assert_saved_timeout_recovery()
+            api.assert_not_called()
+            self.assertEqual([model for model, _ in observations],
+                             [MODELS['low'], MODELS['low'], MODELS['high']])
+            interrupted = observations[1][1]
+            self.assertTrue(interrupted['active']['uncertain'])
+            self.assertEqual(interrupted['interrupted']['latest_model'], MODELS['low'])
+            self.assertFalse(interrupted['interrupted']['backend_completion_verified'])
+            final = runtime_memory.read_state()
+            self.assertIsNone(final['active'])
+            self.assertIsNone(final['owned'])
+            self.assertEqual(final['interrupted'], interrupted['interrupted'])
+            self.assertEqual(final['plan']['model'], MODELS['high'])
+            self.assertEqual(final['plan']['decision'], 'ALLOW')
 
     def test_non_timeout_rejection_keeps_existing_terminal_behavior(self):
         self.fail_provider = False

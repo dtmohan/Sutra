@@ -75,6 +75,16 @@ async function check() {
     authorization.write(savedGrant);
     assert.equal(first.controller.status().accessProfile, 'workspace_agent');
     assert.equal(second.controller.status().accessProfile, 'workspace_agent');
+    const expected={workspace:root,generation:savedGrant.id,scope:savedGrant.scope,profile:savedGrant.profile};
+    const proof=authorization.evidence(expected);
+    assert.match(proof.digest,/^[a-f0-9]{64}$/);
+    assert.equal(path.dirname(proof.path),fs.realpathSync.native(path.dirname(proof.path)));
+    assert.deepEqual(first.controller.permissionEvidence(expected),proof);
+    authorization.write({...savedGrant,id:crypto.randomUUID()});
+    assert.throws(()=>authorization.evidence(expected),/permission changed/);
+    authorization.write({...savedGrant,profile:'read_only'});
+    assert.throws(()=>authorization.evidence(expected),/permission changed/);
+    authorization.write(savedGrant);
 
     let interrupted = false;
     const active = second.controller.withWorkspaceAccess(undefined, token => new Promise(resolve => {

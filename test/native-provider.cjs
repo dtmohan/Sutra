@@ -1697,6 +1697,253 @@ function setup(saved={}){
   assert(!next.some(p=>p instanceof Text&&p.value.includes('Coherence indicators')));
   checks.push('native chat displays one bounded inert coherence notice, leaves greetings and malformed diagnostics quiet, and adds no actions, permissions or retries');
  }
+ {
+  const saved={},first=setup(saved),original=first.deps.request;
+  const options={modelOptions:{_conversationId:'runner-owned-origin'}};
+  const key=require('node:crypto').createHash('sha256').update(options.modelOptions._conversationId).digest('hex');
+  const id='d'.repeat(32),tickets='sutra.coordinatorRequests.v1';
+  let entered,rejectView,response,modelSubmissions=0,cancelRequests=0,tokenCancellations=0;
+  const started=new Promise(resolve=>entered=resolve);
+  first.deps.allocateRequest=async chatKey=>{assert.equal(chatKey,key);return {id};};
+  first.deps.resumeRequest=async()=>{throw Error('The first client must submit once');};
+  first.deps.cancelRequest=async()=>{cancelRequests++;};
+  first.deps.request=async(m,t,activity,transport)=>{
+   if(!transport)return original(m,t);
+   assert.deepEqual(transport,{id,chatKey:key});
+   assert.equal(saved[tickets][key].id,id,'Persist the ticket before submission, including initial start');
+   modelSubmissions++;
+   t.onCancellationRequested(()=>tokenCancellations++);
+   response=await original(m,t);
+   entered();
+   return new Promise((_resolve,reject)=>{rejectView=reject;});
+  };
+  const disconnected=first.send('low',[{role:1,content:[new Text('hello')]}],options);
+  await started;
+  assert.equal(saved['sutra.pendingOrchestration'],undefined,'The initial flow response never reached the UI');
+  first.controller.dispose();
+  assert.equal(tokenCancellations,0,'UI disposal must not cancel the runner');
+  assert.equal(cancelRequests,0);
+  rejectView(Object.assign(new Error('UI detached; runner retained'),{code:'COORDINATOR_DETACHED'}));
+  await assert.rejects(disconnected,/UI detached/);
+  assert.equal(saved[tickets][key].prompt,'hello');
+
+  const foreign=setup(saved);let foreignReconnections=0;
+  foreign.deps.resumeRequest=async()=>{foreignReconnections++;throw Error('Foreign chat cannot attach');};
+  foreign.deps.allocateRequest=async()=>{throw Error('No saved request for this other chat');};
+  await assert.rejects(foreign.send('high',[{role:1,content:[new Text('continue')]}],
+    {modelOptions:{_conversationId:'foreign-runner-chat'}}),/No saved request/);
+  assert.equal(foreignReconnections,0);assert.equal(saved[tickets][key].id,id);
+
+  const reloaded=setup(saved);let reconnects=0,acknowledgements=0,inspections=0;
+  const afterReloadRequest=reloaded.deps.request;
+  reloaded.deps.request=async(m,t,a)=>{
+   if(m.op==='orchestrate'&&m.event==='inspect'){
+    inspections++;assert.equal(m.chat_key,key);assert.equal(m.flow_id,response.flow_id);
+    return {...structuredClone(response),conversation:undefined};
+   }
+   return afterReloadRequest(m,t,a);
+  };
+  reloaded.deps.allocateRequest=async()=>{throw Error('Reconnection must not allocate or submit another request');};
+  reloaded.deps.resumeRequest=async(ticket,_token,_activity)=>{
+   reconnects++;assert.equal(ticket.id,id);assert.equal(ticket.chatKey,key);assert.equal(ticket.workspace,'/project');
+   return structuredClone(response);
+  };
+  reloaded.deps.ackRequest=async ticket=>{
+   acknowledgements++;assert.equal(ticket.id,id);
+   assert.equal(saved[tickets][key].id,id,'Keep the ticket until the runner acknowledges durable receipt');
+  };
+  const restored=await reloaded.send('high',[{role:1,content:[new Text('continue')]}],options);
+  assert.equal(reconnects,1);assert.equal(acknowledgements,1);assert.equal(modelSubmissions,1);
+  assert.equal(saved[tickets][key],undefined);
+  assert(restored.some(part=>part.value?.includes('Reconnecting to the runner')));
+  assert(restored.some(part=>part.value?.includes('Conversational answer')));
+  assert.equal(inspections,1,'Current host policy must inspect a cached workflow before its result is published');
+  assert.equal(reloaded.flowRequests.length,0,'Initial result recovery cannot rerun start or model inference');
+  assert.equal(reloaded.calls.length,0);
+  assert.equal(reloaded.controller.status().pending,null);
+  checks.push('runner request identity persists before initial start; UI disposal detaches, same-chat continue on another tier restores its result once, and another chat cannot attach or replay it');
+ }
+ {
+  const saved={},host=setup(saved),options={modelOptions:{_conversationId:'runner-policy-change'}};
+  const key=require('node:crypto').createHash('sha256').update(options.modelOptions._conversationId).digest('hex');
+  saved['sutra.coordinatorRequests.v1']={[key]:{id:'c'.repeat(32),workspace:'/project',nativeChat:key,chatKey:key,stackChat:key,event:'step',prompt:'Review workspace'}};
+  const old={flow_id:'old-flow',cursor:'old-cursor',state:'MAPPING',prompt:'Review workspace',
+    conversation:{result:{accepted_output:{answer:'STALE CACHED ANSWER'}}}};
+  let acknowledgements=0;
+  host.deps.resumeRequest=async()=>structuredClone(old);
+  host.deps.ackRequest=async()=>{acknowledgements++;};
+  host.deps.allocateRequest=async()=>{throw Error('Declined recovery cannot submit work');};
+  host.deps.request=async m=>{
+   assert.equal(m.event,'inspect');assert.equal(m.flow_id,old.flow_id);assert.equal(m.chat_key,key);
+   return {...old,conversation:undefined,recovery:{kind:'policy_changed',restart_allowed:true,
+    message:'Current policy requires a fresh review.'}};
+  };
+  host.v.window.showWarningMessage=async()=>undefined;
+  const parts=await host.send('high',[{role:1,content:[new Text('continue')]}],options);
+  assert.equal(acknowledgements,1);assert.equal(saved['sutra.coordinatorRequests.v1'][key],undefined);
+  assert(!parts.some(value=>value.value?.includes('STALE CACHED ANSWER')));
+  assert(parts.some(value=>value.value?.includes('Saved request retained')));
+  assert.equal(host.calls.length,0);
+  checks.push('cached runner output receives current host inspection and follows explicit policy recovery before source answers can be published');
+ }
+ {
+  const saved={},host=setup(saved),options={modelOptions:{_conversationId:'runner-revocation'}};
+  const key=require('node:crypto').createHash('sha256').update(options.modelOptions._conversationId).digest('hex');
+  const ticket={id:'e'.repeat(32),workspace:'/project',nativeChat:key,chatKey:key,stackChat:key,event:'start',prompt:'hello'};
+  saved['sutra.coordinatorRequests.v1']={[key]:ticket};
+  let cancellations=0;
+  host.deps.cancelRequest=async value=>{assert.deepEqual(value,ticket);cancellations++;};
+  await host.commands['karma.disarmNative']();
+  assert.equal(cancellations,1,'Explicit workspace revocation cancels its retained runner request');
+  assert.equal(saved['sutra.coordinatorRequests.v1'][key].id,ticket.id,'Cancellation does not erase the retained request identity or its ledger');
+  checks.push('explicit workspace revocation requests runner cancellation while retaining request identity and consumed-budget provenance');
+ }
+ {
+  for(const action of ['revoke','disable','enable','dispose']){
+   const host=setup();let cancellations=0;
+   host.deps.cancelWorkspaceRequests=async()=>{cancellations++;return {cancelled:1};};
+   assert.equal(host.calls.length,0);assert.equal(cancellations,0,'Ordinary activation must not stop existing runner work');
+   if(action==='revoke')await host.commands['karma.disarmNative']();
+   if(action==='disable'){host.cfg.nativeEnabled=false;host.changeConfiguration('karma.nativeEnabled');}
+   if(action==='enable'){host.cfg.nativeEnabled=true;host.changeConfiguration('karma.nativeEnabled');}
+   if(action==='dispose')host.controller.dispose();
+   assert.equal(cancellations,['revoke','disable'].includes(action)?1:0,
+    'Only explicit revocation or disabling cancels workspace jobs, including operations with no chat ticket');
+  }
+  checks.push('workspace-wide revocation covers non-ticket source and action jobs; activation, enabling and UI disposal leave runner work intact');
+ }
+ for(const busy of [false,true]){
+  const saved={},host=setup(saved);
+  host.deps.resumeRequest=async()=>{};host.deps.cancelWorkspaceRequests=async()=>{};
+  host.deps.isBusy=()=>busy;
+  if(!busy)saved['sutra.coordinatorRequests.v1']={retained:{id:'c'.repeat(32),workspace:'/project'}};
+  host.v.window.showQuickPick=async items=>items.find(item=>item.id==='stop-runner');
+  await host.commands['karma.nativeControls']();
+  assert(host.uiCalls.some(value=>value[0]==='karma.stopRunner'));
+  assert.equal(host.calls.length,0);
+ }
+ checks.push('bottom-bar controls expose the explicit Stop runner command while working or holding a retained request without dispatching model work');
+ {
+  const saved={},host=setup(saved),options={modelOptions:{_conversationId:'runner-retired'}};
+  const key=require('node:crypto').createHash('sha256').update(options.modelOptions._conversationId).digest('hex');
+  saved['sutra.coordinatorRequests.v1']={[key]:{id:'f'.repeat(32),workspace:'/project',nativeChat:key,chatKey:key,stackChat:key,event:'start',prompt:'hello'}};
+  host.deps.resumeRequest=async()=>{throw Object.assign(new Error('Cached response retired'),{code:'COORDINATOR_RESULT_RETIRED'});};
+  host.deps.allocateRequest=async()=>{throw Error('A retired result cannot cause another start');};
+  const result=await host.send('high',[{role:1,content:[new Text('continue')]}],options);
+  assert(!host.flowRequests.some(value=>value.event==='start'));
+  assert.equal(host.calls.length,0);
+  assert(result.some(value=>value.value?.includes('no active workflow was recovered')));
+  assert.equal(saved['sutra.coordinatorRequests.v1'][key],undefined);
+  checks.push('a retired acknowledged transport response falls back to durable checkpoints and cannot silently submit a replacement start');
+ }
+ {
+  const saved={},host=setup(saved),options={modelOptions:{_conversationId:'runner-missing-record'}};
+  const key=require('node:crypto').createHash('sha256').update(options.modelOptions._conversationId).digest('hex');
+  saved['sutra.coordinatorRequests.v1']={[key]:{id:'f'.repeat(32),workspace:'/project',nativeChat:key,chatKey:key,stackChat:key,event:'start',prompt:'Review original workspace'}};
+  let reconnects=0,acks=0;
+  host.deps.resumeRequest=async()=>{reconnects++;throw Object.assign(new Error('Transport record unavailable'),{code:'COORDINATOR_REQUEST_MISSING'});};
+  host.deps.ackRequest=async()=>{acks++;};
+  host.deps.allocateRequest=async()=>{throw Error('A missing record cannot submit another request');};
+  const prior=host.deps.request;
+  const checkpoint={flow_id:'retained-existing-flow',cursor:'saved-cursor',state:'NEED_ARM',prompt:'Review original workspace',children:[]};
+  host.deps.request=async(m,t,a)=>{
+   if(m.op==='orchestrate'&&['pending','inspect'].includes(m.event))return structuredClone(checkpoint);
+   return prior(m,t,a);
+  };
+  const first=await host.send('high',[{role:1,content:[new Text('continue')]}],options);
+  assert(first.some(value=>value.value?.includes('transport record is unavailable')));
+  assert.equal(saved['sutra.coordinatorRequests.v1'][key],undefined);
+  assert.equal(acks,0,'An absent record cannot be acknowledged as completed');
+  await host.send('high',[{role:1,content:[new Text('continue')]}],options);
+  assert.equal(reconnects,1,'A second continue must use the durable checkpoint rather than repeat a missing transport lookup');
+  assert.equal(host.controller.status().pending.flow_id,checkpoint.flow_id);
+  assert(!host.flowRequests.some(value=>value.event==='start'));assert.equal(host.calls.length,0);
+  checks.push('a typed missing transport record clears only the stale ticket without ACK, then repeated continue uses the durable workflow without resubmission');
+ }
+ for(const code of ['COORDINATOR_INTERRUPTED','COORDINATOR_CANCELLED','COORDINATOR_FAILED']){
+  const saved={},host=setup(saved),options={modelOptions:{_conversationId:'runner-terminal-'+code}};
+  const key=require('node:crypto').createHash('sha256').update(options.modelOptions._conversationId).digest('hex');
+  const id='a'.repeat(32);saved['sutra.coordinatorRequests.v1']={[key]:{id,workspace:'/project',nativeChat:key,chatKey:key,stackChat:key,event:'start',prompt:'hello'}};
+  let acknowledgements=0;
+  host.deps.resumeRequest=async()=>{throw Object.assign(new Error('Execution has stopped'),{code});};
+  host.deps.allocateRequest=async()=>{throw Error('Terminal recovery must not resubmit');};
+  host.deps.ackRequest=async ticket=>{assert.equal(ticket.id,id);acknowledgements++;};
+  const result=await host.send('high',[{role:1,content:[new Text('continue')]}],options);
+  assert.equal(acknowledgements,1);assert.equal(saved['sutra.coordinatorRequests.v1'][key],undefined);
+  assert(!host.flowRequests.some(value=>value.event==='start'));assert.equal(host.calls.length,0);
+  assert(result.some(value=>value.value?.includes('runner confirmed this execution has stopped')));
+ }
+ checks.push('confirmed interrupted, cancelled and failed runner results clear only their transport ticket and inspect durable workflow state without replay or refund');
+ {
+  const saved={},host=setup(saved),options={modelOptions:{_conversationId:'runner-failed-submit'}};
+  const key=require('node:crypto').createHash('sha256').update(options.modelOptions._conversationId).digest('hex');
+  const request=host.deps.request;let acknowledged=0;
+  host.deps.allocateRequest=async()=>({id:'b'.repeat(32)});
+  host.deps.resumeRequest=async()=>{throw Error('No reattachment expected');};
+  host.deps.ackRequest=async ticket=>{assert.equal(ticket.chatKey,key);acknowledged++;};
+  host.deps.request=async(m,t,a,transport)=>{
+   if(!transport)return request(m,t,a);
+   throw Object.assign(new Error('Terminal bridge validation failure'),{code:'COORDINATOR_FAILED'});
+  };
+  await assert.rejects(host.send('low',[{role:1,content:[new Text('hello')]}],options),/Terminal bridge validation failure/);
+  assert.equal(acknowledged,1);assert.equal(saved['sutra.coordinatorRequests.v1'][key],undefined);
+  assert.equal(host.calls.length,0);
+  checks.push('a confirmed terminal bridge failure acknowledges the transport result without leaving a permanent reconnect barrier');
+ }
+ {
+  const saved={},host=setup(saved);await host.arm();let evidenceCalls=0;
+  const grant=structuredClone(saved.access);
+  const authority={generation:grant.id,scope:grant.scope,profile:grant.profile,workspace:'/project'};
+  host.deps.authorization.evidence=expected=>{
+   evidenceCalls++;assert.equal(expected.generation,saved.access.id);assert.equal(expected.scope,saved.access.scope);
+   assert.equal(expected.profile,saved.access.profile);return {path:'/private/authorization.json',digest:'a'.repeat(64)};
+  };
+  assert(host.controller.permissionEvidence(authority));assert.equal(evidenceCalls,1);
+  for(const mismatch of [{...authority,scope:'/another-workspace'},
+    {...authority,profile:grant.profile==='read_only'?'workspace_agent':'read_only'},
+    {...authority,workspace:'/another-workspace'}])assert.throws(()=>host.controller.permissionEvidence(mismatch),/permission changed/);
+  assert.equal(evidenceCalls,1,'Scope/profile mismatch must fail before obtaining file evidence');
+  saved.access={...grant,id:'replacement-grant',profile:grant.profile==='read_only'?'workspace_agent':'read_only'};
+  assert.throws(()=>host.controller.permissionEvidence(authority),/permission changed/);
+  assert.equal(evidenceCalls,1,'A stale caller authority must not obtain proof from its replacement grant');
+  assert(host.controller.permissionEvidence());assert.equal(evidenceCalls,2,'A later caller may explicitly validate the new current grant');
+  checks.push('permission evidence is bound to the caller generation, scope and profile rather than silently inheriting a replacement grant');
+ }
+ {
+  const saved={},host=setup(saved);await host.arm();const originalGrant=saved.access.id;
+  const request=host.deps.request,configure=host.deps.configureModels;
+  host.deps.authorization.evidence=()=>({path:'/private/authorization.json',digest:'b'.repeat(64)});
+  host.deps.configureModels=async(...args)=>{
+   const result=await configure(...args);saved.access={...saved.access,id:'changed-during-model-selection'};return result;
+  };
+  host.deps.request=async(m,t,a,transport)=>{
+   if(m.event==='start'){
+    assert.equal(transport.authority.generation,originalGrant);
+    host.controller.permissionEvidence(transport.authority);
+   }
+   return request(m,t,a);
+  };
+  await assert.rejects(host.send('low',[{role:1,content:[new Text('Review workspace')]}]),/permission changed/);
+  assert.equal(host.calls.length,0,'Changing a grant while selecting the model cannot authorize inference or source work');
+  checks.push('orchestration passes its captured authority through submission and detects a grant replacement during asynchronous model selection');
+ }
+ {
+  const saved={},host=setup(saved);await host.arm();
+  const proposal=(await host.send()).find(value=>value instanceof Call);assert(proposal);
+  const oldGrant=saved.access.id,request=host.deps.request;
+  host.deps.authorization.evidence=()=>({path:'/private/authorization.json',digest:'c'.repeat(64)});
+  host.deps.request=async(m,t,a,transport)=>{
+   if(m.op==='native_execute'){
+    assert.equal(transport.authority.generation,oldGrant);
+    saved.access={...saved.access,id:'replacement-after-confirmation',profile:'read_only'};
+    host.controller.permissionEvidence(transport.authority);
+   }
+   return request(m,t,a);
+  };
+  await assert.rejects(host.tool.invoke({input:proposal.input,toolInvocationToken:{}},host.token.token),/permission changed/);
+  assert(!host.calls.some(value=>value.op==='native_execute'),'A confirmed old action cannot execute under a replacement grant');
+  checks.push('confirmed native actions carry the exact validated access generation and fail before execution when the grant is replaced or downgraded');
+ }
  console.log(JSON.stringify({passed:true,checks},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;});
 

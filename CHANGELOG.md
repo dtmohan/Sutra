@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.54.0
+
+- Move accepted bridge requests into a private persistent coordinator independent of the VS Code UI, with authenticated workspace/chat-bound IDs, bounded queueing and retained results/activity.
+- Reconnect same-chat continuations to the original request without replay; acknowledge results after saving workflow pointers and inspect current core state before using cached results.
+- Separate display detachment from explicit runner cancellation; show runner state and Stop in Monitor and status-bar controls, retaining consumed spending and shared-provider completion uncertainty.
+- Recheck persisted workspace grant bytes before queued dispatch; explicit revocation cancels queued operations and requests active worker cancellation.
+- Preserve uncertain work across coordinator crashes without replay; stop admission and withhold results after journal failures. Bind startup to the shipped runtime and constrain private transport retention.
+- Keep the existing gateway, task state machine, model tiers, backend deadlines and canonical STP kernel unchanged. The NPU retrieval prototype is not automatically enabled.
+
+## 0.53.3
+
+- Allow explicit shared-Ollama retries through fresh admission when an older call marker remains but the Sutra OS slot is free; loaded-model inventory is not request activity.
+- Preserve interrupted completion as a bounded diagnostic without clearing receipts, changing consumed spending or granting exclusive model-unload authority after a later success.
+- Retain uncertainty even when an interrupted request is absent from model inventory; report exclusive ownership uncertainty separately from missing telemetry.
+- Test resident-marker recovery, live-slot exclusion, hardware and identity refusals, and saved conversation reload/model switching. Keep model tiers, deadlines and the canonical STP kernel unchanged.
+
 ## 0.53.2
 
 - Save conversation transport timeouts as resumable provider waits, preserving the original request, parent context, model settings and consumed spending.

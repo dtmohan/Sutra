@@ -41,8 +41,12 @@
   fallback does not relax reviewer identity or turn withheld work into success.
 - Resource recovery releases at most one confirmed idle owned model and observes
   stability for up to three seconds. It does not automatically retry inference.
-  Interrupted model activity stays uncertain until observed absent; no caller is
-  assumed idle just because a local lease was released after process death.
+  Shared-mode retries can pass fresh admission after an interrupted call releases
+  the Sutra OS lease. Ollama schedules the backend queue; model residency cannot
+  identify a request or establish whether it has stopped. Interrupted completion
+  remains unverified even after an empty inventory or a newer successful request.
+  A bounded sticky diagnostic suppresses exclusive idle-model unloading while
+  that uncertainty remains; changing ownership settings does not clear it.
 - Model explanations can contain unsupported factual claims. Structural diagram
   validation does not establish the truth of device specifications or connections.
 - A generated diagram can merge distinct devices unless identity constraints are

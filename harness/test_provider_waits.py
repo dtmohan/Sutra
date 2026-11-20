@@ -28,3 +28,10 @@ class ProviderWaitTests(unittest.TestCase):
         self.assertEqual(wait_category({'available':True,'sample':{'wall_time':1000}}),'hardware_pressure')
         self.assertEqual(wait_category({'available':False,'reason':'No sample'}),'measurement_unavailable')
         self.assertEqual(wait_category({'runtime':{'kind':'model_capacity'}}),'model_admission')
+
+    def test_interrupted_runtime_ownership_is_not_a_missing_measurement(self):
+        state = {'available': False, 'admitted': False,
+                 'reason': 'An interrupted request may still be running.',
+                 'runtime': {'kind': 'interrupted'}}
+        self.assertEqual(wait_category(state), 'runtime_uncertain')
+        self.assertEqual(ResourceWait(state).category, 'runtime_uncertain')

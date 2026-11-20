@@ -1,4 +1,16 @@
-Sutra 0.53.2 — Resumable provider waits
+Sutra 0.54.0 — Persistent request coordinator
+
+Accepted requests now run in a private, persistent coordinator outside the VS Code
+UI. Reloading or stopping the chat display detaches it; send continue in the same
+chat to reconnect without resubmitting work. Use Stop runner request in Sutra
+Monitor or the status-bar controls for explicit cancellation. Each worker step
+still uses the existing gateway, permissions and budgets. NPU retrieval remains
+experimental and is not enabled by this update.
+
+Shared-server retries no longer mistake a loaded Ollama model for a still-running
+request. A free Sutra slot permits fresh admission for an explicit request, while
+interrupted completion remains unverified and cannot authorize model unloading.
+Context, permissions and past charges stay intact.
 
 Conversation timeouts retain the original request and spending for explicit
 resume. Provider-header waits and interrupted streams have distinct diagnostics.
