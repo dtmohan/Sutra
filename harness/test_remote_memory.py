@@ -293,9 +293,12 @@ class RemoteMemoryTests(unittest.TestCase):
 
     def test_ram_checkpoint_reuse_requires_exact_instance_and_file_identity(self):
         sample = copy.deepcopy(self.sample)
+        sample['model']['hash_ms'] = 0.
         server = copy.deepcopy(sample['server'])
         def capture(_profile, _script, **kwargs):
-            return copy.deepcopy(sample)
+            if '--query-gpu' in _script:
+                return copy.deepcopy(sample)
+            return {'version': 1, 'nonce': sample['nonce'], 'binding': memory._cache_binding(sample)}
         with patch('remote_control.ensure_tunnel'), patch('remote_control.run_ps', side_effect=capture), \
                 patch.object(memory, '_server', return_value=server), \
                 patch.object(memory, 'verify_instance'), \
@@ -306,18 +309,23 @@ class RemoteMemoryTests(unittest.TestCase):
             warm = memory.probe(self.profile)
             self.assertEqual(warm['model']['digest_basis'], 'verified_hash_reused_with_stat_and_instance')
             sample['model']['mtime_ticks'] = '639000000000000001'
-            with self.assertRaisesRegex(InvalidUpdate, 'verified checkpoint'):
+            with self.assertRaisesRegex(InvalidUpdate, 'verified checkpoint|cold-size preflight'):
                 memory.probe(self.profile)
             sample['model']['mtime_ticks'] = self.sample['model']['mtime_ticks']
             sample['boot_id'] = '2026-11-20T13:00:00Z'
-            with self.assertRaisesRegex(InvalidUpdate, 'verified checkpoint'):
+            with self.assertRaisesRegex(InvalidUpdate, 'verified checkpoint|cold-size preflight'):
                 memory.probe(self.profile)
 
     def test_verified_digest_reuse_never_reuses_gpu_headroom_or_survives_process_restart(self):
         sample = copy.deepcopy(self.sample)
+        sample['model']['hash_ms'] = 0.
         server = copy.deepcopy(sample['server'])
+        def capture(_profile, script, **kwargs):
+            if '--query-gpu' in script:
+                return copy.deepcopy(sample)
+            return {'version': 1, 'nonce': sample['nonce'], 'binding': memory._cache_binding(sample)}
         with patch('remote_control.ensure_tunnel'), \
-                patch('remote_control.run_ps', side_effect=lambda *a, **k: copy.deepcopy(sample)), \
+                patch('remote_control.run_ps', side_effect=capture), \
                 patch.object(memory, '_server', return_value=server), \
                 patch.object(memory, 'verify_instance'), \
                 patch.object(memory.secrets, 'token_hex', return_value='0' * 32):
@@ -331,7 +339,7 @@ class RemoteMemoryTests(unittest.TestCase):
             # has no RAM checkpoint and cannot promote that plan to identity.
             memory._save(self.root, memory.evaluate(self.profile, first, 4096))
             memory._verified.clear()
-            with self.assertRaisesRegex(InvalidUpdate, 'verified checkpoint'):
+            with self.assertRaisesRegex(InvalidUpdate, 'verified checkpoint|cold-size preflight'):
                 memory.probe(self.profile)
 
     def test_verified_identity_cache_has_a_fixed_profile_bound(self):

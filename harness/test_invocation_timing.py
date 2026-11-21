@@ -51,6 +51,40 @@ class TimingPolicyTests(unittest.TestCase):
         with patch.object(lifecycle, 'hard_deadline_supported', return_value=False):
             self.assertIsNone(timing.plan(self.provider, 'chat_reviewer', self.payload))
 
+    def test_child_output_and_deadline_share_one_versioned_bounded_allocation(self):
+        child = {'child_transport_version': 1, 'child_slice': {'ordinal': 1}}
+        value = timing.plan(self.provider, 'subagent', child)
+        self.assertEqual(value['seconds'], 360)
+        self.assertEqual(timing.validate(value, 'subagent', child, 8192), 360)
+        self.assertEqual(timing.reserved_seconds({'role': 'subagent', 'transport_timing': value,
+            'budget_profile': {'response_reserve': 8192}}), 360)
+        self.assertIsNone(timing.plan(self.provider, 'subagent', {'child_slice': {'ordinal': 1}}))
+        self.provider.budget = Budget(16384, 2048)
+        self.assertEqual(timing.seconds(self.provider, 'subagent', child), 150)
+        for change in ({'child_transport_version': True}, {'child_transport_version': 3},
+                       {'child_slice': None}):
+            with self.subTest(change=change), self.assertRaises(InvalidUpdate):
+                timing.plan(self.provider, 'subagent', dict(child, **change))
+
+    def test_child_time_uses_remaining_share_without_changing_committed_limits(self):
+        child = {'child_transport_version': 2, 'child_slice': {'ordinal': 5}}
+        ledger = Mock()
+        ledger.run.return_value = {'session': 'review'}
+        branch = {'limits': {'seconds': 510.7746473334286}, 'used': {'seconds': 161.489103249}}
+        task = {'limits': {'seconds': 3600}, 'used': {'seconds': 186}}
+        original = copy.deepcopy([branch, task])
+        with patch('orchestration.ACTIVE', Mock(get=Mock(return_value='branch'))), \
+                patch('orchestration.gates', return_value=[branch]), \
+                patch.object(review_budget, 'usage', return_value=task):
+            value = timing.plan(self.provider, 'subagent', child, ledger=ledger, run_id='run')
+        self.assertEqual([branch, task], original)
+        self.assertEqual(value['seconds'], 349)
+        self.assertEqual(timing.validate(value, 'subagent', child, 8192), 349)
+        self.assertEqual(timing.reserved_seconds({'role': 'subagent', 'transport_timing': value,
+            'budget_profile': {'response_reserve': 8192}}), 349)
+        with self.assertRaises(InvalidUpdate):
+            timing.validate(dict(value, seconds=361), 'subagent', child, 8192)
+
     def test_forged_seconds_output_reserve_or_version_is_rejected(self):
         value = timing.plan(self.provider, 'chat_reviewer', self.payload)
         self.assertEqual(timing.validate(value, 'chat_reviewer', self.payload, 8192), 360)

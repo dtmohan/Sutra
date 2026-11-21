@@ -4,7 +4,7 @@ from context_manager import InvalidUpdate
 DEFAULT_SECONDS = 150
 LONG_SECONDS = 360
 BRIDGE_HEADROOM = 30
-ROLES = {'chat_reviewer', 'report_reviewer'}
+ROLES = {'chat_reviewer', 'report_reviewer', 'subagent'}
 
 
 class BridgeStepRequired(RuntimeError):
@@ -15,6 +15,13 @@ class BridgeStepRequired(RuntimeError):
 
 
 def eligible(role, payload):
+    if role == 'subagent':
+        if 'child_transport_version' not in payload:
+            return False
+        if (type(payload['child_transport_version']) is not int or payload['child_transport_version'] not in (1, 2)
+                or not isinstance(payload.get('child_slice'), dict) or not payload['child_slice']):
+            raise InvalidUpdate('Unsupported child transport timing profile')
+        return True
     if role not in ROLES or 'review_transport_version' not in payload:
         return False
     flag = payload['review_transport_version']
@@ -34,7 +41,7 @@ def provider_cap(provider):
             and hard_deadline_supported() else DEFAULT_SECONDS)
 
 
-def plan(provider, role, payload):
+def plan(provider, role, payload, *, ledger=None, run_id=None):
     if not eligible(role, payload): return None
     cap = provider_cap(provider)
     # Unsupported providers keep the existing transport and accounting recipe.
@@ -42,7 +49,24 @@ def plan(provider, role, payload):
     reserve = provider.budget.response_reserve
     if type(reserve) is not int or reserve < 1:
         raise InvalidUpdate('Invalid timed response reserve')
-    return {'version': 1, 'seconds': LONG_SECONDS if reserve > 2048 else DEFAULT_SECONDS,
+    seconds = LONG_SECONDS if reserve > 2048 else DEFAULT_SECONDS
+    version = payload['child_transport_version'] if role == 'subagent' else 1
+    if version == 2 and seconds > DEFAULT_SECONDS and ledger is not None:
+        import math
+        import orchestration
+        import review_budget
+
+        session = ledger.run(run_id)['session']
+        owner = orchestration.ACTIVE.get() or orchestration.task(ledger, session)['id']
+        frames = orchestration.gates(ledger, owner, {})
+        task = review_budget.usage(ledger, session)
+        if task is not None:
+            frames.append({'limits': task['limits'], 'used': task['used']})
+        remaining = min(frame['limits']['seconds'] - frame['used']['seconds'] for frame in frames)
+        seconds = max(DEFAULT_SECONDS, min(seconds, math.floor(remaining)))
+    # The gateway rechecks this proposed duration together with every other
+    # reservation immediately before dispatch.
+    return {'version': version, 'seconds': seconds,
             'response_reserve': reserve, 'provider_cap': cap}
 
 
@@ -53,11 +77,22 @@ def seconds(provider, role, payload):
 def validate(value, role, payload, response_reserve):
     if value is None: return DEFAULT_SECONDS
     if not eligible(role, payload): raise InvalidUpdate('Transport timing requires a new report packet')
+    if isinstance(value, dict) and value.get('version') != (
+            payload['child_transport_version'] if role == 'subagent' else 1):
+        raise InvalidUpdate('Transport timing version differs from its packet')
+    return _reserved(value, role, response_reserve)
+
+
+def _reserved(value, role, response_reserve):
     if (not isinstance(value, dict) or set(value) != {'version', 'seconds', 'response_reserve', 'provider_cap'}
             or any(type(value.get(k)) is not int for k in value)
-            or value['version'] != 1 or value['provider_cap'] != LONG_SECONDS
-            or value['response_reserve'] != response_reserve
-            or value['seconds'] != (LONG_SECONDS if response_reserve > 2048 else DEFAULT_SECONDS)):
+            or value['version'] not in (1, 2) or value['provider_cap'] != LONG_SECONDS
+            or role not in ROLES or (value['version'] == 2 and role != 'subagent')
+            or value['response_reserve'] != response_reserve):
+        raise InvalidUpdate('Invalid committed transport timing')
+    maximum = LONG_SECONDS if response_reserve > 2048 else DEFAULT_SECONDS
+    minimum = maximum if value['version'] == 1 else DEFAULT_SECONDS
+    if not minimum <= value['seconds'] <= maximum:
         raise InvalidUpdate('Transport timing differs from its admitted output reserve')
     return value['seconds']
 
@@ -66,14 +101,7 @@ def reserved_seconds(envelope):
     value = envelope.get('transport_timing')
     if value is None: return DEFAULT_SECONDS
     # Offline accounting/reconciliation must not consult a provider or clock.
-    if (not isinstance(value, dict) or set(value) != {'version', 'seconds', 'response_reserve', 'provider_cap'}
-            or any(type(value.get(k)) is not int for k in value)
-            or value['version'] != 1 or value['provider_cap'] != LONG_SECONDS
-            or envelope.get('role') not in ROLES
-            or value['response_reserve'] != envelope.get('budget_profile', {}).get('response_reserve')
-            or value['seconds'] != (LONG_SECONDS if value['response_reserve'] > 2048 else DEFAULT_SECONDS)):
-        raise InvalidUpdate('Invalid committed transport timing')
-    return value['seconds']
+    return _reserved(value, envelope.get('role'), envelope.get('budget_profile', {}).get('response_reserve'))
 
 
 def require_headroom(value):

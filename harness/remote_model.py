@@ -152,7 +152,8 @@ class RemoteModel(LocalModel):
         from model_activity import thinking_control
         thinking = thinking_control(self.context_metadata, os.environ.get('SUTRA_THINKING', 'adaptive'))
         super().__init__(log_dir, port=self.profile['port'], model=model,
-                         budget=Budget(context_limit=self.context_cap, response_reserve=2048),
+                         budget=Budget(context_limit=self.context_cap,
+                                       response_reserve=max(2048, min(8192, self.context_cap // 3)) if review else 2048),
                          thinking=thinking)
         self.remote_instance = None
         self.expected_identity = remote_profiles.identity(model, self.profile)
@@ -161,6 +162,8 @@ class RemoteModel(LocalModel):
         current = remote_profiles.load(self.model)
         if current['profile_hash'] != self.profile['profile_hash']:
             raise InvalidUpdate('Remote provider profile changed after context selection')
+        from remote_context import configure
+        configure(self)
         return self.context_metadata
 
     @contextmanager
@@ -172,7 +175,6 @@ class RemoteModel(LocalModel):
             yield plan
 
     def call(self, call_id, system, payload, schema):
-        from decoder_schema import for_decoder
         from invocation_gateway import consume_dispatch, transport_seconds
         from model_activity import ACTIVE
         from model_packet import build
@@ -187,15 +189,13 @@ class RemoteModel(LocalModel):
         if self.remote_instance is None:
             raise InvalidUpdate('Remote model has no admitted, verified GPU instance')
         charge = self.budget.check(system, payload, schema)
-        messages = packet['messages'] if packet else self.messages(system, payload)
-        wire_schema = for_decoder(packet['schema'] if packet else schema, None)
-        body = {'model': self.profile['model'], 'messages': messages,
-                'stream': True, 'stream_options': {'include_usage': True},
-                'max_tokens': self.budget.response_reserve,
-                'temperature': 0.6, 'top_p': 0.95, 'top_k': 20, 'min_p': 0,
-                'seed': 42, 'cache_prompt': False,
-                'response_format': {'type': 'json_schema', 'json_schema': {
-                    'name': 'sutra_response', 'strict': True, 'schema': wire_schema}}}
+        from remote_context import wire_request
+        body, _, wire_schema = wire_request(self.profile, system, payload, schema,
+                                            self.budget.response_reserve)
+        from context_window import exact, validate_proof
+        physical = getattr(self, 'context_measurement', None) if exact(self.budget) else None
+        if exact(self.budget):
+            validate_proof(physical, self.budget, system, payload, schema)
         transport = {'version': 1, 'phase': 'connect', 'headers_received': False,
                      'frames_received': 0, 'content_bytes': 0, 'reasoning_bytes': 0}
         record = {'call_id': call_id, 'request': body, 'provider': 'sutra_remote',
@@ -205,6 +205,8 @@ class RemoteModel(LocalModel):
                                         'schema_sha256': sha(canonical(wire_schema))},
                   'reasoning_control': {'requested': self.thinking, 'effective': 'model_default',
                                         'switch_supported': False, 'thinking_only': self.profile['thinking_only']}}
+        if physical is not None:
+            record['physical_context'] = physical
         activity = ACTIVE.get()
         if activity:
             activity.emit('control', requested=self.thinking, policy=payload.get('reasoning'),
@@ -216,6 +218,7 @@ class RemoteModel(LocalModel):
         response = None
         self.runtime_completed = False
         try:
+            remote_control.ensure_tunnel(self.profile)
             remote_control.verify_server(self.profile)
             from remote_memory import require_dispatch_fresh, verify_instance
             verify_instance(self.profile, self.remote_instance)
@@ -238,6 +241,8 @@ class RemoteModel(LocalModel):
                                   max(65536, self.budget.response_reserve * 128), activity, transport)
             self.runtime_completed = True
             record['response'] = result
+            if physical is not None and result['prompt_eval_count'] != physical['prompt_tokens']:
+                raise InvalidUpdate('Remote generation prompt usage differs from its exact count proof')
             if result['done_reason'] == 'length':
                 raise OutputLimitExceeded('Remote model reached the allocated output limit; reasoning and answer share that allocation')
             if result['done_reason'] != 'stop':

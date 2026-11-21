@@ -229,6 +229,9 @@ def dashboard(root):
         from coherence_observations import latest as latest_coherence
         try:data['coherence_observations']=latest_coherence(SimpleNamespace(db=db))
         except Exception as exc:_diagnostic_error(data,'coherence_observations',exc)
+        from child_checkpoint_progress import latest as latest_review_progress
+        try:data['review_progress_observations']=latest_review_progress(db)
+        except Exception as exc:_diagnostic_error(data,'review_progress_observations',exc)
         meta=json.loads((root/'workspace.json').read_text()) if (root/'workspace.json').exists() else {}
         session=meta.get('active');data['session']=session;data['model']=meta.get('model');data['checkpoint']=meta.get('checkpoint')
         from types import SimpleNamespace

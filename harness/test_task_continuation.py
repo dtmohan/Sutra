@@ -189,13 +189,17 @@ class ContinuationRecoveryTests(unittest.TestCase):
                                 'reason': 'The selected provider is busy.'})
             yield
         provider.dispatch_gate = busy
-        gateway = object.__new__(InvocationGateway)
-        gateway._borrowed = None; gateway.provider = provider; gateway.db = self.root / 'state.sqlite'
+        self.until('CHILDREN')
+        session = self.meta['active']
+        run = self.s.begin_run(session, self.prompt, [], None)
+        gateway = InvocationGateway(self.s.path, run, provider, ledger=self.s)
         with patch('reasoning_policy.check_provider'), self.assertRaises(ResourceWait) as stopped:
             gateway.invoke('conversation', 'unused', 'No inference', {}, {}, 'unused')
         runtime = stopped.exception.state['runtime']
         self.assertEqual(runtime['model'], 'strata:high')
         self.assertIs(runtime['inference_started'], False)
+        self.assertEqual(self.s.run(run)['events'][-1]['kind'], 'RESOURCE_WAIT')
+        self.assertTrue(self.s.verify_protocol(session))
 
     def test_summary_once_includes_classifier_and_workspace_without_spending(self):
         out = self.until('DONE'); sid = self.meta['active']

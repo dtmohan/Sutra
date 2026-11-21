@@ -22,6 +22,7 @@ from invocation_gateway import InvocationLedger
 from karma_adapter import KarmaAdapter
 import model_identity
 import provider_resources
+from monitoring import ResourceWait
 from remote_model import RemoteModel
 import remote_profiles
 from review_budget import BudgetStop, usage
@@ -105,6 +106,7 @@ class RemoteIntegrationTests(unittest.TestCase):
                 ('runtime_memory.fresh_resources', {'side_effect': self.local_hardware}),
                 ('remote_memory.probe', {'side_effect': self.remote_hardware}),
                 ('remote_memory.verify_instance', {'return_value': True}),
+                ('remote_control.ensure_tunnel', {'return_value': {'ready': True, 'owned': True}}),
                 ('remote_control.verify_server', {'return_value': {'verified': True}}),
                 ('vscode_bridge.ollama', {'side_effect': AssertionError('Ollama is not used by these profiles')})):
             guard = patch(target, **kwargs)
@@ -121,6 +123,7 @@ class RemoteIntegrationTests(unittest.TestCase):
         sample = observation(profile)
         now = time.time()
         sample.update(wall_time=now, capture_started_at=now - .1, capture_seconds=.1)
+        sample['model']['hash_ms'] = 10.
         sample['process']['context_tokens'] = str(profile['context_tokens'])
         sample['server']['context_tokens'] = profile['context_tokens']
         return sample
@@ -231,6 +234,87 @@ class RemoteIntegrationTests(unittest.TestCase):
         self.assertTrue(result['result']['admission']['admitted'], result)
         self.assertEqual(self.local_measurements, [])
         self.assertEqual(len(self.requests), 1)
+
+    def test_failed_fresh_observation_preserves_two_accepted_calls_and_resumes_across_models(self):
+        first = self.ask('mid')
+        second = self.ask('mid', first['result']['invocation_id'])
+        session, parent = second['session'], second['result']['invocation_id']
+        before = usage(self.ledger, session)
+        contract = self.ledger.current_contract(session)
+        packet_contract = self.payload(second)['contract']
+        prefix = self.ledger.db.execute('SELECT id,record_json FROM invocation_receipts '
+            'WHERE session=? ORDER BY seq', (session,)).fetchall()
+        self.assertEqual(before['used']['calls'], 2)
+        self.reload()
+        with patch('remote_memory.probe', side_effect=InvalidUpdate('Fresh remote SSH inspection timed out')), \
+                patch('monitoring.require_resources', side_effect=AssertionError('Mac cannot replace remote evidence')):
+            with self.assertRaises(ResourceWait) as paused:
+                self.ask('mid', parent)
+        self.assertEqual(paused.exception.state['decision'], 'BRIDGE')
+        self.assertEqual(paused.exception.category, 'measurement_unavailable')
+        self.assertIn('SSH inspection timed out', paused.exception.state['reason'])
+        self.assertIs(paused.exception.state['runtime']['inference_started'], False)
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(usage(self.ledger, session), before)
+        self.assertEqual(self.ledger.current_contract(session), contract)
+        self.assertEqual(self.ledger.db.execute('SELECT id,record_json FROM invocation_receipts '
+            'WHERE session=? ORDER BY seq', (session,)).fetchall(), prefix)
+        self.assertEqual(self.ledger.db.execute('SELECT COUNT(*) FROM invocations '
+            'WHERE session=?', (session,)).fetchone()[0], 2)
+        self.reload()
+        switched = self.ask('high', parent)
+        self.assertTrue(switched['result']['admission']['admitted'])
+        self.assertEqual(self.payload(switched)['contract'], packet_contract)
+        self.assertIn('Marigold', canonical(self.payload(switched)['memory']))
+        self.assertEqual(usage(self.ledger, session)['used']['calls'], before['used']['calls'] + 1)
+        self.assertEqual(usage(self.ledger, session)['used']['tokens'], before['used']['tokens'] + 154)
+        fresh = self.ask('mid', switched['result']['invocation_id'])
+        self.assertTrue(fresh['result']['admission']['admitted'])
+        self.assertEqual(len(self.requests), 3)
+        self.assertEqual(self.payload(fresh)['contract'], packet_contract)
+        self.assertEqual(self.ledger.db.execute('SELECT id,record_json FROM invocation_receipts '
+            'WHERE session=? ORDER BY seq', (session,)).fetchall()[:len(prefix)], prefix)
+        self.assertEqual(usage(self.ledger, session)['used']['tokens'], before['used']['tokens'] + 154 + 125)
+        self.assertTrue(self.ledger.verify_invocations(session))
+
+    def test_expiry_after_gateway_reservation_stops_post_and_keeps_consumed_allocation(self):
+        first = self.ask('mid')
+        session, parent = first['session'], first['result']['invocation_id']
+        before = usage(self.ledger, session)
+        contract = self.ledger.current_contract(session)
+        import remote_memory
+        state = remote_memory._blocked('The dispatch observation expired before transport')
+        state['runtime'] = {'kind': 'remote_observation', 'stage': 'remote_pre_transport',
+                            'inference_started': False, 'model': self.remote['name']}
+        with patch('remote_memory.require_dispatch_fresh', side_effect=ResourceWait(state)):
+            with self.assertRaises(ResourceWait) as stopped:
+                self.ask('mid', parent)
+        self.assertEqual(stopped.exception.state['reason'], state['reason'])
+        self.assertEqual(stopped.exception.state['decision'], state['decision'])
+        self.assertEqual(stopped.exception.state['runtime']['stage'], 'remote_pre_transport')
+        self.assertIs(stopped.exception.state['runtime']['inference_started'], False)
+        self.assertEqual(len(self.requests), 1)
+        charged = usage(self.ledger, session)
+        self.assertEqual(charged['used']['calls'], before['used']['calls'] + 1)
+        self.assertGreater(charged['used']['tokens'], before['used']['tokens'])
+        self.assertEqual(charged['limits'], before['limits'])
+        self.assertEqual(self.ledger.current_contract(session), contract)
+        receipt = json.loads(self.ledger.db.execute('SELECT record_json FROM invocation_receipts '
+            'WHERE session=? ORDER BY seq DESC LIMIT 1', (session,)).fetchone()[0])
+        self.assertEqual(receipt['status'], 'quarantined')
+        self.assertNotEqual(receipt['invocation_id'], parent)
+        self.assertEqual(stopped.exception.state['runtime']['invocation_id'], receipt['invocation_id'])
+        waits = [json.loads(raw) for raw, in self.ledger.db.execute(
+            'SELECT record_json FROM protocol_events ORDER BY rowid') if json.loads(raw)['kind'] == 'RESOURCE_WAIT']
+        self.assertTrue(waits)
+        self.assertIn(state['reason'], canonical(waits[-1]))
+        gates = [json.loads(raw) for raw, in self.ledger.db.execute(
+            "SELECT payload_json FROM page_audit WHERE event='RESOURCE_GATE' ORDER BY seq")]
+        self.assertTrue(gates)
+        self.assertIn(state['reason'], canonical(gates[-1]))
+        self.reload()
+        self.assertEqual(usage(self.ledger, session), charged)
+        self.assertTrue(self.ledger.verify_invocations(session))
 
     def test_remote_gpu_plan_does_not_become_a_local_runtime_memory_plan(self):
         import remote_memory

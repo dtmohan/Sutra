@@ -1,4 +1,10 @@
-Sutra 0.56.0 — Remote GPU inference
+Sutra 0.57.0 — Review allocation and admission recovery
+
+Child reviews retain the output allowance earned from the selected model window
+and remaining task allocation. Supported remote runtimes measure the actual
+rendered prompt with their count-only API, independently of conservative spending
+reservations. Unavailable remote measurements pause with their original cause
+and an audit receipt. Recovery retains context, permissions and consumed budgets.
 
 Remote NVIDIA inference is available through a trusted SSH profile. The remote
 provider keeps model calls inside the existing invocation gateway and checks

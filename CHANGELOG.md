@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.57.0
+
+- Retain capability- and allocation-derived child output reserves instead of clipping every source slice to 2,048 tokens. For supported large-output child calls, fit the transport reservation within the remaining task and branch time up to the existing 360-second cap. Defer safely to a fresh bridge step when needed.
+- Measure remote rendered prompts through the authenticated native count-only API using the same messages, schema and generation controls; bind exact physical fit to the approved model/runtime profile and template while keeping financial reservations, task limits and consumed spending separate.
+- Recheck exact counts and model/template identity at dispatch, retain immutable count proofs for offline verification, and reject mismatched generation usage or unavailable established counters.
+- Preserve remote BRIDGE/FIN measurement causes through admission and the existing saved-task pause path, including failures immediately before inference after a charged reservation; keep rejected receipts and all prior spending.
+- Record failed resource gates and explicit resource waits in the same hash-chained audit as their attempts instead of masking them as generic protocol failures.
+- Bound cold weight verification by measured file size while retaining complete SHA-256 checks, exact instance binding and the existing eight-second final GPU/RAM observation freshness requirement.
+- Show observe-only child checkpoint changes in Sutra Monitor alongside measured tokens and elapsed time. Withheld outputs show cost without reporting citation or follow-up changes.
+- Keep saved context, constraints, permissions and consumed budgets across reloads, retries and model changes. Keep the canonical STP kernel unchanged.
+
 ## 0.56.0
 
 - Add opt-in SSH-tunnelled llama.cpp CUDA provider profiles using private user settings, pinned SSH host keys and protected API credentials; preserve existing tier selections.

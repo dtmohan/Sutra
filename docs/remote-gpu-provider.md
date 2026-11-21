@@ -1,6 +1,6 @@
 # Remote NVIDIA provider
 
-Sutra 0.56.0 can send governed model calls to a Windows NVIDIA machine through
+Sutra can send governed model calls to a Windows NVIDIA machine through
 an owned SSH tunnel and a private llama.cpp endpoint. The canonical STP kernel
 is unchanged. Remote inference uses the same invocation gateway, task contract,
 source custody, output checks and cumulative spending receipts as local inference.
@@ -60,6 +60,13 @@ are always measured afresh. The checkpoint is not restored from a diagnostic fil
 The exact runtime instance is checked around inference; admission freshness is
 checked again immediately before POST. A rejected result retains its spending.
 
+Cold identity verification has a finite file-size-derived allowance for the full
+SHA-256 operation. Warm reuse retains its short inspection allowance. The final
+GPU/RAM observation still must be no more than eight seconds old; a longer hash
+window does not make old capacity measurements admissible. Unavailable checks
+retain their stage, elapsed allowance and bounded failure class, without logging
+credentials or raw SSH output.
+
 ## Context and diagnostics
 
 The current RTX profile uses a measured 32,768-token resident context allocation
@@ -67,6 +74,29 @@ and one generation slot. A smaller client working set can page optional history
 without changing that physical pool. A larger advertised training window does
 not expand either the server allocation or the task budget. New model calls still
 need remaining task/parent capacity and retain all pinned constraints.
+
+When the approved runtime supports `/v1/chat/completions/input_tokens`, Sutra
+counts the same rendered request sent to generation without running inference.
+The proof binds its messages, schema, output allowance, approved model/runtime
+digests and live template/default settings. A fresh count is checked before
+dispatch and compared with actual prompt usage afterward. An established counter
+that becomes unavailable pauses the task; it is not replaced by an estimated
+token-to-byte ratio. Runtimes without this capability retain conservative fit.
+
+Financial reservations remain conservative UTF-8 units and are admitted by the
+existing task and parent gates. A measured physical fit neither increases those
+limits nor resets previous spending. Child output uses the selected window and
+remaining allocation, bounded by the existing 8,192-token review ceiling. Supported
+large-output child calls reserve up to 360 seconds within their remaining task
+and branch time. If less than the regular 150-second reservation remains,
+the existing allocation check handles recovery. Insufficient bridge time defers
+the same checkpoint before inference.
+
+Remote negative observations preserve their BRIDGE/FIN verdict and reason through
+the saved workflow. The failed resource gate and resource-wait transition enter
+the same audit chain as its attempt. If admission expires after a reservation,
+the quarantined invocation and its spending remain recorded before the request
+pauses. Resume requires a new valid observation and does not replay accepted work.
 
 The copied `qwen3:4b` weights identify themselves as Qwen3-4B-Thinking-2507.
 The provider preserves its thinking-only template and native sampling defaults;

@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import secrets
 import stat
+import subprocess
 import tempfile
 import threading
 import time
@@ -28,6 +29,11 @@ from monitoring import ResourceWait
 PROFILE = 'remote-nvidia-v1'
 MAX_SAMPLE_AGE = 8
 MAX_CAPTURE_SECONDS = 20
+MAX_COLD_CAPTURE_SECONDS = 180
+MAX_COLD_RPC_SECONDS = 160
+MIN_HASH_BYTES_PER_SECOND = 128 * 1024**2
+COLD_RPC_FIXED_SECONDS = 5
+COLD_METADATA_SECONDS = 20
 MAX_INTEGER = 2**53 - 1
 GIB = 1024**3
 _DIGEST = re.compile('[a-f0-9]{64}')
@@ -35,23 +41,65 @@ _GPU_UUID = re.compile(r'GPU-[a-fA-F0-9-]{16,64}')
 _verified = OrderedDict()
 _verified_lock = threading.Lock()
 MAX_VERIFIED_MODELS = 32
+_REMOTE_STEPS = frozenset(('listener', 'process', 'executable_hash', 'os_identity',
+    'model_stat', 'model_hash', 'gpu_inventory', 'gpu_processes', 'ram',
+    'instance_recheck', 'reply'))
+_PS_STAGES = r'''
+function Observation-Step([string]$name) {
+ [Console]::Error.WriteLine('SUTRA_REMOTE_STAGE:'+$name)
+ [Console]::Error.Flush()
+}
+'''
+
+
+@contextmanager
+def _stage(name, seconds=None):
+    """Retain bounded host diagnostics without exposing exception arguments."""
+    began = time.monotonic()
+    try:
+        yield
+    except Exception as error:
+        if not getattr(error, 'remote_observation', None):
+            cause = error
+            for _ in range(4):
+                nested = cause.__cause__ or cause.__context__
+                if nested is None or nested is cause:
+                    break
+                cause = nested
+            details = {'stage': name, 'elapsed_seconds': round(max(0, time.monotonic() - began), 6),
+                       'timeout_seconds': seconds, 'error_type': type(error).__name__[:80],
+                       'cause_type': type(cause).__name__[:80],
+                       'failure_kind': ('timeout' if isinstance(cause, (TimeoutError, subprocess.TimeoutExpired))
+                                        else 'unavailable' if isinstance(cause, OSError) else 'rejected')}
+            stderr = getattr(cause, 'stderr', None)
+            if isinstance(stderr, bytes):
+                stderr = stderr[-8192:].decode('ascii', errors='ignore')
+            if isinstance(stderr, str):
+                markers = re.findall(r'^SUTRA_REMOTE_STAGE:([a-z_]{1,32})\r?$', stderr[-8192:], re.M)
+                known = [marker for marker in markers if marker in _REMOTE_STEPS]
+                if known:
+                    details['last_remote_step'] = known[-1]
+            error.remote_observation = details
+        raise
 
 
 def _literal(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def _probe_script(profile, nonce, cached=None):
+def _probe_script(profile, nonce, cached=None, expected_binding=None):
     # Every substituted value comes from the trusted, validated host profile,
     # not the model packet. Never put an API key or raw command line in output.
-    return r'''
+    return _PS_STAGES + r'''
 $ErrorActionPreference='Stop'
 $modelPath=MODEL_PATH
 $port=REMOTE_PORT
 $gpuIndex=GPU_INDEX
+Observation-Step 'listener'
 $listeners=@(Get-NetTCPConnection -State Listen -LocalPort $port)
 if ($listeners.Count -ne 1 -or $listeners[0].LocalAddress -ne '127.0.0.1') { throw 'One loopback listener is required' }
 $listener=$listeners[0]
+Observation-Step 'process'
 $proc=Get-CimInstance Win32_Process -Filter ('ProcessId='+$listener.OwningProcess)
 if (!$proc -or !$proc.ExecutablePath) { throw 'Listener process identity unavailable' }
 function Read-Argument($names) {
@@ -63,37 +111,48 @@ function Read-Argument($names) {
   return $null
 }
 $exe=Get-Item -LiteralPath $proc.ExecutablePath
+Observation-Step 'executable_hash'
 $exeHash=(Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+Observation-Step 'os_identity'
 $os=Get-CimInstance Win32_OperatingSystem
+Observation-Step 'model_stat'
 $before=Get-Item -LiteralPath $modelPath -Force
 if ($before.PSIsContainer -or ($before.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Model is not a regular file' }
 $stamp=@($before.Length,$before.LastWriteTimeUtc.Ticks,$before.CreationTimeUtc.Ticks)
 $binding=@{host_id=$env:COMPUTERNAME;boot_id=$os.LastBootUpTime.ToUniversalTime().ToString('o');pid=[int]$proc.ProcessId;
  started_at=$proc.CreationDate.ToUniversalTime().ToString('o');executable_sha256=$exeHash;model_path=$before.FullName;
  bytes=[long]$before.Length;mtime_ticks=$before.LastWriteTimeUtc.Ticks.ToString();creation_ticks=$before.CreationTimeUtc.Ticks.ToString()}
+$expected=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(EXPECTED_JSON)) | ConvertFrom-Json
+if($null -ne $expected) { foreach($key in $binding.Keys) { if($expected.$key -cne $binding[$key]) { throw 'Remote model identity changed after cold-size preflight' } } }
 $cached=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(CACHE_JSON)) | ConvertFrom-Json
 $reuse=($null -ne $cached)
 if($reuse) { foreach($key in $binding.Keys) { if($cached.binding.$key -cne $binding[$key]) { $reuse=$false } } }
 $timer=[Diagnostics.Stopwatch]::StartNew()
+Observation-Step 'model_hash'
 if($reuse) { $modelHash=$cached.sha256; $digestBasis='verified_hash_reused_with_stat_and_instance' }
 else { $modelHash=(Get-FileHash -LiteralPath $modelPath -Algorithm SHA256).Hash.ToLowerInvariant(); $digestBasis='fresh_full_hash' }
 $timer.Stop()
 $after=Get-Item -LiteralPath $modelPath -Force
 if (($stamp -join ':') -ne (@($after.Length,$after.LastWriteTimeUtc.Ticks,$after.CreationTimeUtc.Ticks) -join ':')) { throw 'Model changed during identity observation' }
+Observation-Step 'gpu_inventory'
 $gpuRaw=@(& nvidia-smi --query-gpu=index,uuid,name,driver_version,memory.total,memory.free,memory.used --format=csv,noheader,nounits)
 if ($LASTEXITCODE -ne 0) { throw 'NVIDIA GPU measurement failed' }
 $gpuRows=@($gpuRaw | ConvertFrom-Csv -Header index,uuid,name,driver,total_mib,free_mib,used_mib)
 $selected=@($gpuRows | Where-Object { [int]$_.index -eq $gpuIndex })
 if ($selected.Count -ne 1) { throw 'Configured GPU is not unique' }
 $gpu=$selected[0]
+Observation-Step 'gpu_processes'
 $appRaw=@(& nvidia-smi --query-compute-apps=pid,gpu_uuid --format=csv,noheader,nounits)
 if ($LASTEXITCODE -ne 0) { throw 'NVIDIA process measurement failed' }
 $apps=@($appRaw | ConvertFrom-Csv -Header pid,uuid)
 $gpuPids=@($apps | Where-Object { $_.uuid.Trim() -eq $gpu.uuid.Trim() } | ForEach-Object { [int]$_.pid })
 # RAM and device counters are always measured after any cold hash pass.
+Observation-Step 'ram'
 $os=Get-CimInstance Win32_OperatingSystem
+Observation-Step 'instance_recheck'
 $again=Get-CimInstance Win32_Process -Filter ('ProcessId='+$listener.OwningProcess)
 if (!$again -or $again.CreationDate -ne $proc.CreationDate -or $again.ExecutablePath -ne $proc.ExecutablePath) { throw 'Listener instance changed during measurement' }
+Observation-Step 'reply'
 @{
  version=1;nonce=NONCE;host_id=$env:COMPUTERNAME;boot_id=$os.LastBootUpTime.ToUniversalTime().ToString('o')
  listener=@{address=$listener.LocalAddress;port=[int]$listener.LocalPort;pid=[int]$listener.OwningProcess}
@@ -107,7 +166,84 @@ if (!$again -or $again.CreationDate -ne $proc.CreationDate -or $again.Executable
 } | ConvertTo-Json -Depth 6 -Compress
 '''.replace('MODEL_PATH', _literal(profile['model_path'])).replace(
         'REMOTE_PORT', str(profile['remote_port'])).replace('GPU_INDEX', str(profile['gpu_index'])).replace(
-        'NONCE', _literal(nonce)).replace('CACHE_JSON', _literal(base64.b64encode(canonical(cached).encode()).decode()))
+        'NONCE', _literal(nonce)).replace('CACHE_JSON', _literal(base64.b64encode(canonical(cached).encode()).decode())).replace(
+        'EXPECTED_JSON', _literal(base64.b64encode(canonical(expected_binding).encode()).decode()))
+
+
+
+def verification_budget(model_bytes, digest_basis):
+    """Bound identity work by bytes; never relax counter freshness or capacity."""
+    _integer(model_bytes, 'model bytes', 1)
+    if digest_basis == 'verified_hash_reused_with_stat_and_instance':
+        return {'kind': 'verified_identity_reuse', 'model_bytes': model_bytes,
+                'rpc_seconds': MAX_CAPTURE_SECONDS, 'capture_seconds': MAX_CAPTURE_SECONDS,
+                'minimum_hash_bytes_per_second': None, 'ceiling_applied': False}
+    if digest_basis != 'fresh_full_hash':
+        raise ValueError('Remote model digest evidence is unavailable')
+    # Integer arithmetic avoids rounding surprises for large JSON-safe sizes.
+    hash_seconds = (model_bytes + MIN_HASH_BYTES_PER_SECOND - 1) // MIN_HASH_BYTES_PER_SECOND
+    requested = max(MAX_CAPTURE_SECONDS, COLD_RPC_FIXED_SECONDS + hash_seconds)
+    rpc_seconds = min(MAX_COLD_RPC_SECONDS, requested)
+    return {'kind': 'cold_identity_from_fresh_file_size', 'model_bytes': model_bytes,
+            'rpc_seconds': rpc_seconds,
+            'capture_seconds': min(MAX_COLD_CAPTURE_SECONDS, rpc_seconds + COLD_METADATA_SECONDS),
+            'minimum_hash_bytes_per_second': MIN_HASH_BYTES_PER_SECOND,
+            'ceiling_applied': requested > MAX_COLD_RPC_SECONDS}
+
+
+def _preflight_script(profile, nonce):
+    # File and process metadata only. No weights hash, GPU read or inference.
+    return _PS_STAGES + r'''
+Observation-Step 'model_stat'
+$file=Get-Item -LiteralPath MODEL_PATH -Force
+if ($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Model is not a regular file' }
+Observation-Step 'listener'
+$listeners=@(Get-NetTCPConnection -State Listen -LocalPort PORT)
+if ($listeners.Count -ne 1 -or $listeners[0].LocalAddress -ne '127.0.0.1') { throw 'One loopback listener is required' }
+Observation-Step 'process'
+$proc=Get-CimInstance Win32_Process -Filter ('ProcessId='+$listeners[0].OwningProcess)
+if (!$proc -or !$proc.ExecutablePath) { throw 'Listener process identity unavailable' }
+Observation-Step 'executable_hash'
+$exeHash=(Get-FileHash -LiteralPath $proc.ExecutablePath -Algorithm SHA256).Hash.ToLowerInvariant()
+Observation-Step 'os_identity'
+$os=Get-CimInstance Win32_OperatingSystem
+@{version=1;nonce=NONCE;binding=@{host_id=$env:COMPUTERNAME;boot_id=$os.LastBootUpTime.ToUniversalTime().ToString('o');
+ pid=[int]$proc.ProcessId;started_at=$proc.CreationDate.ToUniversalTime().ToString('o');executable_sha256=$exeHash;
+ model_path=$file.FullName;bytes=[long]$file.Length;mtime_ticks=$file.LastWriteTimeUtc.Ticks.ToString();creation_ticks=$file.CreationTimeUtc.Ticks.ToString()}} | ConvertTo-Json -Depth 4 -Compress
+'''.replace('MODEL_PATH', _literal(profile['model_path'])).replace(
+        'PORT', str(profile['remote_port'])).replace('NONCE', _literal(nonce))
+
+
+def _preflight_binding(profile, response, nonce):
+    if (not isinstance(response, dict) or type(response.get('version')) is not int or
+            response['version'] != 1 or response.get('nonce') != nonce):
+        raise InvalidUpdate('Remote size preflight does not match its fresh observation request')
+    binding = response.get('binding')
+    if not isinstance(binding, dict) or set(binding) != {
+            'host_id', 'boot_id', 'pid', 'started_at', 'executable_sha256',
+            'model_path', 'bytes', 'mtime_ticks', 'creation_ticks'}:
+        raise InvalidUpdate('Remote size preflight identity is invalid')
+    _integer(binding['bytes'], 'model bytes', 1)
+    _integer(binding['pid'], 'listener process', 1)
+    for key in ('host_id', 'boot_id', 'started_at'):
+        _string(binding[key], 'preflight ' + key)
+    if _path(binding['model_path']) != _path(profile['model_path']):
+        raise InvalidUpdate('Remote size preflight refers to a different model file')
+    digest = binding['executable_sha256']
+    if (not isinstance(digest, str) or _DIGEST.fullmatch(digest) is None or
+            profile.get('executable_sha256') and digest != profile['executable_sha256']):
+        raise InvalidUpdate('Remote size preflight executable differs from its committed identity')
+    for key in ('mtime_ticks', 'creation_ticks'):
+        if not isinstance(binding[key], str) or re.fullmatch(r'[1-9][0-9]{0,18}', binding[key]) is None:
+            raise InvalidUpdate('Remote size preflight file timestamp is invalid')
+    return copy.deepcopy(binding)
+
+
+def _remaining(cap, deadline):
+    seconds = min(cap, deadline - time.monotonic())
+    if seconds <= 0:
+        raise InvalidUpdate('Remote identity observation exceeded its bounded verification window')
+    return seconds
 
 
 def _cache_binding(sample):
@@ -142,11 +278,15 @@ def _context(props):
     return settings.get('n_ctx', (settings.get('params') or {}).get('n_ctx'))
 
 
-def _server(profile):
+def _server(profile, deadline=None):
     from remote_control import request_json
-    props = request_json(profile, '/props')
-    models = request_json(profile, '/v1/models')
-    slots = request_json(profile, '/slots')
+    def read(path):
+        cap = 5 if deadline is None else _remaining(5, deadline)
+        with _stage('server_' + path.strip('/').replace('/', '_'), cap):
+            return request_json(profile, path, timeout_seconds=cap)
+    props = read('/props')
+    models = read('/v1/models')
+    slots = read('/slots')
     if not isinstance(props, dict) or not isinstance(models, dict) or not isinstance(slots, list):
         raise InvalidUpdate('Remote provider metadata has an invalid shape')
     rows = models.get('data')
@@ -167,7 +307,7 @@ def _server(profile):
                       if isinstance(row, dict) else {} for row in slots]}
 
 
-def verify_instance(profile, instance):
+def verify_instance(profile, instance, *, timeout_seconds=5):
     """Confirm the same listener process, without rereading weights or claiming idle."""
     from remote_control import run_ps
     script = r'''
@@ -181,7 +321,8 @@ $file=Get-Item -LiteralPath MODEL_PATH -Force
   host_id=$env:COMPUTERNAME;boot_id=$os.LastBootUpTime.ToUniversalTime().ToString('o');
   model_file=@{bytes=[long]$file.Length;mtime_ticks=$file.LastWriteTimeUtc.Ticks.ToString();creation_ticks=$file.CreationTimeUtc.Ticks.ToString()}} | ConvertTo-Json -Depth 3 -Compress
 '''.replace('PORT', str(profile['remote_port'])).replace('MODEL_PATH', _literal(profile['model_path']))
-    current = run_ps(profile, script, timeout_seconds=5)
+    with _stage('instance_confirmation', timeout_seconds):
+        current = run_ps(profile, script, timeout_seconds=timeout_seconds)
     if (not isinstance(current, dict) or current.get('pid') != instance.get('pid') or
             current.get('started_at') != instance.get('started_at') or
             current.get('address') != '127.0.0.1' or
@@ -194,31 +335,58 @@ $file=Get-Item -LiteralPath MODEL_PATH -Force
 
 
 def probe(profile):
-    """Capture fresh SSH device/process evidence and matching tunneled API state."""
+    """Separate a bounded cold identity pass from fresh counter admission."""
     from remote_control import ensure_tunnel, run_ps
+    # Tunnel readiness has its existing independent bounded SSH control calls;
+    # the identity observation starts at the fresh preflight, after readiness.
+    with _stage('ssh_tunnel', 20):
+        ensure_tunnel(profile)
     started = time.time()
     began = time.monotonic()
     nonce = secrets.token_hex(16)
     cached = _cached(profile)
-    ensure_tunnel(profile)
-    observed = run_ps(profile, _probe_script(profile, nonce, cached), timeout_seconds=20)
+    with _stage('identity_preflight', 5):
+        preflight = _preflight_binding(profile,
+            run_ps(profile, _preflight_script(profile, nonce), timeout_seconds=5), nonce)
+    reuse = cached is not None and cached['binding'] == preflight
+    basis = 'verified_hash_reused_with_stat_and_instance' if reuse else 'fresh_full_hash'
+    budget = verification_budget(preflight['bytes'], basis)
+    deadline = began + budget['capture_seconds']
+    rpc_began = time.monotonic()
+    rpc_limit = _remaining(budget['rpc_seconds'], deadline)
+    with _stage('identity_probe', rpc_limit):
+        observed = run_ps(profile, _probe_script(profile, nonce, cached, preflight),
+                          timeout_seconds=rpc_limit)
+    rpc_elapsed = time.monotonic() - rpc_began
     if not isinstance(observed, dict) or observed.get('nonce') != nonce:
         raise InvalidUpdate('Remote hardware response does not match its fresh observation request')
-    measured_at = time.time()
-    observed['server'] = _server(profile)
-    binding = dict(observed.get('process') or {}, host_id=observed.get('host_id'),
-                   boot_id=observed.get('boot_id'), model_file={key: (observed.get('model') or {}).get(key)
-                   for key in ('bytes', 'mtime_ticks', 'creation_ticks')})
-    verify_instance(profile, binding)
-    observed.update(profile=PROFILE, profile_hash=profile['profile_hash'], wall_time=measured_at,
-                    capture_started_at=started, capture_seconds=time.monotonic() - began)
     model = observed.get('model') or {}
-    if model.get('digest_basis') == 'verified_hash_reused_with_stat_and_instance':
+    if _cache_binding(observed) != preflight or model.get('digest_basis') != basis:
+        raise InvalidUpdate('Remote model identity changed after cold-size preflight')
+    hash_ms = model.get('hash_ms')
+    if (type(hash_ms) not in (int, float) or not math.isfinite(hash_ms) or
+            not 0 <= hash_ms <= rpc_elapsed * 1000):
+        raise InvalidUpdate('Remote hash timing exceeds its containing SSH observation')
+    # Counters are measured after hashing. This conservative upper bound also
+    # includes pre-hash process/SSH overhead; it never turns cold hash time into
+    # eight-second-old GPU/RAM evidence or trusts the remote host's wall clock.
+    measured_at = time.time()
+    counter_age_upper = rpc_elapsed - hash_ms / 1000
+    observed['server'] = _server(profile, deadline=deadline)
+    binding = dict(observed.get('process') or {}, host_id=observed.get('host_id'),
+                   boot_id=observed.get('boot_id'), model_file={key: model.get(key)
+                   for key in ('bytes', 'mtime_ticks', 'creation_ticks')})
+    verify_instance(profile, binding, timeout_seconds=_remaining(5, deadline))
+    observed.update(profile=PROFILE, profile_hash=profile['profile_hash'],
+                    wall_time=measured_at - counter_age_upper,
+                    capture_started_at=started, capture_seconds=time.monotonic() - began,
+                    verification_budget=budget, counter_age_upper_seconds=counter_age_upper)
+    if basis == 'verified_hash_reused_with_stat_and_instance':
         if (not cached or cached['sha256'] != model.get('sha256') or
                 cached['binding'] != _cache_binding(observed)):
             raise InvalidUpdate('Remote model digest reuse does not match this process verified checkpoint')
-    # The checkpoint is RAM-only and never reconstructed from a ledger/cache
-    # file. Ordinary swaps, restarts and profile edits invalidate the binding.
+    # A real, fully validated hash only: no file/ledger reconstruction or cache
+    # injection. Failed, stale, busy and mismatched observations stay untrusted.
     try:
         if _validate(profile, observed, 1, time.time()) is not None:
             _remember(profile, observed)
@@ -264,9 +432,23 @@ def _validate(profile, sample, requested_context, now):
     if any(type(value) not in (int, float) or not math.isfinite(value) for value in stamps):
         raise ValueError('Remote observation time is invalid')
     at, start, elapsed, _ = stamps
-    if not 0 <= now - at <= MAX_SAMPLE_AGE or not 0 <= elapsed <= MAX_CAPTURE_SECONDS or not start <= at:
+    model_evidence = sample.get('model')
+    if not isinstance(model_evidence, dict):
+        raise ValueError('Remote model identity section is invalid')
+    budget = verification_budget(model_evidence.get('bytes'), model_evidence.get('digest_basis'))
+    supplied = sample.get('verification_budget')
+    if supplied is not None and supplied != budget:
+        raise ValueError('Remote verification window differs from its file-size bound')
+    # Old display/test records do not acquire a larger window merely because
+    # they mention a large file; new probes carry their exact derived policy.
+    capture_limit = budget['capture_seconds'] if supplied is not None else MAX_CAPTURE_SECONDS
+    counter_age = sample.get('counter_age_upper_seconds')
+    if (counter_age is not None and (type(counter_age) not in (int, float) or
+            not math.isfinite(counter_age) or not 0 <= counter_age <= MAX_SAMPLE_AGE)):
+        raise ValueError('Remote counter observation exceeds its freshness bound')
+    if not 0 <= now - at <= MAX_SAMPLE_AGE or not 0 <= elapsed <= capture_limit or not start <= at:
         raise ValueError('Remote observation is stale, future-dated or exceeded its capture window')
-    if not 0 <= at - start <= MAX_CAPTURE_SECONDS:
+    if not 0 <= at - start <= capture_limit:
         raise ValueError('Remote observation capture window is invalid')
     _integer(requested_context, 'requested context', 1)
     if requested_context > profile['context_tokens']:
@@ -303,7 +485,7 @@ def _validate(profile, sample, requested_context, now):
     if model.get('digest_basis') not in ('fresh_full_hash', 'verified_hash_reused_with_stat_and_instance'):
         raise ValueError('Remote model digest evidence is unavailable')
     duration = model.get('hash_ms')
-    if type(duration) not in (int, float) or not math.isfinite(duration) or not 0 <= duration <= MAX_CAPTURE_SECONDS * 1000:
+    if type(duration) not in (int, float) or not math.isfinite(duration) or not 0 <= duration <= min(budget['rpc_seconds'], elapsed) * 1000:
         raise ValueError('Remote model digest timing is invalid')
     aliases = _string(process.get('model'), 'process model aliases', 512)
     if profile['model'] not in aliases.split(','):
@@ -375,6 +557,9 @@ def _compact(sample):
     """Keep bounded evidence only, excluding incidental server metadata."""
     result = {key: sample[key] for key in ('profile', 'profile_hash', 'version', 'nonce',
               'wall_time', 'capture_started_at', 'capture_seconds', 'host_id', 'boot_id')}
+    for key in ('verification_budget', 'counter_age_upper_seconds'):
+        if key in sample:
+            result[key] = sample[key]
     fields = {'listener': ('address', 'port', 'pid'),
               'process': ('pid', 'started_at', 'executable', 'executable_sha256', 'model_path',
                           'model', 'context_tokens', 'gpu_layers', 'gpu_device'),
@@ -394,7 +579,10 @@ def evaluate(profile, sample, requested_context, *, now=None, adapter=None):
     try:
         instance = _validate(profile, sample, requested_context, now)
     except (KeyError, TypeError, ValueError, OverflowError) as error:
-        return _blocked(str(error)[:300], adapter=adapter)
+        state = _blocked(str(error)[:300], adapter=adapter)
+        state['observation_failure'] = {'stage': 'hardware_validation',
+            'error_type': type(error).__name__, 'failure_kind': 'rejected'}
+        return state
     if instance is None:
         return _blocked('The remote inference slot is still processing work; no new model call was started.',
                         kind='runtime_busy', adapter=adapter)
@@ -521,7 +709,12 @@ def _observe(profile, context):
         # InvalidUpdate messages in this path are host-authored and sanitized by
         # remote_control. Preserve the observed cause, never a remote body/key.
         cause = str(error)[:300] if isinstance(error, InvalidUpdate) else type(error).__name__
-        return _blocked('Fresh remote GPU observation unavailable: ' + cause)
+        state = _blocked('Fresh remote GPU observation unavailable: ' + cause)
+        details = getattr(error, 'remote_observation', None)
+        state['observation_failure'] = (copy.deepcopy(details) if isinstance(details, dict) else
+            {'stage': 'observation_validation', 'error_type': type(error).__name__,
+             'failure_kind': 'rejected'})
+        return state
     return evaluate(profile, sample, context)
 
 

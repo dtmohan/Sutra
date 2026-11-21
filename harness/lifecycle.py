@@ -101,8 +101,7 @@ def reconcile(s, workspace):
     for raw,digest,payload in pending:
         if sha('invocation-v1:'+raw)!=digest:raise InvalidUpdate('Interrupted invocation commitment corrupted')
         env=json.loads(raw)
-        from invocation_timing import reserved_seconds
-        s.finalize(env,json.loads(payload),None,'Prior bridge ended without a model receipt; result withheld',elapsed_seconds=reserved_seconds(env))
+        s.finalize(env,json.loads(payload),None,'Prior bridge ended without a model receipt; result withheld')
         events.append({'kind':'invocation','id':env['id'],'status':'quarantined'})
     for rid, in s.db.execute('SELECT id FROM protocol_runs').fetchall():
         if not any(e['kind'] in ('ALLOW','FIN','RESOURCE_WAIT') for e in s.run(rid)['events']):

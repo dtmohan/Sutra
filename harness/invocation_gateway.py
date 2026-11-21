@@ -92,8 +92,12 @@ class InvocationLedger(GovernedContext):
         if transport_timing is not None: envelope['transport_timing'] = copy.deepcopy(transport_timing)
         if exact(allocation):
             from strata_model import is_strata
-            if not is_strata(model):
-                raise InvalidUpdate('Exact Strata physical context requires the routed Strata provider')
+            from remote_profiles import is_remote
+            window = allocation.context_window
+            if ((window['provider'] == 'strata' and not is_strata(model))
+                    or (window['provider'] == 'sutra_remote'
+                        and (not is_remote(model) or model != window['reference']))):
+                raise InvalidUpdate('Exact physical context requires its matching routed provider')
             validate_proof(context_measurement, allocation, system, payload, schema, model_identity)
             envelope['physical_context'] = copy.deepcopy(context_measurement)
         elif context_measurement is not None:
@@ -324,6 +328,15 @@ class InvocationLedger(GovernedContext):
                     receipt['generation_progress_observation'] = progress_observation
                 except Exception:
                     pass  # A malformed optional stream counter is not a grant or admission failure.
+            if envelope['role'] == 'subagent':
+                try:
+                    from child_checkpoint_progress import capture as capture_checkpoint_progress
+                    checkpoint_progress = capture_checkpoint_progress(envelope, payload, receipt,
+                                                                      elapsed_seconds=elapsed_seconds)
+                    if checkpoint_progress is not None:
+                        receipt['child_checkpoint_progress'] = checkpoint_progress
+                except Exception:
+                    pass  # An optional observation cannot strand the invocation.
             if observation_fields:
                 receipt['observation_fields'] = observation_fields
             if reference_sets:
@@ -722,6 +735,22 @@ class InvocationGateway:
                 if not entered:
                     runtime['inference_started'] = False
                 state['runtime'] = runtime
+                # A wait is a governed stop even when it occurs after the
+                # dispatch reservation. _invoke has settled any such receipt;
+                # keep the original cause in the same immutable run trace.
+                ledger = self._phase_ledger('resource_wait')
+                try:
+                    with ledger.db:
+                        ledger.db.execute('BEGIN IMMEDIATE')
+                        run = ledger.run(self.run_id)
+                        if not any(event['kind'] in ('ALLOW', 'FIN', 'RESOURCE_WAIT')
+                                   for event in run['events']):
+                            ledger._audit('RESOURCE_GATE', {'run_id': self.run_id,
+                                                            'measurement': state})
+                            ledger._event(self.run_id, 'RESOURCE_WAIT',
+                                          {'reason': str(error), 'measurement': state})
+                finally:
+                    self._release_ledger(ledger)
                 raise ResourceWait(state) from error
         return self._invoke(role,call_id,system,payload,schema,delivery_id)
 
@@ -759,7 +788,7 @@ class InvocationGateway:
                 validate_proof(measurement, self.provider.budget, system, payload, schema, identity)
                 self.provider.context_measurement = measurement
             from invocation_timing import plan as timing_plan, require_headroom
-            timing = timing_plan(self.provider, role, payload)
+            timing = timing_plan(self.provider, role, payload, ledger=ledger, run_id=self.run_id)
             require_headroom(timing)
             envelope = ledger.register(self.run_id, call_id, role, payload, system, schema, delivery_id, name, charge,
                 budget=vars(self.provider.budget).copy(),resource=resource,model_identity=identity,model_interface=interface,
@@ -779,6 +808,7 @@ class InvocationGateway:
         token = _permit.set(permit); error = None; proposal = None; record = None
         failure_kind = None
         repairable = False
+        resource_wait = None
         from model_activity import scope
         try:
             from lifecycle import call_deadline
@@ -788,6 +818,9 @@ class InvocationGateway:
                     raise InvalidUpdate('Model identity changed during inference')
         except Exception as exc:
             from local_model import OutputLimitExceeded, StructuredOutputRejected
+            from monitoring import ResourceWait
+            if isinstance(exc, ResourceWait):
+                resource_wait = exc
             if isinstance(exc, OutputLimitExceeded):
                 failure_kind = 'output_limit'
             elif isinstance(exc, (TimeoutError, socket.timeout)):
@@ -811,5 +844,12 @@ class InvocationGateway:
             if error and not repairable: result['blocked'] = error
             if failure_kind is not None: result['failure_kind'] = failure_kind
             result['record'] = record
+            if resource_wait is not None:
+                from monitoring import ResourceWait
+                state = copy.deepcopy(resource_wait.state)
+                runtime = dict(state.get('runtime') or {})
+                runtime.update(model=name, invocation_id=envelope['id'])
+                state['runtime'] = runtime
+                raise ResourceWait(state) from resource_wait
             return result
         finally: self._release_ledger(ledger)

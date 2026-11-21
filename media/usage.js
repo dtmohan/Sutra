@@ -3,6 +3,7 @@ const vscode=acquireVsCodeApi(),el=id=>document.getElementById(id),T=KarmaTokens
 const node=(tag,text,cls)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;};
 function setText(id,text){const element=el(id);if(element.textContent!==text)element.textContent=text;}
 let workflowSignature='',observationSignature='',coherenceSignature='',usageSignature='';
+let reviewProgressSignature='';
 let snapshot,routing,native,error,filters={...vscode.getState()?.filters};
 const finite=n=>typeof n==='number'&&Number.isFinite(n);
 const decisions=new Set(['ALLOW','BRIDGE','FIN','COMPOUND_FIN']);
@@ -63,6 +64,31 @@ function renderCoherenceObservations(value){
  if(focused&&document.activeElement?.closest('details')?.dataset.id!==focused)
   desired.find(d=>d.dataset.id===focused)?.querySelector('summary')?.focus();
  el('coherence-empty').hidden=!!rows.length;
+}
+function renderReviewProgress(value){
+ const rows=SutraReviewProgress.recent(value),signature=JSON.stringify(rows);
+ if(signature===reviewProgressSignature)return;
+ reviewProgressSignature=signature;
+ const list=el('review-progress-observations');
+ const status={completed:'Partition completion proposed',continued:'Partition continuation proposed',withheld:'Checkpoint output withheld'};
+ const tokens=value=>value===null?'unknown':value.toLocaleString();
+ list.replaceChildren();
+ for(const row of rows){
+  const item=node('li');
+  item.append(node('p',status[row.checkpoint]+' · '+row.model+' · '+row.invocation_id.slice(0,8)));
+  if(row.evidence&&row.next_checks){
+   const e=row.evidence,n=row.next_checks;
+   item.append(node('p',`Citations · ${e.citations} total · ${e.new_citations} new · ${e.retained_citations} previously seen`,'plot-note'));
+   item.append(node('p',`Reported next checks · ${n.new} new · ${n.repeated} repeated · ${n.retired} no longer listed`,'plot-note'));
+  }
+  item.append(node('p',`Earlier accepted checkpoints · ${row.prior_checkpoints}`,'plot-note'));
+  const {input_tokens,output_tokens,elapsed_seconds}=row.cost;
+  const elapsed=elapsed_seconds===null?'unknown elapsed':elapsed_seconds.toLocaleString(undefined,{maximumFractionDigits:3})+' s elapsed';
+  item.append(node('p',`Call cost · ${tokens(input_tokens)} input tokens · ${tokens(output_tokens)} output tokens · ${elapsed}`,'muted'));
+  list.append(item);
+ }
+ list.hidden=!rows.length;
+ el('review-progress-empty').hidden=!!rows.length;
 }
 function renderLogicalMemory(m){
  const counts=m?.counters||{},events=m?.events||[];
@@ -134,6 +160,7 @@ function renderMonitor(){
  renderRunner(d.runner,!error&&finite(elapsed)&&elapsed>=0&&elapsed<=8);
  renderTaskObservations(d.task_observations);
  renderCoherenceObservations(d.coherence_observations);
+ renderReviewProgress(d.review_progress_observations);
  renderLogicalMemory(d.logical_memory);
  renderRamMemory(d.ram_compartments);
  const diagnosticErrors=Array.isArray(d.diagnostic_errors)?d.diagnostic_errors:[];

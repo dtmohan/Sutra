@@ -376,7 +376,7 @@ def request_check(s, sid, p):
         if current != p['workspace_context']:
             raise InvalidUpdate('Workspace task changed during conversation')
     allocation = p['memory_allocation']
-    budget = Budget(allocation['context_limit'], allocation['response_reserve'], allocation['template_reserve'])
+    budget = Budget(**{key: value for key, value in allocation.items() if key != 'summary_max_chars'})
     if allocation['summary_max_chars'] != cm.summary_limit(budget):
         raise InvalidUpdate('Conversation memory allocation changed')
     if p['memory'] and p['memory'] != cm.working_set(s, sid, p['memory']['invocation_id'], p['request'], budget, p, SYSTEM, schema):
@@ -573,8 +573,7 @@ def _answer_step(s,meta,root,request,provider,axis):
     cap = capabilities(getattr(provider, 'context_metadata', {}))
     p['reasoning'] = prepare(s, sid, p, cap, preference)
     budget = provider.budget
-    p['memory_allocation'] = {'context_limit': budget.context_limit, 'response_reserve': budget.response_reserve,
-                              'template_reserve': budget.template_reserve, 'summary_max_chars': cm.summary_limit(budget)}
+    p['memory_allocation'] = dict(vars(budget), summary_max_chars=cm.summary_limit(budget))
     p['model_capacity'] = capacity if real else {'effective_context_tokens': budget.context_limit, 'source': 'injected_provider'}
     cm.materialize(s, sid, cm.history(s, sid, parent))
     try:
@@ -590,8 +589,7 @@ def _answer_step(s,meta,root,request,provider,axis):
             raise
         budget = provider.budget
         p['model_capacity'] = capacity
-        p['memory_allocation'].update(context_limit=budget.context_limit,
-                                      response_reserve=budget.response_reserve)
+        p['memory_allocation'] = dict(vars(budget), summary_max_chars=cm.summary_limit(budget))
         p['memory'] = cm.working_set(s, sid, parent, prompt, budget, p, SYSTEM, schema)
     provider.thinking = p['reasoning']['requested']
     fmt = schema(p)

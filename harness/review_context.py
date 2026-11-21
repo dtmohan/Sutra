@@ -251,6 +251,13 @@ def context_budget(provider, s, sid, slots=2, expand_output=True, *, physical_fi
     from model_context import allocation
     import review_budget
     import orchestration as machine
+    if getattr(provider, 'context_metadata', {}).get('_sutra_provider') == 'sutra_remote':
+        # Opt in after the selected server is available. Discovery failure
+        # retains the conservative profile; an established exact profile fails
+        # closed on later measurement/identity loss.
+        refresh = getattr(provider, 'fresh_context_metadata', None)
+        if callable(refresh):
+            refresh()
     budget, metadata = allocation(provider.context_metadata)
     available = float('inf')
     task = review_budget.usage(s, sid)

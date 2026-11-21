@@ -39,7 +39,18 @@ function monitorHost(){
  fs.mkdirSync(out,{recursive:true});const browser=await chromium.launch({headless:true,...(process.env.KARMA_BROWSER?{executablePath:process.env.KARMA_BROWSER}:{})});
  try{
  const page=await browser.newPage({viewport:{width:1140,height:720}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
- const html=saved=>fs.readFileSync(path.join(root,'media/usage.html'),'utf8').replaceAll('NONCE_VALUE','test-nonce').replace('<script nonce="test-nonce" src="TOKENS_URI"></script>','<script nonce="test-nonce">'+fs.readFileSync(path.join(root,'media/token_usage.js'),'utf8')+'</script>').replace('<script nonce="test-nonce" src="COHERENCE_URI"></script>','<script nonce="test-nonce">'+fs.readFileSync(path.join(root,'media/coherence.js'),'utf8')+'</script>').replace('<script nonce="test-nonce" src="PROGRESS_URI"></script>','<script nonce="test-nonce">'+fs.readFileSync(path.join(root,'media/generation_progress.js'),'utf8')+'</script>').replace('<script nonce="test-nonce" src="SCRIPT_URI"></script>','<script nonce="test-nonce">window.sent=[];window.saved='+JSON.stringify(saved||{})+';function acquireVsCodeApi(){return {postMessage:m=>sent.push(m),setState:s=>window.saved=s,getState:()=>window.saved}}\n'+fs.readFileSync(path.join(root,'media/usage.js'),'utf8')+'</script>');
+ const script=(html,placeholder,file,prefix='')=>html.replace(
+  '<script nonce="test-nonce" src="'+placeholder+'"></script>',
+  ()=>'<script nonce="test-nonce">'+prefix+fs.readFileSync(path.join(root,'media',file),'utf8')+'</script>');
+ const html=saved=>{
+  let content=fs.readFileSync(path.join(root,'media/usage.html'),'utf8').replaceAll('NONCE_VALUE','test-nonce');
+  for(const [placeholder,file] of [['TOKENS_URI','token_usage.js'],['COHERENCE_URI','coherence.js'],
+   ['PROGRESS_URI','generation_progress.js'],['REVIEW_CHECKPOINT_URI','review_progress.js']]){
+   content=script(content,placeholder,file);
+  }
+  const api='window.sent=[];window.saved='+JSON.stringify(saved||{})+';function acquireVsCodeApi(){return {postMessage:m=>sent.push(m),setState:s=>window.saved=s,getState:()=>window.saved}}\n';
+  return script(content,'SCRIPT_URI','usage.js',api);
+ };
  await page.setContent(html());const send=data=>page.evaluate(d=>window.dispatchEvent(new MessageEvent('message',{data:d})),{type:'usage',...data,snapshot:data.snapshot?{...data.snapshot,updatedAt:data.aged?data.snapshot.updatedAt:new Date().toISOString()}:undefined});
  assert.deepEqual(await page.evaluate(()=>sent),[{type:'ready'}]);assert.equal(await page.locator('#input').textContent(),'—');
  await send({snapshot,reasoningPreference:'model-default'});
@@ -264,6 +275,54 @@ function monitorHost(){
  assert(!(await page.locator('#coherence-observations').textContent()).includes('No issue was flagged'));
  await send({snapshot});assert.equal(await page.locator('#coherence-observations details').count(),0);
  assert(await page.locator('#coherence-empty').isVisible());
+ const childProgress={profile:'child-checkpoint-progress-v1',mode:'observe_only',semantic_assessment:'unassessed',
+  invocation_id:'continued-id',model:'small <img src=x onerror=alert(1)>',gateway_status:'accepted',
+  prior_checkpoints:1,checkpoint:'continued',evidence:{new_citations:2,retained_citations:1,citations:3},
+  next_checks:{new:1,repeated:1,retired:0},cost:{input_tokens:1000,output_tokens:0,elapsed_seconds:1.25},
+  reasoning:'PRIVATE REASONING',permission:'FORGED PERMISSION'};
+ const withheld={...childProgress,invocation_id:'withheld-id',gateway_status:'quarantined',checkpoint:'withheld',
+  cost:{input_tokens:null,output_tokens:null,elapsed_seconds:null}};
+ const diagnostics=[childProgress,withheld,...Array.from({length:20},(_,i)=>({...childProgress,invocation_id:'child-'+i}))];
+ host.view.setData({...monitor,review_progress_observations:diagnostics},snapshot.workspace);
+ const diagnosticRows=host.posted.snapshot.monitor.review_progress_observations;
+ assert.equal(diagnosticRows.length,12);
+ assert.equal(diagnosticRows[1].evidence,null);
+ assert.equal(diagnosticRows[1].next_checks,null);
+ assert(!JSON.stringify(diagnosticRows).includes('PRIVATE REASONING'));
+ assert(!JSON.stringify(diagnosticRows).includes('FORGED PERMISSION'));
+ const beforeReviewMessages=await page.evaluate(()=>sent.length);
+ await send(host.posted);
+ const progress=page.locator('#review-progress-observations'),firstCheckpoint=progress.locator('li').first();
+ assert.equal(await progress.locator('li').count(),12);
+ assert((await firstCheckpoint.textContent()).includes('Partition continuation proposed'));
+ assert((await firstCheckpoint.textContent()).includes('Citations · 3 total · 2 new · 1 previously seen'));
+ assert((await firstCheckpoint.textContent()).includes('Reported next checks · 1 new · 1 repeated · 0 no longer listed'));
+ assert((await firstCheckpoint.textContent()).includes('0 output tokens · 1.25 s elapsed'));
+ const withheldText=await progress.locator('li').nth(1).textContent();
+ assert(withheldText.includes('Checkpoint output withheld'));
+ assert(withheldText.includes('unknown input tokens · unknown output tokens · unknown elapsed'));
+ assert(!withheldText.includes('Citations'));
+ assert.equal(await progress.locator('img,script,a,button').count(),0);
+ assert.equal(await page.evaluate(()=>sent.length),beforeReviewMessages,'Child checkpoint diagnostics never issue host actions');
+ const completedCheckpoint={...childProgress,invocation_id:'completed-id',checkpoint:'completed',
+  cost:{input_tokens:42,output_tokens:Infinity,elapsed_seconds:-1}};
+ const malformed=[
+  {...childProgress,mode:'enforce'},
+  {...childProgress,semantic_assessment:'verified'},
+  {...childProgress,prior_checkpoints:-1},
+  {...childProgress,evidence:{...childProgress.evidence,citations:4}},
+  {...childProgress,next_checks:{new:Number.MAX_SAFE_INTEGER,repeated:1,retired:0}},
+  {...childProgress,checkpoint:'withheld'}
+ ];
+ host.view.setData({...monitor,review_progress_observations:[...malformed,completedCheckpoint,completedCheckpoint]},snapshot.workspace);
+ assert.equal(host.posted.snapshot.monitor.review_progress_observations.length,1);
+ await send(host.posted);
+ assert.equal(await progress.locator('li').count(),1);
+ assert((await progress.textContent()).includes('Partition completion proposed'));
+ assert((await progress.textContent()).includes('42 input tokens · unknown output tokens · unknown elapsed'));
+ await send({snapshot});
+ assert(await page.locator('#review-progress-empty').isVisible());
+ assert.equal(await progress.locator('li').count(),0);
  await send({snapshot});assert.equal(await page.locator('#input').textContent(),'6,284');assert.equal(await page.locator('#output').textContent(),'362');assert.equal(await page.locator('#unknown').textContent(),'1');assert.equal(await page.locator('#calls').textContent(),'5');assert((await page.locator('#window').textContent()).includes('latest 5 of 300'));assert.equal(await page.locator('.call-bar').count(),5);
  assert.equal(await page.locator('#cpu-temp').textContent(),'48.2 °C');assert.equal(await page.locator('#gpu-temp').textContent(),'44.6 °C');assert.equal(await page.locator('#cpu-load').textContent(),'20%');assert.equal(await page.locator('#ram').textContent(),'24.5 GiB');assert.equal(await page.locator('#resource').textContent(),'System pressure: ALLOW');assert((await page.locator('#gates').textContent()).includes('BRIDGE'));
  assert.equal(await page.locator('#compressed-memory').textContent(),'6.0 GiB');assert.equal(await page.locator('#swap-memory').textContent(),'2.0 GiB');assert((await page.locator('#memory-policy').textContent()).includes('Shared Ollama'));assert((await page.locator('#resident-models').textContent()).includes('small <img'));assert.equal(await page.locator('#resident-models img').count(),0);assert((await page.locator('#memory-plan').textContent()).includes('8,192 context tokens'));assert((await page.locator('#memory-plan').textContent()).includes('Peak memory is not verified'));assert((await page.locator('#memory-recovery').textContent()).includes('observe only shared server'));assert((await page.locator('#memory-plan').textContent()).includes('MLX calibration aaaaaaaaaaaa'));assert((await page.locator('#memory-plan').textContent()).includes('16,384 tokens'));assert((await page.locator('#memory-plan').textContent()).includes('1.0 GiB uncertainty margin'));

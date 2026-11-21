@@ -1,8 +1,7 @@
 """Exact physical prompt windows, separate from immutable reservation charges.
 
-Only the verified local Strata count-only API is supported. Counting never
-loads a model or performs generation. Historical budget replay is independent
-of this live measurement path.
+Verified native count-only APIs never load a model or perform generation.
+Historical budget replay is independent of this live measurement path.
 """
 import copy
 import http.client
@@ -25,6 +24,9 @@ _counts = {}
 
 
 def validate_window(value):
+    if isinstance(value, dict) and value.get('provider') == 'sutra_remote':
+        from remote_context import validate_window as validate_remote
+        return validate_remote(value)
     keys = {'version', 'provider', 'port', 'model', 'started', 'context_tokens', 'template_sha256'}
     if (not isinstance(value, dict) or set(value) != keys or type(value.get('version')) is not int or value['version'] != 1
             or value.get('provider') != 'strata' or type(value.get('port')) is not int
@@ -168,6 +170,9 @@ def check(budget, system, payload, schema, *, thinking=_UNSET, planning=False):
     if not exact(budget):
         return None
     window = validate_window(budget.context_window)
+    if window['provider'] == 'sutra_remote':
+        from remote_context import check as check_remote
+        return check_remote(budget, system, payload, schema, planning=planning)
     if budget.context_limit > window['context_tokens']:
         raise InvalidUpdate('Physical context allocation exceeds the verified server window')
     if thinking is _UNSET:
@@ -208,6 +213,9 @@ def validate_proof(proof, budget, system, payload, schema, model_identity=None):
             raise InvalidUpdate('Legacy budget cannot carry an exact context proof')
         return
     window = validate_window(budget.context_window)
+    if window['provider'] == 'sutra_remote':
+        from remote_context import validate_proof as validate_remote_proof
+        return validate_remote_proof(proof, budget, system, payload, schema, model_identity)
     if (not isinstance(proof, dict) or type(proof.get('version')) is not int or proof['version'] != 1 or proof.get('basis') != 'strata_count_tokens_v1'
             or proof.get('window') != window or proof.get('context_tokens') != budget.context_limit
             or proof.get('output_reserve') != budget.response_reserve

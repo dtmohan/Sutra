@@ -1439,6 +1439,7 @@ def _handle(s,meta,workspace,root,req,providers=None):
         return response(s,fid,progress=('Reviewing '+str(len(children))+' source partitions' if children else 'Preparing a bounded overview directly; no child review was allocated'))
     if phase=='CHILDREN':
         from subagent_runtime import run
+        from invocation_timing import BridgeStepRequired
         from resource_routing import effective
         pending=[i for i in d['children'] if m.state(s,i)!='DONE']
         if pending:
@@ -1449,7 +1450,13 @@ def _handle(s,meta,workspace,root,req,providers=None):
             mode = effective(d,models,tier)
             if mode == 'auto' and retry.get('models') == models:
                 mode = retry['tier']
-            out=run(s,meta,workspace,root,child,models,mode,provider('subagent'))
+            try:
+                out=run(s,meta,workspace,root,child,models,mode,provider('subagent'))
+            except BridgeStepRequired:
+                move(s, fid, 'CHILDREN', 'MODEL_SLICE_DEFERRED', last_child=child)
+                save(root, meta)
+                return response(s, fid, progress='Continuing the saved child review in a fresh execution slice.',
+                                claim_review_usage=workflow_usage(s, fid))
             latest = {'last_child': child, 'last_model': out['route']['model']}
             if m.state(s, child) in ('QUARANTINED', 'CANCELLED'):
                 return child_rejection(s, fid, child)

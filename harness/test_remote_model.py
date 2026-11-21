@@ -68,6 +68,8 @@ class RemoteTransportTests(unittest.TestCase):
         env.start(); self.addCleanup(env.stop)
         guard = patch('remote_control.verify_server', return_value={'verified': True})
         guard.start(); self.addCleanup(guard.stop)
+        tunnel = patch('remote_control.ensure_tunnel', return_value={'ready': True, 'owned': True})
+        tunnel.start(); self.addCleanup(tunnel.stop)
         instance = patch('remote_memory.verify_instance', return_value=True)
         instance.start(); self.addCleanup(instance.stop)
         fresh = patch('remote_memory.require_dispatch_fresh', return_value=True)

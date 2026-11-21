@@ -3,6 +3,7 @@ const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypt
 const tokens=require('./media/token_usage');
 const {ActivityArchive,activityUri,parseActivityUri}=require('./model_activity');
 const coherence=require('./media/coherence');
+const reviewProgress=require('./media/review_progress');
 
 function currentArchitectureStop(runs){
   const event=runs?.[0]?.recent_events?.at(-1),stop=event?.data?.architecture_stop;
@@ -55,6 +56,7 @@ function install(vscode,context,deps){
       .replace('TOKENS_URI',current.webview.asWebviewUri(vscode.Uri.file(path.join(media.fsPath,'token_usage.js'))).toString())
       .replace('COHERENCE_URI',current.webview.asWebviewUri(vscode.Uri.file(path.join(media.fsPath,'coherence.js'))).toString())
       .replace('PROGRESS_URI',current.webview.asWebviewUri(vscode.Uri.file(path.join(media.fsPath,'generation_progress.js'))).toString())
+      .replace('REVIEW_CHECKPOINT_URI',current.webview.asWebviewUri(vscode.Uri.file(path.join(media.fsPath,'review_progress.js'))).toString())
       .replace('SCRIPT_URI',current.webview.asWebviewUri(vscode.Uri.file(path.join(media.fsPath,'usage.js'))).toString());
     current.webview.onDidReceiveMessage(message=>{
       if(message?.type==='ready'){ready=true;publish();void refresh();}
@@ -95,6 +97,7 @@ function install(vscode,context,deps){
       // include the original request; source and executable action payloads stay out.
       for(const key of ['runner','logical_memory','ram_compartments','task_observations','runtime_memory','remote_memory','orchestration','hardware','kernel','review_budget','repository','action_budget','storage','context','adapter_health','session','contract','diagnostic_errors'])monitor[key]=data[key];
       monitor.coherence_observations=coherence.recent(data.coherence_observations);
+      monitor.review_progress_observations=reviewProgress.recent(data.review_progress_observations);
       monitor.architecture_stop=currentArchitectureStop(data.runs);
       snapshot={...(data.token_usage||{calls:[],total_calls:0,limit:250}),monitor,workspace,updatedAt:new Date().toISOString()};error=undefined;publish();
     },

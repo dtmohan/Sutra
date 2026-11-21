@@ -33,6 +33,15 @@ def allocation(metadata):
         # Native thinking-only models share the reserve between reasoning and
         # the answer. This allocation remains inside the same physical window.
         budget = Budget(limit, min(4096,max(2048,limit//8)),template_reserve)
+    window = metadata.get('_sutra_context_window')
+    if window is not None:
+        from allocation_recovery import MAXIMA
+        # Physical token capacity is not a financial allowance. Task/parent
+        # gates still admit the unchanged conservative UTF-8 reservation; a
+        # review replaces this structural ceiling with its remaining share.
+        budget = Budget(limit, budget.response_reserve, template_reserve,
+                        context_profile=2, reservation_limit=MAXIMA['tokens'],
+                        context_window=window)
     return budget, {'model_context_tokens': maximum, 'configured_context_tokens': configured,
                     'runtime_context_cap': 65536, 'memory_context_cap':runtime_cap, 'effective_context_tokens': limit,
                     'output_reserve_tokens': budget.response_reserve,

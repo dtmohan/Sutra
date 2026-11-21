@@ -192,19 +192,23 @@ def exact_context_fit(details, need):
         from context_window import validate_window, STRATA_CONTEXT_SLACK
         from smriti_adapter import SmritiAdapter
         window = validate_window(proof['window'])
+        basis, slack = 'strata_count_tokens_v1', STRATA_CONTEXT_SLACK
+        if window['provider'] == 'sutra_remote':
+            from remote_context import BASIS, CONTEXT_SLACK
+            basis, slack = BASIS, CONTEXT_SLACK
         cap = need['model_context']; count = proof['prompt_tokens']
         output = proof['output_reserve']
         if (type(cap) is not int or type(count) is not int or type(output) is not int
                 or cap != proof['context_tokens'] or cap > window['context_tokens']
                 or output != details['output_reserve'] or count <= 0 or output <= 0
-                or proof.get('version') != 1 or proof.get('basis') != 'strata_count_tokens_v1'
-                or proof.get('context_slack_tokens') != STRATA_CONTEXT_SLACK):
+                or proof.get('version') != 1 or proof.get('basis') != basis
+                or proof.get('context_slack_tokens') != slack):
             return False
         for key in ('wire_sha256', 'packet_sha256'):
             value = proof.get(key)
             if not isinstance(value, str) or len(value) != 64 or any(c not in '0123456789abcdef' for c in value):
                 return False
-        frame = SmritiAdapter().context(count, output + STRATA_CONTEXT_SLACK, cap)
+        frame = SmritiAdapter().context(count, output + slack, cap)
         return frame['decision'] == 'ALLOW' and frame == proof.get('capacity')
     except (KeyError, TypeError, ValueError, InvalidUpdate):
         return False
