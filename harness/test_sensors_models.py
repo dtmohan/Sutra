@@ -82,4 +82,18 @@ class ModelCatalogTests(unittest.TestCase):
     def test_small_single_model_can_fill_all_tiers(self):
         r,_=self.run_catalog([model('only',4)]);self.assertEqual(r['suggested_tiers'],dict(low='only',mid='only',high='only'))
 
+    def test_catalog_reports_configured_context_without_dispatch(self):
+        configured = model('configured', 27)
+        configured['show']['model_info']['dense.context_length'] = 131072
+        configured['show']['parameters'] = 'num_ctx 32768\n'
+        tiny = model('tiny', 1)
+        tiny['show']['model_info']['dense.context_length'] = 2048
+        result, calls = self.run_catalog([configured, model('unknown', 4), tiny])
+        rows = {row['name']: row for row in result['models']}
+        self.assertEqual(rows['configured']['context_tokens'], 32768)
+        self.assertEqual(rows['unknown']['context_tokens'], 8192)
+        self.assertTrue(rows['tiny']['eligible'])
+        self.assertNotIn('context_tokens', rows['tiny'])
+        self.assertEqual(len(calls), 4)
+
 if __name__=='__main__':unittest.main()

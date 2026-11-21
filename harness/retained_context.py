@@ -427,7 +427,13 @@ def validate_requests(s, sid, p, refs):
     try:
         _pack(binding, graph, view['limit_bytes'], required)
     except ContextBudgetExceeded:
-        raise InvalidUpdate('Retained context cannot fit this fixed window; request a smaller directory branch') from None
+        limit = p.get('expanded_context_recall_bytes')
+        if type(limit) is not int or not view['limit_bytes'] < limit <= 65536:
+            raise InvalidUpdate('Retained context cannot fit this fixed window; request a smaller directory branch') from None
+        try:
+            _pack(binding, graph, limit, required)
+        except ContextBudgetExceeded:
+            raise InvalidUpdate('Retained context cannot fit the expanded view; request a smaller directory branch') from None
     return deferred
 
 
@@ -451,7 +457,7 @@ def _accepted_request(s, sid, iid):
     return env, prior, s.load_result(sid, iid)
 
 
-def apply_recall(s, sid, p, requestrecord, *, owner=None):
+def apply_recall(s, sid, p, requestrecord, *, owner=None, limit=None):
     """Apply an accepted scoped model request to this next delivery, whole-unit.
 
     The draft is still unverified model work. This helper authorizes no source
@@ -475,7 +481,7 @@ def apply_recall(s, sid, p, requestrecord, *, owner=None):
         raise InvalidUpdate('Saved recall differs from the accepted model request')
     deferred_leaves = validate_requests(s, sid, prior, expected)
     mapped = recall(s, sid, p, prior, deferred_leaves, owner=owner)
-    return refit(s, sid, p, p['retained_context']['limit_bytes'],
+    return refit(s, sid, p, p['retained_context']['limit_bytes'] if limit is None else limit,
                  owner=owner, required_refs=mapped)
 
 

@@ -16,6 +16,8 @@ const TASK_RUNNER_EVENTS=new Set(['start','start_existing','step','resume','gran
   'approve_document','supply_evidence','restart_review','continue_parent_report','accept_provenance']);
 const TASK_STOPPED='Sutra stopped this task. Its saved context, permissions and consumed spending are retained. Check the saved checkpoint before explicitly resuming; no new run was started.';
 const MODEL_IDS={auto:'karma-auto',low:'karma-low',mid:'karma-mid',high:'karma-high'};
+const FIXED_TIERS=['low','mid','high'];
+const BASELINE_CONTEXT=32768, UNKNOWN_CONTEXT=8192;
 const CHAT_DEFAULTS={'defaultModel':MODEL_IDS.auto,'editor.preferCopilotHarness':false,'defaultToCopilotHarness':false,'editor.localAgent.enabled':true};
 const MANIFEST=require('./package.json');
 const EXTENSION_ID=MANIFEST.publisher+'.'+MANIFEST.name;
@@ -75,6 +77,34 @@ function install(vscode,context,deps){
   const tickets=new Map(),accessTickets=new Map(),completed=new Map(),changed=new vscode.EventEmitter();
   const enabled=()=>vscode.workspace.getConfiguration('karma').get('nativeEnabled',true);
   const authorization=deps.authorization;
+  function modelInformation(){
+    if(!enabled())return [];
+    const models=deps.modelSettings(), advertised=deps.modelContextLimits?.()||{};
+    const limits={};
+    for(const tier of FIXED_TIERS){
+      const limit=Object.hasOwn(advertised,models[tier])?advertised[models[tier]]:undefined;
+      limits[tier]=Number.isInteger(limit)&&limit>=4096?Math.min(limit,BASELINE_CONTEXT):UNKNOWN_CONTEXT;
+    }
+    const configured=FIXED_TIERS.filter(tier=>models[tier]);
+    limits.auto=models.low?Math.min(...configured.map(tier=>limits[tier])):UNKNOWN_CONTEXT;
+    return ['auto',...FIXED_TIERS].filter(id=>id==='auto'||models[id]).map(id=>{
+      const maxContextWindowTokens=limits[id];
+      const maxOutputTokens=Math.min(4096,Math.floor(maxContextWindowTokens/8));
+      return {id:MODEL_IDS[id],name:id==='auto'?'Sutra Auto':'Sutra '+id[0].toUpperCase()+id.slice(1),
+        family:'karma',version:MANIFEST.version,maxContextWindowTokens,
+        maxInputTokens:maxContextWindowTokens-maxOutputTokens,maxOutputTokens,
+        detail:id==='auto'?'Governed model routing':models[id],
+        tooltip:'Chat normally with saved workspace access. Every model call uses the invocation gateway.',
+        capabilities:{toolCalling:true,imageInput:false}};
+    });
+  }
+  let publishedModelInformation=JSON.stringify(modelInformation());
+  function modelCatalogChanged(){
+    const current=JSON.stringify(modelInformation());
+    if(current===publishedModelInformation)return;
+    publishedModelInformation=current;
+    changed.fire();
+  }
   function setNextThinking(value){
     thinkingForNextRequest=value;
     return vscode.commands.executeCommand('setContext',THINK_NEXT,value);
@@ -172,7 +202,7 @@ function install(vscode,context,deps){
         throw new Error('A workspace or managed setting overrides Sutra chat. Sutra is still '+(enabled()?'on':'off')+'.');
       }
       clearAccess(value?'Sutra chat enabled. Select Sutra Auto to route prompts.':'Sutra chat disabled. Saved tasks, permissions and consumed budgets are retained.',!value);
-      changed.fire();
+      modelCatalogChanged();
     }finally{nativeSetting=false;publish();}
   }
   function controlsBusy(){
@@ -904,7 +934,7 @@ function install(vscode,context,deps){
     }
   };
   const provider={onDidChangeLanguageModelChatInformation:changed.event,
-    provideLanguageModelChatInformation(){if(!enabled())return [];const models=deps.modelSettings();return ['auto','low','mid','high'].filter(id=>id==='auto'||models[id]).map(id=>({id:MODEL_IDS[id],name:id==='auto'?'Sutra Auto':'Sutra '+id[0].toUpperCase()+id.slice(1),family:'karma',version:MANIFEST.version,maxInputTokens:64000,maxOutputTokens:4096,detail:id==='auto'?'Governed model routing':models[id]||'Configure this tier',tooltip:'Chat normally with saved workspace access. Every model call uses the invocation gateway.',capabilities:{toolCalling:true,imageInput:false}}));},
+    provideLanguageModelChatInformation:modelInformation,
     provideTokenCount(model,input,token){if(token?.isCancellationRequested)throw new Error('Token count cancelled.');return hostTokens.count(input);},
     async provideLanguageModelChatResponse(model,messages,options,progress,token){
       if(isCompaction(vscode,messages)){
@@ -1524,7 +1554,7 @@ function install(vscode,context,deps){
     vscode.commands.registerCommand('karma.armNative',()=>chooseWorkspaceAccess().catch(error=>vscode.window.showErrorMessage?.(error.message))),
     vscode.commands.registerCommand('karma.disarmNative',()=>revoke()),
     vscode.commands.registerCommand('karma.toggleNative',()=>setNativeEnabled(!enabled())));
-  const listener=vscode.workspace.onDidChangeConfiguration?.(e=>{if(e.affectsConfiguration('karma.nativeEnabled')){if(!enabled())void setNextThinking(false);clearAccess('Native chat setting changed.',!enabled());changed.fire();publish();}else if(e.affectsConfiguration('karma.models'))changed.fire();if(e.affectsConfiguration('chat'))publish();});if(listener)context.subscriptions.push(listener);
+  const listener=vscode.workspace.onDidChangeConfiguration?.(e=>{if(e.affectsConfiguration('karma.nativeEnabled')){if(!enabled())void setNextThinking(false);clearAccess('Native chat setting changed.',!enabled());modelCatalogChanged();publish();}else if(e.affectsConfiguration('karma.models'))modelCatalogChanged();if(e.affectsConfiguration('chat'))publish();});if(listener)context.subscriptions.push(listener);
   void setNextThinking(false);
   // Populate VS Code's model registry at activation, including after reload.
   // Discovery reads this provider's metadata only; it never starts inference.
@@ -1556,7 +1586,7 @@ function install(vscode,context,deps){
     vscode.workspace.onDidGrantWorkspaceTrust?.(publish),
   ].filter(Boolean);
   publish();
-  return {status,publish,withWorkspaceAccess,requestWorkspaceAccess:()=>chooseWorkspaceAccess(),
+  return {status,publish,modelCatalogChanged,withWorkspaceAccess,requestWorkspaceAccess:()=>chooseWorkspaceAccess(),
     permissionEvidence(expected){
       const access=refreshAccess();
       if(expected&&(!access||expected.generation!==access.generation||expected.scope!==access.scope||

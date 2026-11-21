@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.57.3
+
+- Offer an opt-in 64K architecture writer for calibrated local MLX models and verified remote profiles. Expand only when the evidence needs a larger window and the current memory and remaining task allocation admit it.
+- Advertise the configured model's baseline context in VS Code and keep the optional architecture window separate from the chat limit.
+- Recover eligible saved reviews with their verified pages, permissions, and cumulative spending. Keep the canonical STP kernel unchanged.
+
 ## 0.57.2
 
 - Continue an eligible withheld remote architecture report from its saved evidence and original repair allowance. The closed execution stays in the audit history and its costs stay charged.

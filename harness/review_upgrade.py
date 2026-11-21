@@ -10,6 +10,7 @@ SYNTHESIS_PREDECESSOR = 'df19c45e777027c01f34d13dbd3c6e46d149bab6a3bbcfb735479f4
 COMPACT_WRITER_PREDECESSOR = 'a57157dbafb20e77c3b4821fc12d53c99611c4e5de6a9c1eb3a76e8146c0a500'
 SUMMARY_REPAIR_PREDECESSOR = '1159af17874e347e75644c6d4583dcebb9db212cab69852e009638b3d1e3c43a'
 SUMMARY_PROJECTION_PREDECESSOR = 'a0d9d8e3c9660ce67a34333c097795c398591e6ced9ffa1ad4083437aa94b306'
+CONTEXT_PROFILE_PREDECESSOR = '71f4db9dbce5d9152ab2800b402754b4b28cce34b871ac5b8a8c4c705b6eba8f'
 RESULT_ROLES = {'architect', 'subagent', 'chat_reviewer', 'report_reviewer'}
 REPOSITORY_KINDS = {'catalog', 'list', 'read', 'search', 'static_map', 'api_extract'}
 _MANIFEST = Path(__file__).with_name('review-upgrade.json')
@@ -154,12 +155,32 @@ def closed_summary_repair(s, fid, data):
     return stamp if stamp and data.get('review_policy_upgrade') == stamp else None
 
 
+def _context_profile_scope(s, fid, data, *, stop_receipt=None):
+    import orchestration as machine
+    stop = next((event for event in reversed(machine.events(s, fid))
+                 if (event['receipt'] == stop_receipt if stop_receipt else
+                     event['to'] == 'PAUSED' and event['from'] != 'PAUSED')), None)
+    if not stop or stop['from'] != 'SYNTHESIS' or stop['to'] != 'PAUSED':
+        return None
+    details = stop['data'].get('workflow_stop') or {}
+    context_limit = stop['kind'] == 'CONTEXT_STOPPED' and details.get('status') == 'context_budget'
+    retained_limit = (stop['kind'] == 'MEMORY_STOPPED' and details.get('status') == 'memory_fault'
+                      and (details.get('memory_fault') or {}).get('code') == 'capacity')
+    if not (context_limit or retained_limit):
+        return None
+    stamp = _scope(s, fid, data, CONTEXT_PROFILE_PREDECESSOR)
+    return dict(stamp, context_stop_receipt=stop['receipt']) if stamp else None
+
+
 def offer(s, fid, data):
     import orchestration as machine
     stop = data.get('workflow_stop') or {}
-    if (machine.state(s, fid) != 'PAUSED' or stop.get('resume_phase') != 'SYNTHESIS'
-            or stop.get('status') not in ('resource_wait', 'claim_review_output_limit')
-            or not data.get('git_provenance')):
+    if machine.state(s, fid) != 'PAUSED' or not data.get('git_provenance'):
+        return None
+    if stop.get('status') in ('context_budget', 'memory_fault'):
+        return _context_profile_scope(s, fid, data)
+    if (stop.get('resume_phase') != 'SYNTHESIS'
+            or stop.get('status') not in ('resource_wait', 'claim_review_output_limit')):
         return None
     linked = _active_continuation(s, fid, data)
     if linked and (machine.state(s, linked['active_root']) == 'READY'
@@ -186,7 +207,9 @@ def recorded(s, fid, data=None):
         return None
     import orchestration as machine
     predecessor = machine.node(s, fid).get('parent_synthesis_predecessor')
-    if stamp.get('active_previous'):
+    if stamp.get('context_stop_receipt') and not predecessor:
+        expected = _context_profile_scope(s, fid, data, stop_receipt=stamp['context_stop_receipt'])
+    elif stamp.get('active_previous'):
         expected = _active_continuation(s, fid, data)
     else:
         expected = _continued(s, fid, data, predecessor) if predecessor else _scope(s, fid, data)
@@ -208,6 +231,20 @@ def use(s, stamp):
 def _active(s, sid):
     stamp = getattr(s, '_review_upgrade', None)
     return stamp if stamp and stamp['current']['session'] == sid else None
+
+
+def conversation_axis(s, handoff):
+    """Scope historical chat reads to the original handoff of this review."""
+    stamp = getattr(s, '_review_upgrade', None)
+    if not stamp or not stamp.get('context_stop_receipt'):
+        return None
+    import orchestration as machine
+    owner = machine.node(s, stamp['root'])
+    if owner['context'].get('conversation_id') != handoff:
+        return None
+    from conversation import chat_axis
+    flow = machine.node(s, stamp['flow_id'])
+    return chat_axis(stamp['workspace'], flow.get('chat_key'))
 
 
 def _owner(s, stamp, nid):
@@ -270,6 +307,22 @@ def confirm(s, stamp, data, *, closed=False):
     checkpoint = data.get('parent_checkpoint') or data.get('claim_review_retry')
     if checkpoint and checkpoint.get('candidate_id'):
         s.load_result(sid, checkpoint['candidate_id'])
+    if stamp.get('context_stop_receipt'):
+        origin = machine.node(s, stamp['root'])['context']
+        if origin.get('conversation_id'):
+            from conversation import workspace_handoff
+            workspace_handoff(s, sid, origin['conversation_id'], origin['request'])
+        recall = data.get('context_recall')
+        if recall:
+            from retained_context import _accepted_request, requests, validate_requests
+            if not isinstance(recall, dict) or set(recall) != {'invocation_id', 'refs'}:
+                raise InvalidUpdate('Invalid saved context request')
+            env, packet, proposal = _accepted_request(s, sid, recall['invocation_id'])
+            if (env['role'] != 'chat_reviewer'
+                    or (env.get('orchestration') or {}).get('node_id') != stamp['root']
+                    or requests(packet, proposal) != recall['refs']):
+                raise InvalidUpdate('Saved context request differs from the accepted review')
+            validate_requests(s, sid, packet, recall['refs'])
     if machine.state(s, stamp['root']) != ('DONE' if closed else 'READY'):
         raise InvalidUpdate('Saved review execution is not ready to resume')
 

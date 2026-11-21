@@ -107,7 +107,12 @@ def _decode(s, sid, kind, raw):
         str(s.path), s._audit_file_identity)
     return decode_json((database, sid, s.logic_hash, kind), raw)
 
-def check_routing_ancestry(s,sid,payload):
+def _adopted_policy(env, receipt, axis):
+    from review_upgrade import CONTEXT_PROFILE_PREDECESSOR
+    return bool(axis and env['logic_hash'] == receipt['logic_hash'] == CONTEXT_PROFILE_PREDECESSOR)
+
+
+def check_routing_ancestry(s,sid,payload,*,upgrade_axis=None):
     """Intermediate routing drafts never become memory, but remain dependencies."""
     previous=payload.get('routing_state',{}).get('previous');seen=set()
     while previous:
@@ -118,7 +123,10 @@ def check_routing_ancestry(s,sid,payload):
             raise PageFault('Routing ancestor is unavailable or quarantined', code='corrupt')
         env,receipt,prior=(_decode(s,sid,kind,raw) for kind,raw in
                          zip(('invocation','receipt','delivery'), row[:3]))
-        if (env['role']!='conversation' or receipt['status']!='accepted' or receipt['logic_hash'] not in LEGACY_POLICIES|{s.logic_hash}
+        if (env['role']!='conversation' or receipt['status']!='accepted'
+                or (receipt['logic_hash'] not in LEGACY_POLICIES | {s.logic_hash}
+                    and not _adopted_policy(env, receipt, upgrade_axis))
+                or (upgrade_axis and prior.get('conversation_axis') != upgrade_axis)
                 or sha(row[2])!=row[3] or row[3]!=receipt['payload_hash'] or prior.get('pages')
                 or any(prior[k]!=payload[k] for k in ('contract','workspace_context','request','context_binding'))
                 or prior['routing_state']['parent']!=payload['routing_state']['parent']):
@@ -132,6 +140,8 @@ def history(s, sid, parent):
         return []
     if not s.verify_invocations(sid, complete=False):
         raise PageFault('Conversation receipt chain is invalid', code='corrupt')
+    from review_upgrade import conversation_axis
+    upgrade_axis = conversation_axis(s, parent)
     origin = s.origin(sid)['contract_hash']
     state = s.snapshot(sid)
     result, seen = [], set()
@@ -147,7 +157,8 @@ def history(s, sid, parent):
         r = _decode(s, sid, 'receipt', receipt[0])
         if env['role'] != 'conversation' or r['status'] != 'accepted' or s.db.execute('SELECT 1 FROM invocation_quarantine WHERE invocation_id=?', (parent,)).fetchone():
             raise PageFault('Conversation or ancestor is quarantined', code='corrupt')
-        if r['logic_hash'] not in LEGACY_POLICIES | {s.logic_hash}:
+        adopted = _adopted_policy(env, r, upgrade_axis)
+        if not adopted and r['logic_hash'] not in LEGACY_POLICIES | {s.logic_hash}:
             raise PageFault('Conversation uses an unsupported historical policy')
         if r['resulting_contract_hash'] != origin or env['revision'] != state['revision']:
             raise PageFault('Conversation contract changed', code='denied')
@@ -160,7 +171,7 @@ def history(s, sid, parent):
         if p.get('document_review_version') == 2:
             from document_stages import publication
             publication(s, p, parent)
-        check_routing_ancestry(s,sid,p)
+        check_routing_ancestry(s,sid,p,upgrade_axis=upgrade_axis)
         if p.get('pages') or p['contract']['contract_hash'] != origin:
             raise PageFault('Historical conversation is not tool-free', code='denied')
         proposal = r['proposal']
@@ -173,12 +184,16 @@ def history(s, sid, parent):
         result.append({'id': parent, 'model': env['model'], 'user': p['request'],
                        'assistant': public_answer, 'summary': proposal['summary'],
                        'intent': proposal['intent'],
-                       'facts': proposal.get('facts', []), 'legacy': r['logic_hash'] != s.logic_hash})
+                       'facts': proposal.get('facts', []),
+                       'legacy': not adopted and r['logic_hash'] != s.logic_hash})
         if 'document_evidence' in p:
             result[-1]['document_ref'] = {field: p['document_evidence'][field] for field in ('key', 'version', 'digest')}
         if 'conversation_axis' in p:
             result[-1]['conversation_axis'] = p['conversation_axis']
         parent = (p.get('memory') or {}).get('invocation_id')
+    if upgrade_axis:
+        from conversation import require_chat_axis
+        require_chat_axis(s, sid, result, upgrade_axis)
     return result
 
 

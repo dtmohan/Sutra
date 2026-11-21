@@ -55,7 +55,8 @@ function windowFor(root, storage, dependencies) {
   const context = {globalStorageUri: {fsPath: storage}, workspaceState: new Map(), subscriptions: []};
   const authorization = createStore(vscode, context, dependencies);
   const controller = install(vscode, context, {
-    authorization, workspace: () => root, onStatus: value => status.emit('access', value),
+    authorization, workspace: () => root, modelSettings: () => ({}),
+    onStatus: value => status.emit('access', value),
   });
   return {vscode, authorization, controller, commands, status};
 }

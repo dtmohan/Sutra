@@ -519,6 +519,39 @@ class RetainedRecoveryTests(unittest.TestCase):
                    'orchestration_parent': p.get('orchestration_parent')}
         return p, request, {'invocation_id': out['invocation_id'], 'refs': [ref]}
 
+    def test_expanded_recall_preserves_accepted_evidence_and_prior_charges(self):
+        from paging import Budget
+        import chat_runtime as chat
+
+        p, _, _ = self.crashed_writer()
+        root_ref = p['retained_context']['root']['ref']
+        with self.assertRaisesRegex(InvalidUpdate, 'smaller directory branch'):
+            retained.validate_requests(self.s, self.sid, p, [root_ref])
+
+        p['expanded_context_recall_bytes'] = 65536
+        refs = retained.validate_requests(self.s, self.sid, p, [root_ref])
+        expected = [retained.lookup(self.s, self.sid, p, ref) for ref in refs]
+        saved = self.invoke_writer(p, root_ref)
+        request = {'invocation_id': saved['invocation_id'], 'refs': [root_ref]}
+        before = review_budget.usage(self.s, self.sid)
+        owner = machine.node(self.s, self.owner)
+        operations = self.s.db.execute('SELECT count(*) FROM repository_receipts').fetchone()[0]
+
+        self.s.close()
+        self.s = InvocationLedger(self.root / 'state.sqlite')
+        with machine.scope(self.owner):
+            next_packet = copy.deepcopy(p)
+            model = self.provider('synthesis')
+            model.budget = Budget(65536, 4096, 256)
+            chat._retained_recall(self.s, self.sid, next_packet, model, request)
+        view = next_packet['retained_context']
+        self.assertEqual(set(view['requested_refs']), set(refs))
+        self.assertTrue(all(page in view['pages'] for page in expected))
+        self.assertEqual(machine.node(self.s, self.owner), owner)
+        self.assertEqual(review_budget.usage(self.s, self.sid), before)
+        self.assertEqual(self.s.db.execute('SELECT count(*) FROM repository_receipts').fetchone()[0], operations)
+        self.assertTrue(self.s.verify_invocations(self.sid))
+
     def test_receipt_only_crash_recovers_after_reload_and_later_normal_acceptance_supersedes_it(self):
         p, request, expected = self.crashed_writer()
         before = review_budget.usage(self.s, self.sid); pins = self.s.pinned(self.sid)

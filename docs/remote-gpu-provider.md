@@ -76,6 +76,22 @@ without changing that physical pool. A larger advertised training window does
 not expand either the server allocation or the task budget. New model calls still
 need remaining task/parent capacity and retain all pinned constraints.
 
+An optional 64K architecture writer uses the `karma.expandedReviewContextModels`
+list in VS Code User Settings. Add the exact name of an installed model or
+registered remote profile already assigned to a tier. Sutra fits the writer at
+32K first and considers expansion for evidence or required context that exceeds
+that allocation. A remote opt-in requires an already running 65,536-token
+single-slot profile, a matching live token counter, and a configured GPU/RAM
+restoration envelope that covers 64K. The remote process allocates its own KV
+pool at startup. Sutra checks fresh GPU and host headroom before generation.
+
+On local Ollama MLX, the same setting permits expansion up to the smaller of
+64K, the matched workload calibration ceiling, and the fresh memory allocation.
+A short-prompt run configured for 64K verifies the runtime setting and provides
+a workload observation. Long-context admission uses measurements that cover the
+actual workload. The task, permissions and cumulative accounting stay bound to
+the original review when the window expands.
+
 When the approved runtime supports `/v1/chat/completions/input_tokens`, Sutra
 counts the same rendered request sent to generation without running inference.
 The proof binds its messages, schema, output allowance, approved model/runtime

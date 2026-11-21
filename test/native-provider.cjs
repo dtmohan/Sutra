@@ -3,7 +3,12 @@ const assert=require('node:assert/strict');
 const {install,latestRequest}=require('../native_provider');
 const {forRequest}=require('../model_selection');
 const noop=()=>{},disposable=()=>({dispose:noop});
-class EventEmitter{event=()=>disposable();fire(){}dispose(){}}
+class EventEmitter{
+ listeners=new Set();
+ event=callback=>{this.listeners.add(callback);return {dispose:()=>this.listeners.delete(callback)};};
+ fire(){for(const listener of this.listeners)listener();}
+ dispose(){this.listeners.clear();}
+}
 class Text{constructor(value){this.value=value;}}
 class Call{constructor(callId,name,input){Object.assign(this,{callId,name,input});}}
 class Result{constructor(callId,content){Object.assign(this,{callId,content});}}
@@ -73,6 +78,35 @@ function setup(saved={}){
  const checks=[];const h=setup();
  assert.equal(h.discoveries(),1);assert.equal(h.provider.provideLanguageModelChatInformation().length,4);assert.equal(h.calls.length,0);
  assert.deepEqual(h.provider.provideLanguageModelChatInformation().map(m=>m.id),['karma-auto','karma-low','karma-mid','karma-high']);
+ {
+  const capacity=setup();let updates=0;
+  capacity.provider.onDidChangeLanguageModelChatInformation(()=>updates++);
+  const limits=()=>capacity.provider.provideLanguageModelChatInformation().map(model=>
+    [model.maxContextWindowTokens,model.maxInputTokens,model.maxOutputTokens]);
+  assert.deepEqual(limits(),Array.from({length:4},()=>[8192,7168,1024]));
+  let observed={'model-a':16384,'model-b':32768,'model-c':65536};
+  capacity.deps.modelContextLimits=()=>observed;
+  capacity.controller.modelCatalogChanged();
+  assert.equal(updates,1);
+  assert.deepEqual(limits(),[[16384,14336,2048],[16384,14336,2048],[32768,28672,4096],[32768,28672,4096]]);
+  capacity.controller.modelCatalogChanged();
+  assert.equal(updates,1);
+  observed={'model-a':32768,'model-b':32768,'model-c':65536};
+  capacity.controller.modelCatalogChanged();
+  assert.equal(updates,2);
+  assert.deepEqual(limits(),Array.from({length:4},()=>[32768,28672,4096]));
+  const modelSettings=capacity.deps.modelSettings;
+  capacity.deps.modelSettings=()=>({...modelSettings(),low:'unknown'});
+  capacity.changeConfiguration('karma.models');
+  assert.equal(updates,3);
+  assert.deepEqual(limits(),[[8192,7168,1024],[8192,7168,1024],[32768,28672,4096],[32768,28672,4096]]);
+  capacity.deps.modelSettings=()=>({low:'model-a',mid:'',high:''});
+  capacity.changeConfiguration('karma.models');
+  assert.equal(updates,4);
+  assert.deepEqual(limits(),[[32768,28672,4096],[32768,28672,4096]]);
+  assert.equal(capacity.calls.length,0);
+  checks.push('chat advertises catalog-derived tier windows and a conservative Auto baseline, without dispatch or an optimistic 64K window');
+ }
  h.cfg.defaultModel='local-assistant:latest';await h.commands['karma.useNativeChat']({id:'other-model',prompt:'BYPASS'});
  assert.equal(h.cfg.defaultModel,'karma-auto');assert.equal(h.cfg['editor.preferCopilotHarness'],false);assert.equal(h.cfg.defaultToCopilotHarness,false);assert.equal(h.cfg['editor.localAgent.enabled'],true);assert(h.controller.status().defaultsReady);assert.equal(h.statuses.at(-1).selecting,false);assert(!h.controller.status().armed);assert.equal(h.calls.length,0);
  assert.deepEqual(h.uiCalls[0],['workbench.panel.chat.view.copilot.focus']);assert.deepEqual(h.uiCalls[1],['workbench.action.chat.newLocalChat']);

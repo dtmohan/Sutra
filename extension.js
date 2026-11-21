@@ -134,6 +134,7 @@ function activate(context) {
       SUTRA_REMOTE_MODELS:JSON.stringify(remoteNames),
       SUTRA_REMOTE_ONLY:remoteNames.length===FIXED_TIERS.length?'1':undefined,
       SUTRA_REMOTE_REGISTRY:modelSelection.remoteRegistryPath(config.inspect?.('remoteRegistry')?.globalValue,path.join(remoteBase,'models.json')),
+      SUTRA_EXPANDED_REVIEW_CONTEXT_MODELS:JSON.stringify(config.inspect?.('expandedReviewContextModels')?.globalValue??[]),
       SUTRA_CAPABILITIES_MODE: config.get('tools.mode', 'ask'),
       SUTRA_RUNTIME_DIR: path.join(context.globalStorageUri.fsPath, 'runtime-memory'),
       SUTRA_MEMORY_OWNERSHIP: config.get('memoryOwnership', 'shared'),
@@ -324,6 +325,7 @@ function activate(context) {
   function modelSettings(){return vscode.workspace.getConfiguration('karma').get('models',{low:'',mid:'',high:''});}
   let modelCatalog;
   function publishSettings(){
+    nativeController?.modelCatalogChanged?.();
     nativeController?.publish();
     panel?.webview.postMessage({type:'tier-settings',models:modelSettings(),catalog:modelCatalog});
     const config=vscode.workspace.getConfiguration('karma');panel?.webview.postMessage({type:'runtime-settings',settings:{storageLimitMiB:config.get('storageLimitMiB',512),pythonPath:config.get('pythonPath',''),thinking:config.get('thinking','adaptive'),tierReasoning:tierReasoning(config),logitSensor:config.get('logitSensor','off'),memoryOwnership:config.get('memoryOwnership','shared')}});
@@ -1008,7 +1010,9 @@ function activate(context) {
       ackRequest:ticket=>coordinator().ack(ticket),cancelRequest:ticket=>coordinator().cancel(ticket),
       cancelWorkspaceRequests:()=>coordinator().cancelAll(),
       approveCapability:(p,t)=>toolController.approve(p,t),capabilityReport:capabilityUI.report,
-      activityLink:event=>usage?.activityLink(event),modelSettings,configureModels:(force,t,options)=>configureModels(force,t,true,options),simpleChat,publishReview,
+      activityLink:event=>usage?.activityLink(event),modelSettings,
+      modelContextLimits:()=>Object.fromEntries((modelCatalog?.models||[]).filter(row=>row.eligible===true).map(row=>[row.name,row.context_tokens])),
+      configureModels:(force,t,options)=>configureModels(force,t,true,options),simpleChat,publishReview,
       async presentReview(data){await diagrams.openReview(data);},
       async presentConversation(data){if(data.result.accepted_output.diagram)await diagrams.open(data);},
       async showDiff(change,iid){const before=vscode.Uri.parse('karma-preview:/'+iid+'/before.py'),after=vscode.Uri.parse('karma-preview:/'+iid+'/after.py');previewDocuments.set(before.toString(),change.before);previewDocuments.set(after.toString(),change.after);await vscode.commands.executeCommand('vscode.diff',before,after,'Sutra proposed edit: '+change.target);},

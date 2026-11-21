@@ -3,6 +3,8 @@ import os
 import re
 
 def catalog(ollama):
+    from context_manager import InvalidUpdate
+    from model_context import allocation
     from strata_model import is_strata
     rows=[];errors=[]
     try:
@@ -27,6 +29,13 @@ def catalog(ollama):
             row.update(eligible=eligible,capabilities=capabilities,parameter_count=count,parameter_size=details.get('parameter_size',''),
                 quantization=details.get('quantization_level',''),moe=moe,architecture=architecture,family=details.get('family') or (tag.get('details') or {}).get('family'),
                 eligibility_reason='local chat model' if eligible else 'autocomplete/base model' if base else 'completion capability not declared')
+            if eligible:
+                try:
+                    budget, _ = allocation(data)
+                except (InvalidUpdate, TypeError):
+                    pass  # Capacity stays unknown; runtime admission still checks the model.
+                else:
+                    row['context_tokens'] = budget.context_limit
         except Exception as exc:
             row.update(eligible=False,eligibility_reason='metadata unavailable');errors.append({'model':name,'error':str(exc)[:160]})
         rows.append(row)

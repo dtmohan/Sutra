@@ -369,6 +369,61 @@ def expand_retained_context(s, sid, p, budget):
         from retained_context import refit, MAX_LIMIT
         refit(s, sid, p, min(MAX_LIMIT, budget.input_limit))
 
+
+def _try_expanded_packet(s, sid, provider, allocation, probe, fmt, failure):
+    if not allocation:
+        return False
+    from expanded_review_context import BASELINE, ceiling, packet_requirement, try_expand
+    if ceiling(provider) <= BASELINE:
+        return False
+    if probe is None:
+        from conversation_memory import ConversationContextExceeded
+        if provider.budget.context_profile != 1 or not isinstance(failure, ConversationContextExceeded):
+            return False
+        charge = failure.budget['required_input']
+    else:
+        charge = provider.budget.charge(SYSTEM, probe, fmt)
+    return try_expand(s, sid, provider, allocation, packet_requirement(provider, charge, failure), charge,
+                      reason='exact_prompt_fit' if provider.budget.context_profile == 2 else 'conservative_packet_fit')
+
+
+def _retained_recall(s, sid, p, provider, request):
+    from retained_context import apply_recall, minimum_bytes
+    from expanded_review_context import BASELINE, ceiling, bounded_recall_limit, try_expand
+    expand_retained_context(s, sid, p, provider.budget)
+    try:
+        apply_recall(s, sid, p, request)
+    except ContextBudgetExceeded:
+        cap = ceiling(provider)
+        if cap <= BASELINE:
+            raise
+        budget = provider.budget
+        limit = bounded_recall_limit(budget, cap)
+        if limit <= p['retained_context']['limit_bytes']:
+            raise
+        view = apply_recall(s, sid, p, request, limit=limit)
+        # Exact providers count the upcoming packet before expanding physical
+        # context. The byte reservation has its own independent admission.
+        if budget.context_profile == 2:
+            return
+        fit = context.context_budget(provider, s, sid, slots=2, physical_first=True)
+        charge = minimum_bytes(view) + budget.template_reserve
+        if not try_expand(s, sid, provider, fit, charge + budget.response_reserve, charge,
+                          reason='mandatory_retained_pages'):
+            raise
+
+
+def _mark_expanded_recall(p, provider):
+    p.pop('expanded_context_recall_bytes', None)
+    if p.get('retained_context_version') != 1:
+        return
+    from expanded_review_context import BASELINE, ceiling, bounded_recall_limit
+    cap = ceiling(provider)
+    limit = bounded_recall_limit(provider.budget, cap)
+    if cap > BASELINE and limit > p['retained_context']['limit_bytes']:
+        p['expanded_context_recall_bytes'] = limit
+
+
 def request_check(s,sid,p):
     from review_reasoning import check
     check(p, synthesis=True)
@@ -392,6 +447,12 @@ def request_check(s,sid,p):
         raise InvalidUpdate('Parent response shape repair requires its output-limit recovery')
     from conversation import check_workspace_handoff
     check_workspace_handoff(s,sid,p)
+    if 'expanded_context_recall_bytes' in p:
+        from expanded_review_context import bounded_recall_limit
+        limit = p['expanded_context_recall_bytes']
+        if ('memory_budget' not in p or type(limit) is not int or p.get('retained_context_version') != 1
+                or not report.requested(p) or not 0 < limit <= bounded_recall_limit(Budget(**p['memory_budget']))):
+            raise InvalidUpdate('Invalid expanded retained-context request envelope')
     if 'retained_context_version' in p:
         from retained_context import check as check_retained
         check_retained(s, sid, p)
@@ -457,6 +518,9 @@ def context_failure(s, packet, provider, allocation, cause):
         return failure
     from model_context import allocation as installed_allocation
     installed, _ = installed_allocation(provider.context_metadata)
+    writer_limit = getattr(provider, 'review_window_limit', None)
+    if writer_limit is not None and writer_limit < installed.context_limit:
+        installed = installed.with_limits(context_limit=writer_limit)
     if installed.context_limit <= provider.budget.context_limit:
         return failure
     reserve = min(installed.response_reserve, max(512, installed.context_limit // 4))
@@ -523,6 +587,7 @@ def _fit_source_funded_packet(s, sid, p, data, provider):
         context.evidence(p, data)
         p['facts'] = facts(data['graph'], p['sites'])
         fmt = schema(p)
+        probe = None
         try:
             if not p['excerpts']:
                 raise ContextBudgetExceeded('No complete nonblank source line fits the parent excerpt allocation')
@@ -534,6 +599,8 @@ def _fit_source_funded_packet(s, sid, p, data, provider):
                 continue
             if _trim_parent_optional(p):
                 continue
+            if _try_expanded_packet(s, sid, provider, allocation, probe, fmt, exc):
+                return _fit_source_funded_packet(s, sid, p, data, provider)
             if p['excerpt_bytes'] == 64:
                 raise context_failure(s, p, provider, allocation, exc) from exc
             # Only a verified installed physical-window shortage can reduce
@@ -549,6 +616,7 @@ def _fit_source_funded_packet(s, sid, p, data, provider):
         cost = {'calls': 2, 'tokens': 2 * required}
         machine.allowed(machine.gates(s, owner, cost))
         require(s, sid, cost)
+        _mark_expanded_recall(p, provider)
         return fmt, 3
 
 
@@ -583,6 +651,7 @@ def fit_packet(s, sid, p, data, provider, real):
             context.evidence(p, data)
             p['facts'] = facts(data['graph'], p['sites'])
             fmt = schema(p)
+            probe = None
             try:
                 if p.get('parent_context_version') in (2, 3) and not p['excerpts']:
                     raise ContextBudgetExceeded('No complete nonblank source line fits the parent excerpt allocation')
@@ -591,10 +660,13 @@ def fit_packet(s, sid, p, data, provider, real):
                 provider.budget.check(SYSTEM, probe, fmt)
                 from context_window import check as check_window
                 check_window(provider.budget, SYSTEM, probe, fmt, planning=True)
+                _mark_expanded_recall(p, provider)
                 return fmt, (3 if incremental else min(3, slots-int(structured))) if real else 3
             except ContextBudgetExceeded as exc:
                 if trim_retained_context(s, sid, p):
                     continue
+                if _try_expanded_packet(s, sid, provider, allocation, probe, fmt, exc):
+                    return fit_packet(s, sid, p, data, provider, real)
                 if p['excerpt_bytes'] == 64 and p['map_bytes'] == 512:
                     if not real: raise
                     if not expand:
@@ -618,6 +690,7 @@ def preflight(s, sid, packet, provider, real):
         if structured:
             allocation.update(reviewer_slots_reserved=1, repair_slots_reserved=0)
     probe = dict(packet, excerpts={})
+    checked = None
     try:
         probe['memory'] = conversation_pages(s, probe, provider.budget, materialize=True, mandatory_only=True)
         checked = dict(probe, repair={'errors': ['x'*140]*2})
@@ -627,6 +700,8 @@ def preflight(s, sid, packet, provider, real):
     except ContextBudgetExceeded as exc:
         if allocation is None:
             raise
+        if _try_expanded_packet(s, sid, provider, allocation, checked, schema(probe), exc):
+            return preflight(s, sid, packet, provider, real)
         raise context_failure(s, probe, provider, allocation, exc) from exc
 
 
@@ -727,6 +802,9 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
             from api_runtime import provider_for
             selected = provider_for(root, model, review=True)
             selected.keep_alive = 0
+            if parent_step and report.requested(intent_packet):
+                from expanded_review_context import prepare as prepare_context_profile
+                prepare_context_profile(selected)
         else:
             selected = provider
             if selected.model != model:
@@ -816,9 +894,7 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
         from review_followup import expand
         data['followups'], followup_usage = expand(s, sid, p, data, root, reader, real)
     if request.get('context_recall'):
-        from retained_context import apply_recall
-        expand_retained_context(s, sid, p, provider.budget)
-        apply_recall(s, sid, p, request['context_recall'])
+        _retained_recall(s, sid, p, provider, request['context_recall'])
     import report_review
     resumed = report_review.pending_candidate(s, sid, p)
     if resumed:

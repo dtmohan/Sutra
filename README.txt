@@ -1,4 +1,8 @@
-Sutra 0.57.2 — Saved report recovery
+Sutra 0.57.3 — Optional 64K review context
+
+Architecture reviews start with the baseline context. The User Settings option
+karma.expandedReviewContextModels allows eligible writers to use up to 64K when
+the evidence needs more room and the current memory and task allocation allow it.
 
 Remote reviews can recover a timed-out identity inspection. Claim reviews for
 remote models without reasoning controls use smaller pages. Compatible saved

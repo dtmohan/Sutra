@@ -259,6 +259,10 @@ def context_budget(provider, s, sid, slots=2, expand_output=True, *, physical_fi
         if callable(refresh):
             refresh()
     budget, metadata = allocation(provider.context_metadata)
+    writer_limit = getattr(provider, 'review_window_limit', None)
+    if writer_limit is not None and writer_limit < budget.context_limit:
+        budget = budget.with_limits(context_limit=writer_limit)
+        metadata['effective_context_tokens'] = writer_limit
     available = float('inf')
     task = review_budget.usage(s, sid)
     if task:

@@ -3,11 +3,14 @@ import json
 import unittest
 from unittest.mock import patch
 
+import conversation_memory
 import orchestration as machine
 import orchestration_flow as flow
+import retained_context as retained
 import review_budget
 import review_upgrade as upgrade
 import test_orchestration as fixture
+import test_retained_context as retained_fixture
 from context_manager import InvalidUpdate
 from invocation_gateway import InvocationLedger
 from paging import PageFault
@@ -100,6 +103,106 @@ class ReviewUpgradeTests(unittest.TestCase):
             self.assertIsNone(upgrade.recorded(self.s, paused['flow_id']))
         self.assertEqual(flow.info(self.s, paused['flow_id'])[1]['child_results'], original['child_results'])
         self.assertEqual(review_budget.usage(self.s, sid), before_usage)
+
+
+class ContextProfileUpgradeTests(unittest.TestCase):
+    tearDown = retained_fixture.RetainedRecoveryTests.tearDown
+    provider = retained_fixture.RetainedRecoveryTests.provider
+    until = retained_fixture.RetainedRecoveryTests.until
+    discover = retained_fixture.RetainedRecoveryTests.discover
+    invoke_writer = retained_fixture.RetainedRecoveryTests.invoke_writer
+    crashed_writer = retained_fixture.RetainedRecoveryTests.crashed_writer
+
+    def setUp(self):
+        retained_fixture.RetainedRecoveryTests.setUp(self)
+        self.ws = self.ws.resolve()
+        self.meta['workspace'] = str(self.ws)
+
+    def step(self, out=None, **kwargs):
+        kwargs.setdefault('chat_key', '1' * 64)
+        result = fixture.OrchestrationTests.step(self, out, **kwargs)
+        if result.get('binding'):
+            self.meta['active'] = result['binding']['session']
+        return result
+
+    def paused_review(self, *, policy=upgrade.CONTEXT_PROFILE_PREDECESSOR):
+        with patch('governance.policy_hash', return_value=policy):
+            self.s.close()
+            self.s = InvocationLedger(self.root / 'state.sqlite')
+            packet, request, recall = self.crashed_writer()
+            fid = machine.node(self.s, self.owner)['flow_id']
+            flow.move(self.s, fid, 'SYNTHESIS', 'RETAINED_CONTEXT_REQUESTED', context_recall=recall)
+            flow.move(self.s, fid, 'PAUSED', 'CONTEXT_STOPPED', workflow_stop={
+                'status': 'context_budget', 'stage': 'SYNTHESIS', 'error': 'Fixture context allocation exceeded',
+            })
+            self.s.close()
+        self.s = InvocationLedger(self.root / 'state.sqlite')
+        self.meta = flow.flow_metadata(self.root, self.ws, fid)
+        return fid, packet, request, recall
+
+    def test_resume_native_review_preserves_handoff_pages_children_grants_and_spending(self):
+        fid, packet, request, recall = self.paused_review()
+        sid = self.sid
+        original = machine.node(self.s, self.owner)
+        before = review_budget.usage(self.s, sid)
+        pins = self.s.pinned(sid)
+        children = flow.info(self.s, fid)[1]['child_results']
+        self.assertTrue(children)
+        self.assertTrue(before['used']['calls'])
+        self.assertTrue(before['used']['operations'])
+        self.assertNotIn(recall['refs'][0], {page['ref'] for page in packet['retained_context']['pages']})
+        handoff = request['conversation_id']
+        conversation_sid = self.s.db.execute('SELECT session FROM invocations WHERE id=?', (handoff,)).fetchone()[0]
+        with self.assertRaisesRegex(PageFault, 'unsupported historical policy'):
+            conversation_memory.history(self.s, conversation_sid, handoff)
+        repo_receipts = self.s.db.execute('SELECT id,record_json FROM repository_receipts ORDER BY seq').fetchall()
+        before_receipts = self.s.db.execute(
+            'SELECT id,record_json FROM invocation_receipts WHERE session=? ORDER BY seq', (sid,)).fetchall()
+        with patch('review_upgrade.release_pair', return_value=True):
+            paused = flow.response(self.s, fid)
+            self.assertEqual(paused['recovery']['kind'], 'compatible_review_upgrade')
+            with self.assertRaisesRegex(InvalidUpdate, 'requires confirmation'):
+                self.step(paused, event='restart_review')
+            accepted = self.step(paused, event='restart_review', confirmed=True)
+            self.assertEqual(accepted['execution_id'], self.owner)
+            stamp = upgrade.recorded(self.s, fid)
+            with upgrade.use(self.s, stamp), machine.scope(self.owner):
+                page = retained.lookup(self.s, sid, packet, recall['refs'][0])
+                self.assertEqual(conversation_memory.history(self.s, conversation_sid, handoff)[0]['user'], self.prompt)
+            resumed = self.step(accepted, event='resume')
+            self.assertEqual(resumed['state'], 'SYNTHESIS')
+            self.assertEqual(review_budget.usage(self.s, sid), before)
+            self.assertEqual(self.s.pinned(sid), pins)
+            self.assertEqual(machine.node(self.s, self.owner), original)
+            self.tier = 'high'
+            self.models.clear()
+            done = self.until('DONE', resumed)
+            self.assertEqual(done['execution_id'], self.owner)
+            self.assertEqual(flow.info(self.s, fid)[1]['child_results'], children)
+            self.assertTrue(done['data']['result']['admission']['admitted'])
+            writer = next(p for stage, model in self.models if stage == 'synthesis'
+                          for p in model.payloads if p.get('retained_context'))
+            self.assertEqual(writer['route']['record']['choice']['model'], fixture.MODELS['high'])
+            self.assertEqual(writer['request'], self.prompt)
+            self.assertEqual(writer['contract']['constraints'], self.s.snapshot(sid)['constraints'])
+            self.assertIn(page, writer['retained_context']['pages'])
+            self.assertEqual(self.s.db.execute('SELECT id,record_json FROM repository_receipts ORDER BY seq').fetchall(), repo_receipts)
+            receipts = self.s.db.execute(
+                'SELECT id,record_json FROM invocation_receipts WHERE session=? ORDER BY seq', (sid,)).fetchall()
+            self.assertEqual(receipts[:len(before_receipts)], before_receipts)
+            self.assertTrue(all(json.loads(raw)['logic_hash'] == self.s.logic_hash
+                                for _, raw in receipts[len(before_receipts):]))
+            after = review_budget.usage(self.s, sid)
+            self.assertEqual(after['limits'], before['limits'])
+            self.assertGreater(after['used']['calls'], before['used']['calls'])
+            self.assertTrue(self.s.verify_invocations(sid))
+        with self.assertRaisesRegex(PageFault, 'unsupported historical policy'):
+            conversation_memory.history(self.s, conversation_sid, handoff)
+
+    def test_other_policy_does_not_admit_handoff_even_at_same_pause(self):
+        fid, _, _, _ = self.paused_review(policy='2' * 64)
+        with patch('review_upgrade.release_pair', return_value=True):
+            self.assertIsNone(upgrade.offer(self.s, fid, flow.info(self.s, fid)[1]))
 
 
 if __name__ == '__main__':
