@@ -49,12 +49,19 @@ function monitorHost(){
  await send({snapshot:runnerSnapshot(running)});
  assert.equal(await page.locator('#runner-state').textContent(),'Working');
  assert.equal(await page.locator('#runner-jobs img').count(),0);
- assert((await page.locator('#runner-detail').textContent()).includes('Stopping display does not cancel execution'));
+ assert((await page.locator('#runner-detail').textContent()).includes('Chat Stop or Stop runner request prevents further execution'));
  const stopRunner=page.getByRole('button',{name:'Stop runner request',exact:true});
  assert(await stopRunner.isEnabled());await stopRunner.click();
  assert.deepEqual(await page.evaluate(()=>sent.at(-1)),{type:'stop_runner',id:runnerId});
  runnerHost.receive({type:'stop_runner',id:runnerId});
  assert.deepEqual(runnerHost.commands,[['karma.stopRunner',runnerId]]);
+ await send({snapshot:runnerSnapshot({...running,jobs:running.jobs.map(job=>({...job,state:'waiting'}))})});
+ assert.equal(await page.locator('#runner-state').textContent(),'Waiting for readiness');
+ assert((await page.locator('#runner-detail').textContent()).includes('without starting inference'));
+ assert.equal(await stopRunner.isEnabled(),true);
+ await stopRunner.click();
+ assert.deepEqual(await page.evaluate(()=>sent.at(-1)),{type:'stop_runner',id:runnerId});
+ await send({snapshot:runnerSnapshot(running)});
  await page.screenshot({path:path.join(out,'Persistent-runner-working.png'),fullPage:true});
  await send({snapshot:runnerSnapshot({...running,jobs:running.jobs.map(job=>({...job,state:'cancelling'}))})});
  assert.equal(await page.locator('#runner-state').textContent(),'Cancellation requested');
@@ -73,6 +80,19 @@ function monitorHost(){
  assert.deepEqual(dismissMessage,{type:'dismiss_runner',id:runnerId});
  runnerHost.receive(dismissMessage);
  assert.deepEqual(runnerHost.commands.at(-1),['karma.dismissRunnerResult',runnerId]);
+ const auditPending={...completed,jobs:completed.jobs.map(job=>({...job,state:'cancelled',acknowledged:true,
+  stop_receipt_pending:true,stop_audit_error:'Audit write unavailable <img src=x>',
+  runner:{version:1,mode:'approved_limits'},workflow:{kernel:{adapter:'karma',profile:'task-continuation-v1',decision:'BRIDGE'}}}))};
+ await send({snapshot:runnerSnapshot(auditPending)});
+ assert.equal(await page.locator('#runner-jobs .gate').count(),1,'Pending Stop evidence cannot be hidden by transport acknowledgement');
+ assert.equal(await page.locator('#runner-jobs img').count(),0);
+ assert((await page.locator('#gates').textContent()).includes('Task continuationBRIDGE'));
+ const retryStop=page.getByRole('button',{name:'Retry Stop receipt for state',exact:true});
+ assert(await retryStop.isEnabled());await retryStop.click();
+ assert.deepEqual(await page.evaluate(()=>sent.at(-1)),{type:'stop_runner',id:runnerId});
+ assert(await dismissRunner.isHidden());
+ await send({snapshot:{...runnerSnapshot(auditPending),updatedAt:new Date(Date.now()-10000).toISOString()},aged:true});
+ assert(await retryStop.isHidden(),'A stale Stop receipt cannot be retried from an old observation');
  await send({snapshot:{...runnerSnapshot(running),updatedAt:new Date(Date.now()-10000).toISOString()},aged:true});
  assert.equal(await page.locator('#runner-state').textContent(),'Status stale');
  assert(await stopRunner.isDisabled());
@@ -268,6 +288,42 @@ function monitorHost(){
  assert((await page.locator('#resident-models').textContent()).includes('Memory unmeasured · 16,384'));
  assert.equal(await page.locator('#resident-models img').count(),0);
  assert((await page.locator('#memory-plan').textContent()).includes('incremental memory unmeasured'));
+ assert(await page.locator('#remote-memory-section').isHidden(),'Unconfigured remote providers do not imply a live GPU observation');
+ const remoteMemory={version:1,provider:'remote_llama',profile:'remote-nvidia-v1',model:'sutra:remote/rtx3090 <img src=x>',
+  available:true,admitted:true,decision:'ALLOW',reason:'Exact resident model and remote allocation fit',observed_at:Date.now()/1000,stale:false,
+  sample:{wall_time:1,gpu:{uuid:'GPU-rtx3090 <svg onload=alert(1)>',name:'RTX 3090',total_bytes:24*1024**3,free_bytes:20*1024**3,used_bytes:4*1024**3},ram:{free_bytes:25*1024**3}},
+  plan:{decision:'ALLOW',model:'sutra:remote/rtx3090',context_tokens:8192,estimated_increment_bytes:0},
+  last_admission:{decision:'ALLOW',reason:'Exact resident model and remote allocation fit'}};
+ await send({snapshot:{...snapshot,monitor:{...monitor,remote_memory:remoteMemory}}});
+ assert(await page.locator('#remote-memory-section').isVisible());
+ assert.equal(await page.locator('#remote-vram-free').textContent(),'20.0 GiB');
+ assert.equal(await page.locator('#remote-vram-total').textContent(),'of 24.0 GiB GPU memory');
+ assert.equal(await page.locator('#remote-host-ram').textContent(),'25.0 GiB');
+ assert((await page.locator('#remote-gpu-identity').textContent()).includes('GPU UUID: GPU-rtx3090 <svg'));
+ assert.equal(await page.locator('#remote-memory-section img, #remote-memory-section svg').count(),0);
+ assert((await page.locator('#remote-plan').textContent()).includes('8,192 context tokens · 0.0 GiB additional VRAM reservation'));
+ assert((await page.locator('#remote-plan').textContent()).includes('not a live fit guarantee'));
+ assert.equal(await page.locator('#remote-allocation').getAttribute('data-decision'),'ALLOW');
+ const blockedRemote={...remoteMemory,decision:'BRIDGE',admitted:false,reason:'Remote VRAM reserve does not fit',observed_at:Date.now()/1000,
+  sample:{...remoteMemory.sample,gpu:{...remoteMemory.sample.gpu,free_bytes:256*1024**2}},plan:{...remoteMemory.plan,decision:'BRIDGE'}};
+ await send({snapshot:{...snapshot,monitor:{...monitor,remote_memory:blockedRemote}}});
+ assert.equal(await page.locator('#resource').textContent(),'System pressure: ALLOW','Local host pressure cannot overwrite a remote GPU admission');
+ assert.equal(await page.locator('#remote-allocation').textContent(),'Last remote check: BRIDGE');
+ assert.equal(await page.locator('#remote-allocation').getAttribute('data-decision'),'BRIDGE');
+ assert.equal(await page.locator('#remote-reason').textContent(),blockedRemote.reason);
+ await send({snapshot:{...snapshot,monitor:{...monitor,remote_memory:{...remoteMemory,observed_at:Date.now()/1000-9,age_seconds:0}}}});
+ assert.equal(await page.locator('#remote-vram-free').textContent(),'—','Old remote values are not presented as live even if an old record claims age zero');
+ assert.equal(await page.locator('#remote-host-ram').textContent(),'—');
+ assert.equal(await page.locator('#remote-allocation').textContent(),'Last remote check: ALLOW · historical');
+ assert.equal(await page.locator('#remote-allocation').getAttribute('data-decision'),'');
+ assert((await page.locator('#remote-freshness').textContent()).includes('fresh check is required'));
+ await send({snapshot:{...snapshot,monitor:{...monitor,remote_memory:{...remoteMemory,observed_at:Date.now()/1000+60}}}});
+ assert.equal(await page.locator('#remote-vram-free').textContent(),'—','A future timestamp does not create a fresh observation');
+ await send({snapshot:{...snapshot,monitor:{...monitor,remote_memory:{...remoteMemory,version:2,observed_at:Date.now()/1000}}}});
+ assert.equal(await page.locator('#remote-vram-free').textContent(),'—','Unknown remote evidence schemas remain unverified');
+ await send({snapshot:{...snapshot,monitor:{...monitor,remote_memory:remoteMemory}}});
+ await page.locator('#remote-memory-section').scrollIntoViewIfNeeded();
+ await page.screenshot({path:path.join(out,'Remote-GPU-memory.png')});
  await send({snapshot});
  await send({snapshot:{...snapshot,monitor:{...monitor,runtime_memory:{...monitor.runtime_memory,plan:{...monitor.runtime_memory.plan,decision:'BRIDGE'}}}}});
  assert.equal(await page.locator('#resource').textContent(),'System pressure: ALLOW');

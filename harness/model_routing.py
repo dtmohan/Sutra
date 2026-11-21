@@ -4,12 +4,13 @@ from context_manager import InvalidUpdate
 TIERS=('low','mid','high')
 
 def choose(prompt,models,mode,signals):
-    if not isinstance(models,dict) or set(models)!=set(TIERS):raise InvalidUpdate('Configure all three local model tiers')
+    if not isinstance(models,dict) or set(models)!=set(TIERS):raise InvalidUpdate('Configure all three model tiers')
     from strata_model import is_strata
     from engine_profiles import is_engine
+    from remote_profiles import is_remote
     for value in models.values():
-        if not isinstance(value,str) or not value.strip() or len(value)>200 or ('cloud' in value.lower() and not is_strata(value) and not is_engine(value)) or (value.startswith('strata:') and not is_strata(value)) or (value.startswith('sutra:') and not is_engine(value)):
-            raise InvalidUpdate('Each tier needs an installed local model name')
+        if not isinstance(value,str) or not value.strip() or len(value)>200 or ('cloud' in value.lower() and not is_strata(value) and not is_engine(value) and not is_remote(value)) or (value.startswith('strata:') and not is_strata(value)) or (value.startswith('sutra:') and not (is_engine(value) or is_remote(value))):
+            raise InvalidUpdate('Each tier needs an installed or registered model name')
     # Resource modes are emitted by the central host workflow after a receipted
     # fallback. They are not offered as user model choices.
     resource_mode=mode in ('resource-low','resource-mid')

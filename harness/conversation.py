@@ -600,8 +600,8 @@ def _answer_step(s,meta,root,request,provider,axis):
     for attempt in range(3):
         s.reserve(run, 'ATTEMPT', {'attempt': attempt})
         if real:
-            from monitoring import require_resources
-            hardware = require_resources(root)
+            from provider_resources import require_resources
+            hardware = require_resources(root,provider=provider)
             with s.db:
                 s._audit('RESOURCE_GATE', {'run_id': run, 'measurement': hardware})
         delivery = s.prepare_delivery(sid, p, provider.budget.check(SYSTEM, p, fmt))

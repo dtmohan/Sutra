@@ -63,7 +63,7 @@ class ChildSourceHandoffTests(unittest.TestCase):
         seen = []
 
         def finish(worker, cid, system, packet, schema):
-            self.assertEqual(packet['child_evidence_version'], 4)
+            self.assertEqual(packet['child_evidence_version'], 5)
             handoff = packet.get('child_source_handoff')
             seen.append(copy.deepcopy(packet))
             result, record = original(worker, cid, system, packet, schema)

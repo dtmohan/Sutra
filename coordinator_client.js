@@ -37,7 +37,7 @@ function privateJSON(file, limit=32768) {
   } finally {fs.closeSync(descriptor);}
 }
 function runtimeHash(extensionPath) {
-  const names = ['runtime-integrity.json', 'coordinator_service.js', 'coordinator_client.js', 'bridge_worker.js'];
+  const names = ['runtime-integrity.json', 'coordinator_service.js', 'coordinator_client.js', 'bridge_worker.js', 'task_runner.js', 'coordinator_telemetry.js'];
   return hash(names.map(name => name+'\0'+hash(fs.readFileSync(path.join(extensionPath,name)))).join('\0'));
 }
 function endpointFor(root, scope) {
@@ -105,7 +105,7 @@ class CoordinatorClient {
     if(endpoint) {
       if(previous||endpoint.runtime_hash===this.runtimeHash)return endpoint;
       const status=await rpc(endpoint,'status');
-      if(status.busy||status.active||status.queued>0)throw error('The previous Sutra runner is finishing retained work. Reconnect to it before starting work under this version.','COORDINATOR_VERSION_BUSY');
+      if(status.busy||status.active||status.queued>0||status.pending_tasks>0)throw error('The previous Sutra runner is finishing retained work. Reconnect to it before starting work under this version.','COORDINATOR_VERSION_BUSY');
       await rpc(endpoint,'shutdown');
       for(let i=0;i<50;i++){try{process.kill(endpoint.pid,0);}catch(e){if(e.code==='ESRCH')break;}await sleep(20);}
       endpoint=null;
@@ -175,6 +175,7 @@ class CoordinatorClient {
     const id=transport?.id||(await rpc(endpoint,'allocate',{chat_key:chatKey})).id;
     const wire=JSON.parse(JSON.stringify({request,environment:Object.fromEntries(Object.entries(environment).map(([key,value])=>[key,value??null]))}));
     if(authorization)wire.authorization=authorization;
+    if(transport?.wholeTask===true)wire.runner={version:1,mode:'approved_limits'};
     const digest=hash(canonical(wire));
     // The ID is durable before a model or source operation begins. A lost
     // submission acknowledgement must be recovered by ID, never blind replay.
@@ -188,10 +189,11 @@ class CoordinatorClient {
     return this.wait(endpoint,ticket.id,ticket.chatKey||ticket.nativeChat||'',{token,onActivity});
   }
   async wait(endpoint,id,chatKey,{token,onActivity}) {
-    let cursor=0;
+    let cursor=0,firstState;
     while(true) {
       if(this.detached||token?.isCancellationRequested)throw error('Stopped displaying this request. The runner retains it; reconnect with continue or stop it in Sutra Monitor.','COORDINATOR_DETACHED');
       const status=await rpc(endpoint,'status',{id,chat_key:chatKey});
+      firstState ??= status.state;
       if(status.response_evicted)throw error('This result was already acknowledged. Its saved workflow and ledger remain available.','COORDINATOR_RESULT_RETIRED');
       const replay=await rpc(endpoint,'events',{id,chat_key:chatKey,after:cursor});
       if(replay.dropped_before>cursor) {
@@ -205,7 +207,8 @@ class CoordinatorClient {
       }
       if(TERMINAL.has(status.state)) {
         if(cursor<(status.last_event_seq||0))continue;
-        if(status.state==='cancelled')throw error(status.error||'The runner acknowledged cancellation. Backend completion remains unverified.','COORDINATOR_CANCELLED');
+        if(status.state==='cancelled')throw Object.assign(error(status.error||'The runner acknowledged cancellation. Backend completion remains unverified.','COORDINATOR_CANCELLED'),
+          {terminalAtAttach:firstState==='cancelled'});
         if(status.state==='interrupted')throw error(status.error||'The runner was interrupted. Durable work remains charged and was not replayed.','COORDINATOR_INTERRUPTED');
         if(status.response)return status.response;
         throw error(status.error||'The runner failed without a response. Saved work was not replayed.','COORDINATOR_FAILED');

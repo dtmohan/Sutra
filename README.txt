@@ -1,3 +1,45 @@
+Sutra 0.56.0 — Remote GPU inference
+
+Remote NVIDIA inference is available through a trusted SSH profile. The remote
+provider keeps model calls inside the existing invocation gateway and checks
+fresh GPU memory, remote host RAM, model identity, context allocation and runtime
+liveness. Local file operations still use local resource and permission checks.
+Model switches retain task context, constraints, permissions and consumed budgets.
+
+The provider is opt-in through Configure Models. Existing tier choices stay saved.
+The separate Remote GPU section in Sutra Monitor distinguishes fresh measurements
+from historical allocation decisions. Credentials and host profiles remain outside
+the VSIX. See docs/remote-gpu-provider.md for setup and scope.
+
+Authorized task stages now continue in the durable runner without requiring a
+chat Continue after every checkpoint. Reloading VS Code detaches the display;
+reconnect in the original chat to collect current progress or the final report.
+Chat Stop and Stop runner request prevent further stages. Completed work,
+source receipts, task context, permissions and consumed spending stay saved.
+
+The existing backend state machine declares whether to continue, wait, request
+authorization/evidence, or stop. A Karma continuation adapter gates automatic
+transitions through the unchanged kernel and binds their permits to the existing
+audit hash chain, task contract, checkpoint and runner identity. The runner
+rechecks the captured workspace grant
+before each operation. Only fresh, bound resource-readiness observations can
+resume an eligible wait. Permission changes, unresolved effects, policy/source
+recovery and allocation outside approved workspace limits require explicit action.
+The runner cannot grant itself permissions or reset an allocation.
+
+A queued or waiting checkpoint can recover after a runner restart under the same
+runtime. A call interrupted in flight remains unresolved and is never replayed.
+Model and reasoning settings stay fixed for an accepted run; explicitly stop or
+pause it before resuming with another configured model. The same task identity,
+checkpoints, constraints and prior charges carry across that change.
+
+An independent bounded telemetry stream survives UI reloads. Inline workflow
+progress stays separate from model reasoning, and the final usage footer includes
+all recorded model calls. New child source pages also recover unseen imports and
+global definitions above previously supplied function bodies. Complete source
+delivery can bridge unresolved questions to the parent without claiming semantic
+completion. The canonical STP kernel and model-tier settings are unchanged.
+
 Sutra 0.54.2 — Structured project reviews and chat recovery
 
 Project review requests now receive source-linked report sections and a control-flow

@@ -64,7 +64,7 @@ def write_trace(directory, call_id, record):
              'conservative_input_charge':record.get('conservative_input_charge'),
              'response':{k:response[k] for k in ('model','done','done_reason','load_duration','prompt_eval_count','eval_count','total_duration') if k in response},
              'privacy':'Prompt, source excerpts and response bodies omitted; committed deliveries remain in the ledger'}
-    if record.get('provider') in ('strata', 'sutra_engine'):
+    if record.get('provider') in ('strata', 'sutra_engine', 'sutra_remote'):
         compact['provider'] = record['provider']
         request = record.get('request') or {}
         compact['generation_limits'] = {

@@ -7,6 +7,7 @@ from pathlib import Path
 import platform
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
@@ -48,17 +49,47 @@ def _on_demand_state(max_wait):
 def resource_state(root, now=None, *, refresh=False, newer_than=None, max_wait=2):
     """Read observed state. Admission may request a fresh local measurement."""
     refresh = refresh and now is None
-    try:
-        sample=json.loads((Path(root)/'telemetry.json').read_text())
-        state = dict(KarmaAdapter().hardware(sample, time.time() if now is None else now),
-                     sample_source='telemetry_file')
-    except (FileNotFoundError, StaleHardwareSample) as exc:
+    observed = time.time() if now is None else now
+    states, missing_or_stale, invalid = [], [], []
+    for file, source, private in ((Path(root)/'telemetry.json', 'telemetry_file', False),
+                                  (Path(root)/'coordinator'/'telemetry.json', 'coordinator_telemetry_file', True)):
+        try:
+            if private:
+                directory = file.parent.lstat()
+                if (not stat.S_ISDIR(directory.st_mode) or hasattr(os, 'getuid') and directory.st_uid != os.getuid()
+                        or os.name != 'nt' and directory.st_mode & 0o077):
+                    raise ValueError('Coordinator telemetry directory is not private')
+            fd = os.open(file, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+            try:
+                info = os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 65536
+                        or private and (hasattr(os, 'getuid') and info.st_uid != os.getuid()
+                                        or os.name != 'nt' and info.st_mode & 0o077)):
+                    raise ValueError('Telemetry is not a bounded regular measurement file')
+                raw = os.read(fd, 65537)
+                if len(raw) > 65536: raise ValueError('Telemetry exceeds its measurement allocation')
+            finally:
+                os.close(fd)
+            sample = json.loads(raw)
+            states.append(dict(KarmaAdapter().hardware(sample, observed), sample_source=source))
+        except (FileNotFoundError, StaleHardwareSample) as exc:
+            missing_or_stale.append(exc)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            invalid.append(exc)
+    if not states:
+        # Preserve fail-closed handling of malformed observations. A missing or
+        # expired stream can be refreshed; an invalid one is not healthy evidence.
+        if invalid: return _unavailable(invalid[0])
+        reason = missing_or_stale[0] if missing_or_stale else 'No local telemetry observation'
         if refresh:
             fresh = _on_demand_state(max_wait)
-            return fresh if fresh['available'] else _unavailable(f'{exc}. {fresh["reason"]}')
-        return _unavailable(exc)
-    except (OSError,ValueError,KeyError,TypeError) as exc:
-        return _unavailable(exc)
+            return fresh if fresh['available'] else _unavailable(f'{reason}. {fresh["reason"]}')
+        return _unavailable(reason)
+    # Fresh pressure wins over a simultaneous healthy reading. Otherwise use
+    # the newest validated measurement, regardless of which process sampled it.
+    priority = {'ALLOW': 0, 'BRIDGE': 1, 'FIN': 2, 'COMPOUND_FIN': 3}
+    state = max(states, key=lambda value: (value['sample']['wall_time'], priority.get(value['decision'], 4)))
+    sample = state['sample']
     if refresh and state['admitted'] and newer_than is not None and sample['wall_time'] <= newer_than:
         fresh = _on_demand_state(max_wait)
         if fresh['available']:return fresh
@@ -88,7 +119,9 @@ class ResourceWait(InvalidUpdate):
         self.state = state
         self.category = wait_category(state)
         details = [state.get('reason', 'Resource measurement unavailable')]
-        if state.get('available'):
+        if state.get('profile') == 'remote-nvidia-v1':
+            details.append('remote GPU admission: '+str(state.get('decision') or 'unavailable'))
+        elif state.get('available'):
             details.append('OS thermal pressure: '+str(state.get('thermal_label', 'unknown')))
             pressure = (state.get('sample') or {}).get('memory_pressure_raw')
             details.append('memory pressure: '+{1:'normal',2:'warning',4:'critical'}.get(pressure, 'unavailable'))
@@ -168,6 +201,9 @@ def dashboard(root):
     from runtime_memory import snapshot
     try:data['runtime_memory']=snapshot()
     except Exception as exc:_diagnostic_error(data,'runtime_memory',exc)
+    from remote_memory import snapshot as remote_snapshot
+    try:data['remote_memory']=remote_snapshot(root)
+    except Exception as exc:_diagnostic_error(data,'remote_memory',exc)
     from storage_policy import usage
     try:data['storage']=usage(root)
     except Exception as exc:_diagnostic_error(data,'storage',exc)

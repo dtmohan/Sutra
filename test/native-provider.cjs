@@ -1036,6 +1036,9 @@ function setup(saved={}){
     assert.equal(request.document_path,file);
     assert.equal(request.confirmed,true);
     assert.equal(request.armed,false);
+    assert.equal(request.tier,'high');
+    assert.deepEqual(request.models,{low:'model-a',mid:'model-b',high:'model-c'},
+     'The approved document segment captures models before automatic classification can continue');
     flow={...flow,state:'CLASSIFYING',cursor:'5',stop:undefined};
     return flow;
    }
@@ -1841,6 +1844,93 @@ function setup(saved={}){
   checks.push('native chat displays one bounded inert coherence notice, leaves greetings and malformed diagnostics quiet, and adds no actions, permissions or retries');
  }
  {
+  const saved={},host=setup(saved),original=host.deps.request;await host.arm();
+  const options={modelOptions:{_conversationId:'durable-task-final-report'},tools:[]};
+  let submissions=0,allocations=0,acks=0;
+  host.deps.allocateRequest=async()=>({id:(++allocations).toString(16).padStart(32,'0')});
+  host.deps.resumeRequest=async()=>{throw Error('Initial task must submit once');};
+  host.deps.ackRequest=async()=>{acks++;};
+  host.deps.request=async(m,t,activity,transport)=>{
+   if(!transport?.id)return original(m,t);
+   assert.equal(transport.wholeTask,true);submissions++;
+   let flow=await original(m,t);const conversation=structuredClone(flow.conversation);
+   while(!['DONE','AWAITING_ACTION'].includes(flow.state)){
+    const event={kind:'workflow',version:1,flow_id:flow.flow_id,cursor:flow.cursor,state:flow.state,
+     disposition:'continue',progress:'Reading the approved project source.'};
+    activity(event);activity(event);
+    flow=await original({...m,event:'step',flow_id:flow.flow_id,cursor:flow.cursor,binding:flow.binding||flow.bound_task},t);
+   }
+   flow.data.report_markdown='## Architecture\n\nThe Entry component passes work to the worker.';
+   flow.data.result.accepted_output={answer:'Architecture summary',summary:'Architecture summary',report:{overview:'Architecture summary'}};
+   const usage=(invocation_id,stage)=>({invocation_id,stage,model:'model-a',status:'accepted',input_tokens:100,output_tokens:20});
+   const rows=[usage(conversation.result.invocation_id,'conversation'),usage(flow.data.result.invocation_id,'chat_reviewer')];
+   conversation.result.token_usage={calls:[rows[0]]};flow.data.result.token_usage={calls:[rows[1]]};
+   return {...flow,conversation,runner_usage:{calls:rows}};
+  };
+  const parts=await host.send('auto',undefined,options),body=parts.map(part=>part.value||'').join('');
+  assert(body.includes('## Architecture'));assert(!body.includes('Conversational answer'));
+  assert.equal(submissions,1);assert.equal(allocations,1);assert.equal(acks,1);
+  assert(host.flowRequests.every(request=>request.tier==='auto'),'The accepted task keeps its selected routing mode');
+  assert.equal((body.match(/Reading the approved project source\./g)||[]).length,2,
+   'A replayed workflow event is displayed once per distinct cursor, without opening model thinking');
+  assert(body.includes('200 in · 40 out · 2 calls'),'Aggregated runner usage deduplicates conversation and final receipts');
+  assert.equal(host.controller.status().routing.token_usage.calls.length,2);
+  const key=require('node:crypto').createHash('sha256').update(options.modelOptions._conversationId).digest('hex');
+  assert.equal(saved['sutra.coordinatorRequests.v1'][key],undefined);
+  const anchor=body.match(/conversation\/([a-f0-9]{32})\/Response\.md/)?.[1];
+  assert(anchor,'The final report includes its authenticated conversation-memory anchor');
+  assert.equal(saved['karma.nativeMemory.v1'].chats[key],anchor);
+  assert.equal(saved['karma.nativeMemory.v1'].taskStacks[anchor],key);
+  checks.push('one durable task submission publishes its final report instead of classifier prose, streams deduplicated workflow progress and retains exact usage and conversation memory');
+ }
+ {
+  for(const boundary of ['stop','dispose','extension-disconnect']){
+   const saved={},host=setup(saved),original=host.deps.request,options={modelOptions:{_conversationId:'durable-task-'+boundary},tools:[]};
+   const id='b'.repeat(32);let started,stops=0,submissions=0;
+   const entered=new Promise(resolve=>started=resolve);
+   host.deps.allocateRequest=async()=>({id});host.deps.resumeRequest=async()=>{throw Error('Initial submission expected');};
+   host.deps.ackRequest=async()=>{throw Error('An unobserved task outcome cannot be acknowledged');};
+   host.deps.cancelRequest=async ticket=>{assert.equal(ticket.id,id);assert.equal(ticket.wholeTask,true);stops++;};
+   host.deps.request=async(m,t,_activity,transport)=>{
+    if(!transport?.id)return original(m,t);
+    assert.equal(transport.wholeTask,true);submissions++;
+    return new Promise((_resolve,reject)=>{
+     t.onCancellationRequested(()=>reject(Object.assign(Error('UI subscription ended'),{code:'COORDINATOR_DETACHED'})));
+     started();
+    });
+   };
+   const request=host.send('low',undefined,options);await entered;
+   host.token.cancel();
+   if(boundary==='dispose')host.controller.dispose();
+   if(boundary==='extension-disconnect')host.deps.isDisconnecting=()=>true;
+   await assert.rejects(request,/subscription ended/);
+   assert.equal(stops,boundary==='stop'?1:0,'Only a live user Stop cancels its task runner');
+   assert.equal(submissions,1);assert(!host.controller.status().working);
+   const key=require('node:crypto').createHash('sha256').update(options.modelOptions._conversationId).digest('hex');
+   assert.equal(saved['sutra.coordinatorRequests.v1'][key].id,id);
+   assert.equal(saved['sutra.coordinatorRequests.v1'][key].wholeTask,true);
+  }
+  checks.push('live chat Stop cancels only its exact durable task; reload/disposal detaches without stopping the runner and retains its immutable ticket');
+ }
+ {
+  const saved={},host=setup(saved),original=host.deps.request,options={modelOptions:{_conversationId:'monitor-stopped-task'},tools:[]};
+  let acknowledgements=0,submissions=0;
+  host.deps.allocateRequest=async()=>({id:'c'.repeat(32)});
+  host.deps.resumeRequest=async()=>{throw Error('Initial submission expected');};
+  host.deps.ackRequest=async()=>{acknowledgements++;};
+  host.deps.request=async(m,t,activity,transport)=>{
+   if(!transport?.id)return original(m,t);
+   submissions++;await original(m,t);
+   throw Object.assign(Error('The runner acknowledged cancellation.'),{code:'COORDINATOR_CANCELLED'});
+  };
+  const stopped=await host.send('low',undefined,options);
+  assert(stopped.some(part=>part.value?.includes('Sutra stopped this task')));
+  assert.equal(host.controller.status().routing.stage,'cancelled');assert(!host.controller.status().working);
+  assert.equal(acknowledgements,1);assert.equal(submissions,1);assert.equal(host.calls.length,1);
+  assert.equal(host.calls[0].op,'conversation');assert.equal(Object.keys(saved['sutra.coordinatorRequests.v1']).length,0);
+  checks.push('an acknowledged Monitor runner stop is a cancelled task notice rather than a failed VS Code request, without replaying paid work');
+ }
+ {
   const saved={},host=setup(saved),original=host.deps.request;
   await host.arm();host.kind('report');
   const options={modelOptions:{_conversationId:'runner-footer-detach'},tools:[]};
@@ -1892,7 +1982,7 @@ function setup(saved={}){
   first.deps.cancelRequest=async()=>{cancelRequests++;};
   first.deps.request=async(m,t,activity,transport)=>{
    if(!transport)return original(m,t);
-   assert.deepEqual(transport,{id,chatKey:key});
+   assert.deepEqual(transport,{id,chatKey:key,wholeTask:true});
    assert.equal(saved[tickets][key].id,id,'Persist the ticket before submission, including initial start');
    modelSubmissions++;
    t.onCancellationRequested(()=>tokenCancellations++);
@@ -2043,12 +2133,29 @@ function setup(saved={}){
   assert(!host.flowRequests.some(value=>value.event==='start'));assert.equal(host.calls.length,0);
   checks.push('a typed missing transport record clears only the stale ticket without ACK, then repeated continue uses the durable workflow without resubmission');
  }
+ for(const terminalAtAttach of [false,undefined]){
+  const saved={},host=setup(saved),options={modelOptions:{_conversationId:'monitor-stop-during-attach-'+terminalAtAttach}};
+  const key=require('node:crypto').createHash('sha256').update(options.modelOptions._conversationId).digest('hex');
+  const ticket={id:'d'.repeat(32),workspace:'/project',nativeChat:key,chatKey:key,stackChat:key,event:'step',prompt:'Review workspace',wholeTask:true};
+  saved['sutra.coordinatorRequests.v1']={[key]:ticket};
+  let acknowledgements=0;
+  host.deps.resumeRequest=async()=>{throw Object.assign(Error('The task was stopped while attached.'),
+   {code:'COORDINATOR_CANCELLED',...(terminalAtAttach===undefined?{}:{terminalAtAttach})});};
+  host.deps.ackRequest=async value=>{assert.equal(value.id,ticket.id);acknowledgements++;};
+  host.deps.allocateRequest=async()=>{throw Error('A live Stop cannot authorize a replacement task');};
+  host.deps.request=async()=>{throw Error('A live Stop cannot inspect and automatically resume the stopped workflow');};
+  const result=await host.send('high',[{role:1,content:[new Text('continue')]}],options);
+  assert.equal(acknowledgements,1);assert.equal(saved['sutra.coordinatorRequests.v1'][key],undefined);
+  assert.equal(host.controller.status().routing.stage,'cancelled');assert(!host.controller.status().working);
+  assert(result.some(part=>part.value?.includes('Sutra stopped this task')));assert.equal(host.calls.length,0);
+ }
+ checks.push('Monitor Stop during a retained-result subscription ends that response without inspecting, resuming or submitting a replacement task; missing timing evidence also stops safely');
  for(const code of ['COORDINATOR_INTERRUPTED','COORDINATOR_CANCELLED','COORDINATOR_FAILED']){
   const saved={},host=setup(saved),options={modelOptions:{_conversationId:'runner-terminal-'+code}};
   const key=require('node:crypto').createHash('sha256').update(options.modelOptions._conversationId).digest('hex');
   const id='a'.repeat(32);saved['sutra.coordinatorRequests.v1']={[key]:{id,workspace:'/project',nativeChat:key,chatKey:key,stackChat:key,event:'start',prompt:'hello'}};
   let acknowledgements=0;
-  host.deps.resumeRequest=async()=>{throw Object.assign(new Error('Execution has stopped'),{code});};
+  host.deps.resumeRequest=async()=>{throw Object.assign(new Error('Execution has stopped'),{code,...(code==='COORDINATOR_CANCELLED'?{terminalAtAttach:true}:{})});};
   host.deps.allocateRequest=async()=>{throw Error('Terminal recovery must not resubmit');};
   host.deps.ackRequest=async ticket=>{assert.equal(ticket.id,id);acknowledgements++;};
   const result=await host.send('high',[{role:1,content:[new Text('continue')]}],options);

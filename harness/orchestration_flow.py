@@ -184,8 +184,10 @@ def pending_flows(s,workspace,exclude=None):
         and not m.node(s,nid).get('chat_key')
         and m.state(s,nid) not in m.TERMINAL]
 
-def response(s,fid,**extra):
+def response(s,fid,*,_runner_poll=False,**extra):
     n,data=info(s,fid);history=m.events(s,fid)
+    if m.state(s,fid)=='NEED_PERMISSION':
+        extra.setdefault('bound_task',data.get('permission_binding'))
     if m.state(s,fid)=='NEED_TOOL_APPROVAL':
         import capabilities
         p=data.get('capability_proposal')
@@ -205,9 +207,9 @@ def response(s,fid,**extra):
     coherence_id = (publication.get('reviewer_id') or (outcome or {}).get('invocation_id')
                     or data.get('invocation_id') or data.get('conversation_id'))
     coherence = read_observation(s, coherence_id)
-    if m.state(s, fid) == 'PAUSED' and data.get('binding'):
+    if not _runner_poll and m.state(s, fid) == 'PAUSED' and data.get('binding'):
         extra.setdefault('claim_review_usage', workflow_usage(s, fid))
-    return dict(task_observations=observations,coherence_observation=coherence,
+    result = dict(task_observations=observations,coherence_observation=coherence,
                 flow_id=fid,state=m.state(s,fid),cursor=history[-1]['receipt'] if history else None,
                 conversation_id=data.get('conversation_id'),binding=data.get('binding'),
                 git_provenance=data.get('git_provenance'),
@@ -216,6 +218,9 @@ def response(s,fid,**extra):
                 recovery=recovery(s,fid),allocation_version=data.get('allocation_version',0),
                 execution_id=data.get('root_node') if data.get('root_node') and m.node(s,data['root_node'])['kind']=='execution' else None,
                 children=[{'id':i,'state':m.state(s,i),'files':m.node(s,i)['files']} for i in data.get('children',[])],**extra)
+    from task_continuation import describe
+    result['continuation'] = describe(result, result.get('continuation_probe'))
+    return result
 
 def _terminal_review(s, flow, data):
     """Only the latest closed, unpublished workspace draft can be restarted.
@@ -379,17 +384,26 @@ def budget_pause(s, meta, root, req, fid, phase, stop, kind='CONTEXT_STOPPED', *
                     progress='Sutra added '+dimension.replace('_', ' ')+' from the workspace reserve. Continuing with prior spending retained.')
 
 
-def task_projection(s,workspace,chat_key):
+def task_projection(s,workspace,chat_key,*,_runner_poll=False):
     from task_stack import view
     stack=view(s,workspace,chat_key)
     fid=stack['focused']
-    focus=response(s,fid) if fid else None
-    if focus and focus['binding']:
+    focus=response(s,fid,_runner_poll=_runner_poll) if fid else None
+    if not _runner_poll and focus and focus['binding']:
         from review_budget import usage
         focus['task_budget']=usage(s,focus['binding']['session'])
     return {'task_stack':stack,'focused_flow':focus}
 
 def handle(s,meta,workspace,root,req,providers=None):
+    from task_continuation import attach, check_request, stop
+    if req.get('event') == 'runner_stop':
+        return stop(s, root, workspace, req)
+    check_request(s, req)
+    result = _handle_chat(s, meta, workspace, root, req, providers)
+    return attach(s, root, req, result)
+
+
+def _handle_chat(s,meta,workspace,root,req,providers=None):
     req=dict(req)
     chat=req.get('chat_key')
     event=req.get('event','step')
@@ -436,12 +450,12 @@ def handle(s,meta,workspace,root,req,providers=None):
                         m.transition(s,fid,'CANCELLED','CANCELLED',{'spending_retained':True})
             projection=task_projection(s,workspace,chat)
             return dict(response(s,fid),**projection) if event=='cancel' else projection
-        if event!='inspect' and not (event == 'restart_review' and (recovery(s,fid) or {}).get('terminal_review')):
+        if event not in ('inspect', 'runner_summary') and not (event == 'restart_review' and (recovery(s,fid) or {}).get('terminal_review')):
             assert_focused(s,workspace,chat,fid)
     else:
         meta={'workspace':str(workspace)}
     out=run(s,meta,workspace,root,req,providers)
-    return dict(out,**task_projection(s,workspace,chat))
+    return dict(out,**task_projection(s,workspace,chat,_runner_poll=event in ('continuation_probe', 'runner_summary')))
 
 def workflow_usage(s, fid):
     """Complete receipt-backed usage for this flow, including interrupted calls."""
@@ -567,10 +581,10 @@ def run(s,meta,workspace,root,req,providers=None):
         if not hardware_wait:
             return response(s,fid)
         try:
-            from runtime_memory import recover
+            from provider_resources import recover
             def audit(kind,value):
                 with s.db:s._audit(kind,dict(flow_id=fid,**value))
-            recovery_result=exc.state.get('runtime_recovery') or recover(root,audit)
+            recovery_result=exc.state.get('runtime_recovery') or recover(root,audit,model=(exc.state.get('runtime') or {}).get('model'))
             if recovery_result:
                 stop['recovery']=recovery_result
                 move(s,fid,'PAUSED','RESOURCE_RECOVERY_OBSERVED',workflow_stop=stop)
@@ -1028,8 +1042,12 @@ def _handle(s,meta,workspace,root,req,providers=None):
     else:
         fid=req.get('flow_id');f,d=info(s,fid)
         if f['workspace']!=str(workspace):raise InvalidUpdate('Workflow belongs to another workspace')
-        if event=='inspect':
+        if event in ('inspect', 'runner_summary'):
             extra={'prompt':f['prompt']}
+            if event == 'runner_summary':
+                from task_continuation import summary
+                current = response(s, fid, _runner_poll=True)
+                return response(s, fid, _runner_poll=True, **summary(s, fid, current), **extra)
             notice=saved_document_notice(s,workspace,f,m.state(s,fid),d)
             if notice:return response(s,fid,request_notice=notice,**extra)
             if (m.state(s,fid) == 'DONE' and d.get('conversation_id')
@@ -1039,8 +1057,17 @@ def _handle(s,meta,workspace,root,req,providers=None):
             if m.state(s,fid)=='NEED_TOOL_APPROVAL':extra['capability_proposal']=d.get('capability_proposal')
             if m.state(s,fid)=='NEED_PERMISSION' and not recovery(s,fid):extra.update(permission=permission(s,meta['active'],d['permission']),bound_task=identity(s,meta['active']))
             return response(s,fid,**extra)
-        if req.get('cursor')!=response(s,fid)['cursor']:raise InvalidUpdate('Workflow event is stale or replayed')
+        if req.get('cursor')!=response(s,fid,_runner_poll=event=='continuation_probe')['cursor']:raise InvalidUpdate('Workflow event is stale or replayed')
     f,d=info(s,fid);phase=m.state(s,fid);prompt=f['prompt']
+    if event == 'continuation_probe' or event == 'resume' and 'continuation_fingerprint' in req:
+        from task_continuation import describe, probe
+        current = response(s, fid, _runner_poll=True)
+        descriptor = describe(current)
+        if event == 'resume' and req['continuation_fingerprint'] != descriptor['fingerprint']:
+            raise InvalidUpdate('Automatic continuation belongs to another blocker or checkpoint')
+        observed = probe(s, root, current)
+        if event == 'continuation_probe' or not observed['ready']:
+            return response(s, fid, _runner_poll=True, continuation_probe=observed)
     if event in ('supply_evidence','locate_document','approve_document') and phase=='PAUSED' and d.get('conversation_session'):
         session_for(s,{'prompt':prompt,'parent':f.get('conversation_parent'),
                        'conversation_session':d['conversation_session']},
@@ -1182,15 +1209,15 @@ def _handle(s,meta,workspace,root,req,providers=None):
         if last['kind'] == 'CHILD_REVIEW_STOPPED':
             return retry_child(s, fid, d, models, tier)
         if last['kind']=='RESOURCE_STOPPED':
-            from monitoring import require_resources
-            from runtime_memory import recover
+            from provider_resources import require_resources, recover, stopped_model
+            selected=stopped_model(stop,req)
             def audit(kind,value):
                 with s.db:s._audit(kind,dict(flow_id=fid,**value))
-            recovered=recover(root,audit)
+            recovered=recover(root,audit,model=selected)
             if recovered and not recovered['admitted']:
                 from monitoring import ResourceWait
                 raise ResourceWait(dict(recovered['after'],runtime_recovery=recovered))
-            require_resources(root)
+            require_resources(root,model=selected)
         move(s,fid,target,'RESUME_REQUESTED',workflow_stop=None,
              resumed_followup_source=stop.get('followup_source_changed'),
              reason='User resumed with existing contract and allocation')

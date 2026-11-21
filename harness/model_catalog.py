@@ -6,7 +6,7 @@ def catalog(ollama):
     from strata_model import is_strata
     rows=[];errors=[]
     try:
-        tags=[] if os.environ.get('SUTRA_STRATA_ONLY') == '1' or os.environ.get('SUTRA_ENGINE_ONLY') == '1' else ollama('/api/tags').get('models',[])
+        tags=[] if any(os.environ.get(key) == '1' for key in ('SUTRA_STRATA_ONLY','SUTRA_ENGINE_ONLY','SUTRA_REMOTE_ONLY')) else ollama('/api/tags').get('models',[])
     except Exception as exc:
         tags=[];errors.append({'provider':'ollama','error':str(exc)[:160]})
     for tag in tags:
@@ -46,11 +46,15 @@ def catalog(ollama):
 
 def combined(ollama):
     result = catalog(ollama)
-    if os.environ.get('SUTRA_ENGINE_ONLY') != '1':
+    if os.environ.get('SUTRA_ENGINE_ONLY') != '1' and os.environ.get('SUTRA_REMOTE_ONLY') != '1':
         from strata_model import append_catalog
         result = append_catalog(result)
     if ('SUTRA_ENGINE_MODELS' in os.environ or 'SUTRA_ENGINE_REGISTRY' in os.environ or
             os.environ.get('SUTRA_ENGINE_ONLY') == '1'):
         from engine_model import append_catalog as append_engines
         result = append_engines(result)
+    if ('SUTRA_REMOTE_MODELS' in os.environ or 'SUTRA_REMOTE_REGISTRY' in os.environ or
+            os.environ.get('SUTRA_REMOTE_ONLY') == '1'):
+        from remote_model import append_catalog as append_remotes
+        result = append_remotes(result)
     return result

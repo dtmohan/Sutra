@@ -182,8 +182,9 @@ def mechanism_excerpts(sources, prompt, limit, graph, *, preferred_paths=(), sym
 def focused_architecture(p):
     from strata_model import is_strata
     from engine_profiles import is_engine
+    from remote_profiles import is_remote
     model = (p.get('route') or {}).get('record',{}).get('choice',{}).get('model')
-    return ((is_strata(model) or is_engine(model))
+    return ((is_strata(model) or is_engine(model) or is_remote(model))
             and report.requested(p) and context.EvidenceFocus(context.query(p)).modules)
 
 
@@ -837,8 +838,8 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
                     fmt, _ = fit_packet(s, sid, p, data, provider, real)
                 s.reserve(run,'ATTEMPT',{'attempt':attempt})
                 if real:
-                    from monitoring import require_resources
-                    hardware=require_resources(root)
+                    from provider_resources import require_resources
+                    hardware=require_resources(root,provider=provider)
                     with s.db:s._audit('RESOURCE_GATE',{'run_id':run,'measurement':hardware})
                 delivery=s.prepare_delivery(sid,p,provider.budget.check(SYSTEM,p,fmt))
                 out=InvocationGateway(s.path, run, provider, ledger=s).invoke('chat_reviewer',uuid.uuid4().hex,SYSTEM,p,fmt,delivery)

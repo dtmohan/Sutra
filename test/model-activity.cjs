@@ -171,6 +171,54 @@ console.log('PASS bounded activity framing, Unicode, identity, sequence, interru
 
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {ActivityArchive,activityUri,parseActivityUri}=require('../model_activity');
+{
+ const {chatActivity,controlLabel}=require('../model_activity');
+ const remoteId='d'.repeat(32),received=[],rendered=[];
+ const label='model default; thinking-only; off switch unsupported';
+ class Thinking{constructor(value,id,metadata){Object.assign(this,{value,id,metadata});}}
+ const show=chatActivity({LanguageModelThinkingPart:Thinking},{report:part=>rendered.push(part)});
+ const stream=decoder(event=>{received.push(event);show(event);},()=>{});
+ const feed=event=>stream.write(Buffer.from('SUTRA_EVENT '+JSON.stringify(event)+'\n'));
+ feed({kind:'start',id:remoteId,seq:1,model:'sutra:remote/rtx3090',role:'conversation'});
+ feed({kind:'control',id:remoteId,seq:2,requested:false,effective:'model_default',switch_supported:false,
+       thinking_only:true,arbitrary:'PRIVATE CONTROL FIELD',policy:{network_allowed:true}});
+ feed({kind:'thinking',id:remoteId,seq:3,text:'Actual received model commentary.'});
+ feed({kind:'finish',id:remoteId,seq:4,status:'accepted',thinking_chars:33,usage:{input_tokens:5,output_tokens:10}});
+ assert.equal(received[1].effective,'model_default');assert.equal(received[1].switch_supported,false);
+ assert.equal(received[1].thinking_only,true);assert.equal(received[1].requested,false);
+ assert(!('arbitrary' in received[1]));assert(!('policy' in received[1]));
+ assert(rendered[0].value.includes('Unverified model reasoning.'));
+ assert(rendered[0].value.includes('Reasoning control: '+label));
+ assert(!rendered[0].value.includes('Reasoning control: off requested'));
+ assert.equal(controlLabel(false),'off requested');assert.equal(controlLabel(true),'on requested');
+ assert.equal(controlLabel(null),'model default');assert.equal(controlLabel('low'),'low');
+ assert.equal(controlLabel(false,{effective:'model_default',switch_supported:false,thinking_only:true}),label);
+ assert.equal(controlLabel(false,{effective:'off',switch_supported:false,thinking_only:true}),'off requested');
+ const invalid=[],bad=decoder(event=>invalid.push(event),()=>{});
+ bad.write(Buffer.from('SUTRA_EVENT '+JSON.stringify({kind:'start',id:'invalid-control',seq:1,model:'m',role:'conversation'})+'\n'));
+ bad.write(Buffer.from('SUTRA_EVENT '+JSON.stringify({kind:'control',id:'invalid-control',seq:2,requested:'x'.repeat(300),
+   effective:{private:'not an enum'},switch_supported:'false',thinking_only:1,control_label:'PRIVATE UNTRUSTED LABEL'})+'\n'));
+ assert.equal(invalid[1].requested.length,80);
+ for(const key of ['effective','switch_supported','thinking_only','control_label'])assert(!(key in invalid[1]));
+ const directory=fs.mkdtempSync(path.join(os.tmpdir(),'sutra-remote-control-'));
+ try{
+  const saved=new ActivityArchive(directory);received.forEach(event=>saved.accept(event));saved.dispose();
+  const restored=new ActivityArchive(directory),call=restored.calls[0];
+  assert.equal(call.effective,'model_default');assert.equal(call.switch_supported,false);assert.equal(call.thinking_only,true);
+  assert.equal(call.control_label,label);assert.equal(call.requested,false);
+  assert(restored.document(remoteId).includes('Reasoning control: '+label));
+  assert(!fs.readFileSync(restored.file,'utf8').includes('PRIVATE CONTROL FIELD'));
+  const forged=JSON.parse(fs.readFileSync(restored.file,'utf8'));
+  Object.assign(forged.calls[0],{effective:'off',switch_supported:'false',thinking_only:'true',control_label:'PRIVATE UNTRUSTED LABEL'});
+  fs.writeFileSync(restored.file,JSON.stringify(forged));
+  const sanitized=new ActivityArchive(directory);
+  assert.equal(sanitized.calls[0].control_label,'off requested');
+  assert(!sanitized.document(remoteId).includes('PRIVATE UNTRUSTED LABEL'));
+  restored.dispose();sanitized.dispose();
+ }finally{fs.rmSync(directory,{recursive:true,force:true});}
+ stream.close();bad.close();
+ console.log('PASS bounded remote reasoning capability metadata, truthful inline/archive labels, legacy controls and forged-field rejection');
+}
 const temp=fs.mkdtempSync(path.join(os.tmpdir(),'sutra-reasoning-'));
 const key='a'.repeat(24),dir=path.join(temp,key),id=n=>n.toString(16).padStart(32,'0');
 try{

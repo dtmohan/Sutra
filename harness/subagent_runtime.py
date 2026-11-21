@@ -23,7 +23,7 @@ SYSTEM='''You are a read-only child reviewer. Answer only the assigned branch ob
 Return only the requested JSON object. Echo task_id, branch_id and every constraint_echo entry exactly into constraints; complete must be false. Choose citations unchanged from the supplied source choices. Keep summary under 320 characters and each remaining entry under 160 characters. For a sliced branch, continue only for a concrete unresolved check within this branch, with a new source citation and next step; otherwise use slice_status=complete or omit it. Finish the JSON object within the output allowance.'''
 SLICE_OUTPUT_TOKENS = 2048
 REPAIR_ALLOWANCE = {'errors': ['x' * 140] * 2}
-CHILD_EVIDENCE_VERSION = 4
+CHILD_EVIDENCE_VERSION = 5
 CHILD_REPAIR_CONTROL_VERSION = 1
 
 
@@ -242,6 +242,85 @@ def _declaration_delivered(p, declaration):
     return False
 
 
+def _covered_source_lines(p, path, text):
+    """Union exact accepted source locations; quotations alone are not coverage."""
+    lines = text.splitlines(keepends=True)
+    covered = set()
+    for note in _child_source_notes(p):
+        span = note.get('source_spans', {}).get(path)
+        if span is None:
+            continue
+        start, end = span.get('start_line'), span.get('next_line')
+        if (type(start) is not int or type(end) is not int or not 1 <= start < end <= len(lines) + 1
+                or sha(''.join(lines[start - 1:end - 1])) != span.get('sha256')):
+            raise InvalidUpdate('Child source coverage differs from its accepted source span')
+        covered.update(range(start - 1, end - 1))
+    return covered
+
+
+def _source_frontier(p, data):
+    total = delivered = 0
+    for path, text in data['sources'].items():
+        covered = _covered_source_lines(p, path, text)
+        for index, line in enumerate(text.splitlines(keepends=True)):
+            if line.strip():
+                total += 1
+                delivered += index in covered
+    return total, delivered
+
+
+def _frontier_excerpts(p, data, source_spans=None):
+    """Recipe 5 reads fresh whole-line gaps, including imports before a body."""
+    remaining, result = p['excerpt_bytes'], {}
+    notes = p.get('child_checkpoint') or p.get('recovery_checkpoint') or []
+    preferred, hints = context.retrieval_hints(notes[-1]['remaining'] if notes else [], data['sources'], graph=data['graph'])
+    names = context.ordered_sources(data['sources'], data['graph'], context.query(p), version=3, latest=hints)
+    names = list(dict.fromkeys([*preferred, *names]))
+    share = max(128, min(2400, remaining // min(6, max(1, len(names)))))
+    if p.get('child_source_handoff', {}).get('basis') == 'source_frontier_exhausted':
+        for path in names:
+            lines = data['sources'][path].splitlines(keepends=True)
+            first = next((i for i, line in enumerate(lines) if line.strip()), len(lines))
+            page = chat.whole_line_excerpt(''.join(lines[first:]), remaining)
+            if page:
+                if source_spans is not None:
+                    source_spans[path] = {'start_line': first + 1, 'next_line': first + 1 + len(page.splitlines(keepends=True)),
+                                          'anchor_line': first + 1, 'sha256': sha(page)}
+                return {path: page}
+        return {}
+    if p.get('child_source_handoff'):
+        return slice_excerpts(dict(p, child_evidence_version=4), data, source_spans=source_spans)
+    candidates = {}
+    # Retain the earlier mechanism priorities, then trim already delivered
+    # lines. The fallback below covers gaps that its forward cursor skipped.
+    candidate_spans = {}
+    slice_excerpts(dict(p, child_evidence_version=4), data, source_spans=candidate_spans)
+    for path, span in candidate_spans.items():
+        candidates[path] = (span['start_line'] - 1, span['next_line'] - 1, span['anchor_line'])
+    for path in names:
+        if remaining <= 0:
+            break
+        lines = data['sources'][path].splitlines(keepends=True)
+        covered = _covered_source_lines(p, path, data['sources'][path])
+        first, end, anchor = candidates.get(path, (0, len(lines), 1))
+        at = next((i for i in range(first, end) if lines[i].strip() and i not in covered), None)
+        if at is None:
+            at = next((i for i, line in enumerate(lines) if line.strip() and i not in covered), None)
+            end, anchor = len(lines), (at + 1 if at is not None else 1)
+        if at is None:
+            continue
+        end = next((i for i in range(at, end) if i in covered), end)
+        first_size = len(lines[at].encode())
+        page = chat.whole_line_excerpt(''.join(lines[at:end]), min(remaining, max(share, first_size)))
+        if not page:
+            continue
+        result[path] = page; remaining -= len(page.encode())
+        if source_spans is not None:
+            source_spans[path] = {'start_line': at + 1, 'next_line': at + 1 + len(page.splitlines(keepends=True)),
+                                  'anchor_line': anchor, 'sha256': sha(page)}
+    return result
+
+
 def source_handoff(s, sid, p, data):
     """Bridge repeated requests only after their exact target body was supplied.
 
@@ -270,6 +349,24 @@ def source_handoff(s, sid, p, data):
         return None
     remaining = notes[-1]['remaining']
     literal = canonical(remaining)
+    if p['child_evidence_version'] >= 5:
+        if (set(data.get('versions', {})) != set(data['sources'])
+                or any(n['context']['versions'].get(path) != digest for path, digest in data['versions'].items())):
+            raise InvalidUpdate('Child source frontier source version changed')
+        total, delivered = _source_frontier(p, data)
+        if total and total == delivered:
+            observation = {'profile': 'child-source-frontier-v1', 'version': 1,
+                'source_files': len(data['sources']), 'nonblank_lines': total,
+                'delivered_nonblank_lines': delivered, 'checkpoints_verified': True, 'sources_current': True}
+            kernel = KarmaAdapter().child_source_frontier(observation)
+            if kernel['decision'] == 'BRIDGE':
+                return {'version': 1, 'basis': 'source_frontier_exhausted', 'observation': observation,
+                    'observed_repeats': 0, 'remaining_hash': sha(literal),
+                    'targets': [{'path': path, 'start_line': 1,
+                                 'next_line': len(text.splitlines(keepends=True)) + 1, 'sha256': sha(text)}
+                                for path, text in sorted(data['sources'].items())],
+                    'kernel': kernel, 'semantic_completion_verified': False,
+                    'publication': 'parent_synthesis_required'}
     repeats = 0
     for note in reversed(notes):
         if canonical(note['remaining']) != literal or repeats == 128:
@@ -304,8 +401,10 @@ def source_handoff(s, sid, p, data):
 
 def slice_excerpts(p, data, *, source_spans=None):
     version = p.get('child_evidence_version', 1)
-    if type(version) is not int or version not in (1, 2, 3, CHILD_EVIDENCE_VERSION):
+    if type(version) is not int or version not in (1, 2, 3, 4, CHILD_EVIDENCE_VERSION):
         raise InvalidUpdate('Unsupported child evidence recipe')
+    if version == 5:
+        return _frontier_excerpts(p, data, source_spans)
     if version >= 3:
         notes = p.get('child_checkpoint') or p.get('recovery_checkpoint') or []
         preferred, hints = context.retrieval_hints(notes[-1]['remaining'] if notes else [], data['sources'],
@@ -570,7 +669,7 @@ def _fit_packet(s, sid, packet, data, provider, preferred_slots):
             context.evidence(packet, data)
             packet['facts'] = chat.facts(data['graph'], packet['sites'])
             try:
-                if packet.get('child_evidence_version') in (2, 3, 4) and not packet['excerpts']:
+                if packet.get('child_evidence_version') in (2, 3, 4, 5) and not packet['excerpts']:
                     raise ContextBudgetExceeded('No complete nonblank source line fits the child excerpt allocation')
                 fmt, _ = _fit(s, packet, provider.budget)
                 return fmt, 1 if slots == 1 else 3
@@ -639,7 +738,7 @@ def request_check(s,sid,p):
     return data
 
 def validate(s,sid,p,proposal):
-    request_check(s,sid,p)
+    data = request_check(s,sid,p)
     if proposal['branch_id']!=p['branch']['id'] or proposal['task_id']!=p['contract']['task_id'] or sorted(proposal['constraints'],key=lambda x:x['key'])!=constraint_rows(p['contract']):raise InvalidUpdate('Child omitted task or constraints')
     for c in proposal['citations']:
         if c['quote'] not in chat.citation_quotes(p) or c['quote'] not in p['excerpts'].get(c['path'],''):raise InvalidUpdate('Child citation lacks fresh source')
@@ -649,7 +748,17 @@ def validate(s,sid,p,proposal):
     if proposal.get('slice_status') == 'continue':
         prior = {(c['path'], c['quote']) for note in p['child_checkpoint'] for c in note['citations']}
         current = {(c['path'], c['quote']) for c in proposal['citations']}
-        if not any(item.strip() for item in proposal['remaining']) or not current - prior:
+        fresh = bool(current - prior)
+        if p.get('child_evidence_version') == 5:
+            fresh = False
+            for path, span in p['excerpt_spans'].items():
+                lines = data['sources'][path].splitlines(keepends=True)
+                covered = _covered_source_lines(p, path, data['sources'][path])
+                if any(lines[index].strip() and index not in covered
+                       for index in range(span['start_line'] - 1, span['next_line'] - 1)):
+                    fresh = True
+                    break
+        if not any(item.strip() for item in proposal['remaining']) or not fresh:
             raise InvalidUpdate('A continuation needs a specific next step and at least one new source quotation')
     return {'admission':{'admitted':True,'errors':[],'semantic_correctness_verified':False},'checks':['child_lineage','full_contract','inherited_permissions','fresh_source','smriti_context','citations'],'provisional':True}
 
@@ -836,8 +945,8 @@ def run(s,meta,workspace,root,nid,models,tier='auto',provider=None):
                                   'before resuming; prior spending remains charged.')}}
             s.reserve(rid,'ATTEMPT',{'attempt':attempt})
             if real:
-                from monitoring import require_resources
-                h=require_resources(root)
+                from provider_resources import require_resources
+                h=require_resources(root,provider=provider)
                 with s.db:s._audit('RESOURCE_GATE',{'run_id':rid,'measurement':h,'orchestration_node':nid})
             try:
                 d=s.prepare_delivery(sid,p,provider.budget.check(SYSTEM,p,fmt))

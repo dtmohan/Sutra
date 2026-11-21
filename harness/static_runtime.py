@@ -87,7 +87,8 @@ def explain(s,meta,workspace,root,receipt,model,sites=None,mode='compact',provid
  for attempt in range(3):
   s.reserve(run,'ATTEMPT',{'attempt':attempt})
   if real:
-   h=require_resources(root)
+   from provider_resources import require_resources as provider_resources
+   h=provider_resources(root,provider=provider)
    with s.db:s._audit('RESOURCE_GATE',{'run_id':run,'measurement':h})
   charge=provider.budget.check(role.SYSTEM,payload,schema);delivery=s.prepare_delivery(sid,payload,charge)
   from review_budget import BudgetStop

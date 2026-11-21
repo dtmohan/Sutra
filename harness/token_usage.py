@@ -17,7 +17,8 @@ def measured(record):
     response = record.get('response') if isinstance(record, dict) else None
     response = response if isinstance(response, dict) else {}
     provider = record.get('provider') if isinstance(record, dict) else None
-    source = {'strata': 'strata_response', 'sutra_engine': 'sutra_engine_response'}.get(provider, 'ollama_response')
+    source = {'strata': 'strata_response', 'sutra_engine': 'sutra_engine_response',
+              'sutra_remote': 'remote_cuda_response'}.get(provider, 'ollama_response')
     return {'source': source if response else 'unavailable',
             'input_tokens': count(response.get('prompt_eval_count')),
             'output_tokens': count(response.get('eval_count'))}

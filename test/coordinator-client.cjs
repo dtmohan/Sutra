@@ -142,10 +142,11 @@ async function detachedRequest() {
 
     const cancelId = await reloaded.allocate(chatKey), cancelTicket = {id: cancelId.id, chatKey};
     const running = reloaded.send({op: 'state', tag: 'explicit-cancel', delay_ms: 1500}, {}, {transport: cancelTicket});
-    const cancelled = assert.rejects(running, error => error.code === 'COORDINATOR_CANCELLED');
+    const cancelled = assert.rejects(running, error => error.code === 'COORDINATOR_CANCELLED' && error.terminalAtAttach === false);
     await until(subject.rows, rows => rows.length === 3, 'Explicit cancellation trial did not start');
     await reloaded.cancel(cancelTicket);
     await cancelled;
+    await assert.rejects(reloaded.resume(cancelTicket),error=>error.code==='COORDINATOR_CANCELLED'&&error.terminalAtAttach===true);
     assert.equal(subject.rows().filter(row => row.request.tag === 'explicit-cancel').length, 1);
     await reloaded.ack(cancelTicket);
     assert.equal((await reloaded.snapshot()).busy, false);

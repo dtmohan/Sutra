@@ -29,9 +29,14 @@ def allocation(metadata):
         if type(template_reserve) is not int or not 256 <= template_reserve <= 4096:
             raise InvalidUpdate('Invalid trusted Strata template allowance')
     budget = Budget(limit, min(4096, limit // 8), template_reserve)
+    if metadata.get('_sutra_provider') == 'sutra_remote':
+        # Native thinking-only models share the reserve between reasoning and
+        # the answer. This allocation remains inside the same physical window.
+        budget = Budget(limit, min(4096,max(2048,limit//8)),template_reserve)
     return budget, {'model_context_tokens': maximum, 'configured_context_tokens': configured,
                     'runtime_context_cap': 65536, 'memory_context_cap':runtime_cap, 'effective_context_tokens': limit,
                     'output_reserve_tokens': budget.response_reserve,
-                    'source': ('sutra_engine_metadata' if metadata.get('_sutra_provider') == 'sutra_engine'
+                    'source': ('remote_gpu_metadata' if metadata.get('_sutra_provider') == 'sutra_remote'
+                               else 'sutra_engine_metadata' if metadata.get('_sutra_provider') == 'sutra_engine'
                                else 'strata_metadata' if metadata.get('_sutra_provider') == 'strata'
                                else 'ollama_metadata' if maximum is not None else 'metadata_missing_conservative_fallback')}

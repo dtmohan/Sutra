@@ -83,6 +83,9 @@ def from_metadata(name, tag, metadata, root=None):
 
 
 def observe(name, ollama=None):
+    from remote_profiles import is_remote, identity as remote_identity
+    if is_remote(name):
+        return remote_identity(name)
     from engine_profiles import is_engine, identity
     if is_engine(name):
         return identity(name)
@@ -133,15 +136,18 @@ def choose(mapper, requested='auto', models=None):
         from model_catalog import combined
         from strata_model import assigned_models, is_strata
         from engine_profiles import assigned_models as engine_assignments, is_engine
+        from remote_profiles import assigned_models as remote_assignments, is_remote
         approved = assigned_models() if os.environ.get('SUTRA_ENGINE_ONLY') != '1' else set()
         approved_engines = engine_assignments()
+        approved_remotes = remote_assignments()
         catalog = combined(ollama)
         observations.extend({'model': error.get('model'), 'provider': error.get('provider'),
                              'status': 'unavailable', 'stage': 'catalog', 'error_kind': 'MetadataUnavailable'}
                             for error in catalog.get('errors', []))
         models = [dict(m) for m in catalog['models'] if m.get('eligible') and
                   (not is_strata(m['name']) or m['name'] in approved or m['name'] == 'strata:high' and not approved) and
-                  (not is_engine(m['name']) or m['name'] in approved_engines)]
+                  (not is_engine(m['name']) or m['name'] in approved_engines) and
+                  (not is_remote(m['name']) or m['name'] in approved_remotes)]
         observable = []
         for row in models:
             try:

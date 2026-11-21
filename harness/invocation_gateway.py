@@ -108,7 +108,8 @@ class InvocationLedger(GovernedContext):
             if model_interface['version'] in REFERENCE_VERSIONS:
                 from strata_model import is_strata
                 from engine_profiles import is_engine
-                if not is_strata(model) and not is_engine(model):
+                from remote_profiles import is_remote
+                if not is_strata(model) and not is_engine(model) and not is_remote(model):
                     raise InvalidUpdate('Citation reference packet requires the routed native model')
             envelope['model_interface'] = model_interface
         with self.db:
@@ -707,9 +708,21 @@ class InvocationGateway:
         from reasoning_policy import check_provider
         check_provider(self.provider, payload, fresh=isinstance(self.provider, LocalModel))
         if isinstance(self.provider, LocalModel):
-            with self.provider.dispatch_gate(Path(self.db).parent,call_id,system,payload,schema) as plan:
-                self.provider.memory_plan=plan
-                return self._invoke(role,call_id,system,payload,schema,delivery_id)
+            from monitoring import ResourceWait
+            entered = False
+            try:
+                with self.provider.dispatch_gate(Path(self.db).parent,call_id,system,payload,schema) as plan:
+                    entered = True
+                    self.provider.memory_plan=plan
+                    return self._invoke(role,call_id,system,payload,schema,delivery_id)
+            except ResourceWait as error:
+                state = copy.deepcopy(error.state)
+                runtime = dict(state.get('runtime') or {})
+                runtime['model'] = self.provider.model
+                if not entered:
+                    runtime['inference_started'] = False
+                state['runtime'] = runtime
+                raise ResourceWait(state) from error
         return self._invoke(role,call_id,system,payload,schema,delivery_id)
 
     def _invoke(self, role, call_id, system, payload, schema, delivery_id):
@@ -725,8 +738,8 @@ class InvocationGateway:
         try:
             charge = self.provider.budget.check(system, payload, schema)
             from local_model import LocalModel
-            from monitoring import require_resources
-            resource=require_resources(Path(self.db).parent) if isinstance(self.provider,LocalModel) else {'profile':'injected-test-provider'}
+            from provider_resources import require_resources
+            resource=require_resources(Path(self.db).parent,provider=self.provider,committed=True) if isinstance(self.provider,LocalModel) else {'profile':'injected-test-provider'}
             if getattr(self.provider,'memory_plan',None):resource=dict(resource,runtime_memory=self.provider.memory_plan)
             from model_identity import observe, unknown
             identity=observe(name) if isinstance(self.provider,LocalModel) else getattr(self.provider,'model_identity',unknown(name))

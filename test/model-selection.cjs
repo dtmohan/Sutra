@@ -56,4 +56,27 @@ for(const invalid of [[],null,{bad:'a'.repeat(64)},{[owned.low]:'not-a-hash'}])a
 for(const invalid of [{...identity,executable_path:'relative'}, {...identity,executable_sha256:undefined},
  {...identity,profile_hash:undefined}])assert.throws(()=>engineApprovalCandidates([owned.low],{models:[invalid]},{}),/Cannot verify/);
 assert.deepEqual(engineApprovalCandidates(['small'],catalog,{}),[],'Ordinary model selection cannot approve an executable');
+const {remoteProfile,remoteRegistryPath}=require('../model_selection');
+const remote='sutra:remote/rtx3090';
+const remoteCatalog={...catalog,models:[...catalog.models,{name:remote,eligible:true,provider:'sutra_remote',ready:true}]};
+const mixed=Object.freeze({low:'small',mid:remote,high:'large'});
+assert.equal(remoteProfile(remote),'rtx3090');
+for(const invalid of ['sutra:remote/../escape','sutra:remote/A','sutra:remote/a/extra','https://remote.example/model','sutra:engine/rtx3090',null])assert(!remoteProfile(invalid));
+assert.deepEqual(validate(mixed,remoteCatalog),mixed,'A registered remote provider can be selected for any tier');
+assert.deepEqual(forRequest(mixed,remoteCatalog,'auto'),{models:mixed,fallbacks:[]});
+assert.deepEqual(prefill(mixed,catalog),mixed,'Remote outages cannot replace saved tier selections');
+assert.deepEqual(prefill({}, {...remoteCatalog,suggested_tiers:{low:remote,mid:remote,high:remote}}),
+ {low:'',mid:'',high:''},'Remote execution requires an explicit selection, never a discovered default');
+const remoteOffline={...catalog,errors:[{model:remote,error:'Remote GPU observation is unavailable'}]};
+assert.throws(()=>forRequest(mixed,remoteOffline,'mid'),/remote provider for mid.*SSH connection.*GPU observation/);
+assert.deepEqual(forRequest(mixed,remoteOffline,'auto'),{
+ models:{low:'small',mid:'small',high:'large'},
+ fallbacks:[{tier:'mid',model:remote,availableTier:'low',availableModel:'small'}]
+},'Auto can use an eligible lower tier while preserving the remote choice');
+assert.deepEqual(mixed,{low:'small',mid:remote,high:'large'});
+const registry=require('node:path').resolve('/tmp','Sutra Remote','models.json');
+assert.equal(remoteRegistryPath(undefined,registry),registry);
+assert.equal(remoteRegistryPath('',registry),registry);
+assert.equal(remoteRegistryPath(registry,'/unused'),registry);
+for(const invalid of ['relative/models.json','https://remote.example/models.json','/tmp/models\n.json',{},null])assert.throws(()=>remoteRegistryPath(invalid,registry),/absolute file path in User Settings/);
 console.log(JSON.stringify({passed:true,checks:['prefill empty tiers from installed metadata','preserve saved and missing choices','never invent unavailable defaults','reject ineligible models on save','allow fixed available tiers during a High outage','block fixed unavailable High with recovery details','fallback and restore Auto High as readiness changes without editing settings']}));

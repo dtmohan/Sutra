@@ -7,7 +7,7 @@ const tierModels={low:'fixture-small',mid:'fixture-mid',high:'fixture-large'};
 const documentPrompt='Review this resume at "/tmp/Candidate Resume (1).docx"';
 const documentNotice='Paste the document text for review.';
 const runtimeUpdates=[],bridgeAllocations=[],bridgeThinking=[],bridgeChildThinking=[];
-const nativeAssignments=[],engineAssignments=[];let userModels,userEngineApprovals;
+const nativeAssignments=[],engineAssignments=[],remoteAssignments=[];let userModels,userEngineApprovals,userRemoteRegistry;
 const requestThinking=new WeakMap(),requestChildThinking=new WeakMap();
 const runtimeSettings=new Map();
 const inputValues=[],openedDocuments=[];
@@ -30,6 +30,7 @@ function spawn(exe,args,options){
   bridgeAllocations.push(environment.SUTRA_WORKSPACE_ALLOCATION);
   nativeAssignments.push({models:environment.SUTRA_STRATA_MODELS,only:environment.SUTRA_STRATA_ONLY});
   engineAssignments.push({models:environment.SUTRA_ENGINE_MODELS,only:environment.SUTRA_ENGINE_ONLY,python:environment.SUTRA_ENGINE_PYTHON,registry:environment.SUTRA_ENGINE_REGISTRY,approvals:environment.SUTRA_ENGINE_APPROVALS});
+  remoteAssignments.push({models:environment.SUTRA_REMOTE_MODELS,only:environment.SUTRA_REMOTE_ONLY,registry:environment.SUTRA_REMOTE_REGISTRY});
   if(!streaming){bridgeThinking.push(environment.SUTRA_THINKING);bridgeChildThinking.push(environment.SUTRA_CHILD_THINKING);requestThinking.set(req,environment.SUTRA_THINKING);requestChildThinking.set(req,environment.SUTRA_CHILD_THINKING);}
   const finish=()=>{if(req.op==='auto_new')state={...state,contract:{contract_hash:'fixture-contract',contract:{constraints:{auto_review:true}}},calibration:{binding:{hash:'fixture-calibration'}},session:'new-review',auto:{pending_files:0,mapped_files:2,source_files:2}};
    const data=req.op==='orchestrate'?{flow_id:'fixture-flow',state:'DONE',data:{state,route:{tier:'low',model:tierModels.low},result:{invocation_id:'fixture',admission:{admitted:true},accepted_output:{answer:'Fixture answer',remaining:[]}},coverage:{mapped_files:2,source_files:2},source_files:['a.py']}}:req.op==='models'?fixtureCatalog||{models:Object.values(tierModels).map(name=>({name,eligible:true})),suggested_tiers:tierModels}:req.op==='chat_answer'?{state,route:{tier:'low',model:tierModels.low,reason:'focused request'},result:{invocation_id:'fixture-invocation',admission:{admitted:true},accepted_output:{answer:'Fixture answer',remaining:[]}},coverage:{mapped_files:2,source_files:2},source_files:['a.py']}:req.op==='calibration_list'?{binding:{hash:'fixture',profiles:[]},profiles:[]}:req.op==='dashboard'?{hardware:{available:false,temperatures:{cpu:{available:true,maximum_celsius:42.12},gpu:{available:true,maximum_celsius:40.82}}},runs:[],invocations:{},actions:[]}:state;
@@ -75,7 +76,7 @@ const vscode={
  EventEmitter:Emitter,Uri:{file:uri,parse:uri},StatusBarAlignment:{Right:1},ViewColumn:{One:1},
  env:{appRoot:'/must/not/load/internal/typescript'},
  MarkdownString:class{constructor(value){this.value=value;}},ConfigurationTarget:{Global:1},chat:{createChatParticipant(id,handler){participants.set(id,handler);return disposable();}},
- workspace:{onDidChangeConfiguration:()=>disposable(),isTrusted:true,workspaceFolders:[{uri:uri(tmp)}],textDocuments:[],getConfiguration(){return {get(k,d){return k==='models'?tierModels:k==='workspaceAllocation'?repoAllocation:runtimeSettings.get(k)??d;},inspect(k){return k==='workspaceAllocation'?{globalValue:userAllocation,workspaceValue:repoAllocation}:k==='models'?{globalValue:userModels,workspaceValue:{low:'strata:profile/unapproved'}}:k==='engine.approvals'?{globalValue:userEngineApprovals,workspaceValue:{'sutra:engine/unapproved':'f'.repeat(64)}}:undefined;},async update(k,v,target){if(k==='models'){if(!allowModelSave)throw Error('Existing model choices must not be overwritten by discovery');userModels=v;return;}if(k==='engine.approvals'){assert.equal(target,vscode.ConfigurationTarget.Global);userEngineApprovals=v;}runtimeSettings.set(k,v);runtimeUpdates.push([k,v]);}};},
+ workspace:{onDidChangeConfiguration:()=>disposable(),isTrusted:true,workspaceFolders:[{uri:uri(tmp)}],textDocuments:[],getConfiguration(){return {get(k,d){return k==='models'?tierModels:k==='workspaceAllocation'?repoAllocation:runtimeSettings.get(k)??d;},inspect(k){return k==='workspaceAllocation'?{globalValue:userAllocation,workspaceValue:repoAllocation}:k==='models'?{globalValue:userModels,workspaceValue:{low:'strata:profile/unapproved'}}:k==='remoteRegistry'?{globalValue:userRemoteRegistry,workspaceValue:path.join(tmp,'repo-controlled-remote.json')}:k==='engine.approvals'?{globalValue:userEngineApprovals,workspaceValue:{'sutra:engine/unapproved':'f'.repeat(64)}}:undefined;},async update(k,v,target){if(k==='models'){if(!allowModelSave)throw Error('Existing model choices must not be overwritten by discovery');userModels=v;return;}if(k==='engine.approvals'){assert.equal(target,vscode.ConfigurationTarget.Global);userEngineApprovals=v;}runtimeSettings.set(k,v);runtimeUpdates.push([k,v]);}};},
   registerTextDocumentContentProvider(s,p){provider=p;return disposable();},async openTextDocument(u){return {uri:u};},fs:{writeFile:async()=>{}}},
  commands:{registerCommand(n,f){commands.set(n,f);return disposable();},async executeCommand(n,...a){return commands.get(n)?.(...a);}},
  window:{createOutputChannel(){return {appendLine(){},dispose(){}};},registerWebviewViewProvider(id,provider){views.set(id,provider);return disposable();},createStatusBarItem(){const item={show(){},dispose(){}};statusItems.push(item);return item;},
@@ -86,7 +87,7 @@ const vscode={
 const moduleFixture={exports:{}};
 const context={module:moduleFixture,exports:moduleFixture.exports,require:n=>n==='vscode'?vscode:n==='node:child_process'?{spawn}:n==='./coordinator_client'?{CoordinatorClient:CoordinatorFixture}:n==='./model_activity'?require('../model_activity'):n==='./media/token_usage'?require('../media/token_usage'):n==='./usage_view'?require('../usage_view'):n==='./diagram_view'?require('../diagram_view'):n==='./model_selection'?require('../model_selection'):n==='./strata_startup'?require('../strata_startup'):n==='./strata_management'?require('../strata_management'):n==='./engine_management'?{create:()=>({command:async()=>({ok:true,models:[],environment_ready:false,running:false})})}:n==='./strata_setup'?require('../strata_setup'):n==='./bridge_worker'?require('../bridge_worker'):n==='./capabilities'?require('../capabilities'):n==='./native_provider'?nativeProvider:n==='./workspace_authorization'?require('../workspace_authorization'):require(n),process,Buffer,console,queueMicrotask,structuredClone,
  setInterval:fn=>{intervals.push(fn);return fn;},clearInterval(){},setTimeout:(fn,ms)=>{timers.push({fn,ms});return fn;},clearTimeout(){}};
-context.process={...process,env:{...process.env,SUTRA_WORKSPACE_ALLOCATION:'{"tokens":999999}',SUTRA_ENGINE_APPROVALS:JSON.stringify({'sutra:engine/inherited':'f'.repeat(64)})}};
+context.process={...process,env:{...process.env,SUTRA_WORKSPACE_ALLOCATION:'{"tokens":999999}',SUTRA_ENGINE_APPROVALS:JSON.stringify({'sutra:engine/inherited':'f'.repeat(64)}),SUTRA_REMOTE_REGISTRY:path.join(tmp,'inherited-remote.json'),SUTRA_REMOTE_MODELS:'["sutra:remote/inherited"]'}};
 vm.runInNewContext(fs.readFileSync(path.join(root,'extension.js'),'utf8'),context,{filename:'extension.js'});
 const subscriptions=[];
 (async()=>{
@@ -94,6 +95,23 @@ const subscriptions=[];
  assert.deepEqual(Object.keys(api).sort(),['getRoutingStatus','getState','open','version']);assert(Object.isFrozen(api));const beforeRouting=requests.length;assert.equal(api.getRoutingStatus(),null);assert.equal(requests.length,beforeRouting);
  await api.getState();
  assert.deepEqual(JSON.parse(nativeAssignments.at(-1).models),[],'Repository model choices cannot authorize native activation');
+ assert.deepEqual(JSON.parse(remoteAssignments.at(-1).models),[],'Workspace and inherited values cannot authorize remote model selection');
+ assert.equal(remoteAssignments.at(-1).registry,path.join(os.homedir(),'Library','Application Support','Sutra','Remote','models.json'),'Workspace and inherited registry paths are ignored');
+ userRemoteRegistry=path.join(tmp,'User Remote','models.json');
+ userModels={low:'sutra:remote/rtx3090',mid:'sutra:remote/rtx3090',high:'sutra:remote/rtx3090'};
+ await api.getState();
+ assert.deepEqual(JSON.parse(remoteAssignments.at(-1).models),Object.values(userModels));
+ assert.equal(remoteAssignments.at(-1).only,'1');
+ assert.equal(remoteAssignments.at(-1).registry,userRemoteRegistry,'Only the User registry setting reaches the worker');
+ userModels={low:'fixture-small',mid:'fixture-mid',high:'sutra:remote/rtx3090'};
+ await api.getState();
+ assert.deepEqual(JSON.parse(remoteAssignments.at(-1).models),['sutra:remote/rtx3090']);
+ assert.equal(remoteAssignments.at(-1).only,null,'A model switch clears remote-only mode');
+ const beforeInvalidRegistry=requests.length;
+ userRemoteRegistry='relative/models.json';
+ await assert.rejects(api.getState(),/absolute file path in User Settings/);
+ assert.equal(requests.length,beforeInvalidRegistry,'An invalid registry must not dispatch');
+ userRemoteRegistry=undefined;userModels=undefined;
  userModels={low:'strata:profile/approved-low',mid:'strata:profile/approved-mid',high:'strata:profile/approved-high'};
  await api.getState();
  assert.deepEqual(JSON.parse(nativeAssignments.at(-1).models),Object.values(userModels));

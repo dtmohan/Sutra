@@ -252,7 +252,7 @@ el('overview-chat').onclick=()=>showSection('advanced');el('overview-settings').
 showView(vscode.getState?.()?.view||'dashboard');
 el('open-current-task').onclick=()=>showSection('advanced');
 function showModelChoices(m){
- m={...m,catalog:m.catalog||{models:[],suggested_tiers:{},error:'Local models have not been discovered. Refresh model discovery or connect the native runtime.'}};
+ m={...m,catalog:m.catalog||{models:[],suggested_tiers:{},error:'Models have not been discovered. Refresh model discovery, connect the native runtime or check a registered remote provider.'}};
  const candidates=m.catalog.models.filter(x=>x.eligible===true);modelCandidates=candidates;
  if(!modelDraftDirty)modelDraft={...m.models};
  for(const tier of ['low','mid','high']){
@@ -261,22 +261,24 @@ function showModelChoices(m){
   for(const model of available){
    const o=document.createElement('option');o.value=model.name;
    const native=typeof model.name==='string'&&(model.name.startsWith('strata:profile/')||model.name.startsWith('sutra:engine/'));
+   const remote=typeof model.name==='string'&&model.name.startsWith('sutra:remote/');
    const label=model.display_name||model.name;
    const state=model.state||model.runtime_state;
-   o.textContent=label+(model.parameter_size?' · '+model.parameter_size:'')+(model.moe?' · MoE':'')+
+   o.textContent=label+(model.parameter_size?' · '+model.parameter_size:'')+(model.moe?' · MoE':'')+(remote?' · Remote':'')+
+    (remote?(model.ready===true?' · ready':state?' · '+state.replaceAll('_',' '):' · checks before dispatch'):'')+
     (native?(model.ready===true?' · loaded':state==='starting'?' · loading':state?' · '+state.replaceAll('_',' '):' · loads on demand'):'');select.append(o);
   }
-  const saved=modelDraft[tier];if(!available.some(x=>x.name===saved)){const missing=document.createElement('option');missing.value=saved||'';const row=m.catalog.models.find(x=>x.name===saved);missing.textContent=saved?saved+' ('+(row?.state||'unavailable')+' — choose a replacement)':'No local chat model available';select.append(missing);}
+  const saved=modelDraft[tier];if(!available.some(x=>x.name===saved)){const missing=document.createElement('option');missing.value=saved||'';const row=m.catalog.models.find(x=>x.name===saved);missing.textContent=saved?saved+' ('+(row?.state||'unavailable')+' — choose a replacement)':'No chat model available';select.append(missing);}
   select.value=saved||'';
   select.setAttribute('aria-invalid',String(!!saved&&!available.some(x=>x.name===saved)));
  }
  const defaults=m.catalog.suggested_tiers;
- suggestedModels=defaults&&['low','mid','high'].every(t=>candidates.some(c=>!c.tier&&c.name===defaults[t]))?defaults:null;
+ suggestedModels=defaults&&['low','mid','high'].every(t=>candidates.some(c=>!c.tier&&!c.name.startsWith('sutra:remote/')&&c.name===defaults[t]))?defaults:null;
  el('use-model-defaults').disabled=busy||!suggestedModels;
  const differs=suggestedModels&&['low','mid','high'].some(t=>m.models[t]!==suggestedModels[t]);
- el('model-suggestions').textContent=suggestedModels?'Discovered defaults — '+['low','mid','high'].map(t=>t+': '+suggestedModels[t]).join(' · ')+(differs?'. Your saved choices were preserved. Use discovered defaults, then Save choices, to replace them.':'. These match your saved choices.'):'No complete defaults available. Choose an installed model or native profile for each tier.';
+ el('model-suggestions').textContent=suggestedModels?'Discovered defaults — '+['low','mid','high'].map(t=>t+': '+suggestedModels[t]).join(' · ')+(differs?'. Your saved choices were preserved. Use discovered defaults, then Save choices, to replace them.':'. These match your saved choices.'):'No complete defaults available. Choose an installed model, native profile or registered remote provider for each tier.';
  const issues=(m.catalog.errors||[]).map(entry=>entry.error).filter(value=>typeof value==='string'&&value.trim());
- setText('model-discovery',(m.catalog.error||candidates.length+' eligible local models.')+' '+(m.catalog.selection_note||'')+(issues.length?' '+[...new Set(issues)].join(' '):''));
+ setText('model-discovery',(m.catalog.error||candidates.length+' eligible models.')+' '+(m.catalog.selection_note||'')+(issues.length?' '+[...new Set(issues)].join(' '):''));
  if(!modelDraftDirty&&!modelSavePending)setText('model-save-status','');
  const picked=modelTiers.map(t=>m.catalog.models.find(row=>row.name===modelDraft[t]));
  const sameModel=picked.every(Boolean)&&new Set(picked.map(row=>row.model||row.name)).size===1;

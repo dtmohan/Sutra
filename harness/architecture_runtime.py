@@ -247,7 +247,9 @@ def dispatch(s,meta,workspace,root,request,provider=None):
  for attempt in range(3):
   s.reserve(run,'ATTEMPT',{'attempt':attempt})
   if real:
-   try:hardware=require_resources(root)
+   try:
+    from provider_resources import require_resources as provider_resources
+    hardware=provider_resources(root,provider=provider)
    except ResourceWait as exc:
     s.event(run,'RESOURCE_WAIT',{'reason':str(exc),'measurement':exc.state,'architecture_stop':previous_stop});raise
    with s.db:s._audit('RESOURCE_GATE',{'run_id':run,'measurement':hardware})

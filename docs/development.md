@@ -23,6 +23,11 @@ identity. The package omission and changelog-order regressions are ordinary
 Python tests. The gate runner never regenerates integrity hashes or installs
 model dependencies.
 
+The [durable task runner](durable-task-runner.md) section documents automatic
+continuation, Stop/reload semantics and its real-process recovery matrix.
+The [common operation boundary proposal](kernel-operation-boundary.md) scopes
+remaining adapter and lifecycle coverage without changing the canonical kernel.
+
 Action tests exercise operating-system sandbox capabilities. macOS uses
 `sandbox-exec`; Linux availability depends on the host. Windows action execution
 is currently read-only. Do not weaken an adapter to make a test pass.

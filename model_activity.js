@@ -13,8 +13,19 @@ function callLabel(role){
     document_verdict_reviewer:'Document verdict review',
   }[role]||'Model call';
 }
-function controlLabel(requested){
-  return requested===undefined?'not reported':requested===null?'model default':requested===false?'off requested':requested===true?'on requested':String(requested);
+function controlMetadata(value){
+  if(!value||typeof value!=='object')return {};
+  const result={};
+  if(value.effective==='model_default')result.effective='model_default';
+  if(value.switch_supported===false)result.switch_supported=false;
+  if(value.thinking_only===true)result.thinking_only=true;
+  return result;
+}
+function controlLabel(requested,metadata={}){
+  const value=controlMetadata(metadata);
+  if(value.effective==='model_default'&&value.switch_supported===false&&value.thinking_only===true)
+    return 'model default; thinking-only; off switch unsupported';
+  return requested===undefined?'not reported':requested===null?'model default':requested===false?'off requested':requested===true?'on requested':String(requested).slice(0,80);
 }
 // A call starting (or finishing) does not establish that it emitted reasoning.
 // Keep metadata out of VS Code's thinking UI until actual reasoning arrives.
@@ -42,7 +53,7 @@ function chatActivity(vscode,progress,activityLink){
       return;
     }
     if(Number.isSafeInteger(e.seq)&&c.progressSeq!==null&&e.seq>c.progressSeq)c.progressSeq=e.seq;
-    if(e.kind==='control'){c.requested=e.requested;return;}
+    if(e.kind==='control'){c.requested=e.requested;Object.assign(c,controlMetadata(e));return;}
     const canThink=typeof vscode.LanguageModelThinkingPart==='function';
     if(e.kind==='thinking'&&typeof e.text==='string'&&e.text.trim())c.received=true;
     if(e.kind==='thinking'&&typeof e.text==='string'&&canThink){
@@ -50,7 +61,7 @@ function chatActivity(vscode,progress,activityLink){
         if(!e.text.trim())return;
         c.opened=true;
         const header=callLabel(c.role)+' · '+c.model+' · '+c.role+'\n'+(c.node_id?'Task '+c.node_id+'\n':'')+
-          'Unverified local-model reasoning.\nReasoning control: '+controlLabel(c.requested)+'.\n';
+          'Unverified model reasoning.\nReasoning control: '+controlLabel(c.requested,c)+'.\n';
         progress.report(new vscode.LanguageModelThinkingPart(header,e.id));
       }
       progress.report(new vscode.LanguageModelThinkingPart(e.text,e.id));
@@ -103,7 +114,10 @@ function decoder(onEvent,onStderr){
       event.text=e.text.slice(0,Math.min(2048,Math.max(0,retention.reasoning_chars-state.chars)));state.chars+=event.text.length;
       if(!event.text)return;
     }
-    if(e.kind==='control')event.requested=(typeof e.requested==='string'||typeof e.requested==='boolean'||e.requested===null)?e.requested:null;
+    if(e.kind==='control'){
+      event.requested=typeof e.requested==='string'?e.requested.slice(0,80):(typeof e.requested==='boolean'||e.requested===null)?e.requested:null;
+      Object.assign(event,controlMetadata(e));
+    }
     if(e.kind==='finish'){
       state.done=true;event.status=e.status==='accepted'?'accepted':'withheld';event.display_truncated=!!e.display_truncated;
       event.thinking_chars=Number.isSafeInteger(e.thinking_chars)&&e.thinking_chars>=0?e.thinking_chars:null;
@@ -149,7 +163,9 @@ class ActivityLog{
       }
       if(Number.isSafeInteger(e.seq)&&this.progressSeq.get(e.id)!==null&&e.seq>(this.progressSeq.get(e.id)??0))this.progressSeq.set(e.id,e.seq);
       if(e.kind==='thinking')c.text=(c.text+e.text).slice(0,retention.reasoning_chars);
-      if(e.kind==='control')c.requested=e.requested;
+      if(e.kind==='control'){
+        c.requested=e.requested;Object.assign(c,controlMetadata(e));c.control_label=controlLabel(c.requested,c);
+      }
       if(e.kind==='finish'){
         Object.assign(c,{status:e.status,usage:e.usage,thinking_chars:e.thinking_chars,display_truncated:e.display_truncated,finishedAt:Date.now()});
         const value=progressSequence?generationProgress.normalize(e.generation_progress):null;if(value)c.generation_progress=value;
@@ -212,7 +228,7 @@ class ActivityArchive extends ActivityLog{
       '',`Invocation: ${c.id}`,`Model: ${c.model}`,`Stage: ${c.role}`,`Task: ${c.node_id||'not recorded'}`,
       `Status: ${c.status}${c.interruptedOnReload?' (window closed before completion was observed)':''}`,
       'Protocol admission does not verify task completion or answer correctness.',
-      `Reasoning control: ${controlLabel(c.requested)}`,
+      `Reasoning control: ${controlLabel(c.requested,c)}`,
       `Reasoning characters reported: ${c.thinking_chars??'not recorded'}`,
       `Tokens: ${c.usage?.input_tokens??'?'} input / ${c.usage?.output_tokens??'?'} output (includes reasoning)`,
       ...(c.generation_progress?[generationProgress.describe(c.generation_progress)]:[]),
@@ -231,6 +247,8 @@ function cleanCall(c){
     thinking_chars:number(c.thinking_chars),
     usage:c.usage?{input_tokens:number(c.usage.input_tokens),output_tokens:number(c.usage.output_tokens)}:undefined,
     display_truncated:!!c.display_truncated,interruptedOnReload:!!c.interruptedOnReload};
+  Object.assign(result,controlMetadata(c));
+  result.control_label=controlLabel(result.requested,result);
   const value=generationProgress.normalize(c.generation_progress);if(value)result.generation_progress=value;
   return result;
 }
@@ -242,4 +260,4 @@ function parseActivityUri(uri){
   const match=String(uri).match(/^karma-preview:\/activity\/([a-f0-9]{24})\/([a-f0-9]{32})\/Reasoning\.txt$/);
   return match?{workspace:match[1],id:match[2]}:null;
 }
-module.exports={decoder,ActivityLog,ActivityArchive,activityUri,parseActivityUri,chatActivity};
+module.exports={decoder,ActivityLog,ActivityArchive,activityUri,parseActivityUri,chatActivity,controlLabel};

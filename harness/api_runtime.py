@@ -15,6 +15,10 @@ def initialize(s):
  s.db.commit()
 
 def provider_for(root,model,review=False,model_class=LocalModel):
+ from remote_profiles import is_remote
+ if is_remote(model):
+  from remote_model import RemoteModel
+  return RemoteModel(root/'calls',model=model,review=review)
  from vscode_bridge import ollama
  from runtime_memory import fresh_resources
  from engine_profiles import is_engine
@@ -53,7 +57,8 @@ def invoke(s,session,root,role,payload,provider,real):
  for attempt in range(3):
   s.reserve(run,'ATTEMPT',{'attempt':attempt})
   if real:
-   h=require_resources(root)
+   from provider_resources import require_resources as provider_resources
+   h=provider_resources(root,provider=provider)
    with s.db:s._audit('RESOURCE_GATE',{'run_id':run,'measurement':h})
   charge=provider.budget.check(system,payload,schema);delivery=s.prepare_delivery(session,payload,charge)
   result=InvocationGateway(s.path, run, provider, ledger=s).invoke(role,uuid.uuid4().hex,system,payload,schema,delivery)

@@ -98,10 +98,11 @@ def citation_references(role, payload):
         return False
     from strata_model import is_strata
     from engine_profiles import is_engine
+    from remote_profiles import is_remote
     route = payload.get('route', {})
     if role == 'chat_reviewer':
         route = route.get('record', {}).get('choice', {})
-    return is_strata(route.get('model')) or is_engine(route.get('model'))
+    return is_strata(route.get('model')) or is_engine(route.get('model')) or is_remote(route.get('model'))
 
 
 def citation_choices(schema):

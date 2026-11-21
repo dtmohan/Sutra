@@ -12,6 +12,9 @@ const ACCESS='karma_workspace_access';
 const ACCESS_AGENT='karma_workspace_agent_access';
 const THINK_NEXT='sutraThinkingForNextRequest';
 const HOST_READY_WAIT_MS=1500,HOST_READY_POLL_MS=50;
+const TASK_RUNNER_EVENTS=new Set(['start','start_existing','step','resume','grant','capability_grant',
+  'approve_document','supply_evidence','restart_review','accept_provenance']);
+const TASK_STOPPED='Sutra stopped this task. Its saved context, permissions and consumed spending are retained. Check the saved checkpoint before explicitly resuming; no new run was started.';
 const MODEL_IDS={auto:'karma-auto',low:'karma-low',mid:'karma-mid',high:'karma-high'};
 const CHAT_DEFAULTS={'defaultModel':MODEL_IDS.auto,'editor.preferCopilotHarness':false,'defaultToCopilotHarness':false,'editor.localAgent.enabled':true};
 const MANIFEST=require('./package.json');
@@ -555,10 +558,10 @@ function install(vscode,context,deps){
     }finally{allocationPending=false;publish();}
   }
   let activityProgress;
-  async function flowEvent(flow,event,tier,token,extra,thinkForTurn,chatKey,stackChat,onFallback){
+  async function flowEvent(flow,event,tier,token,extra,thinkForTurn,chatKey,stackChat,onFallback,onTicket){
     if(disposed)throw Object.assign(new Error('Sutra chat disconnected. The runner retains its request for reconnection.'),{code:'COORDINATOR_DETACHED'});
     const access=refreshAccess();
-    const models=['inspect','pending','recoverable_review','cancel','locate_document','approve_document'].includes(event)?undefined:await deps.configureModels(false,token,{tier,onFallback});
+    const models=['inspect','pending','recoverable_review','cancel','locate_document'].includes(event)?undefined:await deps.configureModels(false,token,{tier,onFallback});
     const workspaceStep=['step','resume','grant','capability_grant','restart_review','accept_provenance'].includes(event) && !classifying(flow);
     if(workspaceStep){
       assertCurrent(access,token);
@@ -579,22 +582,25 @@ function install(vscode,context,deps){
       const allocated=await deps.allocateRequest(stackChat);
       if(!/^[a-f0-9]{32}$/.test(allocated?.id))throw new Error('The runner did not allocate a valid request identity.');
       ticket={id:allocated.id,workspace:deps.workspace(),nativeChat:chatKey,chatKey:stackChat,stackChat,
-        prompt:extra?.prompt||flow?.prompt,event,flow_id:flow?.flow_id,thinkForTurn};
+        prompt:extra?.prompt||flow?.prompt,event,flow_id:flow?.flow_id,thinkForTurn,
+        ...(TASK_RUNNER_EVENTS.has(event)?{wholeTask:true}:{})};
       // Save before submission: reload can happen before the backend creates a
       // flow pointer. The ticket grants no permissions and never replays work.
       await saveTransport(ticket);
+      onTicket?.(ticket);
     }
     let next;
     try{
-      const transport={...(ticket?{id:ticket.id,chatKey:stackChat}:{}),...(access?{authority:access}:{})};
+      const transport={...(ticket?{id:ticket.id,chatKey:stackChat,...(ticket.wholeTask?{wholeTask:true}:{})}:{}),...(access?{authority:access}:{})};
       next=await deps.request(message,token,activityProgress,Object.keys(transport).length?transport:undefined);
     }catch(error){
-      if(ticket&&!disposed&&['COORDINATOR_INTERRUPTED','COORDINATOR_CANCELLED','COORDINATOR_FAILED'].includes(error?.code))
-        await acknowledgeTransport(ticket);
+      if(ticket&&!disposed&&['COORDINATOR_INTERRUPTED','COORDINATOR_CANCELLED','COORDINATOR_FAILED'].includes(error?.code)){
+        await acknowledgeTransport(ticket);onTicket?.(undefined);
+      }
       throw error;
     }
     await rememberFlow(next,event==='pending'?undefined:thinkForTurn,event==='pending'&&!next.task_stack?undefined:chatKey,stackChat);
-    if(ticket&&!disposed&&!token?.isCancellationRequested)await acknowledgeTransport(ticket);
+    if(ticket&&!disposed&&!token?.isCancellationRequested){await acknowledgeTransport(ticket);onTicket?.(undefined);}
     return next;
   }
   const shownHostPhases=new WeakMap();
@@ -788,6 +794,11 @@ function install(vscode,context,deps){
     }catch(error){
       audit.stage=token.isCancellationRequested||/^(?:Sutra (?:request|action|workspace access) cancelled|Workspace permission choice cancelled)/i.test(error.message)?'cancelled':'blocked';
       audit.message=error.message;
+      if(error?.code==='COORDINATOR_CANCELLED'){
+        audit.stage='cancelled';
+        if(!token.isCancellationRequested)progress.report(new vscode.LanguageModelTextPart(TASK_STOPPED));
+        return;
+      }
       if(error instanceof ModelUnavailable||/Ollama|model.*unavailable|model.*discover|No local chat model/i.test(error.message)){
         void vscode.window.showErrorMessage?.(error.message,'Model settings')?.then(choice=>{
           if(choice==='Model settings')return deps.configureModels(true);
@@ -893,7 +904,7 @@ function install(vscode,context,deps){
     }
   };
   const provider={onDidChangeLanguageModelChatInformation:changed.event,
-    provideLanguageModelChatInformation(){if(!enabled())return [];const models=deps.modelSettings();return ['auto','low','mid','high'].filter(id=>id==='auto'||models[id]).map(id=>({id:MODEL_IDS[id],name:id==='auto'?'Sutra Auto':'Sutra '+id[0].toUpperCase()+id.slice(1),family:'karma',version:MANIFEST.version,maxInputTokens:64000,maxOutputTokens:4096,detail:id==='auto'?'Governed local routing':models[id]||'Configure this tier',tooltip:'Chat normally with saved workspace access. Every local call uses the invocation gateway.',capabilities:{toolCalling:true,imageInput:false}}));},
+    provideLanguageModelChatInformation(){if(!enabled())return [];const models=deps.modelSettings();return ['auto','low','mid','high'].filter(id=>id==='auto'||models[id]).map(id=>({id:MODEL_IDS[id],name:id==='auto'?'Sutra Auto':'Sutra '+id[0].toUpperCase()+id.slice(1),family:'karma',version:MANIFEST.version,maxInputTokens:64000,maxOutputTokens:4096,detail:id==='auto'?'Governed model routing':models[id]||'Configure this tier',tooltip:'Chat normally with saved workspace access. Every model call uses the invocation gateway.',capabilities:{toolCalling:true,imageInput:false}}));},
     provideTokenCount(model,input,token){if(token?.isCancellationRequested)throw new Error('Token count cancelled.');return hostTokens.count(input);},
     async provideLanguageModelChatResponse(model,messages,options,progress,token){
       if(isCompaction(vscode,messages)){
@@ -968,7 +979,23 @@ function install(vscode,context,deps){
         publish();
         return result;
       }
-      running=true;activeCancel=new vscode.CancellationTokenSource();const cancellation=token.onCancellationRequested(()=>activeCancel?.cancel());publish();
+      let currentRunnerTicket,stopPromise,stopAttempted=false,stopError;
+      const stopOwnedTask=()=>{
+        if(stopPromise)return;
+        const interrupted=currentRunnerTicket;
+        // Reload disposes the controller/client in the same turn. A live chat
+        // Stop instead cancels its scoped task runner, not just its display.
+        stopPromise=new Promise(resolve=>setImmediate(resolve)).then(async()=>{
+          if(disposed||deps.isDisconnecting?.())return;
+          const ticket=currentRunnerTicket||interrupted;
+          if(!ticket?.wholeTask||typeof deps.cancelRequest!=='function')return;
+          stopAttempted=true;
+          try{await deps.cancelRequest(ticket);}
+          catch(error){stopError=error.message;audit.stopError=stopError;publish();}
+        });
+      };
+      running=true;activeCancel=new vscode.CancellationTokenSource();
+      const cancellation=token.onCancellationRequested(()=>{activeCancel?.cancel();stopOwnedTask();});publish();
       let savedClassifierThinking;
       const resumeToken=prompt.trim().match(RESUME_PROMPT)?.[1];
       const requestedResume=/^(continue|resume|please continue|please resume)[.! ]*$/i.test(prompt.trim())||!!resumeToken;
@@ -997,7 +1024,8 @@ function install(vscode,context,deps){
       const advance=async(flow,event,extra)=>{
         const next=await flowEvent(flow,event,tier,activeCancel.token,extra,
           classifying(flow)?savedClassifierThinking??thinkForTurn:thinkForTurn,chatKey,legacyResume?undefined:flow?.stackChat||stackChat,
-          reportModelFallbacks);
+          reportModelFallbacks,ticket=>{currentRunnerTicket=ticket;});
+        if(next.runner_usage)recordUsage({token_usage:next.runner_usage});
         recordCoherence(next.coherence_observation);
         if(next.claim_review_usage)recordUsage({token_usage:next.claim_review_usage});
         managed ||= !!next.task_stack;
@@ -1075,8 +1103,18 @@ function install(vscode,context,deps){
       }
       const activityToken=activeCancel.token;let activityOpen=true;
       const renderActivity=chatActivity(vscode,progress,deps.activityLink);
+      let lastWorkflowProgress;
       activityProgress=e=>{
         if(!activityOpen||activityToken.isCancellationRequested)return;
+        if(e?.kind==='workflow'){
+          if(e.version!==1||typeof e.flow_id!=='string'||e.flow_id.length>128||typeof e.state!=='string'||e.state.length>80||
+             typeof e.progress!=='string'||!e.progress.trim()||e.progress.length>500)return;
+          audit.orchestration={flowId:e.flow_id,state:e.state,cursor:e.cursor};
+          audit.stage='workflow';audit.message=e.progress;publish();
+          const key=JSON.stringify([e.flow_id,e.cursor,e.state,e.disposition,e.progress]);
+          if(key!==lastWorkflowProgress){lastWorkflowProgress=key;progress.report(new vscode.LanguageModelTextPart(e.progress+'\n\n'));}
+          return;
+        }
         renderActivity(e);
       };
       try{
@@ -1112,9 +1150,11 @@ function install(vscode,context,deps){
         if(!request.results){
           const retained=requestedResume&&typeof deps.resumeRequest==='function'?transportFor(stackChat,chatKey):undefined;
           if(retained){
+            currentRunnerTicket=retained;
             progress.report(new vscode.LanguageModelTextPart('Reconnecting to the runner’s saved request. No work is being submitted again.\n\n'));
             try{
               flow=await deps.resumeRequest(retained,activeCancel.token,activityProgress);
+              if(flow.runner_usage)recordUsage({token_usage:flow.runner_usage});
               if(!flow?.flow_id)throw new Error('The retained runner response has no workflow identity.');
               const cachedFlow=flow;
               const inspected=await deps.request({op:'orchestrate',event:'inspect',flow_id:flow.flow_id,
@@ -1122,14 +1162,14 @@ function install(vscode,context,deps){
               if(inspected.flow_id!==flow.flow_id)throw new Error('The runner response no longer matches the current workflow identity.');
               if(inspected.cursor!==flow.cursor||inspected.state!==flow.state){
                 await rememberFlow(inspected,retained.thinkForTurn,chatKey,stackChat);
-                if(!disposed&&!activeCancel.token.isCancellationRequested)await acknowledgeTransport(retained);
+                if(!disposed&&!activeCancel.token.isCancellationRequested){await acknowledgeTransport(retained);currentRunnerTicket=undefined;}
                 resumeUnavailable('The saved workflow advanced after this runner step. Its current checkpoint is retained. Send continue to use that checkpoint; the older cached answer was not published.');
                 return;
               }
               flow={...cachedFlow,task_stack:inspected.task_stack,focused_flow:inspected.focused_flow,
                 recovery:inspected.recovery};
               await rememberFlow(flow,retained.thinkForTurn,chatKey,stackChat);
-              if(!disposed&&!activeCancel.token.isCancellationRequested)await acknowledgeTransport(retained);
+              if(!disposed&&!activeCancel.token.isCancellationRequested){await acknowledgeTransport(retained);currentRunnerTicket=undefined;}
               prompt=flow.prompt||retained.prompt||prompt;
               audit.memoryUsed=true;
               managed ||= !!flow.task_stack;
@@ -1141,11 +1181,18 @@ function install(vscode,context,deps){
               audit.conversationInvocationId=conversationId;
               resuming=true;
             }catch(error){
+              if(error?.code==='COORDINATOR_CANCELLED'&&error.terminalAtAttach!==true){
+                await acknowledgeTransport(retained);currentRunnerTicket=undefined;
+                audit.stage='cancelled';audit.message=error.message;publish();
+                if(!activeCancel.token.isCancellationRequested)progress.report(new vscode.LanguageModelTextPart(TASK_STOPPED));
+                return;
+              }
               const terminal=['COORDINATOR_INTERRUPTED','COORDINATOR_CANCELLED','COORDINATOR_FAILED'].includes(error?.code);
               const missing=error?.code==='COORDINATOR_REQUEST_MISSING';
               if(error?.code!=='COORDINATOR_RESULT_RETIRED'&&!terminal&&!missing)throw error;
               if(terminal)await acknowledgeTransport(retained);
               else await clearTransport(retained);
+              currentRunnerTicket=undefined;
               retiredTransport=true;
               progress.report(new vscode.LanguageModelTextPart(terminal?
                 'The runner confirmed this execution has stopped. Checking the durable workflow checkpoint; consumed spending remains charged and no operation will be replayed.\n\n':
@@ -1294,9 +1341,11 @@ function install(vscode,context,deps){
           }
           // Routing prose is not an authority on host capabilities or permissions.
           // Present a host-owned transition; publish model prose for conversation.
-          progress.report(new vscode.LanguageModelTextPart((flow.state!=='DONE'?'Continuing this request through Sutra’s workspace workflow.':conversationMarkdown(p))+'\n\n'));
+          const conversationDone=flow.state==='DONE'&&!flow.data&&!flow.capability_result;
+          if(conversationDone||flow.state!=='DONE')
+            progress.report(new vscode.LanguageModelTextPart((conversationDone?conversationMarkdown(p):'Continuing this request through Sutra’s workspace workflow.')+'\n\n'));
           if(p.diagram){try{await deps.presentConversation?.(chat);progress.report(new vscode.LanguageModelTextPart('Diagram opened beside the chat. Use **Sutra: Open Last Diagram** to reopen it.\n\n'));}catch(error){progress.report(new vscode.LanguageModelTextPart('Diagram preview could not open: '+error.message+'\n\n'));}}
-          if(flow.state==='DONE')return;
+          if(conversationDone)return;
           const commitmentText=observationText(flow.task_observations);
           if(commitmentText){audit.taskObservations=flow.task_observations;publish();}
           conversationId=r.invocation_id;audit.conversationInvocationId=r.invocation_id;
@@ -1425,13 +1474,17 @@ function install(vscode,context,deps){
         }finally{
           // A discarded response stream must detach its local UI owner, even
           // when reporting its footer throws. The runner ticket stays retained.
-          activityOpen=false;activityProgress=undefined;cancellation.dispose();activeCancel.dispose();activeCancel=undefined;running=false;publish();
+          try{await stopPromise;}
+          finally{activityOpen=false;activityProgress=undefined;cancellation.dispose();activeCancel.dispose();activeCancel=undefined;running=false;publish();}
         }
         if(stopped&&!disposed){try{const key=legacyResume?undefined:stackChat;
           await rememberFlow(await deps.request({op:'orchestrate',event:'pending',...(key?{chat_key:key}:{})}),undefined,chatKey,key);
         }catch{} }
         if(stopped&&!disposed){
-          if(transportFor(stackChat,chatKey))void vscode.window.showInformationMessage('Stopped displaying this request. The runner retains it. Send continue to reconnect, or stop the runner request in Sutra Monitor.');
+          if(stopAttempted)void vscode.window.showInformationMessage(stopError?
+            'Sutra could not confirm the runner stop: '+stopError+' Check Sutra Monitor before resuming.':
+            'Stop requested for this Sutra task. Its context, permissions and consumed spending are retained. Check the runner acknowledgement before resuming.');
+          else if(transportFor(stackChat,chatKey))void vscode.window.showInformationMessage('Stopped displaying this request. The runner retains it. Send continue to reconnect, or stop the runner request in Sutra Monitor.');
           else if(context.workspaceState.get(pendingKey))void vscode.window.showInformationMessage('Sutra stopped. The saved request, context and consumed budget are retained. Resume or Discard from Sutra Monitor.');
         }
       }

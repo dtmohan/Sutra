@@ -100,16 +100,24 @@ function renderRamMemory(memory){
 let runnerStopId,runnerJobsSignature;
 function renderRunner(runner,fresh){
  const jobs=Array.isArray(runner?.jobs)?runner.jobs.slice(0,8):[];
- const active=jobs.find(job=>['running','cancelling'].includes(job.state))||jobs.find(job=>job.state==='queued');
- setText('runner-state',runner?.error?'Connection unavailable':!fresh&&runner?'Status stale':active?active.state==='cancelling'?'Cancellation requested':'Working':runner?.instance_id?'Ready':'Not started');
- setText('runner-detail',runner?.error||(!fresh&&runner?'Refresh runner status. The displayed states are the last observation, not current execution status.':'Accepted work survives a chat disconnect. Send continue in the original chat to reconnect. Stopping display does not cancel execution.'));
- const displayJobs=jobs.filter(job=>!job.acknowledged);
- const signature=JSON.stringify([fresh,displayJobs.map(job=>[job.id,job.operation,job.state])]);
+ const active=jobs.find(job=>['running','cancelling'].includes(job.state))||jobs.find(job=>job.state==='queued')||jobs.find(job=>job.state==='waiting');
+ setText('runner-state',runner?.error?'Connection unavailable':!fresh&&runner?'Status stale':active?active.state==='cancelling'?'Cancellation requested':active.state==='waiting'?'Waiting for readiness':'Working':runner?.instance_id?'Ready':'Not started');
+ setText('runner-detail',runner?.error||(!fresh&&runner?'Refresh runner status. The displayed states are the last observation, not current execution status.':active?.state==='waiting'?'Checking the saved resource blocker without starting inference. Stop prevents further stages; context and spending stay saved.':'Authorized task stages continue across reloads. Send continue in the original chat to reconnect. Chat Stop or Stop runner request prevents further execution.'));
+ const displayJobs=jobs.filter(job=>!job.acknowledged||job.stop_receipt_pending);
+ const signature=JSON.stringify([fresh,displayJobs.map(job=>[job.id,job.operation,job.state,job.stop_receipt_pending,job.stop_audit_error])]);
  if(signature!==runnerJobsSignature){
  const list=el('runner-jobs');list.replaceChildren();
  for(const job of displayJobs){
   const label=node('span',String(job.operation||'Request')+' · '+String(job.state||'unknown'));
-  if(fresh&&['completed','cancelled','interrupted','failed'].includes(job.state)){
+  if(job.stop_receipt_pending){
+   label.append(node('small',job.stop_audit_error?'Stop audit needs recovery: '+job.stop_audit_error:'Stop recorded locally; kernel audit receipt pending.'));
+   if(fresh&&job.stop_audit_error){
+    const retry=node('button','Retry Stop receipt');retry.type='button';
+    retry.setAttribute('aria-label','Retry Stop receipt for '+String(job.operation||'request'));
+    retry.onclick=()=>vscode.postMessage({type:'stop_runner',id:job.id});label.append(retry);
+   }
+  }
+  if(fresh&&!job.stop_receipt_pending&&['completed','cancelled','interrupted','failed'].includes(job.state)){
    const dismiss=node('button','Dismiss');dismiss.type='button';dismiss.title='Keeps saved task history and consumed spending';
    dismiss.setAttribute('aria-label','Dismiss '+String(job.operation||'request')+' runner notification');
    dismiss.onclick=()=>vscode.postMessage({type:'dismiss_runner',id:job.id});label.append(dismiss);
@@ -142,13 +150,15 @@ function renderMonitor(){
  el('ram').textContent=hwFresh&&finite(h.reclaimable_estimate_gib)&&h.reclaimable_estimate_gib>=0?h.reclaimable_estimate_gib.toFixed(1)+' GiB':'—';
  el('ram-note').textContent=hwFresh?'Reclaimable estimate · pressure '+({1:'normal',2:'elevated',4:'critical'}[s.memory_pressure_raw]||'unavailable'):'Waiting for fresh memory data';
  renderRuntimeMemory(d.runtime_memory,s,hwFresh,snapshotFresh);
+ renderRemoteMemory(d.remote_memory,snapshotFresh);
  for(const group of ['cpu','gpu']){
   const t=h.temperatures,v=t?.[group],ok=hwFresh&&T.freshAge(t?.age_seconds,elapsed)&&v?.available===true&&finite(v.maximum_celsius)&&v.maximum_celsius>0&&v.maximum_celsius<=150;
   el(group+'-temp').textContent=ok?v.maximum_celsius.toFixed(1)+' °C':'—';
   el(group+'-temp-note').textContent=ok?'Hottest readable sensor'+(finite(v.mean_celsius)?' · avg '+v.mean_celsius.toFixed(1)+' °C':''):hwFresh?(v?.reason||'No validated sensor available'):why;
  }
  el('adapter').textContent=!snapshotFresh?'Awaiting fresh snapshot':d.adapter_health|| (d.session?'Task recorded':'No active workspace task');
- const checks=[['Resources',h,hwFresh],['Task allocation',d.review_budget,snapshotFresh],['Repository tools',d.repository,snapshotFresh],['Edits / tests',d.action_budget,snapshotFresh],['Storage',d.storage,snapshotFresh],['Last dispatch',d.context?.last_kernel_budget,snapshotFresh],['Conversation · last response',routing?.conversationBudget,true]];
+ const runnerJob=d.runner?.active||d.runner?.jobs?.filter(job=>job.runner&&(job.stop_kernel||job.workflow?.kernel)).at(-1);
+ const checks=[['Resources',h,hwFresh],['Task continuation',runnerJob?.stop_kernel||runnerJob?.workflow?.kernel,snapshotFresh],['Task allocation',d.review_budget,snapshotFresh],['Repository tools',d.repository,snapshotFresh],['Edits / tests',d.action_budget,snapshotFresh],['Storage',d.storage,snapshotFresh],['Last dispatch',d.context?.last_kernel_budget,snapshotFresh],['Conversation · last response',routing?.conversationBudget,true]];
  el('gates').replaceChildren();el('signals').replaceChildren();
  for(const [label,frame,fresh] of checks){
   const code=typeof frame==='string'?frame:frame?.decision,known=decisions.has(code),value=known?(fresh?code:'Stale · '+code):label==='Resources'?'Unavailable':'Not recorded';
@@ -260,6 +270,39 @@ function renderRuntimeMemory(m,s,hwFresh,snapshotFresh){
  const e=(m?.events||[]).at(-1);
  el('memory-recovery').textContent=e?'Last resource event: '+e.event.replaceAll('_',' ')+(e.action?' · '+e.action.replaceAll('_',' '):'')+(e.status?' · '+e.status.replaceAll('_',' '):'')+' · '+new Date(e.at*1000).toLocaleTimeString():'';
 }
+function renderRemoteMemory(memory,snapshotFresh){
+ const present=memory&&typeof memory==='object'&&!Array.isArray(memory);
+ el('remote-memory-section').hidden=!present;
+ if(!present)return;
+ const known=memory.version===1&&memory.profile==='remote-nvidia-v1';
+ const age=finite(memory.observed_at)?Date.now()/1000-memory.observed_at:undefined;
+ const fresh=known&&snapshotFresh&&memory.available===true&&memory.stale!==true&&finite(age)&&age>=0&&age<=8;
+ const sample=known&&memory.sample&&typeof memory.sample==='object'?memory.sample:{};
+ const gpu=sample.gpu||{},ram=sample.ram||{};
+ const gib=n=>finite(n)&&n>=0?(n/(1024**3)).toFixed(1)+' GiB':'—';
+ const last=memory.last_admission||memory.plan||memory;
+ const currentDecision=decisions.has(memory.decision)?memory.decision:undefined;
+ const decision=fresh&&currentDecision?currentDecision:decisions.has(last.decision)?last.decision:undefined;
+ setText('remote-allocation',decision?'Last remote check: '+decision+(fresh?'':' · historical'):'Remote allocation unavailable');
+ el('remote-allocation').dataset.decision=fresh?currentDecision||decision||'':'';
+ const model=memory.model||last.model;
+ setText('remote-model',typeof model==='string'?'Provider: '+model:'Registered remote GPU provider');
+ setText('remote-vram-free',fresh?gib(gpu.free_bytes??sample.vram_free_bytes):'—');
+ setText('remote-vram-total',fresh?'of '+gib(gpu.total_bytes??sample.vram_total_bytes)+' GPU memory':'Waiting for a fresh remote measurement');
+ setText('remote-host-ram',fresh?gib(ram.free_bytes??sample.host_available_bytes):'—');
+ const uuid=gpu.uuid||sample.gpu_uuid,name=gpu.name;
+ setText('remote-gpu-identity',fresh&&typeof uuid==='string'
+  ? (typeof name==='string'?name+' · ':'')+'GPU UUID: '+uuid
+  : 'GPU identity unavailable or stale');
+ setText('remote-freshness',fresh?'Remote observation '+age.toFixed(1)+'s old; dispatch checks again.'
+  : finite(age)&&age>=0?'Remote observation is '+age.toFixed(1)+'s old. A fresh check is required before dispatch.'
+  : 'No fresh remote observation. The remote connection and GPU must be checked before dispatch.');
+ setText('remote-reason',typeof memory.reason==='string'?(fresh?'':'Saved status: ')+memory.reason:'Remote admission evidence unavailable');
+ const plan=memory.plan||last;
+ setText('remote-plan',finite(plan.context_tokens)
+  ? 'Last allocation: '+T.number(plan.context_tokens)+' context tokens · '+gib(plan.estimated_increment_bytes)+' additional VRAM reservation. This is a saved check, not a live fit guarantee.'
+  : 'No remote model allocation recorded yet.');
+}
 for(const key of ['model','stage','status','time']){el(key).value=filters[key]||'';el(key).onchange=()=>{filters[key]=el(key).value;vscode.setState({filters});render();};}
 el('reset').onclick=()=>{filters={};for(const key of ['model','stage','status','time'])el(key).value='';vscode.setState({filters});render();};
 el('refresh').onclick=()=>vscode.postMessage({type:'refresh'});
@@ -327,7 +370,7 @@ function renderActivity(calls){
    card.append(node('summary'),node('p',undefined,'plot-note'),node('pre'),node('p',undefined,'plot-note'),indicator,open);box.prepend(card);
   }
   card.children[0].textContent=(c.role==='report_reviewer'?'Architecture claim review':c.role==='subagent'?'Child review':c.role==='chat_reviewer'?'Workspace review':c.role==='conversation'?'Conversation / routing':'Model call')+' · '+c.model+' · '+c.role+' · '+(c.status==='accepted'?'Protocol checks passed':c.status);
-  card.children[1].textContent='Invocation '+c.id+(c.node_id?' · task '+c.node_id:'')+' · reasoning control: '+(c.requested===false?'off requested':c.requested===true?'on requested':c.requested===null?'model default':c.requested??'not reported');
+  card.children[1].textContent='Invocation '+c.id+(c.node_id?' · task '+c.node_id:'')+' · reasoning control: '+(c.control_label||(c.requested===false?'off requested':c.requested===true?'on requested':c.requested===null?'model default':c.requested??'not reported'));
   card.children[2].textContent=c.text||(c.status==='generating'?'No separate reasoning text received yet.':c.thinking_chars>0?
    'Reasoning was reported but its text is unavailable in this archive.':'No separate reasoning text received.');
   const usage=c.usage,elapsed=((c.finishedAt||Date.now())-c.startedAt)/1000;

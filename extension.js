@@ -86,7 +86,7 @@ function activate(context) {
   async function stopStrata(){
     return manageStrata('unload');
   }
-  let nativeController, usage, panel, panelReady=false, panelSection, busy = false, sequence = false, telemetry, telemetryDir, dashboardTimer, dashboardInFlight=false, stopAuto=false, chatCancellation;
+  let nativeController, usage, panel, panelReady=false, panelSection, busy = false, sequence = false, telemetry, telemetryDir, dashboardTimer, dashboardInFlight=false, stopAuto=false, chatCancellation,disconnecting=false;
   let strataManager, strataState, strataChanging=false, strataSetupRunning=false;
   let engineState, engineChanging=false;
   let lastReview;
@@ -107,7 +107,9 @@ function activate(context) {
     const userModels=config.inspect?.('models')?.globalValue||{};
     const nativeNames=FIXED_TIERS.map(tier=>userModels[tier]).filter(name=>name==='strata:high'||modelSelection.nativeProfile(name));
     const engineNames=FIXED_TIERS.map(tier=>userModels[tier]).filter(name=>/^sutra:engine\/[a-z][a-z0-9_-]{0,63}$/.test(name||''));
+    const remoteNames=FIXED_TIERS.map(tier=>userModels[tier]).filter(modelSelection.remoteProfile);
     const engineBase=path.join(require('node:os').homedir(),'Library','Application Support','Sutra','Engine');
+    const remoteBase=path.join(require('node:os').homedir(),'Library','Application Support','Sutra','Remote');
     // Only user settings can authorize automatic grants. A repository setting
     // or a model tool payload cannot set or widen these limits.
     const userAllocation = config.inspect?.('workspaceAllocation')?.globalValue;
@@ -129,6 +131,9 @@ function activate(context) {
       SUTRA_ENGINE_ONLY:engineNames.length===FIXED_TIERS.length?'1':undefined,
       SUTRA_ENGINE_PYTHON:config.inspect?.('engine.pythonPath')?.globalValue||path.join(engineBase,'python','bin','python'),
       SUTRA_ENGINE_REGISTRY:config.inspect?.('engine.registryPath')?.globalValue||path.join(engineBase,'models.json'),
+      SUTRA_REMOTE_MODELS:JSON.stringify(remoteNames),
+      SUTRA_REMOTE_ONLY:remoteNames.length===FIXED_TIERS.length?'1':undefined,
+      SUTRA_REMOTE_REGISTRY:modelSelection.remoteRegistryPath(config.inspect?.('remoteRegistry')?.globalValue,path.join(remoteBase,'models.json')),
       SUTRA_CAPABILITIES_MODE: config.get('tools.mode', 'ask'),
       SUTRA_RUNTIME_DIR: path.join(context.globalStorageUri.fsPath, 'runtime-memory'),
       SUTRA_MEMORY_OWNERSHIP: config.get('memoryOwnership', 'shared'),
@@ -165,7 +170,7 @@ function activate(context) {
   }
   async function stopRunner(id) {
     const startedWorkspace=workspace(),worker=coordinator(),current=await worker.snapshot();
-    const jobs=(current.jobs||[]).filter(job=>['queued','running','cancelling'].includes(job.state));
+    const jobs=(current.jobs||[]).filter(job=>job.stop_receipt_pending===true||['queued','running','waiting','cancelling'].includes(job.state));
     let selected;
     if(id!==undefined){
       if(typeof id!=='string'||!/^[a-f0-9]{32}$/.test(id))throw new Error('Invalid runner request.');
@@ -294,7 +299,7 @@ function activate(context) {
         KARMA_TYPESCRIPT:path.join(context.extensionPath,'vendor','typescript','typescript.js'),
         SUTRA_RAM_CACHE_MIB:String(ramMiB)};
       const authorization=!managementRead?nativeController?.permissionEvidence(transport?.authority):undefined;
-      const result=await worker.send(payload,environment,{token,transport,authorization,onActivity:event=>{usage?.activity(event);onActivity?.(event);}});
+      const result=await worker.send(payload,environment,{token,transport,authorization,onActivity:event=>{if(event.kind!=='workflow')usage?.activity(event);onActivity?.(event);}});
       output.appendLine(new Date().toISOString()+' '+message.op+' completed');
       const data=bridgeResult(result);
       if(data?.result?.token_usage)void refreshDashboard();
@@ -527,7 +532,7 @@ function activate(context) {
   async function configureModels(force=true,token,internal=false,{tier='auto',onFallback}={}){
     if(force){await showPanelSection('models');return modelSettings();}
     const catalog=await discoverModels(token,internal);
-    if(tier==='auto'&&!catalog.models.some(m=>m.eligible))throw new Error('No local chat models found. Open Model settings to connect a native runtime or Ollama.');
+    if(tier==='auto'&&!catalog.models.some(m=>m.eligible))throw new Error('No chat models found. Open Model settings to check a local runtime or a registered remote provider.');
     const {models,fallbacks}=modelSelection.forRequest(modelSettings(),catalog,tier);
     await approveEngineProfiles(tier==='auto'?Object.values(models):[models[tier]],catalog);
     if(fallbacks.length)onFallback?.(fallbacks);
@@ -966,7 +971,7 @@ function activate(context) {
     vscode.commands.registerCommand('karma.selectCalibrations',()=>selectCalibrations()),
     vscode.commands.registerCommand('karma.revokeCalibration',()=>revokeCalibration()),
     vscode.commands.registerCommand('karma.evaluateCalibration',()=>evaluateCalibration()),
-    vscode.commands.registerCommand('karma.switchModel',switchModel),{dispose(){clearInterval(dashboardTimer);requestWorker?.dispose();telemetry?.kill();for(const p of processes)p.kill('SIGTERM');}});
+    vscode.commands.registerCommand('karma.switchModel',switchModel),{dispose(){disconnecting=true;clearInterval(dashboardTimer);requestWorker?.dispose();telemetry?.kill();for(const p of processes)p.kill('SIGTERM');}});
   context.subscriptions.push(vscode.commands.registerCommand('karma.stopRunner',id=>stopRunner(id).catch(error=>vscode.window.showErrorMessage(error.message))));
   context.subscriptions.push(vscode.commands.registerCommand('karma.dismissRunnerResult',id=>dismissRunnerResult(id).catch(error=>vscode.window.showErrorMessage(error.message))));
   const diagrams=diagramView.install(vscode,context,id=>request({op:'conversation_read',invocation_id:id}));
@@ -997,9 +1002,9 @@ function activate(context) {
   }));
   if(vscode.lm.registerLanguageModelChatProvider){
     workspaceAuthorization=require('./workspace_authorization').createStore(vscode,context);
-    nativeController=nativeProvider.install(vscode,context,{authorization:workspaceAuthorization,request:(m,t,a,r)=>request(m,t,true,a,r),workspace,isBusy:()=>busy||sequence||strataChanging||strataSetupRunning||engineChanging,
+    nativeController=nativeProvider.install(vscode,context,{authorization:workspaceAuthorization,request:(m,t,a,r)=>request(m,t,true,a,r),workspace,isBusy:()=>busy||sequence||strataChanging||strataSetupRunning||engineChanging,isDisconnecting:()=>disconnecting,
       allocateRequest:chatKey=>coordinator().allocate(chatKey),
-      async resumeRequest(ticket,token,onActivity){return bridgeResult(await coordinator().resume(ticket,{token,onActivity:event=>{usage?.activity(event);onActivity?.(event);}}));},
+      async resumeRequest(ticket,token,onActivity){return bridgeResult(await coordinator().resume(ticket,{token,onActivity:event=>{if(event.kind!=='workflow')usage?.activity(event);onActivity?.(event);}}));},
       ackRequest:ticket=>coordinator().ack(ticket),cancelRequest:ticket=>coordinator().cancel(ticket),
       cancelWorkspaceRequests:()=>coordinator().cancelAll(),
       approveCapability:(p,t)=>toolController.approve(p,t),capabilityReport:capabilityUI.report,

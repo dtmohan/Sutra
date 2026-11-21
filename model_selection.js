@@ -2,6 +2,12 @@
 const tiers=['low','mid','high'];
 const nativeProfile=name=>typeof name==='string'&&/^strata:profile\/([a-z][a-z0-9_-]{0,63})$/.exec(name)?.[1];
 const engineProfile=name=>typeof name==='string'&&/^sutra:engine\/([a-z][a-z0-9_-]{0,63})$/.exec(name)?.[1];
+const remoteProfile=name=>typeof name==='string'&&/^sutra:remote\/([a-z][a-z0-9_-]{0,63})$/.exec(name)?.[1];
+function remoteRegistryPath(value,fallback){
+ const selected=value===undefined||value===''?fallback:value;
+ if(typeof selected!=='string'||selected.length>4096||/[\x00-\x1f\x7f]/.test(selected)||!require('node:path').isAbsolute(selected))throw Error('Sutra remote provider registry must be an absolute file path in User Settings.');
+ return selected;
+}
 function engineApprovals(value={}){
  if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).length>64||
   Object.entries(value).some(([ref,hash])=>!engineProfile(ref)||typeof hash!=='string'||!/^[a-f0-9]{64}$/.test(hash)))throw Error('Sutra engine approvals must be a User setting containing profile references and SHA-256 identities.');
@@ -19,7 +25,7 @@ function engineApprovalCandidates(names,catalog,approvals={}){
  return result;
 }
 function prefill(current,catalog){
- const names=new Set((catalog.models||[]).filter(m=>m.eligible===true&&!m.tier).map(m=>m.name));
+ const names=new Set((catalog.models||[]).filter(m=>m.eligible===true&&!m.tier&&!remoteProfile(m.name)).map(m=>m.name));
  const result={};
  for(const tier of tiers){
   const saved=typeof current?.[tier]==='string'?current[tier].trim():'';
@@ -44,6 +50,8 @@ class ModelUnavailable extends Error{
    ? `Strata High is unavailable. Start your configured local Strata server and load its model, then retry.${detail?' '+detail+'.':''}`
    : engineProfile(name)
     ? `The Sutra-owned engine profile for ${tier} (${engineProfile(name)}) is unavailable. Refresh the engine worker in Sutra model settings and check its registry and environment.${detail?' '+detail+'.':''}`
+   : remoteProfile(name)
+    ? `The remote provider for ${tier} (${remoteProfile(name)}) is unavailable. Check its configured SSH connection and remote model service, then refresh Sutra model settings.${detail?' '+detail+'.':''}`
    : nativeProfile(name)
     ? `The native Strata profile for ${tier} (${nativeProfile(name)}) is unavailable. Refresh Native Strata runtime in Sutra model settings and check its installed configuration.${detail?' '+detail+'.':''}`
     : message);
@@ -83,4 +91,4 @@ function fallbackMessage(fallback){
  return `Sutra Auto: ${label(fallback.tier)} (${fallback.model||'unconfigured'}) is unavailable. Work routed to ${label(fallback.tier)} will use ${label(fallback.availableTier)} (${fallback.availableModel}). Your saved model choices are unchanged.`;
 }
 
-module.exports={prefill,validate,forRequest,ModelUnavailable,fallbackMessage,nativeProfile,engineProfile,engineApprovals,engineApprovalCandidates};
+module.exports={prefill,validate,forRequest,ModelUnavailable,fallbackMessage,nativeProfile,engineProfile,remoteProfile,remoteRegistryPath,engineApprovals,engineApprovalCandidates};

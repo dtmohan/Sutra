@@ -8,6 +8,8 @@ const crypto = require('node:crypto');
 const {spawn} = require('node:child_process');
 const {BridgeWorker, preventIdleSleep} = require('./bridge_worker');
 const activity = require('./model_activity');
+const taskRunner = require('./task_runner');
+const {CoordinatorTelemetry} = require('./coordinator_telemetry');
 
 const VERSION = 1;
 const MAX_FRAME = 4_500_000;
@@ -30,8 +32,9 @@ function canonical(value) {
   return '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + canonical(value[key])).join(',') + '}';
 }
 function hash(value) {return crypto.createHash('sha256').update(value).digest('hex');}
-function digestFor(request, environment, authorization) {
-  return hash(canonical(authorization === undefined ? {request,environment} : {request,environment,authorization}));
+function digestFor(request, environment, authorization, runner) {
+  return hash(canonical({request,environment,
+    ...(authorization === undefined ? {} : {authorization}), ...(runner === undefined ? {} : {runner})}));
 }
 function scopeFor(workspace, storage) {return hash(canonical({workspace:path.resolve(workspace), storage:path.resolve(storage)}));}
 function journalRecord(body) {
@@ -143,7 +146,7 @@ class Coordinator {
     this.config = config;this.directory = directory;this.instance = instance;this.scope = scopeFor(config.workspace, config.storage);
     this.journalFile = path.join(directory, 'journal.json');this.worker = null;this.active = null;
     this.queue = [];this.stopping = false;this.lastContact = Date.now();this.workerFactory = options.workerFactory;
-    this.eventFlushes = new Map();
+    this.eventFlushes = new Map();this.waitTimers = new Map();this.telemetry = null;
     let previous;
     try {previous = verifiedJournal(readPrivate(this.journalFile, MAX_JOURNAL));} catch (error) {if (error.code !== 'ENOENT') throw error;}
     if (previous && (previous.version !== VERSION || previous.scope !== this.scope || !Array.isArray(previous.jobs) ||
@@ -152,16 +155,40 @@ class Coordinator {
     const seen = new Set();
     for (const job of this.state.jobs) {
       if (!job || !ID.test(job.id) || !HASH.test(job.digest) || seen.has(job.id) || !Array.isArray(job.events) ||
-          !['queued','running','cancelling',...TERMINAL].includes(job.state) || typeof job.chat_key !== 'string') {
+          !['queued','running','waiting','cancelling',...TERMINAL].includes(job.state) || typeof job.chat_key !== 'string') {
         throw new Error('Invalid retained coordinator request');
       }
+      if (job.runner && (canonical(taskRunner.runner(job.runner,job.initial_request)) !== canonical(job.runner) ||
+          digestFor(job.initial_request,job.environment,job.authorization,job.runner) !== job.digest)) {
+        throw new Error('The retained task-runner submission changed');
+      }
       seen.add(job.id);
+      if (job.runner && job.stop_receipt_pending) {
+        job.state='cancelled';this.queueStopAudit(job);continue;
+      }
       if (!TERMINAL.has(job.state)) {
+        if (job.runner && job.runner_runtime_hash===config.runtimeHash && ['queued','waiting'].includes(job.state)) {
+          // Running/cancelling work has an unknown outcome and is never replayed.
+          // A queued checkpoint was fsynced before dispatch; its next operation
+          // still rechecks the cursor, exact grant and normal gateway admission.
+          if (job.continuation) {
+            const descriptor=taskRunner.plan({...job.workflow,continuation:job.continuation},undefined,job.id);
+            if (job.state==='waiting') this.waitForReadiness(job,descriptor);
+            else {
+              const mode=descriptor.disposition==='wait'?'probe':descriptor.disposition==='continue'?'flow':'summary';
+              this.enqueue(job,taskRunner.nextRequest(job.initial_request,descriptor,
+                mode==='summary'?'runner_summary':descriptor.next_event),mode);
+            }
+          } else this.queue.push({job,request:job.initial_request,environment:job.environment});
+          continue;
+        }
         job.state = 'interrupted';job.finished_at = Date.now();job.backend_completion_verified = false;
         job.error = 'The coordinator ended without a completion receipt. Work was not replayed; recover through the saved task.';
       }
     }
     this.persist();
+    this.syncTelemetry();
+    if (this.queue.length) setImmediate(() => this.runNext());
   }
   persist() {
     try {atomicPrivate(this.journalFile, journalRecord(this.state));}
@@ -188,6 +215,11 @@ class Coordinator {
       finished_at:job.finished_at ?? null, last_event_seq:job.last_event_seq, dropped_before:job.dropped_before,
       acknowledged:!!job.acknowledged, backend_completion_verified:job.backend_completion_verified === true,
       host_completion_received:job.host_completion_received === true};
+    if (job.runner) Object.assign(value,{runner:job.runner,steps:job.steps || 0,workflow:job.workflow || null});
+    if (job.stop_receipt_pending) value.stop_receipt_pending=true;
+    if (job.stop_receipt) value.stop_receipt=job.stop_receipt;
+    if (job.stop_kernel) value.stop_kernel=job.stop_kernel;
+    if (job.stop_audit_error) value.stop_audit_error=job.stop_audit_error;
     if (includeResponse && job.error) value.error = job.error;
     if (this.persistenceError && TERMINAL.has(job.state)) {
       value.state = 'interrupted';value.host_completion_received = false;
@@ -196,19 +228,19 @@ class Coordinator {
     return value;
   }
   reserveSpace() {
-    const reserve = this.state.jobs.filter(job => !TERMINAL.has(job.state)).length * (MAX_RESPONSE + MAX_EVENTS + 4096);
+    const reserve = this.state.jobs.filter(job => !TERMINAL.has(job.state)||job.stop_receipt_pending).length * (MAX_RESPONSE + MAX_EVENTS + MAX_REQUEST + 8192);
     return Buffer.byteLength(canonical(this.state)) + 256 + reserve;
   }
   prune() {
-    while (this.state.jobs.length >= MAX_JOBS || this.reserveSpace() + MAX_RESPONSE + MAX_EVENTS + 4096 > MAX_JOURNAL) {
-      const index = this.state.jobs.findIndex(job => job.acknowledged && TERMINAL.has(job.state));
+    while (this.state.jobs.length >= MAX_JOBS || this.reserveSpace() + MAX_RESPONSE + MAX_EVENTS + MAX_REQUEST + 8192 > MAX_JOURNAL) {
+      const index = this.state.jobs.findIndex(job => job.acknowledged && TERMINAL.has(job.state) && !job.stop_receipt_pending);
       if (index < 0) throw new Error('Coordinator retained-result capacity is full; acknowledge saved results before submitting more work');
       const [job] = this.state.jobs.splice(index, 1), seq = decodeCounter(job.id, this.instance);
       if (seq !== null) this.state.retired_through = Math.max(this.state.retired_through, seq);
     }
   }
   allocate() {
-    if (this.stopping || this.persistenceError || !Number.isSafeInteger(this.state.issued + 1)) throw new Error('Coordinator is not accepting requests');
+    if (this.stopping || this.persistenceError || this.stopAuditBlocked() || !Number.isSafeInteger(this.state.issued + 1)) throw new Error('Coordinator is not accepting requests; inspect pending Stop receipts');
     const next = this.state.issued + 1;
     this.state.issued = next;this.persist();
     return {id:this.instance.slice(0,16) + next.toString(16).padStart(16,'0'), instance_id:this.instance};
@@ -233,8 +265,10 @@ class Coordinator {
     if (typeof chat !== 'string' || chat.length > 256 || !ID.test(frame.id || '') || !HASH.test(frame.digest || '') ||
         !frame.request || typeof frame.request !== 'object' || Array.isArray(frame.request) ||
         !frame.environment || typeof frame.environment !== 'object' || Array.isArray(frame.environment)) throw new Error('Invalid coordinator submission');
-    if (Buffer.byteLength(canonical({request:frame.request, environment:frame.environment, ...(frame.authorization === undefined ? {} : {authorization:frame.authorization})})) + 1 > MAX_REQUEST) throw new Error('Coordinator request exceeds its transport allocation');
-    if (digestFor(frame.request,frame.environment,frame.authorization) !== frame.digest) throw new Error('Coordinator request digest does not match its payload');
+    const runner = taskRunner.runner(frame.runner,frame.request);
+    if (Buffer.byteLength(canonical({request:frame.request, environment:frame.environment,
+        ...(frame.authorization === undefined ? {} : {authorization:frame.authorization}), ...(runner ? {runner} : {})})) + 1 > MAX_REQUEST) throw new Error('Coordinator request exceeds its transport allocation');
+    if (digestFor(frame.request,frame.environment,frame.authorization,runner) !== frame.digest) throw new Error('Coordinator request digest does not match its payload');
     const authorization = frame.authorization === undefined ? undefined : this.authorization(frame.authorization);
     const old = this.find(frame.id, chat);
     if (old) {
@@ -243,14 +277,15 @@ class Coordinator {
     }
     const seq = decodeCounter(frame.id, this.instance);
     if (seq === null || seq > this.state.issued || this.retired(frame.id)) throw new Error('Coordinator request identity expired or was already acknowledged; work will not be replayed');
-    if (this.stopping || this.persistenceError) throw new Error('Coordinator admission is stopped');
+    if (this.stopping || this.persistenceError || this.stopAuditBlocked()) throw new Error('Coordinator admission is stopped; inspect pending Stop receipts');
     this.prune();
     // A request with an older allocated sequence may have expired during pruning.
     if (this.retired(frame.id)) throw new Error('Coordinator request identity expired before admission');
     const job = {id:frame.id, digest:frame.digest, chat_key:chat, operation:String(frame.request.op || '').slice(0,80),
       state:'queued', created_at:Date.now(), events:[], event_bytes:0, last_event_seq:0, dropped_before:0,
-      acknowledged:false, backend_completion_verified:false, ...(authorization ? {authorization} : {})};
-    this.state.jobs.push(job);this.persist();
+      acknowledged:false, backend_completion_verified:false, ...(authorization ? {authorization} : {}),
+      ...(runner ? {runner,runner_runtime_hash:this.config.runtimeHash,initial_request:frame.request,environment:frame.environment,steps:0} : {})};
+    this.state.jobs.push(job);this.persist();this.syncTelemetry();
     this.queue.push({job, request:frame.request, environment:frame.environment});
     setImmediate(() => this.runNext());
     return this.publicJob(job);
@@ -299,60 +334,174 @@ class Coordinator {
     // child exit is observed. This says nothing about a shared Ollama request.
     await worker.stopped;
   }
+  pendingTasks() {return this.state.jobs.filter(job => job.runner && (!TERMINAL.has(job.state)||job.stop_receipt_pending)).length;}
+  stopAuditBlocked() {return this.state.jobs.some(job=>job.stop_receipt_pending&&job.stop_audit_error);}
+  queueStopAudit(job,reason='Explicit runner Stop') {
+    if (!job.runner || job.stop_receipt || this.queue.some(item=>item.job===job&&item.mode==='stop') ||
+        this.active?.job===job&&this.active.mode==='stop') return;
+    job.stop_receipt_pending=true;job.stop_reason ||= reason.slice(0,500);delete job.stop_audit_error;
+    const request={op:'orchestrate',event:'runner_stop',
+      runner_stop:{version:1,request_digest:job.digest,reason:job.stop_reason}};
+    if (job.initial_request.chat_key!==undefined) request.chat_key=job.initial_request.chat_key;
+    const flow=job.workflow?.flow_id || job.initial_request.flow_id;
+    if (flow) request.flow_id=flow;
+    // Immediate transport cutoff does not wait behind another chat's inference.
+    // The durable administrative FIN is drained before ordinary queued work.
+    this.queue.unshift({job,request,environment:job.environment,mode:'stop'});
+  }
+  syncTelemetry() {
+    if (this.pendingTasks() && !this.stopping && !this.persistenceError) {
+      this.telemetry ??= new CoordinatorTelemetry({...this.config,
+        onError:message => {process.stderr.write('Sutra runner telemetry: '+message+'\n');}});
+      this.telemetry.ensure();
+    } else {this.telemetry?.dispose();this.telemetry=null;}
+  }
+  checkAuthority(job) {
+    if (!job.authorization) return;
+    try {this.authorization(job.authorization,true);}
+    catch {
+      throw Object.assign(new Error('Workspace authorization changed before the next task step; automatic execution was stopped.'),
+        {code:'COORDINATOR_AUTHORIZATION_CHANGED'});
+    }
+  }
+  enqueue(job, request, mode='flow') {
+    job.state='queued';
+    this.queue.push({job,request,environment:job.environment,mode});
+  }
+  waitForReadiness(job, continuation) {
+    job.state='waiting';
+    job.wait_attempts=(job.wait_attempts || 0)+1;
+    // These delays schedule observations only. They never retry an inference,
+    // expand an allocation or establish that an interrupted request finished.
+    const delay=Math.min(30000,1000*Math.pow(2,Math.min(job.wait_attempts-1,5)));
+    job.next_probe_at=Date.now()+delay;
+    clearTimeout(this.waitTimers.get(job.id));
+    const timer=setTimeout(() => {
+      this.waitTimers.delete(job.id);
+      if (job.state!=='waiting' || this.stopping || this.persistenceError) return;
+      this.enqueue(job,taskRunner.nextRequest(job.initial_request,continuation,'continuation_probe'),'probe');
+      try {this.persist();} catch {return;}
+      setImmediate(() => this.runNext());
+    },delay);
+    timer.unref();this.waitTimers.set(job.id,timer);
+  }
+  async advanceTask(job, item, response, worker, token) {
+    if (!response.ok) {job.response=response;job.state='failed';return;}
+    const data=response.data, previous=job.continuation;
+    const continuation=taskRunner.plan(data,previous,job.id);
+    if (item.mode==='summary') {
+      if (continuation.cursor!==previous.cursor || continuation.fingerprint!==previous.fingerprint) {
+        throw new Error('The saved task changed before its final response could be collected');
+      }
+      for (const key of ['runner_usage','conversation']) {
+        if (data[key]!==undefined) job.response.data[key]=data[key];
+      }
+      job.state='completed';return;
+    }
+    if (item.mode!=='probe') {
+      job.steps++;
+      job.wait_attempts=0;
+      // A runnable receipt is dispatched once. An unchanged checkpoint is a
+      // protocol failure, not permission to repeat a model/source operation.
+      if (previous && continuation.disposition==='continue' && continuation.next_event==='step' &&
+          continuation.cursor===previous.cursor && continuation.fingerprint===previous.fingerprint) {
+        throw new Error('The task made no durable progress; automatic continuation stopped at the saved checkpoint');
+      }
+      job.response=response;
+    }
+    if (item.mode==='probe' && !['continue','wait'].includes(continuation.disposition)) job.response=response;
+    job.continuation=continuation;
+    job.workflow=taskRunner.checkpoint(data,continuation);
+    if (item.mode!=='probe' || continuation.disposition!=='wait') this.event(job,taskRunner.activity(data,continuation));
+    if (token.isCancellationRequested) throw new Error('The task was stopped before its next stage');
+    if (continuation.disposition==='continue') {
+      this.enqueue(job,taskRunner.nextRequest(job.initial_request,continuation));
+    } else if (continuation.disposition==='wait') {
+      this.waitForReadiness(job,continuation);
+    } else {
+      // A read-only summary collects complete usage once. It cannot infer or
+      // acquire missing evidence, and never substitutes a stale final report.
+      this.enqueue(job,taskRunner.nextRequest(job.initial_request,continuation,'runner_summary'),'summary');
+    }
+  }
   async runNext() {
     if (this.active || this.stopping || this.persistenceError || !this.queue.length) return;
+    if (this.stopAuditBlocked() && this.queue[0].mode!=='stop') return;
     const item = this.queue.shift(), {job} = item;
-    if (job.state !== 'queued') return this.runNext();
-    const token = cancellation();this.active = {job,token};
+    const stopAudit=item.mode==='stop';
+    if (stopAudit ? !job.stop_receipt_pending : job.state !== 'queued') return this.runNext();
+    const token = cancellation();this.active = {job,token,mode:item.mode};
     let worker;
     try {
-      job.state = 'running';job.started_at = Date.now();this.persist();
-      if (job.authorization) {
-        try {this.authorization(job.authorization,true);}
-        catch {
-          const error = new Error('Workspace authorization changed before dispatch; this queued request was cancelled without reading source.');
-          error.code = 'COORDINATOR_AUTHORIZATION_CHANGED';throw error;
-        }
-      }
+      if (!stopAudit) {job.state = 'running';job.started_at ??= Date.now();}
+      this.persist();
+      if (!stopAudit) this.checkAuthority(job);
       worker = this.makeWorker();this.active.worker = worker;
-      const response = await worker.send(item.request,item.environment,{token,onActivity:event => this.event(job,event)});
+      const request=job.runner?{...item.request,task_runner:{version:1,request_id:job.id,request_digest:job.digest}}:item.request;
+      const response = await worker.send(request,item.environment,{token,onActivity:event => this.event(job,event)});
       if (Buffer.byteLength(canonical(response)) > MAX_RESPONSE) throw new Error('Coordinator response exceeds its retained-result allocation');
-      job.response = response;job.state = response.ok ? 'completed' : 'failed';
+      if (stopAudit) {
+        const data=response.data,receipt=data?.receipt;
+        if (!response.ok || data?.stopped!==true || data.runner_request_id!==job.id || data.request_digest!==job.digest ||
+            data.kernel?.profile!=='task-continuation-v1' || data.kernel?.decision!=='FIN' ||
+            data.kernel?.grants_permissions!==false || data.kernel?.replenishes_budget!==false ||
+            receipt?.version!==1 || !Number.isSafeInteger(receipt.seq) || receipt.seq<1 || !HASH.test(receipt.hash||'')) {
+          throw new Error('The backend did not retain the runner Stop in its kernel audit chain');
+        }
+        job.stop_receipt=receipt;job.stop_kernel=data.kernel;job.stop_receipt_pending=false;delete job.stop_audit_error;return;
+      }
+      if (token.isCancellationRequested) throw new Error('The task was stopped before its response was published');
+      if (job.runner) await this.advanceTask(job,item,response,worker,token);
+      else {job.response = response;job.state = response.ok ? 'completed' : 'failed';}
+      if (job.response && Buffer.byteLength(canonical(job.response)) > MAX_RESPONSE) throw new Error('Coordinator response exceeds its retained-result allocation');
       // This is the host response boundary, not proof that a model answer is true.
-      job.host_completion_received = true;job.backend_completion_verified = false;
+      job.host_completion_received = TERMINAL.has(job.state);job.backend_completion_verified = false;
     } catch (error) {
       if (worker && (token.isCancellationRequested || worker.closed)) await this.stopWorker(worker);
+      if (stopAudit) {job.stop_audit_error=safeError(error);return;}
       job.state = this.persistenceError ? 'interrupted' : token.isCancellationRequested || error.code === 'COORDINATOR_AUTHORIZATION_CHANGED' ? 'cancelled' : 'failed';
-      job.error = safeError(error);job.backend_completion_verified = false;
+      job.error = safeError(error);job.backend_completion_verified = false;delete job.response;
+      this.queue=this.queue.filter(pending => pending.job!==job||pending.mode==='stop');
+      if (job.state==='cancelled') this.queueStopAudit(job,job.error);
+      clearTimeout(this.waitTimers.get(job.id));this.waitTimers.delete(job.id);
     } finally {
-      job.finished_at = Date.now();
+      if (TERMINAL.has(job.state)) job.finished_at = Date.now();
       clearTimeout(this.eventFlushes.get(job.id));this.eventFlushes.delete(job.id);
       try {this.persist();} catch {job.state = 'interrupted';job.host_completion_received = false;}
       this.active = null;this.lastContact = Date.now();
+      this.syncTelemetry();
       if (!this.persistenceError) setImmediate(() => this.runNext());
     }
   }
   cancel(job) {
-    if (TERMINAL.has(job.state)) return this.publicJob(job,true);
-    if (job.state === 'queued') {
+    if (TERMINAL.has(job.state)) {
+      if (job.stop_receipt_pending) {this.queueStopAudit(job);this.persist();setImmediate(()=>this.runNext());}
+      return this.publicJob(job,true);
+    }
+    if (['queued','waiting'].includes(job.state)) {
       this.queue = this.queue.filter(item => item.job !== job);job.state = 'cancelled';job.finished_at = Date.now();
-      job.error = 'Request cancelled before host dispatch; no inference was started.';this.persist();
+      clearTimeout(this.waitTimers.get(job.id));this.waitTimers.delete(job.id);
+      job.error = job.runner && job.steps ? 'Task stopped between stages. Settled work and all spending remain saved.' : 'Request cancelled before host dispatch; no inference was started.';
+      this.queueStopAudit(job);this.persist();this.syncTelemetry();setImmediate(()=>this.runNext());
     } else if (this.active?.job === job) {
-      job.state = 'cancelling';this.persist();this.active.token.cancel();
+      job.state = 'cancelling';this.queueStopAudit(job);this.persist();this.active.token.cancel();
     }
     return this.publicJob(job,true);
   }
   cancelAll() {
-    const queued = this.queue.splice(0), now = Date.now();
-    for (const {job} of queued) {
+    const queued = this.state.jobs.filter(job => ['queued','waiting'].includes(job.state)), now = Date.now();
+    this.queue=this.queue.filter(item=>item.mode==='stop');
+    for (const job of queued) {
+      clearTimeout(this.waitTimers.get(job.id));this.waitTimers.delete(job.id);
       job.state = 'cancelled';job.finished_at = now;
-      job.error = 'Request cancelled by an explicit workspace stop before host dispatch; no inference was started.';
+      job.error = 'Task stopped before its next host dispatch. Previously settled work remains charged.';
+      this.queueStopAudit(job);
     }
     const active = this.active;
-    if (active) active.job.state = 'cancelling';
+    if (active&&active.mode!=='stop') {active.job.state = 'cancelling';this.queueStopAudit(active.job);}
     // Clear every queued request before signalling active work. A fast worker
     // cancellation must not allow the next stale-authority request to start.
-    try {this.persist();} finally {active?.token.cancel();}
+    try {this.persist();} finally {if(active?.mode!=='stop')active?.token.cancel();this.syncTelemetry();setImmediate(()=>this.runNext());}
     return {cancelled_queued:queued.length,active:active ? this.publicJob(active.job) : null,
       jobs:this.state.jobs.map(job => this.publicJob(job)),busy:!!active,backend_completion_verified:false};
   }
@@ -367,7 +516,8 @@ class Coordinator {
     if (frame.op === 'status' && frame.id === undefined) return {version:VERSION,instance_id:this.instance,scope:this.scope,
       active:this.active && (frame.all === true || this.active.job.chat_key === chat) ? this.publicJob(this.active.job) : null,
       jobs:this.state.jobs.filter(job => frame.all === true || job.chat_key === chat).map(job => this.publicJob(job)),
-      busy:!!this.active, queued:this.queue.length, persistence_unavailable:!!this.persistenceError};
+      busy:!!this.active, queued:this.queue.length, pending_tasks:this.pendingTasks(),
+      waiting:this.state.jobs.filter(job => job.state==='waiting').length,persistence_unavailable:!!this.persistenceError};
     const job = this.find(frame.id,chat);
     if (!job) {
       if (['status','ack'].includes(frame.op) && this.retired(frame.id)) return {id:frame.id,request_id:frame.id,state:'acknowledged',acknowledged:true,response_evicted:true};
@@ -390,9 +540,11 @@ class Coordinator {
     throw new Error('Unknown coordinator operation');
   }
   async close() {
-    if (this.active || this.queue.length && !this.persistenceError) throw new Error('Coordinator has running or queued work');
+    if (this.active || (this.queue.length || this.pendingTasks()) && !this.persistenceError) throw new Error('Coordinator has running, queued or waiting work');
     this.stopping = true;
     for (const timer of this.eventFlushes.values()) clearTimeout(timer);this.eventFlushes.clear();
+    for (const timer of this.waitTimers.values()) clearTimeout(timer);this.waitTimers.clear();
+    this.telemetry?.dispose();this.telemetry=null;
     this.worker?.dispose();if (!this.persistenceError) this.persist();
   }
 }
@@ -426,7 +578,7 @@ async function start(configFile, options = {}) {
             !crypto.timingSafeEqual(Buffer.from(frame.token),Buffer.from(token)) ||
             frame.scope !== controller.scope || frame.runtime_hash !== config.runtimeHash) throw new Error('Coordinator protocol, authentication or runtime binding failed');
         if (frame.op==='shutdown') {
-          if (controller.active || controller.queue.length && !controller.persistenceError) throw new Error('Coordinator has running or queued work');
+          if (controller.active || (controller.queue.length || controller.pendingTasks()) && !controller.persistenceError) throw new Error('Coordinator has running, queued or waiting work');
           reply={ok:true,data:{stopping:true}};
           socket.end(JSON.stringify(reply)+'\n',() => {void close().catch(error => {process.stderr.write(safeError(error)+'\n');process.exitCode=1;});});return;
         }
@@ -444,7 +596,7 @@ async function start(configFile, options = {}) {
       runtime_hash:config.runtimeHash,scope:controller.scope},8192);
     // Only an idle service retires itself. Every saved result remains on disk.
     idleTimer=setInterval(() => {
-      if (!controller.active && !controller.queue.length && Date.now()-controller.lastContact>15*60*1000) void close().catch(() => {});
+      if (!controller.active && !controller.queue.length && !controller.pendingTasks() && Date.now()-controller.lastContact>15*60*1000) void close().catch(() => {});
     },30000);idleTimer.unref();
   } catch (error) {server.close();unlock();throw error;}
   return {server,controller,close};

@@ -66,6 +66,28 @@ const dashboard={token_usage:{calls:usageRows,total_calls:4,limit:250},hardware:
  await send({type:'state',data:fixture});
  await page.click('#nav-settings');await send({type:'tier-settings',models:{low:'',mid:'',high:''}});assert((await page.locator('#model-discovery').textContent()).includes('connect the native runtime'));await send({type:'busy',value:false});assert(await page.locator('#save-model-tiers').isDisabled());
  await send({type:'tier-settings',models:catalog.suggested_tiers,catalog});assert(!(await page.locator('#save-model-tiers').isDisabled()));
+ const remoteRef='sutra:remote/rtx3090';
+ const remoteRow={name:remoteRef,eligible:true,provider:'sutra_remote',display_name:'RTX 3090 <img src=x>',ready:true};
+ const remoteCatalog={...catalog,models:[...catalog.models,remoteRow]};
+ await send({type:'tier-settings',models:catalog.suggested_tiers,catalog:remoteCatalog});
+ for(const tier of ['low','mid','high']){
+  assert.equal(await page.locator('#tier-'+tier).inputValue(),catalog.suggested_tiers[tier],'Remote discovery preserves saved selections');
+  assert((await page.locator('#tier-'+tier+' option[value="'+remoteRef+'"]').textContent()).includes('Remote · ready'));
+ }
+ assert.equal(await page.locator('#tier-config img').count(),0,'Remote display metadata is rendered as text');
+ await page.locator('#tier-high').selectOption(remoteRef);await page.click('#save-model-tiers');
+ assert.deepEqual(await page.evaluate(()=>sent.at(-1)),{op:'save_model_tiers',models:{...catalog.suggested_tiers,high:remoteRef}});
+ await send({type:'models-saved'});
+ const selectedRemote={...catalog.suggested_tiers,high:remoteRef};
+ await send({type:'tier-settings',models:selectedRemote,catalog:{...catalog,errors:[{model:remoteRef,error:'Remote measurement unavailable'}]}});
+ assert.equal(await page.locator('#tier-high').inputValue(),remoteRef,'A disconnected remote choice is retained');
+ assert.equal(await page.locator('#tier-high').getAttribute('aria-invalid'),'true');
+ assert((await page.locator('#model-discovery').textContent()).includes('Remote measurement unavailable'));
+ await send({type:'tier-settings',models:selectedRemote,catalog:remoteCatalog});
+ assert.equal(await page.locator('#tier-high').getAttribute('aria-invalid'),'false');
+ await send({type:'tier-settings',models:catalog.suggested_tiers,catalog:{...remoteCatalog,suggested_tiers:{low:remoteRef,mid:remoteRef,high:remoteRef}}});
+ assert(await page.locator('#use-model-defaults').isDisabled(),'Remote providers cannot be assigned through discovered defaults');
+ await send({type:'tier-settings',models:catalog.suggested_tiers,catalog});
  await send({type:'dashboard',data:{...dashboard,hardware:{...dashboard.hardware,temperatures:{...dashboard.hardware.temperatures,age_seconds:99}}}});assert.equal(await page.locator('#cpu-temperature').textContent(),'—');await send({type:'dashboard',data:dashboard});await page.click('#nav-dashboard');
  const idle={enabled:true,armed:true,accessProfile:'read_only',label:'Sutra · Read only',explanation:'Current chat selection is unverified. Check for Sutra Auto beneath the prompt.',defaultsReady:true,reason:'Saved workspace permissions restored.',routing:null};
  await send({type:'native-status',data:idle});

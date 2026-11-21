@@ -178,6 +178,7 @@ def dispatch(s,meta,workspace,root,request,provider=None):
     model_name=request.get('model',meta.get('model','local-assistant:latest'))
     from strata_model import is_strata
     from engine_profiles import is_engine
+    from remote_profiles import is_remote
     if request.get('op')=='work' and request.get('mode') in ('edit','test'):
         if st['execution'].get('pending_actions'):raise InvalidUpdate('An earlier action is pending; inspect it before continuing')
         from karma_adapter import budget_decision
@@ -187,7 +188,7 @@ def dispatch(s,meta,workspace,root,request,provider=None):
         if measured['decision']!='ALLOW':
             with s.db:s._audit('ACTION_PLAN_DENIED',{'session':session,'budget_kernel':measured})
             raise InvalidUpdate('Action budget exhausted: '+measured['decision'])
-    if provider is None and (is_strata(model_name) or is_engine(model_name)):
+    if provider is None and (is_strata(model_name) or is_engine(model_name) or is_remote(model_name)):
         from api_runtime import provider_for
         provider=provider_for(root,model_name,review=True)
     if provider is None:
@@ -319,14 +320,19 @@ def handle(root,workspace,request):
                 return capabilities.execute(s,sid,workspace,root,request['proposal_id'],request.get('authorization'))
             if request.get('op')=='orchestrate':
                 from orchestration_flow import handle as orchestrate
+                from task_continuation import check_request
+                if request.get('event') == 'runner_stop':
+                    return orchestrate(s, {}, Path(workspace).resolve(), root, request)
+                check_request(s, request)
                 from storage_policy import prune,require_space
-                if request.get('event') not in ('task_list','task_focus','task_close','pending','recoverable_review','inspect','cancel'):
+                if request.get('event') not in ('task_list','task_focus','task_close','pending','recoverable_review','inspect','cancel','runner_summary','continuation_probe'):
                     prune(root);require_space(root)
                 meta=json.loads(metadata.read_text()) if metadata.exists() else {'workspace':str(Path(workspace).resolve())}
                 if not metadata.exists():metadata.write_text(canonical(meta))
                 # Document evidence has its own scoped read and ledger reservation.
                 reconcile_workspace=request.get('event') not in (
-                    'start','task_list','pending','recoverable_review','inspect','supply_evidence','locate_document','approve_document')
+                    'start','task_list','pending','recoverable_review','inspect','supply_evidence','locate_document','approve_document',
+                    'runner_summary','continuation_probe')
                 if reconcile_workspace:reconcile(s,workspace)
                 try:return orchestrate(s,meta,Path(workspace).resolve(),root,request)
                 except BaseException:
@@ -515,6 +521,7 @@ def _handle(root,workspace,request,metadata=None,prepare_catalog=True):
 
 
 REQUEST_ENVIRONMENT = frozenset((
+    'SUTRA_REMOTE_MODELS', 'SUTRA_REMOTE_ONLY', 'SUTRA_REMOTE_REGISTRY', 'SUTRA_REMOTE_CONTEXT',
     'SUTRA_ENGINE_MODELS', 'SUTRA_ENGINE_ONLY', 'SUTRA_ENGINE_PYTHON', 'SUTRA_ENGINE_REGISTRY', 'SUTRA_ENGINE_APPROVALS',
     'SUTRA_ENGINE_CONTEXT',
     'SUTRA_STRATA_PORT', 'SUTRA_STRATA_MODEL', 'SUTRA_STRATA_MODELS', 'SUTRA_STRATA_ONLY', 'SUTRA_CAPABILITIES_MODE',

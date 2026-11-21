@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.56.0
+
+- Add opt-in SSH-tunnelled llama.cpp CUDA provider profiles using private user settings, pinned SSH host keys and protected API credentials; preserve existing tier selections.
+- Keep remote generations behind the existing invocation gateway, source/permission checks, context allocation, output validation and cumulative spending ledger.
+- Check fresh remote GPU UUID, VRAM, host RAM, model digest, loaded context, listener process and idle slot before dispatch; recheck instance identity around inference and reject stale admission evidence.
+- Reserve only bounded additional workspace for a matching loaded allocation; require an explicit full-footprint restoration envelope when physical GPU residency cannot be established.
+- Reuse verified weight hashes only within the same in-memory file/runtime epoch, while refreshing GPU capacity, RAM and activity on every admission.
+- Preserve context, constraints, permissions and consumed budgets across local/remote switches, reloads, rejected permissions and exhausted allocations.
+- Recognize identical GGUF weights across provider aliases and exclude unassigned remote profiles from automatic reviewer selection.
+- Stream remote reasoning inline and retain actual usage, output-limit charges and rejected-instance receipts; disclose unsupported thinking switches for thinking-only models.
+- Add a separate freshness-aware Remote GPU Monitor section and provider-aware readiness/recovery without attributing GPU memory to the Mac runtime.
+- Keep the canonical STP kernel unchanged.
+
+## 0.55.0
+
+- Drive authorized whole-task orchestration in the existing durable coordinator, advancing authoritative backend checkpoints without repeated chat Continue requests.
+- Gate automatic continuation through a Karma adapter to the unchanged kernel and bind each permit to the existing audit hash chain, task checkpoint, contract and runner identity; reject stale or mismatched permits before dispatch.
+- Bind automatic transitions to the original task, cursor, captured model/reasoning environment and exact workspace grant; recheck authorization before every step, readiness probe and final summary.
+- Separate runnable stages, fresh resource waits, permission/evidence decisions and explicit recovery; never replay unknown in-flight work or expand authority.
+- Restore only known queued/waiting checkpoints under the same runtime after a daemon restart; retain uncertain active work for explicit reconciliation.
+- Make live chat Stop cancel the captured runner task while reload/disposal detaches its display; preserve checkpoints, constraints, permissions and all consumed spending across explicit model changes.
+- Distinguish a cancellation observed during reattachment from a task stopped before a new explicit Continue, preventing Monitor Stop from triggering replacement work in the same response.
+- Collect complete deduplicated model usage once at final/actionable boundaries and render durable host progress separately from model reasoning.
+- Maintain a private bounded telemetry stream independent of the VS Code UI and show stoppable readiness waits in Monitor.
+- Page unseen import/global preambles and source gaps through a new child recipe; after authenticated delivery of every authorized nonblank line, bridge bounded unresolved findings to parent synthesis rather than misreporting source exhaustion as context overflow. Preserve historical source recipes.
+- Add real TCP/process/ledger recovery tests and preserve historical conversation memory without accepting stale executable authority. Keep the canonical STP kernel unchanged.
+
 ## 0.54.2
 
 - Bind a versioned project-review presentation intent from the caller's actual ask, recognizing strengths, weaknesses, tools logic and control-flow requests without requiring the literal word architecture.

@@ -41,7 +41,8 @@ const good = activate();
 assert.match(good.error.message, /LOCAL_MODULE_LOAD_REACHED/);
 assert.equal(good.loaded.length, 1);
 for (const changed of [kernel, 'harness/host_actions.py', 'extension.js', 'native_provider.js',
-                       'coordinator_client.js', 'coordinator_service.js', 'media/panel.js', 'bin/telemetry']) {
+                       'coordinator_client.js', 'coordinator_service.js', 'task_runner.js',
+                       'coordinator_telemetry.js', 'harness/task_continuation.py', 'media/panel.js', 'bin/telemetry']) {
   const result = activate({changed});
   assert.match(result.error.message, /integrity check failed/, changed);
   assert.deepEqual(result.loaded, [], 'Local modules loaded before integrity validation');

@@ -46,7 +46,7 @@ exports.run=async()=>{
   for(const id of ['engine-manager','engine-profile','engine-setup','engine-load','engine-unload'])assert(html.includes('id="'+id+'"'));
   for(const name of ['engine_management.js','harness/engine_service.py','harness/engine_process.py','requirements-engine.txt'])assert(fs.existsSync(path.join(extension.extensionPath,name)),name);
   report.checks.push('Sutra-owned engine manager and direct worker ship with the runtime package');
-  for(const name of ['coordinator_service.js','coordinator_client.js'])assert(fs.existsSync(path.join(extension.extensionPath,name)),name);
+  for(const name of ['coordinator_service.js','coordinator_client.js','task_runner.js','coordinator_telemetry.js','harness/task_continuation.py'])assert(fs.existsSync(path.join(extension.extensionPath,name)),name);
   for(const name of ['karma.stopRunner','karma.dismissRunnerResult'])assert((await vscode.commands.getCommands(true)).includes(name));
   report.checks.push('persistent coordinator, reconnect client and explicit runner controls ship in the package');
   assert(!html.includes('id="extra"'));report.checks.push('tabbed overview, labelled settings and troubleshooting ship without a JSON constraint editor');

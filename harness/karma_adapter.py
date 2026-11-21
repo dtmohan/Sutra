@@ -119,6 +119,58 @@ class KarmaAdapter:
                     suggested_recovery='partial_handoff' if handoff else 'continue' if valid else 'inspect_evidence',
                     grants_permissions=False, semantic_completion_verified=False, task_closed=False)
 
+    def child_source_frontier(self, observation):
+        """Bridge verified source delivery to partial parent synthesis.
+
+        Delivery of every nonblank line is a measurable acquisition boundary,
+        not evidence that a model understood or semantically reviewed it.
+        """
+        fields = {'profile', 'version', 'source_files', 'nonblank_lines',
+                  'delivered_nonblank_lines', 'checkpoints_verified', 'sources_current'}
+        if (not isinstance(observation, dict) or set(observation) != fields
+                or observation['profile'] != 'child-source-frontier-v1'
+                or type(observation['version']) is not int or observation['version'] != 1):
+            raise ValueError('Unknown child source-frontier observation')
+        for key in ('source_files', 'nonblank_lines', 'delivered_nonblank_lines'):
+            if type(observation[key]) is not int or observation[key] < 0:
+                raise ValueError('Child source-frontier counts must be nonnegative integers')
+        if (not observation['source_files'] or not observation['nonblank_lines']
+                or observation['delivered_nonblank_lines'] > observation['nonblank_lines']
+                or any(type(observation[key]) is not bool for key in ('checkpoints_verified', 'sources_current'))):
+            raise ValueError('Invalid child source-frontier coverage')
+        valid = observation['checkpoints_verified'] and observation['sources_current']
+        handoff = valid and observation['delivered_nonblank_lines'] == observation['nonblank_lines']
+        omega = 3 * self.boundary.k if not valid else 2 * self.boundary.k if handoff else 0.
+        return dict(self.frame('child-source-frontier-v1', omega, 0.), observation=dict(observation),
+                    scope='child_source_acquisition',
+                    suggested_recovery='partial_handoff' if handoff else 'continue' if valid else 'inspect_evidence',
+                    grants_permissions=False, semantic_completion_verified=False, task_closed=False)
+
+    def task_continuation(self, observation):
+        """Govern one runner transition, without admitting its source/model cost."""
+        fields = {'profile', 'version', 'disposition', 'next_event', 'binding_current',
+                  'checkpoint_current', 'readiness_verified'}
+        if (not isinstance(observation, dict) or set(observation) != fields
+                or observation['profile'] != 'task-continuation-v1'
+                or type(observation['version']) is not int or observation['version'] != 1
+                or observation['disposition'] not in ('continue', 'wait', 'approval', 'evidence', 'finished', 'stopped')
+                or observation['next_event'] not in ('step', 'resume', 'continuation_probe', None)
+                or any(type(observation[key]) is not bool for key in
+                       ('binding_current', 'checkpoint_current', 'readiness_verified'))):
+            raise ValueError('Invalid task-continuation observation')
+        disposition, event = observation['disposition'], observation['next_event']
+        if (disposition == 'continue' and event not in ('step', 'resume')
+                or disposition == 'wait' and event != 'continuation_probe'
+                or disposition not in ('continue', 'wait') and event is not None):
+            raise ValueError('Continuation intent differs from its next operation')
+        current = observation['binding_current'] and observation['checkpoint_current']
+        ready = event != 'resume' or observation['readiness_verified']
+        omega = (3 * self.boundary.k if not current or disposition in ('finished', 'stopped') else
+                 0. if disposition == 'continue' and ready else 2 * self.boundary.k)
+        return dict(self.frame('task-continuation-v1', omega, 0.), observation=dict(observation),
+                    scope='runner_transition', grants_permissions=False,
+                    semantic_completion_verified=False, replenishes_budget=False)
+
     def child_repair(self, observation):
         """Checkpoint a proven unchanged failed format repair, without a grant."""
         fields = {'profile', 'version', 'status', 'fingerprint', 'failure_class',

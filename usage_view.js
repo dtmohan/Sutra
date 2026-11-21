@@ -93,7 +93,7 @@ function install(vscode,context,deps){
       const monitor={};
       // Monitoring and bounded, unverified task observations only. Observations
       // include the original request; source and executable action payloads stay out.
-      for(const key of ['runner','logical_memory','ram_compartments','task_observations','runtime_memory','orchestration','hardware','kernel','review_budget','repository','action_budget','storage','context','adapter_health','session','contract','diagnostic_errors'])monitor[key]=data[key];
+      for(const key of ['runner','logical_memory','ram_compartments','task_observations','runtime_memory','remote_memory','orchestration','hardware','kernel','review_budget','repository','action_budget','storage','context','adapter_health','session','contract','diagnostic_errors'])monitor[key]=data[key];
       monitor.coherence_observations=coherence.recent(data.coherence_observations);
       monitor.architecture_stop=currentArchitectureStop(data.runs);
       snapshot={...(data.token_usage||{calls:[],total_calls:0,limit:250}),monitor,workspace,updatedAt:new Date().toISOString()};error=undefined;publish();
