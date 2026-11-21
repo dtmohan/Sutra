@@ -169,6 +169,10 @@ def packet(source, draft, candidate_id, plan, index, all_claims, evidence, separ
         result['review_transport_version'] = 1
     if source.get('report_schema_version') == 2:
         result['evidence_choice_version'] = 2
+    if type(source.get('review_intent_version')) is int and source['review_intent_version'] == 1:
+        result['evidence_set_version'] = 1
+    if type(source.get('review_judgment_version')) is int and source['review_judgment_version'] == 1:
+        result['review_judgment_version'] = 1
     if type(source.get('claim_source_version')) is int and source['claim_source_version'] == 2:
         result['review_scope']['meaning'] += (' Entries labelled static_source_statement are delivered source syntax, '
                                              'not proof of runtime execution or order.')

@@ -117,6 +117,10 @@ def legacy_published(s, sid, candidate_id, reviewer_id):
 
 def schema(p):
     if p.get('review_protocol') != 2: return legacy_schema(p)
+    if 'review_judgment_version' in p and (type(p['review_judgment_version']) is not int or p['review_judgment_version'] != 1):
+        raise InvalidUpdate('Unsupported evidence-grounded reviewer representation')
+    if 'evidence_set_version' in p and (type(p['evidence_set_version']) is not int or p['evidence_set_version'] != 1):
+        raise InvalidUpdate('Unsupported reviewer evidence-set representation')
     text = lambda size: {'type': 'string', 'minLength': 1, 'maxLength': size}
     fields = {}
     for key, claim in p['claims'].items():
@@ -133,6 +137,10 @@ def schema(p):
 
 def request_check(s, sid, p):
     if p.get('review_protocol') != 2: return legacy_request_check(s, sid, p)
+    if 'review_judgment_version' in p and (type(p['review_judgment_version']) is not int or p['review_judgment_version'] != 1):
+        raise InvalidUpdate('Unsupported evidence-grounded reviewer representation')
+    if 'evidence_set_version' in p and (type(p['evidence_set_version']) is not int or p['evidence_set_version'] != 1):
+        raise InvalidUpdate('Unsupported reviewer evidence-set representation')
     from review_reasoning import check
     import claim_pages as pages
     check(p)
@@ -151,6 +159,8 @@ def request_check(s, sid, p):
     if (any(p.get(k) != value for k, value in required.items())
             or p.get('evidence_choice_version') != required.get('evidence_choice_version')
             or p.get('claim_timeout_recovery_version') != required.get('claim_timeout_recovery_version')
+            or p.get('evidence_set_version') != required.get('evidence_set_version')
+            or p.get('review_judgment_version') != required.get('review_judgment_version')
             or p.get('review_transport_version') != required.get('review_transport_version')):
         raise InvalidUpdate('Claim review page or evidence binding changed')
     if p['contract'] != s.validation_contract(sid): raise InvalidUpdate('Report review contract changed')

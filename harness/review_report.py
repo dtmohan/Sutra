@@ -6,9 +6,33 @@ from context_manager import InvalidUpdate
 from protocol import obj, arr
 
 
-def requested(p):
+def brief(p):
+    """Choose presentation from the caller's ask, not source or model notes.
+
+    This describes output genre, not difficulty, correctness or permission.
+    Keep the old keyword recipe for historical accepted deliveries.
+    """
     text = p['contract']['goal'] + '\n' + p['request']
-    return bool(re.search(r'architectur|overview|strengths|shortcomings', text, re.I))
+    old = bool(re.search(r'architectur|overview|strengths|shortcomings', text, re.I))
+    if 'review_intent_version' not in p:
+        return {'structured': old}
+    if type(p['review_intent_version']) is not int or p['review_intent_version'] != 1:
+        raise InvalidUpdate('Unsupported review presentation intent')
+    workspace = bool(re.search(r'\b(?:codebase|repositories|repository|repo|workspace|project|modules?|'
+                               r'source\s+code|code\s+(?:logic|flow)|tools?\s+logic)\b', text, re.I))
+    analysis = bool(re.search(r'\b(?:review|analy[sz]e|inspect|explain|understand|thoughts?|opinion|'
+                              r'walk\s+(?:me\s+)?through|go\s+through)\b', text, re.I))
+    diagram = bool(re.search(r'\b(?:diagrams?|flowcharts?|(?:control|request|data|call)[ -]+flow)\b', text, re.I))
+    structured = old or workspace and (analysis or diagram)
+    return {'structured': bool(structured), 'kind': 'architecture' if structured else 'answer',
+            'detail': 'detailed' if re.search(r'\bin\s+detail\b|\bdetailed\b|\bdeep\s+dive\b|\bintern\b', text, re.I) else 'standard',
+            'diagram_requested': diagram,
+            'purpose': 'Explain how the supplied project works, with source-linked components, control flow, strengths and weaknesses.'
+                       if structured else 'Answer the specific question from supplied evidence.'}
+
+
+def requested(p):
+    return brief(p)['structured']
 
 
 def text(limit):

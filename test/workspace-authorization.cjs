@@ -59,6 +59,7 @@ function host(fixture, buttons = {}) {
   const prompts = [];
   const requests = [];
   const synthesisReads = [];
+  const synthesisContextChecks = [];
   const commands = new Map();
   const subscriptions = [];
   let provider, tool;
@@ -113,6 +114,7 @@ function host(fixture, buttons = {}) {
       try {
         const result = bridge(bridgeRequest);
         if (result._fixture_synthesis_reads !== undefined) synthesisReads.push(result._fixture_synthesis_reads);
+        if (result._fixture_synthesis_context_checks) synthesisContextChecks.push(...result._fixture_synthesis_context_checks);
         return result;
       } catch (error) {
         if (error.stdout) throw new Error(JSON.parse(error.stdout).error);
@@ -132,7 +134,7 @@ function host(fixture, buttons = {}) {
     controller.dispose();
     for (const subscription of subscriptions.reverse()) subscription.dispose();
   }
-  return {controller, requests, prompts, synthesisReads, tool, send, close, token, command: vscode.commands.executeCommand};
+  return {controller, requests, prompts, synthesisReads, synthesisContextChecks, tool, send, close, token, command: vscode.commands.executeCommand};
 }
 function lastFlow(snapshot) { return snapshot.flows.findLast(flow => flow.binding) || snapshot.flows.at(-1); }
 function sameTask(before, after) {
@@ -243,6 +245,9 @@ async function reviewJourney(base) {
     assert(pending.execution_id);
     assert.equal(preflight.budget.used.calls, 0);
     assert.deepEqual(h.synthesisReads, [0], 'An impossible context must stop before reading source for synthesis');
+    assert(h.synthesisContextChecks.some(check => check.source_files === 0 &&
+      check.input_charge + check.output_reserve > check.input_limit),
+    'Low must fail the measured mandatory packet without opening source');
     assert.deepEqual(preflight.synthesis_receipts, [], 'The failed preflight cannot spend any synthesis source budget');
     assert(!preflight.source_events.includes('REVIEW_SOURCE_PREPARED'));
     assert.equal(h.prompts.length, 1);
@@ -262,6 +267,12 @@ async function reviewJourney(base) {
     assert.equal(lastFlow(evidenceStop).execution_id, pending.execution_id);
     assert.equal(lastFlow(evidenceStop).stop.status, 'context_budget');
     assert.equal(evidenceStop.budget.used.calls, 0);
+    assert(h.synthesisContextChecks.some(check => check.source_files === 0 &&
+      check.input_charge + check.output_reserve <= check.input_limit),
+    'Mid must fit the measured mandatory context rather than failing the same preflight as Low');
+    assert(h.synthesisContextChecks.some(check => check.source_files > 0 &&
+      check.input_charge + check.output_reserve > check.input_limit),
+    'Mid must pause on measured evidence capacity after the mandatory lower bound passed');
     assert(evidenceStop.budget.used.source_bytes > preflight.budget.used.source_bytes, lastFlow(evidenceStop).stop.error);
     assert(evidenceStop.synthesis_receipts.length > 0, 'The second stop must occur after real source work');
     assert(evidenceStop.source_events.includes('REVIEW_SOURCE_PREPARED'));

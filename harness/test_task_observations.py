@@ -252,6 +252,11 @@ class ObservationFlowTests(unittest.TestCase):
         for stage,model in self.models:
             if stage in ('subagent','synthesis'):
                 for p in model.payloads:
+                    if 'claims' in p:
+                        # The separate claim reviewer receives fresh evidence,
+                        # not the writer's conversational commitment as proof.
+                        self.assertNotIn('conversation_handoff',p)
+                        continue
                     self.assertEqual(p['conversation_handoff']['task_commitment'],obs.context(c))
                     self.assertEqual(p['request'],self.prompt)
                     self.assertEqual(p['contract']['constraints'],contract['constraints'])

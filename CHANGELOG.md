@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.54.2
+
+- Bind a versioned project-review presentation intent from the caller's actual ask, recognizing strengths, weaknesses, tools logic and control-flow requests without requiring the literal word architecture.
+- Carry that intent into structured report generation, governed discovery, claim review, Adaptive synthesis reasoning and the existing request-flow diagram; preserve historical generic-answer schemas and wire packets.
+- Apply the same caller-bound genre to evidence selection, and ask synthesis to explain supplied function names, inputs, helper calls and results rather than generic module labels.
+- Normalize repeated valid reviewer evidence IDs as a versioned set representation only after raw per-claim scope validation; retain reversible raw-reference records and verify the original response hash without changing verdicts or inventing evidence.
+- New claim-review wire packets select supporting or conflicting source IDs instead of an independently typed verdict; empty channels retain uncertainty, simultaneous channels are rejected, and the unchanged host judgment schema is derived with reversible raw-response verification.
+- Make stronger synthesis eligible after fresh source inspection using a versioned routing signal; keep explicit tier selections, governed resource fallback, permissions and budgets unchanged.
+- Return in-chat guidance for overlapping requests, wait briefly for transient host setup, and preserve the existing runner identity without queuing duplicate native workflows.
+- Isolate diagnostic sink failures and guarantee local cleanup after stream/footer errors; reconnect retained results across model switches without replay or cancellation.
+- Disclose committed Low fallback in completed reviews. Keep the canonical STP kernel unchanged.
+
 ## 0.54.1
 
 - Resolve bare requested symbols against the child’s authorized static graph and deliver coherent declaration bodies through a versioned source recipe; keep historical recipes unchanged.

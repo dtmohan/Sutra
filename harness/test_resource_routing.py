@@ -45,13 +45,16 @@ class ResourceRoutingTests(unittest.TestCase):
         self.assertEqual(fallback['children'],children);self.assertEqual(self.s.pinned(sid),pin)
         self.s.close();self.s=InvocationLedger(self.root/'state.sqlite')
         done=self.step(fallback,tier='auto')
+        if done['state']=='SYNTHESIS':
+            done=self.until('DONE',done)
         self.assertEqual(done['state'],'DONE');self.assertTrue(done['data']['result']['admission']['admitted'])
         self.assertEqual(done['data']['route']['reason'],'governed resource fallback')
-        p=self.models[-1][1].payloads[-1]
+        p=next(p for stage,p in reversed(self.models) if stage=='synthesis' and 'claims' not in p.payloads[-1]).payloads[-1]
         self.assertEqual(p['request'],self.prompt);self.assertIn('CED724',canonical(p))
         self.assertEqual(p['contract'],pin);self.assertEqual(self.s.pinned(sid),pin)
         self.assertEqual(done['children'],children)
-        after=review_budget.usage(self.s,sid)['used'];self.assertEqual(after['calls'],before['calls']+1)
+        self.assertIsNotNone(done['data']['report_review'])
+        after=review_budget.usage(self.s,sid)['used'];self.assertEqual(after['calls'],before['calls']+2)
         self.assertGreater(after['tokens'],before['tokens']);self.assertTrue(self.s.verify_invocations(sid))
 
     def test_runtime_wait_is_not_memory_pressure_and_never_switches_or_releases_models(self):

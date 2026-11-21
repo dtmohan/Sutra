@@ -120,6 +120,30 @@ function setup(saved={}){
  assert(body.includes('Review details and source citations'));assert(body.includes('10 freshly mapped files'));
  assert(!body.includes('protocol invocation'));assert(!body.includes('Remaining:'));
  checks.push('structured workspace report retains Markdown spacing, opens verified diagram, and moves raw IDs into review details');
+ {
+  const note='This review used the configured Low tier after a model-capacity refusal.';
+  assert(!body.includes(note));
+  for(const [route,admitted,expected] of [
+   [{model:'model-a',tier:'low',mode:'resource-low',reason:'governed resource fallback'},true,true],
+   [{model:'model-a',tier:'low',mode:'low',reason:'governed resource fallback'},true,false],
+   [{model:'model-a',tier:'low',mode:'resource-low',reason:'governed resource fallback'},false,false]
+  ]){
+   const host=setup();await host.arm();host.kind('report');
+   const original=host.deps.backendRequest;
+   host.deps.backendRequest=async(m,t)=>{
+    const data=await original(m,t);
+    if(m.op==='native_work'){
+     data.route=route;data.report_markdown='Architecture report';data.result.accepted_output.report={overview:'Architecture report'};
+     data.result.admission={admitted,errors:admitted?[]:['Citations not admitted']};
+    }
+    return data;
+   };
+   const response=(await host.send('auto')).map(part=>part.value||'').join('');
+   assert.equal(response.includes(note),expected);
+   assert.equal(host.controller.status().lastRoute,'model-a');
+  }
+  checks.push('committed resource fallback discloses the configured Low review tier without attributing withheld or unrelated routes');
+ }
  for(const settled of [false,true]){
   const cap=setup();await cap.arm();let approvals=0,grants=0;
   const prior=cap.deps.request;
@@ -170,7 +194,67 @@ function setup(saved={}){
  assert(h.controller.status().armed);
  assert((await h.send()).some(p=>p instanceof Call));
  checks.push('revocation and contract changes invalidate action tickets while a new contract can reuse workspace permission');
- const c=setup();await c.arm();let release,entered;const started=new Promise(r=>entered=r);c.hold(t=>new Promise(r=>{release=r;entered();}));const pending=c.send();await started;assert(c.controller.status().routing.active);assert.equal(c.controller.status().label,'Sutra: request received');await assert.rejects(c.send('high'),/running/);c.commands['karma.disarmNative']();release();await assert.rejects(pending,/cancelled|permission changed/);assert(!c.calls.some(x=>x.op==='native_preview'));assert.equal(c.controller.status().routing.stage,'cancelled');assert(!c.controller.status().routing.active);checks.push('concurrent calls rejected; disarming during inference withholds action');
+ const c=setup();await c.arm();let release,entered;const started=new Promise(r=>entered=r);c.hold(t=>new Promise(r=>{release=r;entered();}));const pending=c.send();await started;assert(c.controller.status().routing.active);assert.equal(c.controller.status().label,'Sutra: request received');
+ const activeRoute=structuredClone(c.controller.status().routing),activeCalls=c.calls.length,activeFlows=c.flowRequests.length;
+ const concurrent=await c.send('high');assert(concurrent.some(part=>part.value?.includes('Sutra already has a request running')));
+ assert.equal(c.calls.length,activeCalls);assert.equal(c.flowRequests.length,activeFlows);assert.deepEqual(c.controller.status().routing,activeRoute);
+ c.commands['karma.disarmNative']();release();await assert.rejects(pending,/cancelled|permission changed/);assert(!c.calls.some(x=>x.op==='native_preview'));assert.equal(c.controller.status().routing.stage,'cancelled');assert(!c.controller.status().routing.active);checks.push('concurrent chat gets host guidance without another dispatch or replacing the active route; revocation still withholds its action');
+ {
+  const saved={},host=setup(saved);await host.arm();host.kind('report');
+  const options={modelOptions:{_conversationId:'same-chat-busy'},tools:[]};
+  let entered,release;const started=new Promise(resolve=>entered=resolve);
+  host.hold(()=>new Promise(resolve=>{release=resolve;entered();}));
+  const current=host.send('low',undefined,options);await started;
+  await host.commands['karma.toggleThinkingForNextRequest']();
+  const before=structuredClone(saved),route=host.controller.status().routing,traffic=host.flowRequests.length;
+  const busy=await host.send('high',[{role:1,content:[new Text('continue')]}],options);
+  assert(busy.some(part=>part.value?.includes('current request in this chat')));
+  assert.deepEqual(saved,before,'A busy reply cannot overwrite saved tasks or runner identity');
+  assert.deepEqual(host.controller.status().routing,route);assert.equal(host.flowRequests.length,traffic);
+  assert(host.contextKeys.sutraThinkingForNextRequest,'An ignored overlap cannot consume the next-request thinking override');
+  release();await current;host.hold(undefined);
+  await host.send('high',[{role:1,content:[new Text('hello')]}],options);
+  assert.equal(host.flowRequests.at(-1).tier,'high');assert.equal(host.flowRequests.at(-1).think_for_turn,true);
+  assert(!host.contextKeys.sutraThinkingForNextRequest);assert(!host.controller.status().working);
+  checks.push('same-chat overlap preserves saved state, selected active model and next-turn thinking; a later explicit tier request proceeds normally');
+ }
+ {
+  const host=setup();let busy=true;host.deps.isBusy=()=>busy;
+  setImmediate(()=>{busy=false;});
+  const reply=await host.send('low',[{role:1,content:[new Text('hello')]}]);
+  assert(reply.some(part=>part.value?.includes('Conversational answer')));assert.equal(host.calls.length,1);
+  assert(!host.controller.status().working);
+  checks.push('transient host setup completes before the first chat dispatch rather than failing the user request');
+ }
+ {
+  const host=setup();host.deps.isBusy=()=>true;
+  const reply=await host.send('low',[{role:1,content:[new Text('hello')]}]);
+  assert(reply.some(part=>part.value?.includes('finishing another host operation')));
+  assert.equal(host.calls.length,0);assert.equal(host.flowRequests.length,0);assert.equal(host.controller.status().routing,null);
+  host.deps.isBusy=()=>false;
+  await host.send('low',[{role:1,content:[new Text('hello')]}]);assert.equal(host.calls.length,1);
+  checks.push('persistent host contention gives bounded in-chat guidance without inference, saved-task mutation or a sticky busy state');
+ }
+ {
+  const host=setup();host.deps.isBusy=()=>true;
+  const waiting=host.send('low',[{role:1,content:[new Text('hello')]}]);setImmediate(()=>host.token.cancel());
+  await assert.rejects(waiting,/cancelled/);
+  assert.equal(host.calls.length,0);assert.equal(host.flowRequests.length,0);assert(!host.controller.status().working);
+  checks.push('cancelling the host-readiness wait cannot dispatch a delayed model request');
+ }
+ {
+  for(const asynchronous of [false,true]){
+   const host=setup();
+   const failed=()=>{if(asynchronous)return Promise.reject(Error('Diagnostic sink offline'));throw Error('Diagnostic sink offline');};
+   host.deps.onStatus=failed;host.deps.onRoute=failed;
+   await host.send('low',[{role:1,content:[new Text('hello')]}]);
+   assert(!host.controller.status().routing.active);assert(!host.controller.status().working);
+   await host.send('high',[{role:1,content:[new Text('hello again')]}]);
+   assert.equal(host.calls.length,2);assert.equal(host.controller.status().routing.model,'model-c');
+   assert(!host.controller.status().routing.active);assert(!host.controller.status().working);
+  }
+  checks.push('throwing or rejected status and route sinks cannot fail chat or strand execution ownership');
+ }
  const d=setup();await d.arm();const cancelledCall=(await d.send()).find(p=>p instanceof Call);d.token.cancel();await assert.rejects(d.tool.invoke({input:cancelledCall.input},d.token.token),/cancelled/);assert(!d.calls.some(x=>x.op==='native_execute'));checks.push('already-cancelled tool invocation cannot execute');
  const refused=setup();await refused.arm();const denied=(await refused.send()).find(p=>p instanceof Call);refused.v.window.showWarningMessage=async()=>undefined;await assert.rejects(refused.tool.invoke({input:denied.input},refused.token.token),/not confirmed/);assert(!refused.calls.some(c=>c.op==='native_execute'));checks.push('programmatic action without a chat token requires explicit host confirmation');
  const e=setup();await e.commands['karma.toggleNative']();assert.deepEqual(e.provider.provideLanguageModelChatInformation(),[]);await assert.rejects(e.arm(),/Enable/);await assert.rejects(e.commands['karma.useNativeChat'](),/Enable/);checks.push('disabled provider is removed from discovery and cannot arm or select');
@@ -254,9 +338,10 @@ function setup(saved={}){
    updating.cfg[k]=value;if(k==='nativeEnabled')await new Promise(r=>{finish=r;});
   }});
   const changing=updating.commands['karma.toggleNative']();assert.equal(updating.controller.status().working,true);
-  await assert.rejects(updating.send('low',[{role:1,content:[new Text('Hello')]}]),/controls are updating/);
+  const notice=await updating.send('low',[{role:1,content:[new Text('Hello')]}]);
+  assert(notice.some(part=>part.value?.includes('Sutra settings are updating')));
   assert.equal(updating.calls.length,0);finish();await changing;assert.equal(updating.controller.status().working,false);
-  checks.push('requests wait until a delayed enable/disable setting has completed instead of racing the controls');
+  checks.push('a delayed enable/disable setting gives host guidance without dispatching a racing request');
  }
  {
   const disabling=setup();await disabling.arm();
@@ -1754,6 +1839,46 @@ function setup(saved={}){
   assert(next.some(p=>p instanceof Text&&p.value.includes('Conversational answer')));
   assert(!next.some(p=>p instanceof Text&&p.value.includes('Coherence indicators')));
   checks.push('native chat displays one bounded inert coherence notice, leaves greetings and malformed diagnostics quiet, and adds no actions, permissions or retries');
+ }
+ {
+  const saved={},host=setup(saved),original=host.deps.request;
+  await host.arm();host.kind('report');
+  const options={modelOptions:{_conversationId:'runner-footer-detach'},tools:[]};
+  const key=require('node:crypto').createHash('sha256').update(options.modelOptions._conversationId).digest('hex');
+  let allocations=0,submissions=0,acknowledgements=0,reconnections=0,cancellations=0,response;
+  host.deps.allocateRequest=async()=>({id:(++allocations).toString(16).padStart(32,'0')});
+  host.deps.resumeRequest=async()=>{throw Error('Initial request must submit once');};
+  host.deps.ackRequest=async()=>{acknowledgements++;};
+  host.deps.cancelRequest=async()=>{cancellations++;};
+  host.deps.request=async(m,t,activity,transport)=>{
+   if(transport?.id){submissions++;t.onCancellationRequested(()=>cancellations++);}
+   const next=await original(m,t);
+   if(transport?.id&&next.data){
+    response=next;
+    throw Object.assign(Error('Response stream detached; runner retained'),{code:'COORDINATOR_DETACHED'});
+   }
+   return next;
+  };
+  const progress={report:part=>{
+   if(part.value?.includes('Open tokens, system and kernel status'))throw Error('Response stream closed during footer');
+  }};
+  await assert.rejects(host.provider.provideLanguageModelChatResponse({id:'karma-low'},
+   [{role:1,content:[new Text('Review workspace')]}],options,progress,host.token.token),/stream closed during footer/);
+  const retained=structuredClone(saved['sutra.coordinatorRequests.v1'][key]);
+  assert(retained?.id);assert(!host.controller.status().working);assert(!host.controller.status().routing.active);
+  assert.equal(cancellations,0,'Closing a response stream cannot cancel runner execution');
+  const before={allocations,submissions,acknowledgements,modelCalls:host.calls.length};
+  host.deps.resumeRequest=async ticket=>{reconnections++;assert.equal(ticket.id,retained.id);return structuredClone(response);};
+  host.deps.allocateRequest=async()=>{throw Error('Reconnection cannot allocate another execution');};
+  const restored=await host.send('high',[{role:1,content:[new Text('continue')]}],options);
+  assert(restored.some(part=>part.value?.includes('Reconnecting to the runner')));
+  assert(restored.some(part=>part.value?.includes('proposal')));
+  assert.equal(reconnections,1);assert.equal(allocations,before.allocations);assert.equal(submissions,before.submissions);
+  assert.equal(host.calls.length,before.modelCalls);assert.equal(acknowledgements,before.acknowledgements+1);
+  assert.equal(saved['sutra.coordinatorRequests.v1'][key],undefined);assert.equal(cancellations,0);
+  assert.equal(host.controller.status().lastRoute,'model-a','A UI tier change cannot relabel the already executed model');
+  assert(!host.controller.status().working);
+  checks.push('a discarded footer releases local busy ownership while same-chat retry on another tier reconnects the identical runner result without replay, cancellation or new spending');
  }
  {
   const saved={},first=setup(saved),original=first.deps.request;

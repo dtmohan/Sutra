@@ -21,6 +21,7 @@ Keep summary under 320 characters and each remaining entry under 160 characters.
 from task_observations import ASSESSMENT_GUIDE
 SYSTEM += ASSESSMENT_GUIDE
 PARENT_CONTEXT_VERSION = 3
+REVIEW_JUDGMENT_VERSION = 1
 
 def citation_quotes(p):
     # Small, source-derived choices prevent the model from reconstructing code.
@@ -364,6 +365,10 @@ def expand_retained_context(s, sid, p, budget):
 def request_check(s,sid,p):
     from review_reasoning import check
     check(p, synthesis=True)
+    if 'review_intent_version' in p:
+        report.brief(p)  # Validate the host-bound genre before schema or publication.
+    if 'review_judgment_version' in p and (type(p['review_judgment_version']) is not int or p['review_judgment_version'] != 1):
+        raise InvalidUpdate('Unsupported evidence-grounded reviewer representation')
     if 'parent_source_funding_version' in p:
         if type(p['parent_source_funding_version']) is not int or p['parent_source_funding_version'] != 1:
             raise InvalidUpdate('Unsupported parent source funding recipe')
@@ -641,10 +646,15 @@ def mapped_candidates(s, meta, workspace):
 
 def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
     sid=meta['active'];prompt=request.get('prompt','');models=request.get('models');mode=request.get('tier','auto')
+    if not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= 1800:
+        raise InvalidUpdate('Prompt must be 1..1800 characters')
+    intent_packet = {'contract': s.pinned(sid), 'request': prompt, 'review_intent_version': 1}
     adapter = KarmaAdapter()
     def route(sources, selected, unresolved=0):
         return adapter.route(prompt, models, mode, {
-            'source_files': sources, 'selected_files': selected, 'unresolved_calls': unresolved})
+            'source_files': sources, 'selected_files': selected, 'unresolved_calls': unresolved,
+            **({'review_intent': 'architecture'} if intent_packet.get('review_intent_version') == 1
+               and report.requested(intent_packet) else {})})
     route(0, 0)  # Validate user configuration without touching source.
     import orchestration as machine
     owner = machine.ACTIVE.get() or machine.task(s, sid)['id']
@@ -657,6 +667,13 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
         if recovered:
             request = dict(request, context_recall=recovered)
     repair_state = recover_parent_repair(s, sid, workspace, request) if parent_step else None
+    if repair_state:
+        # A retry replays the admitted genre and route recipe. It cannot turn an
+        # old generic answer schema into a different executable contract.
+        if 'review_intent_version' not in repair_state['packet']:
+            intent_packet.pop('review_intent_version')
+        else:
+            intent_packet['review_intent_version'] = repair_state['packet']['review_intent_version']
     if repair_state and repair_state['remaining'] == 0:
         return _finish_answer(s, meta, workspace, root, request, repair_state['result'],
                               repair_state['packet'], repair_state['data'], review_provider)
@@ -665,6 +682,11 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
          'request': prompt, 'pages': [], 'snapshot_owner': owner, 'handoff': None,
          'parent_context_version': PARENT_CONTEXT_VERSION, 'citation_policy_version': 2, 'report_schema_version': 2, 'claim_timeout_recovery_version': 1,
          'claim_source_version': 2}
+    if 'review_intent_version' in intent_packet:
+        p['review_intent_version'] = intent_packet['review_intent_version']
+    judgment_version = repair_state['packet'].get('review_judgment_version') if repair_state else REVIEW_JUDGMENT_VERSION
+    if judgment_version is not None:
+        p['review_judgment_version'] = judgment_version
     if parent_step:
         p['review_transport_version'] = 1
     if repair_state:

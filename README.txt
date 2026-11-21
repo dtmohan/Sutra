@@ -1,4 +1,11 @@
-Sutra 0.54.1 — Child source and allocation recovery
+Sutra 0.54.2 — Structured project reviews and chat recovery
+
+Project review requests now receive source-linked report sections and a control-flow
+view even when phrased as thoughts, strengths, weaknesses or tools logic. A bound
+presentation profile keeps historical receipts unchanged. Auto can select stronger
+synthesis after fresh source; fixed tiers and resource admission remain authoritative.
+Concurrent chat requests receive status guidance without starting duplicate work,
+and UI diagnostic or stream failures cannot strand the local busy state.
 
 Child reviews now retain requested in-scope symbol names and page their complete
 bounded declaration bodies before falling back to smaller source pages. Recovery

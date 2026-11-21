@@ -608,7 +608,7 @@ class OrchestrationTests(unittest.TestCase):
         out=self.step(out);self.assertEqual([i['id'] for i in out['children']],[c['id'] for c in children])
         while any(i['state']!='DONE' for i in out['children']):out=self.step(out)
         ids=m.join(self.s,parent['id']);out=self.step(out);self.assertEqual(out['state'],'SYNTHESIS')
-        res=self.step(out);self.assertTrue(res['data']['result']['admission']['admitted'])
+        res=self.until('DONE',out);self.assertTrue(res['data']['result']['admission']['admitted'])
         self.assertEqual(len([e for e in m.events(self.s,parent['id']) if e['kind']=='JOIN']),1)
 
     def test_forged_child_context_and_foreign_completion_are_rejected(self):
@@ -702,7 +702,7 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(resumed['conversation_id'],conversation_id)
         self.assertEqual(review_budget.usage(self.s,sid)['used'],used)
         with patch('auto_review.step',side_effect=AssertionError('unnecessary remapping')):
-            done=self.step(resumed)
+            done=self.until('DONE',resumed)
         self.assertEqual(done['state'],'DONE');self.assertTrue(done['data']['result']['admission']['admitted'])
         self.assertEqual(self.s.pinned(sid),contract)
 
@@ -768,7 +768,7 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(review_budget.usage(self.s,sid)['used'],used)
         with patch('monitoring.resource_state',return_value={'admitted':True}):out=self.step(out,event='resume')
         self.assertEqual(out['state'],'SYNTHESIS')
-        self.assertTrue(self.step(out)['data']['result']['admission']['admitted'])
+        self.assertTrue(self.until('DONE',out)['data']['result']['admission']['admitted'])
 
     def test_memory_release_then_model_switch_preserves_child_context_grants_and_spend(self):
         import os
@@ -885,7 +885,8 @@ class OrchestrationTests(unittest.TestCase):
         self.assertTrue(done['data']['result']['admission']['admitted'])
         self.assertEqual(self.s.pinned(sid),contract)
         self.assertGreater(review_budget.usage(self.s,sid)['used']['calls'],used['calls'])
-        self.assertIn('CED724',canonical(self.models[-1][1].payloads[0]['memory']))
+        writer=next(p for stage,p in reversed(self.models) if stage=='synthesis' and 'claims' not in p.payloads[0])
+        self.assertIn('CED724',canonical(writer.payloads[0]['memory']))
 
     def test_new_classification_resource_stop_does_not_pause_saved_same_prompt(self):
         from monitoring import ResourceWait
@@ -1127,7 +1128,7 @@ class OrchestrationTests(unittest.TestCase):
             self.assertTrue(done['data']['result']['admission']['admitted'])
             self.assertEqual(self.s.pinned(sid),contract)
             self.assertGreater(review_budget.usage(self.s,sid)['used']['calls'],used['calls'])
-            packet=[p for stage,p in self.models if stage=='synthesis'][-1].payloads[0]
+            packet=next(p for stage,p in reversed(self.models) if stage=='synthesis' and 'claims' not in p.payloads[0]).payloads[0]
             self.assertIn('CED724',canonical(packet['memory']))
 
     def test_changed_contract_does_not_allow_policy_only_restart(self):

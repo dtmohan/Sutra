@@ -17,6 +17,9 @@ def choose(prompt,models,mode,signals):
     if not isinstance(prompt,str) or not 1<=len(prompt.strip())<=1800:raise InvalidUpdate('Prompt must be 1..1800 characters')
     for key in ('source_files','selected_files','unresolved_calls'):
         if type(signals.get(key)) is not int or signals[key]<0:raise InvalidUpdate('Invalid routing measurement '+key)
+    quality_profile = 'review_intent' in signals
+    if quality_profile and signals['review_intent'] != 'architecture':
+        raise InvalidUpdate('Unknown routing review intent')
     difficult=bool(re.search(r'\b(architecture|security|audit|concurrency|race|refactor|whole|entire)\b',prompt,re.I))
     broad=bool(re.search(r'\b(codebase|repository|dependencies|integration|compare|across)\b',prompt,re.I))
     # With no source evidence Auto always starts small. Workspace work may use
@@ -24,7 +27,12 @@ def choose(prompt,models,mode,signals):
     evidence=signals['source_files']>0 and signals['selected_files']>0
     tier=('high' if difficult else 'mid' if broad or len(prompt)>500 or signals['selected_files']>3 else 'low') if evidence else 'low'
     reason='explicit user override' if mode!='auto' else 'small-model first' if not evidence else 'fresh-source breadth assessment' if tier!='low' else 'focused request'
+    if mode == 'auto' and quality_profile and evidence:
+        # The current request's bound report requirements select synthesis
+        # capacity. This is not a semantic difficulty measurement or admission.
+        tier = 'high'
+        reason = 'structured architecture synthesis after fresh source'
     if mode!='auto':tier=mode.removeprefix('resource-') if resource_mode else mode
     if resource_mode:reason='governed resource fallback'
-    return {'policy':'local-tier-routing-v2','tier':tier,'model':models[tier],'mode':mode,'models':dict(models),
+    return {'policy':'local-tier-routing-v3' if quality_profile else 'local-tier-routing-v2','tier':tier,'model':models[tier],'mode':mode,'models':dict(models),
             'signals':dict(signals),'reason':reason,'semantic_complexity_verified':False,'automatic_escalation':mode=='auto'}

@@ -58,14 +58,21 @@ class AllocationTests(unittest.TestCase):
         self.tier = 'high'
         resumed = self.step(approved, event='resume')
         self.assertEqual(resumed['conversation_id'], out['conversation_id'])
-        done = self.step(resumed)
+        done = self.until('DONE', resumed)
         self.assertTrue(done['data']['result']['admission']['admitted'])
         self.assertEqual(self.s.pinned(sid), contract)
-        self.assertGreater(review_budget.usage(self.s, sid)['used']['calls'], before['used']['calls'])
-        model = [p for stage, p in self.models if stage == 'synthesis'][-1]
+        synthesis = [(model, packet) for stage, model in self.models[calls:] if stage == 'synthesis'
+                     for packet in model.payloads]
+        self.assertTrue(any('claims' in packet for _, packet in synthesis),
+                        'Recovery must complete the admitted claim-review stage before publication')
+        self.assertEqual(review_budget.usage(self.s, sid)['used']['calls'],
+                         before['used']['calls'] + len(synthesis))
+        model, packet = next((model, packet) for model, packet in reversed(synthesis) if 'claims' not in packet)
         self.assertEqual(model.model, fixtures.MODELS['high'])
-        self.assertIn('CED724', canonical(model.payloads[-1]['memory']))
-        self.assertEqual(model.payloads[-1]['contract'], contract)
+        self.assertIn('CED724', canonical(packet['memory']))
+        self.assertEqual(packet['contract'], contract)
+        self.assertTrue(done['data']['report_review']['reviewer_id'])
+        self.assertTrue(self.s.verify_invocations(sid))
         self.assertTrue(self.s.audit_valid())
 
     def test_stale_tampered_and_replayed_proposals_do_not_grant(self):
@@ -212,13 +219,24 @@ class AllocationTests(unittest.TestCase):
             before = review_budget.usage(self.s, sid)
             restarted = self.step(approved, event='restart_review')
             self.assertEqual(review_budget.usage(self.s, sid), before)
+            restart_models = len(self.models)
             self.tier = 'high'; done = self.until('DONE', restarted)
             self.assertTrue(done['data']['result']['admission']['admitted'])
             self.assertEqual(self.s.pinned(sid), contract)
             after = review_budget.usage(self.s, sid)
             self.assertEqual(after['limits'], before['limits'])
             self.assertGreater(after['used']['tokens'], before['used']['tokens'])
-            self.assertIn('CED724', canonical(self.models[-1][1].payloads[-1]['memory']))
+            synthesis = [(model, packet) for stage, model in self.models[restart_models:] if stage == 'synthesis'
+                         for packet in model.payloads]
+            self.assertTrue(any('claims' in packet for _, packet in synthesis))
+            completed_calls = sum(len(model.payloads) for _, model in self.models[restart_models:])
+            self.assertEqual(after['used']['calls'], before['used']['calls'] + completed_calls)
+            model, packet = next((model, packet) for model, packet in reversed(synthesis) if 'claims' not in packet)
+            self.assertEqual(model.model, fixtures.MODELS['high'])
+            self.assertIn('CED724', canonical(packet['memory']))
+            self.assertEqual(packet['contract'], contract)
+            self.assertTrue(done['data']['report_review']['reviewer_id'])
+            self.assertTrue(self.s.verify_invocations(sid))
 
     def test_task_budget_stop_is_recoverable_without_model_dispatch(self):
         out = self.until('SYNTHESIS')

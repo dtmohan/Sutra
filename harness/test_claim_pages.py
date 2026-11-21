@@ -72,7 +72,8 @@ class ClaimPageTests(unittest.TestCase):
             wire = build(review.SYSTEM, payload, review.schema(payload))
             body = json.loads(wire['messages'][1]['content'])
             self.assertEqual(body['source_evidence'], payload['source_evidence'])
-            self.assertIn('under 120 characters', wire['messages'][0]['content'])
+            self.assertIn('Use at most one nonempty channel', wire['messages'][0]['content'])
+            self.assertIn('Do not return a verdict', wire['messages'][0]['content'])
             for field in ('contract', 'constraint_echo', 'review_plan', 'reviewer_selection'):
                 self.assertNotIn(field, body)
             for eid, entry in payload['source_evidence'].items():

@@ -19,6 +19,7 @@ import review_budget
 import review_discovery as discovery
 import test_discovery_source_recall as source_fixture
 import test_discovery_working_set as paid_fixture
+from test_model_packet import WireModel
 
 
 class ExposureRecoveryTests(unittest.TestCase):
@@ -62,6 +63,13 @@ class ExposureRecoveryTests(unittest.TestCase):
     def provider(self, stage):
         model = source_fixture.SourceRecallTests.provider(self, stage)
         if stage == 'synthesis':
+            # New writer/reviewer calls use the actual model-facing transport,
+            # so the measured 400/80 counters below settle their reservations.
+            # pay_to() still uses its historical failed, unmeasured calls.
+            transport = WireModel(model.model)
+            transport.__dict__.update(model.__dict__)
+            self.models[-1] = (stage, transport)
+            model = transport
             model.discovery_provider.context_metadata['thinking'] = {'values': [False, True], 'default': False}
         if stage != 'conversation':
             call = model.call
@@ -144,6 +152,17 @@ class ExposureRecoveryTests(unittest.TestCase):
         self.assertEqual(self.s.pinned(sid), contract)
         self.assertEqual(self.s.db.execute('SELECT id,record_json FROM invocation_receipts ORDER BY seq').fetchall()[:len(prefix)], prefix)
         final = review_budget.usage(self.s, sid)
+        new_receipts = self.s.db.execute(
+            'SELECT i.record_json,r.record_json FROM invocation_receipts r '
+            'JOIN invocations i ON i.id=r.invocation_id ORDER BY r.rowid').fetchall()[len(prefix):]
+        settled = [(json.loads(env), json.loads(receipt)) for env, receipt in new_receipts
+                   if json.loads(env)['role'] in ('chat_reviewer', 'report_reviewer')]
+        self.assertEqual({env['role'] for env, _ in settled}, {'chat_reviewer', 'report_reviewer'})
+        for env, receipt in settled:
+            self.assertTrue(env['model_interface'])
+            self.assertEqual(receipt['accounting_settlement']['basis'], 'runtime_measured')
+            self.assertEqual(receipt['accounting_settlement']['used_tokens'], 480)
+        self.assertEqual(final['used']['tokens'], after_report['used']['tokens'] + 480 * len(settled))
         self.assertGreater(final['used']['tokens'], 400647)
         self.assertLessEqual(final['used']['tokens'], 500000)
         self.assertEqual(final['limits'], before['limits'])

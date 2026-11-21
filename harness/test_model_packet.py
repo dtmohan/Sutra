@@ -25,6 +25,11 @@ class WireModel(fixture.Fake):
             result, record = super().call(cid, system, p, schema)
         for k in host_fields(packet['role'], p, schema, packet['version'], result):
             result.pop(k, None)
+        if packet['role'] == 'report_reviewer' and packet['version'] == 15:
+            result['claims'] = {key: {'reason': row['reason'],
+                'supporting_evidence_ids': row['evidence_ids'] if row['verdict'] == 'supported' else [],
+                'conflicting_evidence_ids': row['evidence_ids'] if row['verdict'] == 'contradicted' else []}
+                for key, row in result['claims'].items()}
         record['response'] = {'done': self.completed, 'prompt_eval_count': self.counts[0], 'eval_count': self.counts[1]}
         if getattr(self, 'after', None): self.after(result, p)
         return result, record
@@ -320,7 +325,10 @@ class BranchAccountingTests(unittest.TestCase):
             self.assertFalse(body['task']['requirements']['edits_allowed'])
             self.assertFalse(body['task']['requirements']['network_allowed'])
         self.assertEqual(machine.spent(self.s,n['parent_id'])['tokens'],usage(self.s,sid)['used']['tokens'])
-        self.assertEqual(machine.spent(self.s,n['parent_id'])['tokens'],480*(len(children)+1))
+        # Project reviews now include a structured writer and a separately
+        # charged claim reviewer, even without the literal word architecture.
+        self.assertIsNotNone(out['data']['report_review'])
+        self.assertEqual(machine.spent(self.s,n['parent_id'])['tokens'],480*(len(children)+2))
         self.assertTrue(self.s.verify_invocations(sid))
 
     def test_interruption_retains_full_reservation_and_recovers_without_refund(self):

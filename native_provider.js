@@ -11,6 +11,7 @@ const ACTION='karma_native_action';
 const ACCESS='karma_workspace_access';
 const ACCESS_AGENT='karma_workspace_agent_access';
 const THINK_NEXT='sutraThinkingForNextRequest';
+const HOST_READY_WAIT_MS=1500,HOST_READY_POLL_MS=50;
 const MODEL_IDS={auto:'karma-auto',low:'karma-low',mid:'karma-mid',high:'karma-high'};
 const CHAT_DEFAULTS={'defaultModel':MODEL_IDS.auto,'editor.preferCopilotHarness':false,'defaultToCopilotHarness':false,'editor.localAgent.enabled':true};
 const MANIFEST=require('./package.json');
@@ -66,7 +67,7 @@ function install(vscode,context,deps){
 
   let disposed=false;
   let allocationPending=false,thinkingForNextRequest=false,resumeSubmission,controlsOpen=false,nativeSetting=false;
-  let armPromise,accessEpoch=0,armingStep='',armed,activeCancel,arming=false,running=false,selecting=false,lastRoute='',routing,reason='Open Sutra chat to talk. Choose workspace access on first use.';
+  let armPromise,accessEpoch=0,armingStep='',armed,activeCancel,activeNativeChat,arming=false,running=false,selecting=false,lastRoute='',routing,reason='Open Sutra chat to talk. Choose workspace access on first use.';
   const memory=new NativeMemory(context);let lastCompaction;
   const tickets=new Map(),accessTickets=new Map(),completed=new Map(),changed=new vscode.EventEmitter();
   const enabled=()=>vscode.workspace.getConfiguration('karma').get('nativeEnabled',true);
@@ -144,7 +145,12 @@ function install(vscode,context,deps){
       permissionPending,permissionCanChoose:permissionPending&&!arming&&!selecting&&!running&&!live&&!deps.isBusy(),
       working:nativeSetting||allocationPending||running||live,session:routing?.session,scope:'Sutra native chat and its workspace tools',defaultModel:chat.get('defaultModel',''),defaultsReady,reason,lastRoute,label,explanation,routing:routing?{...routing}:null,compaction:lastCompaction,pending,openTaskCount:context.workspaceState.get('sutra.openTaskCount')};
   }
-  function publish(){if(!disposed)deps.onStatus(status());}
+  function notify(sink,value){
+    // UI/diagnostic sinks cannot acquire execution ownership or prevent cleanup.
+    try{void Promise.resolve(sink?.call(deps,value)).catch(()=>{});}catch{}
+  }
+  function publish(){if(!disposed){try{notify(deps.onStatus,status());}catch{}}}
+  function publishRoute(audit){notify(deps.onRoute,{...audit});}
   async function setNativeEnabled(value){
     if(nativeSetting)throw new Error('A Sutra enable/disable change is already in progress.');
     const config=vscode.workspace.getConfiguration('karma');
@@ -271,7 +277,7 @@ function install(vscode,context,deps){
       if(owner){
         owner.audit.workspaceAccess={...access};
         publish();
-        deps.onRoute?.({...owner.audit});
+        publishRoute(owner.audit);
       }
     };
     try{
@@ -740,12 +746,42 @@ function install(vscode,context,deps){
     if(running||routing?.active||deps.isBusy())throw new Error('A Sutra operation is running. Wait for it to finish before opening another chat.');
     await selectNativeChat();
   }
-  async function trackRequest(model,progress,token,invoke){
-    if(nativeSetting)throw new Error('Sutra chat controls are updating. Wait for the change to finish.');
-    if(allocationPending||routing?.active||running||deps.isBusy())throw new Error('A Sutra request is running. Wait before switching models.');
+  function busyNotice(progress,chatKey,hostOperation=false){
+    const message=nativeSetting?'Sutra settings are updating. Try this request again after the change finishes.':
+      allocationPending?'Sutra is updating the current task allocation. Wait for it to finish, then continue your request.':
+      !hostOperation&&(running||routing?.active)?(chatKey&&chatKey===activeNativeChat?
+        'Sutra is still working on the current request in this chat. Follow its original reply or Sutra Monitor; another run has not been started.':
+        'Sutra already has a request running. Follow it in Sutra Monitor and wait for it to finish before sending this request or switching models.'):
+      'Sutra is finishing another host operation. Try this request again shortly, or check Sutra Monitor if it stays busy.';
+    progress.report(new vscode.LanguageModelTextPart(message));
+  }
+  async function waitForHostReadiness(token){
+    const deadline=Date.now()+HOST_READY_WAIT_MS;
+    // Model discovery/setup can briefly own the bridge without a native chat run.
+    // Wait only for readiness; never queue a second native execution.
+    while(deps.isBusy()&&!nativeSetting&&!allocationPending&&!routing?.active&&!running){
+      if(token.isCancellationRequested)throw new Error('Sutra request cancelled.');
+      const remaining=deadline-Date.now();if(remaining<=0)return;
+      await new Promise((resolve,reject)=>{
+        let cancellation;
+        const timer=setTimeout(()=>{cancellation?.dispose();resolve();},Math.min(HOST_READY_POLL_MS,remaining));
+        cancellation=token.onCancellationRequested(()=>{
+          clearTimeout(timer);cancellation?.dispose();reject(new Error('Sutra request cancelled.'));
+        });
+      });
+    }
+  }
+  async function trackRequest(model,options,progress,token,invoke){
+    if(token.isCancellationRequested)throw new Error('Sutra request cancelled.');
+    const chatKey=memory.chatKey(options);
+    if(nativeSetting||allocationPending||routing?.active||running){busyNotice(progress,chatKey);return;}
+    await waitForHostReadiness(token);
+    if(token.isCancellationRequested)throw new Error('Sutra request cancelled.');
+    if(nativeSetting||allocationPending||routing?.active||running||deps.isBusy()){busyNotice(progress,chatKey);return;}
     const audit={id:crypto.randomUUID(),model:model.id,startedAt:new Date().toISOString(),active:true,stage:'received'};
-    routing=audit;publish();deps.onRoute?.({...audit});
+    routing=audit;activeNativeChat=chatKey;
     try{
+      publish();publishRoute(audit);
       // Live routing is shown in the status bar and dashboard; keep audit IDs out of the answer body.
       await invoke(audit);
       if(audit.stage==='received')audit.stage='stopped';
@@ -764,7 +800,7 @@ function install(vscode,context,deps){
       throw error;
     }
     finally{
-      audit.active=false;audit.finishedAt=new Date().toISOString();publish();deps.onRoute?.({...audit});
+      audit.active=false;activeNativeChat=undefined;audit.finishedAt=new Date().toISOString();publish();publishRoute(audit);
       if(audit.stage==='awaiting_workspace_permission'&&!audit.workspaceAccess?.callId){
         const pending=context.workspaceState.get(pendingKey),link=pending?.resumeLink;
         // Consent runs outside the model response, so dismissing its dialog
@@ -869,15 +905,15 @@ function install(vscode,context,deps){
         if(!saved.parent){
           progress.report(new vscode.LanguageModelTextPart('<summary>Sutra has no authenticated checkpoint in this supplied history. Missing context must be restated; no permissions are granted.</summary>'));
           lastCompaction={status:'missing_checkpoint',time:new Date().toISOString()};publish();
-          deps.onRoute?.({id:crypto.randomUUID(),stage:'compaction_missing_checkpoint',active:false,model:model.id});return;
+          publishRoute({id:crypto.randomUUID(),stage:'compaction_missing_checkpoint',active:false,model:model.id});return;
         }
         // The next real invocation revalidates receipt ancestry and quarantine.
         // No bridge/model call here: background compaction cannot race inference.
         progress.report(new vscode.LanguageModelTextPart(memory.summary(saved.parent)));
         lastCompaction={status:'checkpoint_preserved',invocationId:saved.parent,memorySource:saved.source,time:new Date().toISOString()};publish();
-        deps.onRoute?.({id:crypto.randomUUID(),stage:'compaction_checkpoint_preserved',active:false,invocationId:saved.parent,memorySource:saved.source,model:model.id});return;
+        publishRoute({id:crypto.randomUUID(),stage:'compaction_checkpoint_preserved',active:false,invocationId:saved.parent,memorySource:saved.source,model:model.id});return;
       }
-      return trackRequest(model,progress,token,async audit=>{
+      return trackRequest(model,options,progress,token,async audit=>{
       if(token.isCancellationRequested)throw new Error('Sutra request cancelled.');
       if(arming||!enabled()){
         audit.stage=arming?'awaiting_confirmation':'needs_arming';
@@ -885,7 +921,7 @@ function install(vscode,context,deps){
         progress.report(new vscode.LanguageModelTextPart('You are connected to Sutra. '+guidance+'\n\nSetup guidance only — no model call, source read, edit, or test was performed.'));
         return;
       }
-      if(running||deps.isBusy())throw new Error('A Sutra request is running. Wait before switching models.');
+      if(running||deps.isBusy()){audit.stage='waiting_for_host';busyNotice(progress,memory.chatKey(options),true);return;}
       const request=latestRequest(vscode,messages);
       const chatKey=memory.chatKey(options);
       if(!request.results){const saved=memory.resolve(vscode,messages,options,request.parent);request.parent=saved.parent;audit.memorySource=saved.source;}
@@ -1358,6 +1394,8 @@ function install(vscode,context,deps){
         const p=r.accepted_output;if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&!['edit','run_tests'].includes(p.action?.kind))throw new Error('No admitted action is available to satisfy required tool mode.');
         if(data.report_markdown){
           progress.report(new vscode.LanguageModelTextPart(data.report_markdown+'\n\n'));
+          if(data.route?.reason==='governed resource fallback'&&data.route.mode==='resource-low'&&data.route.tier==='low')
+            progress.report(new vscode.LanguageModelTextPart('This review used the configured Low tier after a model-capacity refusal.\n\n'));
           if(data.review_diagram){try{await deps.presentReview?.(data);progress.report(new vscode.LanguageModelTextPart(data.review_flow_diagram?'The preview has two views: the **request-flow explanation** and **local source dependencies**. Use its Diagram view selector to switch between them.\n\n':'The **source dependency diagram** is open beside this chat. Its arrows show local import candidates, not execution order.\n\n'));}catch(error){progress.report(new vscode.LanguageModelTextPart('Diagram preview unavailable: '+error.message+'\n\n'));}}
           if(reviewLinks?.reportUri)progress.report(new vscode.LanguageModelTextPart(`[Review details and source citations](${reviewLinks.reportUri}) · Reviewed through Sutra with **${lastRoute}**.\n\n`));
         }else progress.report(new vscode.LanguageModelTextPart((p.answer||p.summary)+'\n\n'));
@@ -1373,17 +1411,22 @@ function install(vscode,context,deps){
           await offerAction(flow,r.invocation_id,p.action.kind);
         }else if(!p.report){progress.report(new vscode.LanguageModelTextPart('Remaining: '+(p.remaining?.join('; ')||'No further step proposed.')+'\n\nModel notes are not proof of correctness. Test receipts report process observations.'));}
       }finally{
-        if(!activeCancel.token.isCancellationRequested){
-          const indicators=coherence.inline(coherenceRows);
-          if(indicators)progress.report(new vscode.LanguageModelTextPart(indicators));
-        }
-        if(responseUsage.calls.length||footerId){
-          const detail=tokens.compact(responseUsage),label='Sutra · '+detail+' · conversation details';
-          const footer=footerId?`[${label}](karma-preview:/conversation/${footerId}/Response.md?checkpoint=${footerSignature})`:'Sutra · '+detail;
-          if(!activeCancel.token.isCancellationRequested)progress.report(new vscode.LanguageModelTextPart('\n\n---\n'+footer+(footerId?(audit.memoryUsed?' · Memory restored':' · New conversation'):'')+' · Open tokens, system and kernel status with **Sutra Monitor** in the status bar.\n'));
-        }
         const stopped=activeCancel.token.isCancellationRequested;
-        activityOpen=false;activityProgress=undefined;cancellation.dispose();activeCancel.dispose();activeCancel=undefined;running=false;publish();
+        try{
+          if(!stopped){
+            const indicators=coherence.inline(coherenceRows);
+            if(indicators)progress.report(new vscode.LanguageModelTextPart(indicators));
+          }
+          if(responseUsage.calls.length||footerId){
+            const detail=tokens.compact(responseUsage),label='Sutra · '+detail+' · conversation details';
+            const footer=footerId?`[${label}](karma-preview:/conversation/${footerId}/Response.md?checkpoint=${footerSignature})`:'Sutra · '+detail;
+            if(!stopped)progress.report(new vscode.LanguageModelTextPart('\n\n---\n'+footer+(footerId?(audit.memoryUsed?' · Memory restored':' · New conversation'):'')+' · Open tokens, system and kernel status with **Sutra Monitor** in the status bar.\n'));
+          }
+        }finally{
+          // A discarded response stream must detach its local UI owner, even
+          // when reporting its footer throws. The runner ticket stays retained.
+          activityOpen=false;activityProgress=undefined;cancellation.dispose();activeCancel.dispose();activeCancel=undefined;running=false;publish();
+        }
         if(stopped&&!disposed){try{const key=legacyResume?undefined:stackChat;
           await rememberFlow(await deps.request({op:'orchestrate',event:'pending',...(key?{chat_key:key}:{})}),undefined,chatKey,key);
         }catch{} }

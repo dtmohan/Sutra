@@ -219,6 +219,7 @@ class InvocationLedger(GovernedContext):
         from task_observations import split, capture
         proposal, observation_fields = split(envelope['role'], proposal)
         host_fields = {}
+        reference_sets = None
         with self.db:
             self.db.execute('BEGIN IMMEDIATE')
             row = self.db.execute('SELECT record_json,digest FROM invocations WHERE id=?', (envelope['id'],)).fetchone()
@@ -238,9 +239,10 @@ class InvocationLedger(GovernedContext):
                     page = self.read_page(session, p['id'], p['version'])
                     if page.content_hash != p['hash']: raise PageFault('Delivered page changed')
                 if interface := envelope.get('model_interface'):
-                    from model_packet import bind_output
+                    from model_packet import bind_output, evidence_set_changes
                     proposal, host_fields = bind_output(envelope['role'], payload, envelope['schema'], proposal,
                                                         interface['version'])
+                    reference_sets = evidence_set_changes(envelope['role'], payload, model_proposal, proposal)
                 elif envelope['role'] == 'conversation' and payload.get('response_contract') == 2:
                     from conversation import bind_output
                     proposal = bind_output(payload, proposal)
@@ -323,6 +325,8 @@ class InvocationLedger(GovernedContext):
                     pass  # A malformed optional stream counter is not a grant or admission failure.
             if observation_fields:
                 receipt['observation_fields'] = observation_fields
+            if reference_sets:
+                receipt['evidence_reference_sets'] = reference_sets
             if envelope.get('model_interface') or observation_fields or (envelope['role'] == 'conversation' and payload.get('response_contract') == 2):
                 receipt.update(model_response_hash=sha(canonical(model_proposal)), host_fields=host_fields)
             if envelope.get('model_interface'):
@@ -578,6 +582,21 @@ class InvocationLedger(GovernedContext):
                             original['findings'] = recover_architect_references(envelope['schema'], original['findings'])
                         except (KeyError, TypeError, ValueError):
                             return False
+                    from model_packet import REVIEW_JUDGMENT_VERSION, recover_judgment_choices
+                    if (envelope.get('model_interface') or {}).get('version') == REVIEW_JUDGMENT_VERSION:
+                        try:
+                            original = recover_judgment_choices(original)
+                        except (InvalidUpdate, KeyError, TypeError, ValueError):
+                            return False
+                if r.get('evidence_reference_sets') is not None:
+                    from model_packet import restore_evidence_sets
+                    delivered = json.loads(self.db.execute('SELECT payload_json FROM deliveries WHERE id=?', (env[2],)).fetchone()[0])
+                    envelope = json.loads(env[0])
+                    try:
+                        original = restore_evidence_sets(r['role'], delivered, envelope['schema'], original,
+                            r['evidence_reference_sets'], envelope['model_interface']['version'])
+                    except (InvalidUpdate, ValueError, TypeError, KeyError):
+                        return False
                 observed = r.get('observation_fields', {})
                 if observed:
                     from task_observations import restore

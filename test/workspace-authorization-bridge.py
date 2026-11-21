@@ -40,7 +40,9 @@ def providers(tier):
         if stage == 'synthesis':
             review.budget = {
                 'low': Budget(1400, 512, 256),
-                'mid': Budget(6500, 768, 256),
+                # The structured report's measured mandatory floor is ~7 KiB.
+                # Mid must carry that floor but still fail on actual evidence.
+                'mid': Budget(7500, 768, 256),
                 'high': Budget(32768, 4096, 256),
             }[tier]
         return review
@@ -118,9 +120,22 @@ if __name__ == '__main__':
             return real(ledger, meta, workspace, root, request, providers(tier))
         # Count actual scoped reads, including freshness checks that correctly
         # have no repository-operation charge.
-        with patch.object(repository_tools, 'read_bytes', wraps=repository_tools.read_bytes) as reads:
+        from chat_runtime import SYSTEM as writer_system
+        budget_check = Budget.check
+        context_checks = []
+
+        def observed_check(budget, system, payload, schema):
+            if system == writer_system:
+                context_checks.append({'input_charge': budget.charge(system, payload, schema),
+                    'output_reserve': budget.response_reserve, 'input_limit': budget.input_limit,
+                    'source_files': len(payload.get('excerpts', {}))})
+            return budget_check(budget, system, payload, schema)
+
+        with patch.object(repository_tools, 'read_bytes', wraps=repository_tools.read_bytes) as reads, \
+                patch.object(Budget, 'check', observed_check):
             result = real(ledger, meta, workspace, root, request, providers(tier))
             result['_fixture_synthesis_reads'] = reads.call_count
+            result['_fixture_synthesis_context_checks'] = context_checks
         return result
 
     os.environ.pop('SUTRA_RUNTIME_DIR', None)

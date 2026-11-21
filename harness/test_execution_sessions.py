@@ -27,17 +27,27 @@ class SessionTests(unittest.TestCase):
             paused = self.step(out)
         self.assertEqual(paused['execution_id'], nid)
         self.assertEqual(review_budget.usage(self.s, sid)['used'], spent)
+        calls = len(self.models)
         self.s.close(); self.s = InvocationLedger(self.root/'state.sqlite')
         self.tier = 'high'
         resumed = self.step(paused, event='resume')
         self.assertEqual(resumed['execution_id'], nid)
         self.assertEqual(m.node(self.s, nid), node)
-        done = self.step(resumed)
+        done = self.until('DONE', resumed)
         self.assertTrue(done['data']['result']['admission']['admitted'])
         self.assertEqual(m.state(self.s, nid), 'DONE')
         self.assertEqual(self.s.pinned(sid), contract)
-        self.assertIn('CED724', canonical(self.models[-1][1].payloads[-1]['memory']))
-        self.assertGreater(review_budget.usage(self.s, sid)['used']['calls'], spent['calls'])
+        synthesis = [(model, packet) for stage, model in self.models[calls:] if stage == 'synthesis'
+                     for packet in model.payloads]
+        self.assertTrue(any('claims' in packet for _, packet in synthesis),
+                        'The writer response cannot close the execution before claim review completes')
+        model, packet = next((model, packet) for model, packet in reversed(synthesis) if 'claims' not in packet)
+        self.assertEqual(model.model, fixtures.MODELS['high'])
+        self.assertIn('CED724', canonical(packet['memory']))
+        self.assertEqual(packet['contract'], contract)
+        self.assertEqual(review_budget.usage(self.s, sid)['used']['calls'], spent['calls'] + len(synthesis))
+        self.assertTrue(done['data']['report_review']['reviewer_id'])
+        self.assertTrue(self.s.verify_invocations(sid))
 
     def test_new_request_uses_remaining_parent_capacity_and_keeps_history(self):
         done = self.until('DONE'); sid = self.meta['active']

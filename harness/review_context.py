@@ -19,7 +19,12 @@ CAPABILITIES = {
 
 
 def query(p):
-    return p['contract']['goal'] + '\n' + p['request']
+    query = p['contract']['goal'] + '\n' + p['request']
+    if p.get('review_intent_version') == 1:
+        from review_report import requested
+        if requested(p):
+            query += '\nArchitecture overview: components and end-to-end request flow.'
+    return query
 
 
 _WORD = re.compile(r'[a-zA-Z][a-zA-Z0-9]+')
