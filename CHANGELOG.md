@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.57.2
+
+- Continue an eligible withheld remote architecture report from its saved evidence and original repair allowance. The closed execution stays in the audit history and its costs stay charged.
+- Bound parent synthesis reasoning on the verified Qwen3.8 runtime and submit the recovered claims to the existing publication checks.
+
+## 0.57.1
+
+- Reuse the pinned remote SSH connection for identity inspection. Retry one timed-out warm inspection with a fresh observation and the same verified instance.
+- Page large claim reviews for remote models without reasoning controls. Resume a timed-out output page inside its existing review plan, retaining paid attempts and accepted verdicts.
+- Verify joined read-only 0.57.0 reviews before continuing them on 0.57.1. Preserve source and draft checkpoints, permissions, and cumulative spending.
+
 ## 0.57.0
 
 - Retain capability- and allocation-derived child output reserves instead of clipping every source slice to 2,048 tokens. For supported large-output child calls, fit the transport reservation within the remaining task and branch time up to the existing 360-second cap. Defer safely to a fresh bridge step when needed.

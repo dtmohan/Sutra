@@ -65,6 +65,12 @@ def schema(p):
     if report.requested(p):
         result['properties']['report'] = report.schema(p)
         result['required'].append('report')
+    if 'parent_draft_recovery' in p:
+        fields = result['properties']
+        fields['answer']['maxLength'] = 240
+        fields['summary']['maxLength'] = 200 if p.get('parent_draft_summary_version') == 1 else 240
+        fields['citations']['maxItems'] = min(citation_limit, 4)
+        fields['remaining']['maxItems'] = 3
     from task_observations import add_schema
     return add_schema(result, 'assessment', p)
 
@@ -382,12 +388,17 @@ def request_check(s,sid,p):
         raise InvalidUpdate('Parent optional context allocation requires its source recipe')
     if p.get('parent_repair'):
         _check_parent_repair(s, sid, p)
+    if ('parent_draft_shape_repair' in p or 'parent_draft_summary_version' in p) and 'parent_draft_recovery' not in p:
+        raise InvalidUpdate('Parent response shape repair requires its output-limit recovery')
     from conversation import check_workspace_handoff
     check_workspace_handoff(s,sid,p)
     if 'retained_context_version' in p:
         from retained_context import check as check_retained
         check_retained(s, sid, p)
-    if p.get('memory_budget') and p.get('memory')!=conversation_pages(s,p,Budget(**p['memory_budget'])):raise InvalidUpdate('Parent synthesis memory changed')
+    memory_packet = _check_parent_draft_recovery(s, sid, p) if 'parent_draft_recovery' in p else p
+    if memory_packet.get('memory_budget') and p.get('memory') != conversation_pages(
+            s, memory_packet, Budget(**memory_packet['memory_budget'])):
+        raise InvalidUpdate('Parent synthesis memory changed')
     if p['contract']!=s.validation_contract(sid) or p['constraint_echo']!=constraint_rows(p['contract']):raise InvalidUpdate('Chat task or constraints changed')
     if not re.fullmatch('[a-f0-9]{32}',p['_request_nonce']):raise InvalidUpdate('Missing fresh chat identity')
     data=runtime.load_partition(s,sid,p['workspace'],p['snapshot_receipts'],p['snapshot_owner'])
@@ -889,8 +900,9 @@ def _parent_candidate(s, sid, workspace, request, candidate_id, checkpoint=None)
     draft, env, packet = candidate(s, sid, candidate_id)
     owner = machine.ACTIVE.get()
     draft_owner = (env.get('orchestration') or {}).get('node_id')
-    if (not owner or not draft_owner
-            or machine.checked(s, owner).get('flow_id') != machine.node(s, draft_owner).get('flow_id')
+    same_flow = (owner and draft_owner
+                 and machine.checked(s, owner).get('flow_id') == machine.node(s, draft_owner).get('flow_id'))
+    if (not owner or not draft_owner or not (same_flow or parent_summary_authorization(s, sid, candidate_id))
             or packet['workspace'] != str(workspace) or packet['request'] != request['prompt']
             or (packet.get('child_results') and packet.get('orchestration_parent') != request.get('orchestration_parent'))
             or [item['invocation_id'] for item in packet.get('child_results', [])] != request.get('child_results', [])
@@ -940,6 +952,336 @@ def _check_parent_repair(s, sid, packet):
             or owner.get('context', {}).get('request') != packet['request']):
         raise InvalidUpdate('Parent repair checkpoint belongs to another run or execution')
     return saved
+
+
+_PARENT_OUTPUT_GUIDANCE = {'errors': [
+    'The previous generation ended before delivering a report. Return the complete JSON object first.',
+    'Use short, specific, source-backed descriptions and keep every required section compact.',
+]}
+
+
+def _parent_output_receipt(s, sid, invocation_id):
+    row = s.db.execute(
+        'SELECT i.record_json,i.digest,d.payload_json,d.payload_hash,r.record_json,r.id '
+        'FROM invocations i JOIN deliveries d ON d.id=i.delivery_id '
+        'JOIN invocation_receipts r ON r.invocation_id=i.id WHERE i.id=? AND i.session=?',
+        (invocation_id, sid)).fetchone()
+    if not row:
+        raise InvalidUpdate('Saved parent output-limit receipt is missing')
+    env_raw, env_hash, packet_raw, packet_hash, receipt_raw, receipt_id = row
+    env, packet, receipt = map(json.loads, (env_raw, packet_raw, receipt_raw))
+    if (sha('invocation-v1:' + env_raw) != env_hash
+            or sha('invocation-receipt-v1:' + receipt_raw) != receipt_id
+            or sha(packet_raw) != packet_hash or env.get('payload_hash') != packet_hash
+            or receipt.get('payload_hash') != packet_hash or receipt.get('invocation_hash') != env_hash
+            or env.get('id') != invocation_id or receipt.get('invocation_id') != invocation_id
+            or env.get('session') != sid or receipt.get('session') != sid
+            or env.get('role') != 'chat_reviewer' or receipt.get('role') != 'chat_reviewer'
+            or receipt.get('logic_hash') != env.get('logic_hash')
+            or receipt.get('contract_hash') != env.get('contract_hash')
+            or receipt.get('resulting_contract_hash') != s.validation_contract(sid)['contract_hash']
+            or sha(canonical(receipt.get('proposal'))) != receipt.get('response_hash')
+            or receipt.get('status') != 'quarantined'
+            or (receipt.get('admission') or {}).get('admitted') is not False):
+        raise InvalidUpdate('Saved parent result is not a verified rejected receipt')
+    return env, packet, receipt, receipt_id
+
+
+def _parent_output_failure(s, sid, invocation_id):
+    from remote_context import supports_parent_output_recovery
+    env, packet, receipt, receipt_id = _parent_output_receipt(s, sid, invocation_id)
+    if (receipt.get('failure_kind') != 'output_limit'
+            or receipt.get('proposal') is not None
+            or (receipt.get('token_usage') or {}).get('output_tokens') != env['budget_profile']['response_reserve']
+            or packet.get('report_schema_version') != 2 or not report.requested(packet)
+            or 'parent_repair' not in packet or 'parent_draft_recovery' in packet
+            or packet.get('memory_budget') != env.get('budget_profile')
+            or not supports_parent_output_recovery(Budget(**env['budget_profile']))):
+        raise InvalidUpdate('Saved parent result is not an eligible verified output-limit receipt')
+    return env, packet, receipt_id
+
+
+def repairable_parent_output(receipt):
+    """Identify a summary-length fault for a possible saved writer retry."""
+    proposal = receipt.get('proposal')
+    summary = proposal.get('summary') if isinstance(proposal, dict) else None
+    errors = (receipt.get('admission') or {}).get('errors') or []
+    return (receipt.get('failure_kind') is None
+            and isinstance(summary, str) and len(summary) > 240
+            and isinstance(errors, list) and len(errors) == 1 and isinstance(errors[0], str)
+            and errors[0].startswith(f'response.summary: string length {len(summary)} outside 1..240 characters;'))
+
+
+def _parent_shape_repair(s, sid, repair_id, source, original, failed_receipt):
+    from invocation_roles import validate_shape
+    from parent_synthesis import linked_to
+    from task_observations import answer_schema
+    import orchestration as machine
+    env, packet, receipt, receipt_id = _parent_output_receipt(s, sid, repair_id)
+    owner = machine.node(s, env['orchestration']['node_id'])
+    if (not linked_to(s, owner, original['parent_repair']['owner'])
+            or env.get('model_identity') != source.get('model_identity') or env['model'] != source['model']
+            or packet != _parent_output_packet(original, source['id'], failed_receipt, Budget(**env['budget_profile']))
+            or not repairable_parent_output(receipt)):
+        raise InvalidUpdate('Saved parent retry did not fail solely its compact summary bound')
+    # Reject a receipt with another invalid field hidden behind the first error.
+    validate_shape(dict(receipt['proposal'], summary=receipt['proposal']['summary'][:240]), answer_schema(env['schema']))
+    return {'version': 1, 'invocation_id': repair_id, 'receipt': receipt_id}
+
+
+def _parent_summary_candidate(s, sid, failed_invocation, candidate_id):
+    from calibration import EMPTY_HASH, assert_binding
+    from context_window import validate_proof
+    from invocation_roles import validate_result
+    from model_packet import DERIVED_REVIEW_SUMMARY_VERSION, host_fields
+    from retained_context import requests as context_requests
+
+    source, original, failed_receipt = _parent_output_failure(s, sid, failed_invocation)
+    repair = _parent_shape_repair(s, sid, candidate_id, source, original, failed_receipt)
+    env, packet, receipt, _ = _parent_output_receipt(s, sid, candidate_id)
+    proposal = receipt['proposal']
+    fmt = schema(packet)
+    if (env['schema'] != fmt or env['revision'] != s.snapshot(sid)['revision']
+            or (env.get('model_interface') or {}).get('version') != DERIVED_REVIEW_SUMMARY_VERSION
+            or (receipt.get('host_fields') or {}).get('summary') != proposal['summary']
+            or context_requests(packet, proposal)
+            or s.db.execute('SELECT 1 FROM invocation_quarantine WHERE invocation_id=?', (candidate_id,)).fetchone()):
+        raise InvalidUpdate('Saved parent report has unresolved context or a different host summary binding')
+    assert_binding(s, sid, env.get('calibration_binding', {'hash': EMPTY_HASH, 'profiles': []}))
+    for envelope, delivered in ((source, original), (env, packet)):
+        validate_proof(envelope.get('physical_context'), Budget(**envelope['budget_profile']), SYSTEM,
+                       delivered, envelope['schema'], envelope.get('model_identity'))
+    summary_packet = dict(packet, parent_draft_summary_version=1)
+    summary = host_fields('chat_reviewer', summary_packet, schema(summary_packet),
+                          DERIVED_REVIEW_SUMMARY_VERSION, proposal)['summary']
+    draft = dict(proposal, summary=summary)
+    result = validate_result(s, sid, 'chat_reviewer', packet, fmt, draft, env['delivery_id'])
+    if not result['admission']['admitted']:
+        raise InvalidUpdate('Saved parent proposal failed its original content validation')
+    descriptor = {'version': 1, 'candidate_id': candidate_id, 'failed_invocation': failed_invocation,
+                  'failed_receipt': failed_receipt, 'repair_receipt': repair['receipt'],
+                  'draft_hash': sha(canonical(draft)), 'packet_hash': sha(canonical(packet))}
+    return descriptor, draft, env, packet
+
+
+def parent_summary_revalidation(s, sid, failed_invocation, repair_invocation):
+    """Revalidate a host-only projection fault without touching its old receipt."""
+    if not s.verify_invocations(sid):
+        raise InvalidUpdate('Saved parent invocation history failed verification')
+    descriptor, _, _, _ = _parent_summary_candidate(s, sid, failed_invocation, repair_invocation)
+    return descriptor
+
+
+def parent_summary_authorization(s, sid, candidate_id):
+    """Accept only a recovery descriptor in this flow's verified handoff."""
+    import orchestration as machine
+    from review_upgrade import recorded
+
+    scope = getattr(s, '_review_upgrade', None)
+    if not scope or scope['current']['session'] != sid or not scope.get('active_root'):
+        return None
+    active = machine.ACTIVE.get()
+    if active and active != scope['active_root']:
+        return None
+    for event in machine.events(s, scope['flow_id']):
+        marker = event['data'].get('parent_summary_revalidation')
+        if (event['kind'] == 'PARENT_REPORT_CONTINUATION' and marker
+                and marker.get('candidate_id') == candidate_id and event['data']['review_policy_upgrade'] == scope):
+            if recorded(s, scope['flow_id']) != scope:
+                raise InvalidUpdate('Saved parent report recovery changed its flow binding')
+            return marker
+    return None
+
+
+def parent_summary_candidate(s, sid, candidate_id):
+    marker = parent_summary_authorization(s, sid, candidate_id)
+    if marker is None:
+        return None
+    actual, draft, env, packet = _parent_summary_candidate(s, sid, marker['failed_invocation'], candidate_id)
+    if actual != marker:
+        raise InvalidUpdate('Saved parent report recovery differs from its committed descriptor')
+    return draft, env, packet
+
+
+def _parent_output_attempts(s, sid, saved):
+    """Count committed dispatches across the original and linked executions."""
+    import orchestration as machine
+    from parent_synthesis import linked_to
+    attempts = []
+    rows = s.db.execute(
+        "SELECT i.id,i.record_json,d.payload_json,r.record_json FROM invocations i "
+        "JOIN deliveries d ON d.id=i.delivery_id LEFT JOIN invocation_receipts r ON r.invocation_id=i.id "
+        "WHERE i.session=? AND json_extract(i.record_json,'$.role')='chat_reviewer' "
+        "AND json_extract(d.payload_json,'$.parent_repair.nonce')=? ORDER BY i.rowid", (sid, saved['nonce']))
+    for iid, env_raw, packet_raw, receipt_raw in rows:
+        env, packet = map(json.loads, (env_raw, packet_raw))
+        owner = machine.node(s, env['orchestration']['node_id'])
+        if (packet.get('parent_repair') != saved
+                or owner['id'] != saved['owner'] and not linked_to(s, owner, saved['owner'])):
+            raise InvalidUpdate('Parent output attempt belongs to another execution or reservation')
+        if not receipt_raw or json.loads(receipt_raw)['status'] == 'accepted':
+            raise InvalidUpdate('A parent output attempt is already in progress or accepted')
+        attempts.append(iid)
+    if not 0 < len(attempts) < saved['attempt_limit']:
+        raise InvalidUpdate('The original parent output attempt allocation is exhausted')
+    return attempts[-1]
+
+
+def parent_output_checkpoint(s, sid, invocation_id, owner, request, *, repair_invocation=None):
+    env, packet, receipt_id = _parent_output_failure(s, sid, invocation_id)
+    saved = _check_parent_repair(s, sid, packet)
+    if (saved['owner'] != owner or env['orchestration']['node_id'] != owner
+            or packet['request'] != request['prompt']
+            or (packet.get('child_results') and packet.get('orchestration_parent') != request.get('orchestration_parent'))
+            or [item['invocation_id'] for item in packet.get('child_results', [])] != request.get('child_results', [])
+            or (packet.get('conversation_handoff') or {}).get('invocation_id') != request.get('conversation_id')
+            or not any(event['kind'] == 'FIN' and event['data'].get('reason') == 'chat_repair_exhausted'
+                       for event in s.run(env['run_id'])['events'])
+            or not s.verify_invocations(sid)):
+        raise InvalidUpdate('Saved parent output limit does not match the original committed workflow')
+    if _parent_output_attempts(s, sid, saved) != (repair_invocation or invocation_id):
+        raise InvalidUpdate('A newer parent output failure already uses this attempt allocation')
+    checkpoint = {'version': 1, 'owner': owner, 'failed_invocation': invocation_id,
+                  'failed_receipt': receipt_id, 'nonce': saved['nonce'], 'attempt_limit': saved['attempt_limit']}
+    if repair_invocation:
+        repair = _parent_shape_repair(s, sid, repair_invocation, env, packet, receipt_id)
+        checkpoint.update(repair_invocation=repair['invocation_id'], repair_receipt=repair['receipt'])
+    return checkpoint
+
+
+def _parent_output_packet(packet, invocation_id, receipt_id, budget, *, repair=None, derive_summary=False):
+    from remote_context import PARENT_REASONING_BUDGET_TOKENS
+    recovered = dict(packet, memory_budget=vars(budget), repair=_PARENT_OUTPUT_GUIDANCE,
+                     parent_draft_recovery={'version': 1, 'failed_invocation': invocation_id,
+                                            'failed_receipt': receipt_id,
+                                            'reasoning_budget_tokens': PARENT_REASONING_BUDGET_TOKENS})
+    if derive_summary:
+        recovered['parent_draft_summary_version'] = 1
+    if repair:
+        recovered['parent_draft_shape_repair'] = repair
+        recovered['repair'] = {'errors': [
+            'The previous report ended before publication. Keep the answer to one introductory sentence.',
+            'Focus the report on the strongest source-backed findings and the concrete request flow.',
+        ]}
+    return recovered
+
+
+def _check_parent_draft_recovery(s, sid, packet):
+    from remote_context import supports_parent_output_recovery
+    marker = packet['parent_draft_recovery']
+    if not isinstance(marker, dict) or not isinstance(marker.get('failed_invocation'), str):
+        raise InvalidUpdate('Invalid parent output recovery binding')
+    env, original, receipt_id = _parent_output_failure(s, sid, marker['failed_invocation'])
+    budget = Budget(**packet['memory_budget'])
+    repair = None
+    if 'parent_draft_shape_repair' in packet:
+        supplied = packet['parent_draft_shape_repair']
+        if not isinstance(supplied, dict) or not isinstance(supplied.get('invocation_id'), str):
+            raise InvalidUpdate('Invalid parent response shape repair binding')
+        repair = _parent_shape_repair(s, sid, supplied['invocation_id'], env, original, receipt_id)
+    derive_summary = 'parent_draft_summary_version' in packet
+    if (not supports_parent_output_recovery(budget)
+            or budget.response_reserve != env['budget_profile']['response_reserve']
+            or derive_summary and type(packet['parent_draft_summary_version']) is not int
+            or repair and not derive_summary
+            or packet != _parent_output_packet(original, env['id'], receipt_id, budget,
+                                               repair=repair, derive_summary=derive_summary)):
+        raise InvalidUpdate('Parent output recovery changed the saved evidence or allocation')
+    return original
+
+
+def check_parent_output_dispatch(s, sid, packet, model, model_identity):
+    """Recheck the original writer quota in the gateway registration transaction."""
+    import orchestration as machine
+    from parent_synthesis import linked_to
+    failed = packet['parent_draft_recovery']['failed_invocation']
+    env, original, _ = _parent_output_failure(s, sid, failed)
+    saved = original['parent_repair']
+    active = machine.ACTIVE.get()
+    if not active:
+        raise InvalidUpdate('Parent output recovery requires the linked execution')
+    owner = machine.checked(s, active)
+    prior = machine.node(s, saved['owner'])
+    if (owner['kind'] != 'execution' or not linked_to(s, owner, prior['id'])
+            or owner['session'] != sid or owner['parent_id'] != prior['parent_id']
+            or model != env['model'] or model_identity != env['model_identity']):
+        raise InvalidUpdate('Parent output recovery changed the original execution or model identity')
+    if _parent_output_attempts(s, sid, saved) != (packet.get('parent_draft_shape_repair') or {}).get('invocation_id', failed):
+        raise InvalidUpdate('A newer parent output failure already uses this attempt allocation')
+
+
+def resume_parent_output(s, meta, workspace, root, request, checkpoint, provider=None, review_provider=None):
+    """Reattempt the saved parent writer with original evidence and remaining spending."""
+    import orchestration as machine
+    from invocation_timing import plan, require_headroom
+    from parent_synthesis import linked_to
+    from remote_context import supports_parent_output_recovery
+    sid = meta['active']
+    owner = machine.checked(s, machine.ACTIVE.get())
+    repair_id = checkpoint.get('repair_invocation')
+    if (owner['kind'] != 'execution' or not linked_to(s, owner, checkpoint['owner']) or owner['session'] != sid
+            or checkpoint != parent_output_checkpoint(s, sid, checkpoint['failed_invocation'], checkpoint['owner'],
+                                                      request, repair_invocation=repair_id)):
+        raise InvalidUpdate('Parent output recovery belongs to another execution')
+    env, original, receipt_id = _parent_output_failure(s, sid, checkpoint['failed_invocation'])
+    if original['workspace'] != str(workspace):
+        raise InvalidUpdate('Parent output recovery belongs to another workspace')
+    choice = original['route']['record']['choice']
+    selection = KarmaAdapter().route(request['prompt'], request['models'], request['tier'], choice['signals'])
+    if selection['model'] != env['model']:
+        raise InvalidUpdate('Resume this parent output recovery with its saved model and tier')
+    real = provider is None
+    if real:
+        from api_runtime import provider_for
+        provider = provider_for(root, env['model'], review=True)
+        provider.keep_alive = 0
+        context.context_budget(provider, s, sid, slots=1)
+    if provider.model != env['model']:
+        raise InvalidUpdate('Parent output recovery model changed')
+    provider.budget = provider.budget.with_limits(response_reserve=env['budget_profile']['response_reserve'])
+    if not supports_parent_output_recovery(provider.budget):
+        from monitoring import ResourceWait
+        raise ResourceWait({'profile': 'physical-context-v1', 'provider': 'sutra_remote',
+                            'model': env['model'], 'available': False, 'admitted': False,
+                            'blocker': 'measurement_unavailable',
+                            'reason': 'Start the saved parent model so Sutra can verify its reasoning-budget runtime.'})
+    provider.thinking = (original.get('reasoning') or {}).get('requested')
+    repair = {'version': 1, 'invocation_id': repair_id, 'receipt': checkpoint['repair_receipt']} if repair_id else None
+    packet = _parent_output_packet(original, env['id'], receipt_id, provider.budget, repair=repair, derive_summary=True)
+    data = request_check(s, sid, packet)
+    fmt = schema(packet)
+    charge = provider.budget.check(SYSTEM, packet, fmt)
+    require_headroom(plan(provider, 'chat_reviewer', packet))
+    run = s.begin_run(sid, packet['request'], [], None, max_calls=1, max_repairs=0)
+    try:
+        s.reserve(run, 'ATTEMPT', {'attempt': 0})
+        if real:
+            from provider_resources import require_resources
+            hardware = require_resources(root, provider=provider)
+            with s.db:
+                s._audit('RESOURCE_GATE', {'run_id': run, 'measurement': hardware})
+        delivery = s.prepare_delivery(sid, packet, charge)
+        out = InvocationGateway(s.path, run, provider, ledger=s).invoke(
+            'chat_reviewer', uuid.uuid4().hex, SYSTEM, packet, fmt, delivery)
+        if out['admission']['admitted']:
+            s.event(run, 'ALLOW', {'reason': 'bounded_parent_output_recovered', 'invocation_id': out['invocation_id']})
+        else:
+            s.event(run, 'NACK', {'errors': out['admission']['errors']})
+            s.event(run, 'FIN', {'reason': 'bounded_parent_output_recovery_finished'})
+    except Exception:
+        if not any(event['kind'] in ('ALLOW', 'FIN', 'RESOURCE_WAIT') for event in s.run(run)['events']):
+            s.event(run, 'FIN', {'reason': 'parent_output_recovery_paused'})
+        raise
+    if not out['admission']['admitted'] and repair_id is None:
+        try:
+            retry = parent_output_checkpoint(s, sid, env['id'], checkpoint['owner'], request,
+                                             repair_invocation=out['invocation_id'])
+        except InvalidUpdate:
+            pass  # The original quota or repair profile cannot admit another call.
+        else:
+            return {'parent_generation_pending': {'invocation_id': out['invocation_id']},
+                    'parent_output_retry': retry, 'route': choice, 'token_usage': out['token_usage']}
+    return _finish_answer(s, meta, workspace, root, request, out, packet, data, review_provider, defer_review=True)
 
 
 def recover_parent_repair(s, sid, workspace, request):
@@ -1011,6 +1353,14 @@ def resume_parent_review(s, meta, workspace, root, request, checkpoint, review_p
 def resume_claim_review(s, meta, workspace, root, request, retry, review_provider=None):
     """Continue a host-saved claim review using its existing draft and evidence."""
     return _resume_parent(s, meta, workspace, root, request, retry['candidate_id'],
+                          review_provider, retry=retry)
+
+
+def resume_revalidated_parent(s, meta, workspace, root, request, descriptor, review_provider=None, retry=None):
+    sid = meta['active']
+    if descriptor != parent_summary_authorization(s, sid, descriptor['candidate_id']):
+        raise InvalidUpdate('Saved parent report recovery lacks its exact flow authorization')
+    return _resume_parent(s, meta, workspace, root, request, descriptor['candidate_id'],
                           review_provider, retry=retry)
 
 

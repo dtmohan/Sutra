@@ -331,7 +331,7 @@ def source_handoff(s, sid, p, data):
     if p.get('child_evidence_version', 1) < 4 or not p.get('child_slice'):
         return None
     n = machine.node(s, p['branch']['id'])
-    if n['session'] != sid or n['binding'] != machine.binding(s, sid):
+    if n['session'] != sid or not machine.binding_matches(s, n):
         raise InvalidUpdate('Child source handoff belongs to another task')
     if machine.state(s, n['id']) in ('CANCELLED', 'QUARANTINED'):
         raise InvalidUpdate('Child source handoff was revoked')
@@ -707,7 +707,9 @@ def request_check(s,sid,p):
     check(p)
     from conversation import check_workspace_handoff
     n=machine.node(s,p['branch']['id'])
-    if machine.packet(n)!=p['branch'] or n['kind']!='branch' or n['session']!=sid or n['binding']!=machine.binding(s,sid):raise InvalidUpdate('Child lineage or contract changed')
+    if (machine.packet(n) != p['branch'] or n['kind'] != 'branch' or n['session'] != sid
+            or not machine.binding_matches(s, n)):
+        raise InvalidUpdate('Child lineage or contract changed')
     if machine.state(s,n['id']) in ('CANCELLED','QUARANTINED'):raise InvalidUpdate('Child was revoked')
     if n['context_hash']!=sha(canonical(n['context'])) or p['request']!=n['context']['request']:raise InvalidUpdate('Parent context changed')
     if p['contract']!=s.validation_contract(sid) or p['constraint_echo']!=constraint_rows(p['contract']):raise InvalidUpdate('Child constraints changed')
@@ -996,9 +998,10 @@ def run(s,meta,workspace,root,nid,models,tier='auto',provider=None):
 
 def joined_results(s,sid,parent,ids,prompt,*,note_version=1):
     n=machine.node(s,parent)
-    if n['binding']!=machine.binding(s,sid) or machine.state(s,parent) in ('CANCELLED','QUARANTINED'):
+    if n['session'] != sid:
+        raise InvalidUpdate('Cross-task child join')
+    if not machine.binding_matches(s, n) or machine.state(s, parent) in ('CANCELLED','QUARANTINED'):
         raise InvalidUpdate('Child result parent binding changed or was revoked')
-    if n['session']!=sid:raise InvalidUpdate('Cross-task child join')
     joins=[e for e in machine.events(s,parent) if e['kind']=='JOIN']
     if not joins or joins[-1]['data']['invocations']!=ids:raise InvalidUpdate('Uncommitted child join')
     result=[]

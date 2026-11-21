@@ -126,6 +126,15 @@ def sync_sources(s,session,workspace):
 
 
 def state(s,meta,workspace):
+    from review_upgrade import for_state, use
+    session = meta.get('active')
+    if session and s.snapshot(session)['constraints'].get('auto_review'):
+        with use(s, for_state(s, session)):
+            return _state(s, meta, workspace)
+    return _state(s, meta, workspace)
+
+
+def _state(s,meta,workspace):
     session=meta.get('active')
     if not session:return {'session':None,'workspace':str(workspace),'model':meta.get('model','local-assistant:latest')}
     if s.snapshot(session)['constraints'].get('review_only'):

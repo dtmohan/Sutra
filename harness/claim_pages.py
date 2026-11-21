@@ -10,6 +10,7 @@ import uuid
 from context_manager import canonical, sha, InvalidUpdate, ContextBudgetExceeded
 
 VERSION = 2
+CLAIM_BATCH_SIZE = 4
 
 
 def static_statements(source):
@@ -217,6 +218,15 @@ def partition(claims, evidence, fits):
     return pages
 
 
+def partition_claims(claims, evidence, fits, batch_size=CLAIM_BATCH_SIZE):
+    """Keep broad overview evidence from inflating every claim batch."""
+    groups = [['overview']] if 'overview' in claims else []
+    keys = [key for key in claims if key != 'overview']
+    groups.extend(keys[i:i + batch_size] for i in range(0, len(keys), batch_size))
+    return [page for group in groups
+            for page in partition({key: claims[key] for key in group}, evidence, fits)]
+
+
 def validate_plan(plan, candidate_id, draft, source, claims, evidence):
     if (plan.get('version') != VERSION or plan.get('candidate_id') != candidate_id
             or plan.get('candidate_hash') != sha(canonical(draft)) or plan.get('source_hash') != source_hash(source)
@@ -238,11 +248,12 @@ def validate_plan(plan, candidate_id, draft, source, claims, evidence):
     if got != expected or seen_claims != set(claims): raise InvalidUpdate('Claim review plan omits source evidence or claims')
 
 
-def create(s, sid, candidate_id, draft, source, claims, evidence, fits, strict):
+def create(s, sid, candidate_id, draft, source, claims, evidence, fits, strict, *, bounded_claims=False):
+    pack = partition_claims if bounded_claims else partition
     plan = {'id': uuid.uuid4().hex, 'version': VERSION, 'candidate_id': candidate_id,
             'candidate_hash': sha(canonical(draft)), 'source_hash': source_hash(source),
             'contract': copy.deepcopy(source['contract']), 'session': sid, 'strict': strict,
-            'pages': partition(claims, evidence, fits), 'attempts_per_page': 2}
+            'pages': pack(claims, evidence, fits), 'attempts_per_page': 2}
     validate_plan(plan, candidate_id, draft, source, claims, evidence)
     with s.db: s._audit('REPORT_REVIEW_PLAN', plan)
     return plan
@@ -263,3 +274,98 @@ def attempts(s, sid, plan_id, index, through=None):
         WHERE i.session=? AND json_extract(d.payload_json,'$.review_plan')=?
         AND json_extract(d.payload_json,'$.review_page')=? ORDER BY i.rowid''', (sid, plan_id, index))
     return [r for r in rows if through is None or r[1] <= through]
+
+
+def output_failure(s, sid, plan, index, invocation_id):
+    """Bind refinement to the actual settled output failure and its page."""
+    row = s.db.execute('''SELECT d.payload_json,i.record_json,i.digest,r.record_json,r.id FROM invocations i
+        JOIN deliveries d ON d.id=i.delivery_id JOIN invocation_receipts r ON r.invocation_id=i.id
+        WHERE i.id=? AND i.session=?''', (invocation_id, sid)).fetchone()
+    if not row:
+        raise InvalidUpdate('Claim review output failure receipt is unavailable')
+    packet_raw, env_raw, env_digest, receipt_raw, receipt_digest = row
+    packet, envelope, receipt = map(json.loads, (packet_raw, env_raw, receipt_raw))
+    if (sha('invocation-v1:' + env_raw) != env_digest
+            or sha('invocation-receipt-v1:' + receipt_raw) != receipt_digest
+            or sha(packet_raw) != envelope['payload_hash'] or receipt['invocation_hash'] != env_digest
+            or envelope['id'] != invocation_id or receipt['invocation_id'] != invocation_id
+            or envelope['role'] != 'report_reviewer' or packet.get('review_plan') != plan['id']
+            or packet.get('review_page') != index or packet.get('candidate_id') != plan['candidate_id']
+            or receipt.get('status') != 'quarantined' or receipt.get('failure_kind') != 'output_limit'):
+        raise InvalidUpdate('Claim review output failure differs from its committed page')
+    return packet
+
+
+def refinement_parent(s, sid, plan):
+    refinement = plan.get('refinement')
+    if refinement is None:
+        return None
+    if (not isinstance(refinement, dict)
+            or set(refinement) != {'previous', 'page', 'count', 'failed_invocation'}
+            or type(refinement['page']) is not int or type(refinement['count']) is not int
+            or refinement['count'] < 2 or refinement['previous'] == plan['id']):
+        raise InvalidUpdate('Invalid claim page refinement')
+    old = find(s, sid, plan['candidate_id'], refinement['previous'])
+    index, count = refinement['page'], refinement['count']
+    if (not 0 <= index < len(old['pages'])
+            or any(old.get(key) != plan.get(key) for key in
+                   ('version', 'candidate_hash', 'source_hash', 'contract', 'strict', 'attempts_per_page'))
+            or old['pages'][:index] != plan['pages'][:index]
+            or old['pages'][index + 1:] != plan['pages'][index + count:]
+            or len(plan['pages']) != len(old['pages']) - 1 + count):
+        raise InvalidUpdate('Claim refinement changed an unaffected page or its binding')
+    old_page = old['pages'][index]
+    old_claims, old_evidence = set(old_page['claims']), set(old_page['evidence'])
+    for page in plan['pages'][index:index + count]:
+        keys, evidence = set(page['claims']), set(page['evidence'])
+        if not keys <= old_claims or not evidence <= old_evidence or (keys, evidence) == (old_claims, old_evidence):
+            raise InvalidUpdate('Claim refinement did not narrow the failed page')
+    output_failure(s, sid, old, index, refinement['failed_invocation'])
+    return old, index, count
+
+
+def page_attempts(s, sid, plan, index, through=None):
+    """Inherited pages retain their admitted receipts and their spent attempts."""
+    result = []
+    seen = set()
+    while True:
+        if plan['id'] in seen:
+            raise InvalidUpdate('Cyclic claim page refinement')
+        seen.add(plan['id'])
+        result.extend(attempts(s, sid, plan['id'], index, through))
+        parent = refinement_parent(s, sid, plan)
+        if parent is None:
+            break
+        previous, split, count = parent
+        if split <= index < split + count:
+            break
+        plan = previous
+        if index >= split + count:
+            index -= count - 1
+    return sorted(result, key=lambda row: row[1])
+
+
+def refine(s, sid, plan, index, failed, draft, source, claims, evidence, fits):
+    """Replace one failed page with smaller disjoint claim/evidence pair sets."""
+    output_failure(s, sid, plan, index, failed)
+    item = plan['pages'][index]
+    page_claims = {key: claims[key] for key in item['claims']}
+    units = {eid: evidence[eid] for eid in item['evidence']}
+    if len(page_claims) > 1:
+        batch = min(CLAIM_BATCH_SIZE, len(page_claims) // 2)
+        smaller = partition_claims(page_claims, units, fits, batch)
+    elif len(units) > 1:
+        middle = len(units) // 2
+        keys = list(units)
+        smaller = [subpage for group in (keys[:middle], keys[middle:])
+                   for subpage in partition(page_claims, {eid: units[eid] for eid in group}, fits)]
+    else:
+        return None
+    refined = dict(plan, id=uuid.uuid4().hex,
+                   pages=plan['pages'][:index] + smaller + plan['pages'][index + 1:],
+                   refinement={'previous': plan['id'], 'page': index, 'count': len(smaller),
+                               'failed_invocation': failed})
+    validate_plan(refined, plan['candidate_id'], draft, source, claims, evidence)
+    refinement_parent(s, sid, refined)
+    with s.db: s._audit('REPORT_REVIEW_PLAN', refined)
+    return refined

@@ -15,7 +15,7 @@ RUNNABLE = {'CLASSIFYING', 'BINDING', 'WORKSPACE', 'MAPPING', 'BRANCHING',
 APPROVAL = {'NEED_ARM', 'NEED_PERMISSION', 'NEED_TOOL_APPROVAL', 'AWAITING_ACTION'}
 INITIAL_EVENTS = {'start', 'start_existing', 'start_review', 'step', 'resume', 'grant',
                   'capability_grant', 'approve_document', 'supply_evidence',
-                  'restart_review', 'accept_provenance'}
+                  'restart_review', 'continue_parent_report', 'accept_provenance'}
 
 
 def _wait_kind(flow):

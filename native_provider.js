@@ -13,7 +13,7 @@ const ACCESS_AGENT='karma_workspace_agent_access';
 const THINK_NEXT='sutraThinkingForNextRequest';
 const HOST_READY_WAIT_MS=1500,HOST_READY_POLL_MS=50;
 const TASK_RUNNER_EVENTS=new Set(['start','start_existing','step','resume','grant','capability_grant',
-  'approve_document','supply_evidence','restart_review','accept_provenance']);
+  'approve_document','supply_evidence','restart_review','continue_parent_report','accept_provenance']);
 const TASK_STOPPED='Sutra stopped this task. Its saved context, permissions and consumed spending are retained. Check the saved checkpoint before explicitly resuming; no new run was started.';
 const MODEL_IDS={auto:'karma-auto',low:'karma-low',mid:'karma-mid',high:'karma-high'};
 const CHAT_DEFAULTS={'defaultModel':MODEL_IDS.auto,'editor.preferCopilotHarness':false,'defaultToCopilotHarness':false,'editor.localAgent.enabled':true};
@@ -356,7 +356,7 @@ function install(vscode,context,deps){
   }
   const stackKey='sutra.taskStackChat';
   const restartableReview=flow=>flow?.state==='DONE'&&flow.recovery?.terminal_review===true&&
-    flow.recovery?.kind==='policy_changed'&&flow.recovery?.restart_allowed===true;
+    ['policy_changed','parent_output_recovery'].includes(flow.recovery.kind)&&flow.recovery?.restart_allowed===true;
   const flowScope=flow=>flow?.stackChat?{chat_key:flow.stackChat,flow_id:flow.flow_id}:{};
   const allocationReasons={
     workspace_limit:'The workspace’s automatic allocation ceiling cannot cover the next step.',
@@ -562,7 +562,7 @@ function install(vscode,context,deps){
     if(disposed)throw Object.assign(new Error('Sutra chat disconnected. The runner retains its request for reconnection.'),{code:'COORDINATOR_DETACHED'});
     const access=refreshAccess();
     const models=['inspect','pending','recoverable_review','cancel','locate_document'].includes(event)?undefined:await deps.configureModels(false,token,{tier,onFallback});
-    const workspaceStep=['step','resume','grant','capability_grant','restart_review','accept_provenance'].includes(event) && !classifying(flow);
+    const workspaceStep=['step','resume','grant','capability_grant','restart_review','continue_parent_report','accept_provenance'].includes(event) && !classifying(flow);
     if(workspaceStep){
       assertCurrent(access,token);
       assertArmed();
@@ -1125,14 +1125,22 @@ function install(vscode,context,deps){
           if(!recovery.restart_allowed){
             progress.report(new vscode.LanguageModelTextPart(recovery.message+'\n\nUse **Discard** in Sutra Monitor, then submit your new request.'));return false;
           }
-          const title=recovery.kind==='provenance_changed'?'Source changed during this review.':
+          const compatible=['compatible_review_upgrade','parent_output_recovery'].includes(recovery.kind);
+          const title=compatible?'Continue this saved review under the updated runtime?':
+            recovery.kind==='provenance_changed'?'Source changed during this review.':
             recovery.kind==='source_scope_correction'?'Correct the source scope for this saved review?':'Update this saved review for the current Sutra version?';
-          const choice=await vscode.window.showWarningMessage(title,{modal:true,detail:recovery.message+'\nSaved request: '+old.prompt},'Restart review');
-          if(activeCancel.token.isCancellationRequested||choice!=='Restart review'){
+          const action=compatible?'Continue review':'Restart review';
+          const choice=await vscode.window.showWarningMessage(title,{modal:true,detail:recovery.message+'\nSaved request: '+old.prompt},action);
+          if(activeCancel.token.isCancellationRequested||choice!==action){
             progress.report(new vscode.LanguageModelTextPart('Saved request retained. '+recovery.message));return false;
           }
           flow=old;prompt=old.prompt;restartReview=true;
-          conversationId=undefined;footerId=undefined;footerSignature=undefined;
+          if(compatible){
+            conversationId=old.conversation_id;
+            if(conversationId){footerSignature=await rememberMemory(conversationId);footerId=conversationId;}
+          }else{
+            conversationId=undefined;footerId=undefined;footerSignature=undefined;
+          }
           return true;
         }
         if(accessContinuation){
@@ -1368,7 +1376,8 @@ function install(vscode,context,deps){
             throw new Error('Task or calibration changed after the action. Its receipt is retained.');
         }
         if(restartReview){
-          flow=await advance(flow,'restart_review',{confirmed:true,
+          const recoveryEvent=flow.recovery?.kind==='parent_output_recovery'?'continue_parent_report':'restart_review';
+          flow=await advance(flow,recoveryEvent,{confirmed:true,
             ...(flow.recovery?.terminal_review?{stack_cursor:flow.recovery.stack_cursor}:{}),
             ...(flow.recovery?.binding?{binding:flow.recovery.binding}:{})});
           if(showRequestNotice(flow))return;

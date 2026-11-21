@@ -46,6 +46,15 @@ def initialize(s):
       CREATE TABLE IF NOT EXISTS orchestration_events(node_id TEXT,seq INTEGER,record_json TEXT,digest TEXT,PRIMARY KEY(node_id,seq));
       CREATE TABLE IF NOT EXISTS orchestration_charges(id TEXT PRIMARY KEY,node_id TEXT,kind TEXT,resource_id TEXT UNIQUE,cost_json TEXT);
       CREATE TABLE IF NOT EXISTS orchestration_settlements(charge_id TEXT PRIMARY KEY,record_json TEXT,digest TEXT);
+      CREATE INDEX IF NOT EXISTS review_policy_upgrades_by_session
+        ON orchestration_events(json_extract(record_json,'$.data.review_policy_upgrade.current.session'))
+        WHERE json_extract(record_json,'$.kind')='REVIEW_POLICY_UPGRADED';
+      CREATE INDEX IF NOT EXISTS parent_report_continuations_by_session
+        ON orchestration_events(json_extract(record_json,'$.data.review_policy_upgrade.current.session'))
+        WHERE json_extract(record_json,'$.kind')='PARENT_REPORT_CONTINUATION';
+      CREATE UNIQUE INDEX IF NOT EXISTS one_parent_report_continuation
+        ON orchestration_nodes(json_extract(record_json,'$.parent_synthesis_predecessor.flow_id'))
+        WHERE json_extract(record_json,'$.parent_synthesis_predecessor.flow_id') IS NOT NULL;
     ''')
     for table in ('orchestration_nodes','orchestration_events','orchestration_charges','orchestration_settlements'):
         for op in ('UPDATE','DELETE'):
@@ -99,6 +108,12 @@ def binding(s,sid):
     return {'session':sid,'contract_hash':s.origin(sid,bootstrap=True)['contract_hash'],
             'calibration_hash':current(s,sid,usable=True)['hash'],'logic_hash':s.logic_hash}
 
+
+def binding_matches(s, node):
+    from review_upgrade import node_policy
+    return node['binding'] == binding(s, node['session']) or node_policy(s, node)
+
+
 def permissions(s,sid):
     from native_access import read_scope
     c=s.snapshot(sid)['constraints'];paths=c.get('allowed_paths',['.'])
@@ -122,7 +137,7 @@ def checked(s,nid):
     check_admission(s)
     n=node(s,nid)
     if n['kind']=='flow':return n
-    if n['binding']!=binding(s,n['session']):raise InvalidUpdate('Orchestration contract, calibration or policy changed')
+    if not binding_matches(s,n):raise InvalidUpdate('Orchestration contract, calibration or policy changed')
     if state(s,nid) in TERMINAL:raise InvalidUpdate('Orchestration node is terminal')
     if n['parent_id']:checked(s,n['parent_id'])
     return n

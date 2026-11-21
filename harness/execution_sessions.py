@@ -8,10 +8,12 @@ from context_manager import InvalidUpdate, canonical, sha
 import orchestration as m
 
 
-def open_session(s, sid, flow_id, previous=None):
+def open_session(s, sid, flow_id, previous=None, *, task_id=None):
     from orchestration_flow import info
     flow, data = info(s, flow_id)
-    parent = m.task(s, sid)
+    parent = m.checked(s, task_id) if task_id else m.task(s, sid)
+    if parent['kind'] != 'task' or parent['session'] != sid:
+        raise InvalidUpdate('Execution requires the same task and session')
     frames = m.gates(s, parent['id'], {})
     m.allowed(frames)
     left = {k: frames[0]['limits'][k] - frames[0]['used'][k]
@@ -21,7 +23,7 @@ def open_session(s, sid, flow_id, previous=None):
     m.allowed(admitted)
     context = {'request': flow['prompt'], 'conversation_id': data.get('conversation_id'),
                'contract_hash': parent['binding']['contract_hash']}
-    n = m.create(s, 'execution', sid, parent['id'], binding=parent['binding'],
+    n = m.create(s, 'execution', sid, parent['id'], binding=m.binding(s, sid),
                  permissions=parent['permissions'], goal=parent['goal'],
                  objective=flow['prompt'], limits=left, context=context,
                  context_hash=sha(canonical(context)), flow_id=flow_id, previous=previous)

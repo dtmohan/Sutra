@@ -39,6 +39,23 @@ class RemoteControlTests(unittest.TestCase):
         self.assertNotIn('shell', options)
         self.assertIn('StrictHostKeyChecking=yes', args[0])
         self.assertIn('BatchMode=yes', args[0])
+        self.assertNotIn('-S', args[0])
+
+    def test_observation_reuses_its_profile_control_socket(self):
+        socket_path = self.root / 'approved.sock'
+        with patch('remote_control._ssh', return_value='/usr/bin/ssh'), \
+                patch('remote_control.control_socket', return_value=socket_path) as socket, \
+                patch('remote_control.subprocess.run', return_value=SimpleNamespace(
+                    returncode=0, stdout=b'{"ok":true}', stderr=b'')) as execute:
+            self.assertEqual(control.run_ps(self.profile, '{}', reuse_tunnel=True), {'ok': True})
+        socket.assert_called_once_with(self.profile)
+        command = execute.call_args.args[0]
+        self.assertEqual(command[command.index('-S') + 1], str(socket_path))
+        self.assertEqual(command[-2], self.profile['ssh_alias'])
+        self.assertIn('StrictHostKeyChecking=yes', command)
+        self.assertIn('-T', command)
+        self.assertNotIn('-M', command)
+        self.assertNotIn('-L', command)
 
     def test_probe_failure_and_timeout_withhold_provider_error_details(self):
         for result in (SimpleNamespace(returncode=1, stdout=b'', stderr=b'PRIVATE_REMOTE_ERROR'),

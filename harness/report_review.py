@@ -41,7 +41,14 @@ def legacy_schema(p):
 
 
 def candidate(s, sid, iid):
-    draft = s.load_result(sid, iid)
+    try:
+        draft = s.load_result(sid, iid)
+    except PageFault:
+        from chat_runtime import parent_summary_candidate
+        recovered = parent_summary_candidate(s, sid, iid)
+        if recovered is None:
+            raise
+        return recovered
     env = json.loads(s.db.execute('SELECT record_json FROM invocations WHERE id=? AND session=?', (iid, sid)).fetchone()[0])
     if env['role'] != 'chat_reviewer' or 'report' not in draft: raise InvalidUpdate('Architecture review requires a current structured draft')
     source = json.loads(s.db.execute('SELECT payload_json FROM deliveries WHERE id=?', (env['delivery_id'],)).fetchone()[0])
@@ -149,6 +156,7 @@ def request_check(s, sid, p):
     evidence = pages.inventory(p['candidate_id'], source)
     plan = pages.find(s, sid, p['candidate_id'], p['review_plan'])
     pages.validate_plan(plan, p['candidate_id'], draft, source, all_claims, evidence)
+    pages.refinement_parent(s, sid, plan)
     index = p['review_page']
     if type(index) is not int or not 0 <= index < len(plan['pages']): raise InvalidUpdate('Invalid claim review page')
     separation = p['reviewer_selection']
@@ -191,7 +199,7 @@ def page_receipts(s, sid, plan, through=None):
     import claim_pages as pages
     accepted = {}
     for index in range(len(plan['pages'])):
-        for iid, _, status in pages.attempts(s, sid, plan['id'], index, through):
+        for iid, _, status in pages.page_attempts(s, sid, plan, index, through):
             if status == 'accepted':
                 s.load_result(sid, iid)  # Fresh source, binding and receipt check.
                 accepted[index] = iid
@@ -277,9 +285,11 @@ def pending_candidate(s, sid, payload):
     Plans are durable before dispatch, so bridge/process restarts can find them.
     Source or contract changes invalidate the candidate and require fresh work.
     """
+    seen = set()
     for raw, in s.db.execute("SELECT payload_json FROM page_audit WHERE event='REPORT_REVIEW_PLAN' ORDER BY seq DESC").fetchall():
         plan = json.loads(raw)
-        if plan['session'] != sid: continue
+        if plan['session'] != sid or plan['candidate_id'] in seen: continue
+        seen.add(plan['candidate_id'])
         try:
             draft, _, source = candidate(s, sid, plan['candidate_id'])
             if any(source.get(k) != payload.get(k) for k in
@@ -341,7 +351,7 @@ def recover_timeout_retry(s, sid, candidate_id):
     completed = page_receipts(s, sid, plan)
     for index in range(len(plan['pages'])):
         if index in completed: continue
-        prior = pages.attempts(s, sid, plan['id'], index)
+        prior = pages.page_attempts(s, sid, plan, index)
         if not prior or len(prior) >= plan['attempts_per_page'] or prior[-1][2] != 'quarantined': return None
         row = s.db.execute('SELECT r.record_json,d.payload_json FROM invocations i '
             'JOIN invocation_receipts r ON r.invocation_id=i.id JOIN deliveries d ON d.id=i.delivery_id '
@@ -384,6 +394,8 @@ def _run(s, sid, root, candidate_id, provider=None, requested='auto', strict=Fal
     from invocation_gateway import InvocationGateway
     from review_context import context_budget
     from review_reasoning import bind, repair, claim_timeout_mode
+    from reasoning_policy import capabilities
+    from remote_profiles import is_remote
     from token_usage import summarize
     draft, env, source = candidate(s, sid, candidate_id)
     mapper = env.get('model_identity') or unknown(env['model']); real = provider is None
@@ -409,16 +421,25 @@ def _run(s, sid, root, candidate_id, provider=None, requested='auto', strict=Fal
             provider.expected_identity = observed
         separation = compare(mapper, observed); separation.update(selection='injected', requested_model=provider.model)
         enforce(separation, strict)
+    bounded_claims = (is_remote(provider.model)
+                      and not capabilities(getattr(provider, 'context_metadata', {}))['values'])
     all_claims = claims(draft['report'], pages.source_paths(source)); evidence = pages.inventory(candidate_id, source)
     plan = pages.find(s, sid, candidate_id, retry['plan_id'] if retry else None)
     retry_index = None
+    split_retry = False
     if retry:
         retry_index = retry['review_page'] - 1
         if not 0 <= retry_index < len(plan['pages']):
             raise InvalidUpdate('Saved claim review page is outside the committed plan')
-        failed = pages.attempts(s, sid, plan['id'], retry_index)
-        if not failed or failed[0][0] != retry['failed_invocation'] or failed[0][2] != 'quarantined':
+        item = plan['pages'][retry_index]
+        split_retry = (retry.get('status') == 'claim_review_output_limit' and bounded_claims
+                       and max(len(item['claims']), len(item['evidence'])) > 1)
+        failed = pages.page_attempts(s, sid, plan, retry_index)
+        selected = failed[-1 if split_retry else 0] if failed else None
+        if not selected or selected[0] != retry['failed_invocation'] or selected[2] != 'quarantined':
             raise InvalidUpdate('Saved claim review failure differs from the committed attempt')
+        if retry.get('status') == 'claim_review_output_limit':
+            pages.output_failure(s, sid, plan, retry_index, retry['failed_invocation'])
         if retry.get('status') == 'claim_review_timeout':
             row = s.db.execute('SELECT r.record_json,d.payload_json FROM invocations i '
                 'JOIN invocation_receipts r ON r.invocation_id=i.id JOIN deliveries d ON d.id=i.delivery_id '
@@ -447,14 +468,14 @@ def _run(s, sid, root, candidate_id, provider=None, requested='auto', strict=Fal
         check(provider.budget, SYSTEM, packet, fmt, planning=True)
         return charge
     def retry_preference(index):
-        if index != retry_index: return None
+        if index != retry_index or split_retry: return None
         if retry and retry.get('status') == 'claim_review_timeout' and retry.get('retry_mode') == 'manual': return None
         return 'off'
     def make(plan, index):
         p = pages.packet(source, draft, candidate_id, plan, index, all_claims, evidence, separation, strict)
         preference = retry_preference(index)
         if p.get('review_transport_version') == 1:
-            previous = pages.attempts(s, sid, plan['id'], index)
+            previous = pages.page_attempts(s, sid, plan, index)
             if previous and previous[-1][2] == 'quarantined':
                 row = s.db.execute('SELECT r.record_json,d.payload_json FROM invocations i '
                     'JOIN invocation_receipts r ON r.invocation_id=i.id JOIN deliveries d ON d.id=i.delivery_id '
@@ -463,7 +484,7 @@ def _run(s, sid, root, candidate_id, provider=None, requested='auto', strict=Fal
                 p['repair'] = {'errors': [error[:160] for error in rejected['admission']['errors'][:2]]}
                 previous_reasoning = delivered.get('reasoning') or {}
                 import os
-                if (preference is None and rejected.get('failure_kind') == 'output_limit'
+                if (preference is None and not bounded_claims and rejected.get('failure_kind') == 'output_limit'
                         and previous_reasoning.get('preference') == 'adaptive'
                         and previous_reasoning.get('step') == 1
                         and os.environ.get('SUTRA_THINKING', 'adaptive') != 'on'):
@@ -479,11 +500,34 @@ def _run(s, sid, root, candidate_id, provider=None, requested='auto', strict=Fal
             check_context(dict(p, repair={'errors': ['x'*160]*2}), schema(p)); return True
         except ContextBudgetExceeded: return False
     if plan is None:
-        try: plan = pages.create(s, sid, candidate_id, draft, source, all_claims, evidence, fits, strict)
+        try: plan = pages.create(s, sid, candidate_id, draft, source, all_claims, evidence, fits, strict,
+                                 bounded_claims=bounded_claims)
         except ContextBudgetExceeded:
             if not real: raise
             attempts = 1; allocation = context_budget(provider, s, sid, slots=1, expand_output=False)
-            plan = pages.create(s, sid, candidate_id, draft, source, all_claims, evidence, fits, strict)
+            plan = pages.create(s, sid, candidate_id, draft, source, all_claims, evidence, fits, strict,
+                                bounded_claims=bounded_claims)
+    if split_retry:
+        latest = successor = pages.find(s, sid, candidate_id)
+        seen = set()
+        while successor['id'] != plan['id']:
+            # Recovery can run again after a bridge ends between saving the
+            # smaller plan and publishing the next flow checkpoint.
+            if successor['id'] in seen:
+                raise InvalidUpdate('Cyclic saved claim refinement')
+            seen.add(successor['id'])
+            previous = pages.refinement_parent(s, sid, successor)
+            if previous is None:
+                raise InvalidUpdate('Saved claim review was superseded by an unrelated plan')
+            if previous[0]['id'] == plan['id'] and (
+                    previous[1] != retry_index
+                    or successor['refinement']['failed_invocation'] != retry['failed_invocation']):
+                raise InvalidUpdate('Saved claim refinement differs from its output failure')
+            successor = previous[0]
+        if latest['id'] == plan['id']:
+            latest = pages.refine(s, sid, plan, retry_index, retry['failed_invocation'],
+                                  draft, source, all_claims, evidence, fits)
+        plan = latest
     pages.validate_plan(plan, candidate_id, draft, source, all_claims, evidence)
     if plan['strict'] != strict: raise InvalidUpdate('Claim review independence requirement changed')
     completed = page_receipts(s, sid, plan); reused = len(completed); measured = []; final = None
@@ -491,7 +535,7 @@ def _run(s, sid, root, candidate_id, provider=None, requested='auto', strict=Fal
     for index in range(len(plan['pages'])):
         if index in completed: continue
         p = make(plan, index); fmt = schema(p)
-        prior = pages.attempts(s, sid, plan['id'], index)
+        prior = pages.page_attempts(s, sid, plan, index)
         available = plan['attempts_per_page'] - len(prior)
         if available <= 0: raise InvalidUpdate('Claim review page repair exhausted; previous attempts remain charged')
         count = min(attempts, available)
@@ -535,14 +579,18 @@ def _run(s, sid, root, candidate_id, provider=None, requested='auto', strict=Fal
                     'review_page': index + 1, 'total_pages': len(plan['pages'])}
                 break
             if attempt == count-1 or (final.get('blocked') and recovery is None):
-                if (final.get('failure_kind') == 'output_limit' and p['reasoning']['requested'] is not False
-                        and len(prior) + attempt + 1 < plan['attempts_per_page']):
+                page = plan['pages'][index]
+                can_split = bounded_claims and max(len(page['claims']), len(page['evidence'])) > 1
+                if (final.get('failure_kind') == 'output_limit' and
+                        (can_split or not bounded_claims and p['reasoning']['requested'] is not False
+                         and len(prior) + attempt + 1 < plan['attempts_per_page'])):
                     final['claim_review_stop'] = {
                         'status': 'claim_review_output_limit', 'resume_phase': 'SYNTHESIS',
                         'candidate_id': candidate_id, 'plan_id': plan['id'],
                         'failed_invocation': final['invocation_id'], 'review_page': index + 1,
                         'total_pages': len(plan['pages']),
-                        'error': 'The claim reviewer reached its shared thinking and answer limit.',
+                        'error': ('The claim reviewer reached its output limit. Resume to review smaller parts of this page.'
+                                  if can_split else 'The claim reviewer reached its shared thinking and answer limit.'),
                     }
                 s.event(run_id, 'FIN', {'reason': ('claim_page_waiting_for_resume'
                         if final.get('claim_review_stop') else 'claim_page_repair_exhausted')})

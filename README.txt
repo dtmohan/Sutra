@@ -1,4 +1,8 @@
-Sutra 0.57.0 — Review allocation and admission recovery
+Sutra 0.57.2 — Saved report recovery
+
+Remote reviews can recover a timed-out identity inspection. Claim reviews for
+remote models without reasoning controls use smaller pages. Compatible saved
+read-only reviews retain verified checkpoints and consumed allocations.
 
 Child reviews retain the output allowance earned from the selected model window
 and remaining task allocation. Supported remote runtimes measure the actual

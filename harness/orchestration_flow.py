@@ -218,6 +218,8 @@ def response(s,fid,*,_runner_poll=False,**extra):
                 recovery=recovery(s,fid),allocation_version=data.get('allocation_version',0),
                 execution_id=data.get('root_node') if data.get('root_node') and m.node(s,data['root_node'])['kind']=='execution' else None,
                 children=[{'id':i,'state':m.state(s,i),'files':m.node(s,i)['files']} for i in data.get('children',[])],**extra)
+    if predecessor := n.get('parent_synthesis_predecessor'):
+        result.update(continued_from=predecessor['flow_id'], previous_execution_id=predecessor['execution_id'])
     from task_continuation import describe
     result['continuation'] = describe(result, result.get('continuation_probe'))
     return result
@@ -264,6 +266,11 @@ def recovery(s,fid):
     """Inspect incompatibility without accepting or rewriting old commitments."""
     n,data=info(s,fid)
     terminal = m.state(s,fid) in m.TERMINAL
+    if terminal:
+        from parent_synthesis import offer
+        parent_recovery = offer(s, n, data)
+        if parent_recovery:
+            return parent_recovery
     if not data.get('root_node') or terminal and not _terminal_review(s, n, data): return None
     parent=m.node(s,data['root_node']);old=parent['binding']
     try:current=m.binding(s,parent['session'])
@@ -271,6 +278,14 @@ def recovery(s,fid):
         return {'kind':'binding_changed','restart_allowed':False,
                 'message':'The saved task calibration is no longer usable. Discard this request and establish a valid task before continuing.'}
     changed=[key for key in old if old[key]!=current.get(key)]
+    if changed == ['logic_hash'] and not terminal:
+        import review_upgrade as upgrade
+        if upgrade.recorded(s, fid, data):
+            changed = []
+        elif upgrade.offer(s, fid, data):
+            return {'kind':'compatible_review_upgrade', 'restart_allowed':True,
+                    'message':'Resume this review under the current Sutra version with the same '
+                              'source evidence, checkpoints, permissions and consumed budget.'}
     if terminal:
         if changed != ['logic_hash'] or not s.snapshot(parent['session'])['constraints'].get('auto_review'): return None
         from task_stack import view
@@ -399,8 +414,10 @@ def handle(s,meta,workspace,root,req,providers=None):
     if req.get('event') == 'runner_stop':
         return stop(s, root, workspace, req)
     check_request(s, req)
-    result = _handle_chat(s, meta, workspace, root, req, providers)
-    return attach(s, root, req, result)
+    import review_upgrade as upgrade
+    with upgrade.use(s, upgrade.recorded(s, req.get('flow_id'))):
+        result = _handle_chat(s, meta, workspace, root, req, providers)
+        return attach(s, root, req, result)
 
 
 def _handle_chat(s,meta,workspace,root,req,providers=None):
@@ -450,7 +467,8 @@ def _handle_chat(s,meta,workspace,root,req,providers=None):
                         m.transition(s,fid,'CANCELLED','CANCELLED',{'spending_retained':True})
             projection=task_projection(s,workspace,chat)
             return dict(response(s,fid),**projection) if event=='cancel' else projection
-        if event not in ('inspect', 'runner_summary') and not (event == 'restart_review' and (recovery(s,fid) or {}).get('terminal_review')):
+        if event not in ('inspect', 'runner_summary') and not (event in ('restart_review','continue_parent_report')
+                and (recovery(s,fid) or {}).get('terminal_review')):
             assert_focused(s,workspace,chat,fid)
     else:
         meta={'workspace':str(workspace)}
@@ -460,7 +478,12 @@ def _handle_chat(s,meta,workspace,root,req,providers=None):
 def workflow_usage(s, fid):
     """Complete receipt-backed usage for this flow, including interrupted calls."""
     from token_usage import history, summarize
-    _, data = info(s, fid)
+    flow, data = info(s, fid)
+    flow_ids = {fid}
+    linked = (flow.get('parent_synthesis_predecessor') or {}).get('flow_id')
+    while linked and linked not in flow_ids:
+        flow_ids.add(linked)
+        linked = (m.node(s, linked).get('parent_synthesis_predecessor') or {}).get('flow_id')
     sid = (data.get('binding') or {}).get('session')
     call_ids = set(); runs = set()
     if sid:
@@ -469,7 +492,7 @@ def workflow_usage(s, fid):
             owner = (env.get('orchestration') or {}).get('node_id')
             while owner:
                 node = m.node(s, owner)
-                if node.get('flow_id') == fid:
+                if node.get('flow_id') in flow_ids:
                     call_ids.add(env['id']); runs.add(env['run_id']); break
                 owner = node.get('parent_id')
     calls = [call for run in runs for call in history(s.db, run_id=run)['calls']
@@ -1102,8 +1125,13 @@ def _handle(s,meta,workspace,root,req,providers=None):
             m.abandon_children(s,d['root_node'],'Workflow cancelled')
         m.cancel(s,fid);return response(s,fid)
     incompatibility=recovery(s,fid)
+    if event=='continue_parent_report':
+        from parent_synthesis import continue_saved
+        return continue_saved(s, meta, workspace, root, f, d, req)
     if event=='restart_review':
         if not incompatibility or not incompatibility['restart_allowed']:raise InvalidUpdate('This saved request cannot restart as a policy-only or source-snapshot review')
+        if incompatibility['kind'] == 'parent_output_recovery':
+            raise InvalidUpdate('Use the linked report continuation for this withheld draft')
         parent=m.node(s,d['root_node']);sid=parent['session']
         terminal_restart = incompatibility.get('terminal_review') is True
         if terminal_restart and req.get('confirmed') is not True:
@@ -1114,6 +1142,19 @@ def _handle(s,meta,workspace,root,req,providers=None):
                 raise InvalidUpdate('Task stack changed before review restart; inspect its current state')
         if not req.get('armed') or meta.get('active')!=sid or req.get('binding')!=identity(s,sid):
             raise InvalidUpdate('Restart requires the same user-armed task and current binding')
+        if incompatibility['kind'] == 'compatible_review_upgrade':
+            if req.get('confirmed') is not True:
+                raise InvalidUpdate('Continuing this saved review under the updated runtime requires confirmation')
+            if provenance_changed(s, workspace, fid, d):
+                return response(s, fid)
+            import review_upgrade as upgrade
+            stamp = upgrade.offer(s, fid, d)
+            if not stamp:
+                raise InvalidUpdate('The saved review is no longer eligible for this upgrade')
+            with upgrade.use(s, stamp):
+                upgrade.confirm(s, stamp, d, closed=bool(stamp.get('active_previous')))
+                move(s, fid, 'PAUSED', 'REVIEW_POLICY_UPGRADED', review_policy_upgrade=stamp)
+                return response(s, fid, progress='Saved review verified under the current runtime. Existing spending remains charged.')
         correction = None
         if incompatibility['kind'] == 'source_scope_correction':
             if req.get('confirmed') is not True:
@@ -1505,6 +1546,10 @@ def _handle(s,meta,workspace,root,req,providers=None):
                 if phase=='CODING':
                     from native_runtime import turn
                     out=turn(s,meta,workspace,root,request,provider=provider('coder'))
+                elif d.get('parent_summary_revalidation'):
+                    from chat_runtime import resume_revalidated_parent
+                    out = resume_revalidated_parent(s, meta, workspace, root, request,
+                        d['parent_summary_revalidation'], review_provider=provider('synthesis'), retry=claim_retry)
                 elif claim_retry:
                     from chat_runtime import resume_claim_review
                     out=resume_claim_review(s,meta,workspace,root,request,claim_retry,
@@ -1519,9 +1564,15 @@ def _handle(s,meta,workspace,root,req,providers=None):
                             save(root, meta)
                             return response(s, fid, progress='The saved draft is ready for claim review.',
                                             claim_review_usage=workflow_usage(s, fid))
-                    out = (resume_parent_review(s, meta, workspace, root, request, checkpoint,
-                                                review_provider=provider('synthesis')) if checkpoint else
-                           answer(s,meta,workspace,root,request,provider=provider('synthesis')))
+                    if checkpoint:
+                        out = resume_parent_review(s, meta, workspace, root, request, checkpoint,
+                                                   review_provider=provider('synthesis'))
+                    elif d.get('parent_output_retry'):
+                        from chat_runtime import resume_parent_output
+                        out = resume_parent_output(s, meta, workspace, root, request, d['parent_output_retry'],
+                                                   provider=provider('synthesis'))
+                    else:
+                        out = answer(s,meta,workspace,root,request,provider=provider('synthesis'))
         except BridgeStepRequired:
             # No model dispatch or charge occurred. Keep the same saved work
             # and let the next bridge step admit a complete bounded slice.
@@ -1565,8 +1616,11 @@ def _handle(s,meta,workspace,root,req,providers=None):
                 return response(s, fid, progress='Gathering source evidence for the review.',
                                 claim_review_usage=workflow_usage(s, fid))
             if out.get('parent_generation_pending'):
+                details = {}
+                if out.get('parent_output_retry'):
+                    details['parent_output_retry'] = out['parent_output_retry']
                 move(s, fid, 'SYNTHESIS', 'PARENT_GENERATION_CHECKPOINT',
-                     parent_generation=out['parent_generation_pending'])
+                     parent_generation=out['parent_generation_pending'], **details)
                 save(root, meta)
                 return response(s, fid, progress='Review attempt saved. Continuing its remaining repair allowance.',
                                 claim_review_usage=workflow_usage(s, fid))

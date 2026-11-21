@@ -149,6 +149,71 @@ class ClaimPageTests(unittest.TestCase):
             review.published(self.s, self.sid, cid, next(iter(old.values())))
         self.assertTrue(self.s.verify_invocations(self.sid))
 
+    def test_remote_length_recovery_refines_saved_page_and_reuses_accepted_receipt(self):
+        from local_model import OutputLimitExceeded
+
+        cid = self.candidate()
+        draft, _, source = review.candidate(self.s, self.sid, cid)
+        claims = review.claims(draft['report'], pages.source_paths(source))
+        evidence = pages.inventory(cid, source)
+        # An older plan may have put multiple claims on a page.
+        old = pages.create(self.s, self.sid, cid, draft, source, claims, evidence,
+                           lambda page: len(page['evidence']) <= 1, False)
+        self.assertGreaterEqual(len(old['pages']), 2)
+
+        class Remote(Fake):
+            context_metadata = {'thinking': {'values': [], 'default': None}}
+
+            def call(self, call_id, system, packet, schema):
+                proposal, record = super().call(call_id, system, packet, schema)
+                if packet['review_plan'] == old['id'] and packet['review_page'] == 1:
+                    failure = OutputLimitExceeded('Fixture exhausted a saved multi-claim page')
+                    failure.call_record = {'provider': 'sutra_remote', 'response': {
+                        'done': True, 'prompt_eval_count': 330, 'eval_count': self.budget.response_reserve}}
+                    raise failure
+                return proposal, record
+
+        reviewer = Remote('sutra:remote/fixture')
+        with patch.dict('os.environ', SUTRA_THINKING='model-default'):
+            paused = review.run(self.s, self.sid, self.storage, cid, reviewer)
+        stop = paused['claim_review_stop']
+        self.assertEqual(stop['status'], 'claim_review_output_limit')
+        self.assertEqual(stop['review_page'], 2)
+        first = review.page_receipts(self.s, self.sid, old)
+        self.assertEqual(set(first), {0})
+        before = review_budget.usage(self.s, self.sid)
+        pinned = self.s.pinned(self.sid)
+        with patch.dict('os.environ', SUTRA_THINKING='model-default'), self.assertRaises(InterruptedError):
+            with patch.object(self.s, 'begin_run', side_effect=InterruptedError('after refinement commit')):
+                review.run(self.s, self.sid, self.storage, cid, reviewer, retry=stop)
+        refinement = pages.find(self.s, self.sid, cid)
+        self.assertNotEqual(refinement['id'], old['id'])
+        self.assertEqual(refinement['refinement']['failed_invocation'], stop['failed_invocation'])
+        self.assertEqual(review_budget.usage(self.s, self.sid), before)
+        self.assertEqual(review.page_receipts(self.s, self.sid, refinement), first)
+        self.s.close()
+        self.s = InvocationLedger(self.storage/'state.sqlite')
+        resumed = Remote(reviewer.model)
+        with patch.dict('os.environ', SUTRA_THINKING='model-default'):
+            final = review.run(self.s, self.sid, self.storage, cid, resumed, retry=stop)
+        report, publication = review.published(self.s, self.sid, cid, final['invocation_id'])
+        self.assertEqual(publication['total'], len(claims))
+        self.assertEqual(set(publication['claim_reviews']), set(claims))
+        self.assertEqual(publication['reviewer_ids'][0], first[0])
+        self.assertEqual(final['review_pages']['reused'], 1)
+        self.assertEqual(final['review_pages']['plan_id'], refinement['id'])
+        self.assertTrue(report['report']['overview'])
+        self.assertTrue(all(p['review_page'] != 0 for p in resumed.payloads))
+        self.assertTrue(all(p['reasoning']['requested'] is None for p in resumed.payloads))
+        self.assertEqual(self.s.pinned(self.sid), pinned)
+        after = review_budget.usage(self.s, self.sid)
+        self.assertEqual(after['limits'], before['limits'])
+        self.assertEqual(after['allocation_version'], before['allocation_version'])
+        self.assertEqual(after['used']['source_bytes'], before['used']['source_bytes'])
+        self.assertEqual(after['used']['calls'], before['used']['calls'] + len(resumed.payloads))
+        self.assertTrue(self.s.verify_invocations(self.sid))
+        self.assertTrue(self.s.audit_valid())
+
     def test_chat_retry_reuses_saved_draft_and_unfinished_review(self):
         import chat_runtime
         from test_chat import MODELS

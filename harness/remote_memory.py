@@ -29,6 +29,7 @@ from monitoring import ResourceWait
 PROFILE = 'remote-nvidia-v1'
 MAX_SAMPLE_AGE = 8
 MAX_CAPTURE_SECONDS = 20
+TUNNEL_READINESS_SECONDS = 20
 MAX_COLD_CAPTURE_SECONDS = 180
 MAX_COLD_RPC_SECONDS = 160
 MIN_HASH_BYTES_PER_SECOND = 128 * 1024**2
@@ -322,7 +323,7 @@ $file=Get-Item -LiteralPath MODEL_PATH -Force
   model_file=@{bytes=[long]$file.Length;mtime_ticks=$file.LastWriteTimeUtc.Ticks.ToString();creation_ticks=$file.CreationTimeUtc.Ticks.ToString()}} | ConvertTo-Json -Depth 3 -Compress
 '''.replace('PORT', str(profile['remote_port'])).replace('MODEL_PATH', _literal(profile['model_path']))
     with _stage('instance_confirmation', timeout_seconds):
-        current = run_ps(profile, script, timeout_seconds=timeout_seconds)
+        current = run_ps(profile, script, timeout_seconds=timeout_seconds, reuse_tunnel=True)
     if (not isinstance(current, dict) or current.get('pid') != instance.get('pid') or
             current.get('started_at') != instance.get('started_at') or
             current.get('address') != '127.0.0.1' or
@@ -336,27 +337,44 @@ $file=Get-Item -LiteralPath MODEL_PATH -Force
 
 def probe(profile):
     """Separate a bounded cold identity pass from fresh counter admission."""
+    from lifecycle import remaining
     from remote_control import ensure_tunnel, run_ps
-    # Tunnel readiness has its existing independent bounded SSH control calls;
-    # the identity observation starts at the fresh preflight, after readiness.
-    with _stage('ssh_tunnel', 20):
-        ensure_tunnel(profile)
-    started = time.time()
-    began = time.monotonic()
-    nonce = secrets.token_hex(16)
     cached = _cached(profile)
-    with _stage('identity_preflight', 5):
-        preflight = _preflight_binding(profile,
-            run_ps(profile, _preflight_script(profile, nonce), timeout_seconds=5), nonce)
-    reuse = cached is not None and cached['binding'] == preflight
-    basis = 'verified_hash_reused_with_stat_and_instance' if reuse else 'fresh_full_hash'
-    budget = verification_budget(preflight['bytes'], basis)
-    deadline = began + budget['capture_seconds']
-    rpc_began = time.monotonic()
-    rpc_limit = _remaining(budget['rpc_seconds'], deadline)
-    with _stage('identity_probe', rpc_limit):
-        observed = run_ps(profile, _probe_script(profile, nonce, cached, preflight),
-                          timeout_seconds=rpc_limit)
+    recovered_timeout = None
+    while True:
+        with _stage('ssh_tunnel', TUNNEL_READINESS_SECONDS):
+            ensure_tunnel(profile)
+        started = time.time()
+        began = time.monotonic()
+        nonce = secrets.token_hex(16)
+        with _stage('identity_preflight', 5):
+            preflight = _preflight_binding(profile,
+                run_ps(profile, _preflight_script(profile, nonce), timeout_seconds=5, reuse_tunnel=True), nonce)
+            reuse = cached is not None and cached['binding'] == preflight
+            if recovered_timeout is not None and not reuse:
+                raise InvalidUpdate('Remote identity changed before the warm inspection retry')
+        basis = 'verified_hash_reused_with_stat_and_instance' if reuse else 'fresh_full_hash'
+        budget = verification_budget(preflight['bytes'], basis)
+        deadline = began + budget['capture_seconds']
+        rpc_began = time.monotonic()
+        rpc_limit = _remaining(budget['rpc_seconds'], deadline)
+        try:
+            with _stage('identity_probe', rpc_limit):
+                observed = run_ps(profile, _probe_script(profile, nonce, cached, preflight),
+                                  timeout_seconds=rpc_limit, reuse_tunnel=True)
+        except (OSError, InvalidUpdate) as error:
+            failure = getattr(error, 'remote_observation', {})
+            available = remaining()
+            # Only a transient warm transport timeout earns a retry. All GPU
+            # evidence must come from the new nonce-bound observation.
+            if (not reuse or recovered_timeout is not None or failure.get('failure_kind') != 'timeout'
+                    or (available is not None and available < TUNNEL_READINESS_SECONDS + MAX_CAPTURE_SECONDS)):
+                if recovered_timeout is not None:
+                    failure['prior_timeout'] = recovered_timeout
+                raise
+            recovered_timeout = failure
+        else:
+            break
     rpc_elapsed = time.monotonic() - rpc_began
     if not isinstance(observed, dict) or observed.get('nonce') != nonce:
         raise InvalidUpdate('Remote hardware response does not match its fresh observation request')
@@ -381,6 +399,9 @@ def probe(profile):
                     wall_time=measured_at - counter_age_upper,
                     capture_started_at=started, capture_seconds=time.monotonic() - began,
                     verification_budget=budget, counter_age_upper_seconds=counter_age_upper)
+    observed.pop('recovered_identity_timeout', None)
+    if recovered_timeout is not None:
+        observed['recovered_identity_timeout'] = recovered_timeout
     if basis == 'verified_hash_reused_with_stat_and_instance':
         if (not cached or cached['sha256'] != model.get('sha256') or
                 cached['binding'] != _cache_binding(observed)):
@@ -557,7 +578,7 @@ def _compact(sample):
     """Keep bounded evidence only, excluding incidental server metadata."""
     result = {key: sample[key] for key in ('profile', 'profile_hash', 'version', 'nonce',
               'wall_time', 'capture_started_at', 'capture_seconds', 'host_id', 'boot_id')}
-    for key in ('verification_budget', 'counter_age_upper_seconds'):
+    for key in ('verification_budget', 'counter_age_upper_seconds', 'recovered_identity_timeout'):
         if key in sample:
             result[key] = sample[key]
     fields = {'listener': ('address', 'port', 'pid'),

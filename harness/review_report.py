@@ -42,6 +42,18 @@ def text(limit):
 def schema(p=None):
     from claim_pages import source_paths
     delivered = source_paths(p) if p else []
+    recovery = bool(p and 'parent_draft_recovery' in p)
+    if recovery:
+        paths = dict(arr(dict(text(512), enum=delivered)), minItems=1, maxItems=min(2, len(delivered)))
+        finding = obj({'observation': text(200), 'implication': text(200), 'paths': paths})
+        return obj({
+            'overview': text(500),
+            'components': dict(arr(obj({'name': text(80), 'responsibility': text(240), 'paths': paths})), minItems=1, maxItems=4),
+            'flow': dict(arr(obj({'description': dict(text(260), minLength=30), 'paths': paths})), minItems=1, maxItems=5),
+            'strengths': dict(arr(finding), maxItems=1),
+            'risks': dict(arr(finding), maxItems=1),
+            'next_steps': dict(arr(dict(text(160), minLength=30)), maxItems=2),
+        })
     paths = dict(arr(dict(text(512), enum=delivered) if p else text(512)), minItems=1, maxItems=3)
     finding = obj({'observation': text(600), 'implication': text(400), 'paths': paths})
     result = obj({

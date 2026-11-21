@@ -1710,11 +1710,14 @@ function setup(saved={}){
   assert(!upgraded.uiCalls.some(c=>c[0]==='workbench.action.chat.newLocalChat'));
  }
  checks.push('policy upgrade recovery is explicit before arming; decline preserves saved work and approval retains the original request in the same chat on another model');
- for(const approve of [false,true]){
+ for(const recoveryKind of ['policy_changed','parent_output_recovery'])for(const approve of [false,true]){
   const terminal=setup(),traffic=[],options={modelOptions:{_conversationId:'terminal-review-origin'}};
   terminal.kind('report');
   const chatKey=require('node:crypto').createHash('sha256').update(options.modelOptions._conversationId).digest('hex');
-  const recovery={kind:'policy_changed',terminal_review:true,restart_allowed:true,stack_cursor:'older-stack',
+  const linked=recoveryKind==='parent_output_recovery';
+  const recoveryEvent=linked?'continue_parent_report':'restart_review';
+  const recoveryAction=linked?'Continue review':'Restart review';
+  const recovery={kind:recoveryKind,terminal_review:true,restart_allowed:true,stack_cursor:'older-stack',
    parked_flow_id:'older-auto-restored',message:'Unpublished review from an older policy. Spending is retained; the older open task will remain saved.'};
   const older={flow_id:'older-auto-restored',state:'PAUSED',cursor:'older-pause',prompt:'An older request',
    restarted_from:'older-original',binding:{session:'older-task',contract_hash:'older-contract',calibration_hash:'cal-1'}};
@@ -1728,7 +1731,7 @@ function setup(saved={}){
    if(m.event==='pending')return {...older,task_stack:original.task_stack,focused_flow:older};
    if(m.event==='recoverable_review')return m.chat_key===chatKey?structuredClone(original):{state:'DONE',flow_id:null};
    if(m.event==='inspect'&&m.flow_id===original.flow_id)return structuredClone(original);
-   if(m.event==='restart_review'){
+   if(m.event===recoveryEvent){
     assert.equal(m.confirmed,true);assert.equal(m.armed,true);assert.equal(m.chat_key,chatKey);
     assert.equal(m.flow_id,original.flow_id);assert.equal(m.binding.session,'task-1');
     assert.equal(m.stack_cursor,'older-stack');
@@ -1738,19 +1741,19 @@ function setup(saved={}){
   };
   let dialogs=0;
   terminal.v.window.showWarningMessage=async(message,detail,...labels)=>{
-   if(labels.at(-1)==='Restart review'){dialogs++;return approve?'Restart review':undefined;}
+   if(labels.at(-1)===recoveryAction){dialogs++;return approve?recoveryAction:undefined;}
    return labels.at(-1);
   };
   const result=await terminal.send('high',[{role:1,content:[new Text('continue')]}],options);
   assert(traffic.some(m=>m.event==='recoverable_review'));assert.equal(dialogs,1);
   assert.equal(traffic[0].event,'recoverable_review');
-  assert(!traffic.some(m=>m.event==='restart_review'));assert(!terminal.calls.some(m=>m.op==='native_work'));
+  assert(!traffic.some(m=>m.event===recoveryEvent));assert(!terminal.calls.some(m=>m.op==='native_work'));
   if(approve){
    assert(result.some(p=>p.value?.includes('Workspace access needed')));
    assert.equal(terminal.controller.status().pending.flow_id,original.flow_id);
    await terminal.commands['karma.armNative']();
    await terminal.send('high',[{role:1,content:[new Text('continue')]}],options);
-   assert.equal(traffic.filter(m=>m.event==='restart_review').length,1);
+   assert.equal(traffic.filter(m=>m.event===recoveryEvent).length,1);
    assert.equal(terminal.calls.find(m=>m.op==='native_work').prompt,original.prompt);
    assert.equal(terminal.calls.find(m=>m.op==='native_work').tier,'high');
   }else assert(result.some(p=>p.value?.includes('Saved request retained')));

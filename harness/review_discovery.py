@@ -45,7 +45,7 @@ def scope(s, sid, p):
     if (owner['kind'] != 'execution' or owner['session'] != sid
             or owner['context']['request'] != p['request']
             or owner['context'].get('conversation_id') != handoff.get('invocation_id')
-            or owner['binding'] != machine.binding(s, sid)):
+            or not machine.binding_matches(s, owner)):
         raise InvalidUpdate('Evidence discovery lost its execution binding')
     lineage = _lineage(s, owner)
     if p['snapshot_owner'] not in {n['id'] for n in lineage}:
@@ -53,7 +53,7 @@ def scope(s, sid, p):
     value = {'owner': lineage[-1]['id'], 'context_hash': owner['context_hash'],
              'workspace': p['workspace'], 'request': p['request'],
              'conversation_id': handoff.get('invocation_id'), 'binding': owner['binding'],
-             'snapshots': p['snapshot_receipts'], 'logic_hash': s.logic_hash}
+             'snapshots': p['snapshot_receipts'], 'logic_hash': owner['binding']['logic_hash']}
     return owner, sha(canonical(value))
 
 

@@ -191,7 +191,11 @@ def host_fields(role, payload, schema, version=VERSION, proposal=None):
         bindings['complete'] = False  # This role cannot certify task completion.
     if version == DERIVED_REVIEW_SUMMARY_VERSION and proposal is not None:
         text = (proposal.get('report') or {}).get('overview') or proposal['answer']
-        bindings['summary'] = ' '.join(text.split())[:320] or text[:320]
+        # New compact writer packets bind the derived field to their own
+        # schema. Older receipts retain the original derivation on replay.
+        limit = (schema['properties']['summary']['maxLength']
+                 if role == 'chat_reviewer' and payload.get('parent_draft_summary_version') == 1 else 320)
+        bindings['summary'] = ' '.join(text.split())[:limit] or text[:limit]
     return bindings
 
 

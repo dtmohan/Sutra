@@ -3,6 +3,7 @@
 All SSH/device operations and clocks are fixtures; no remote host is used.
 """
 import copy
+import re
 import subprocess
 import unittest
 from unittest.mock import patch
@@ -39,12 +40,15 @@ class RemoteVerificationTests(unittest.TestCase):
         with memory._verified_lock:
             memory._verified.clear()
 
-    def ps(self, profile, script, timeout_seconds):
-        self.ps_calls.append({'timeout_seconds': timeout_seconds, 'script': script})
+    def ps(self, profile, script, timeout_seconds, *, reuse_tunnel):
+        self.assertTrue(reuse_tunnel)
+        nonce = re.search(r"nonce='([a-f0-9]{32})'", script)[1]
+        self.ps_calls.append({'timeout_seconds': timeout_seconds, 'script': script, 'nonce': nonce})
         if 'cold-size preflight' not in script:
             self.clock.advance(.4)
-            return {'version': 1, 'nonce': '0' * 32, 'binding': memory._cache_binding(self.sample)}
+            return {'version': 1, 'nonce': nonce, 'binding': memory._cache_binding(self.sample)}
         response = copy.deepcopy(self.sample)
+        response['nonce'] = nonce
         checkpoint = memory._cached(self.config)
         reuse = checkpoint is not None and checkpoint['binding'] == memory._cache_binding(response)
         duration = .001 if reuse else self.full_hash_seconds
@@ -71,7 +75,7 @@ class RemoteVerificationTests(unittest.TestCase):
     def probe(self):
         with patch.object(memory.time, 'time', side_effect=self.clock.now), \
                 patch.object(memory.time, 'monotonic', side_effect=self.clock.now), \
-                patch.object(memory.secrets, 'token_hex', return_value='0' * 32), \
+                patch.object(memory.secrets, 'token_hex', side_effect=lambda size: f'{len(self.ps_calls):032x}'), \
                 patch('remote_control.ensure_tunnel'), \
                 patch('remote_control.run_ps', side_effect=self.ps), \
                 patch.object(memory, '_server', side_effect=self.server), \
@@ -217,21 +221,71 @@ class RemoteVerificationTests(unittest.TestCase):
         self.evaluate(cold)
         self.assertEqual(canonical(self.sample), before)
 
-    def test_probe_timeout_retains_only_bounded_operation_and_whitelisted_remote_step(self):
+    def timeout_probe(self, timeout_seconds):
+        self.clock.advance(timeout_seconds)
+        try:
+            raise subprocess.TimeoutExpired('never-retain-this-command', timeout_seconds,
+                stderr=b'Bearer never-retain-this-secret\nSUTRA_REMOTE_STAGE:gpu_inventory\n')
+        except subprocess.TimeoutExpired:
+            raise InvalidUpdate('Remote host inspection timed out or its pinned SSH connection is unavailable') from None
+
+    def test_warm_probe_timeout_recovers_once_from_a_fresh_observation(self):
         self.probe()
         original = self.ps
-        def capture(profile, script, timeout_seconds):
+        attempts = []
+
+        def capture(profile, script, timeout_seconds, **kwargs):
+            if '--query-gpu' in script:
+                attempts.append(re.search(r"nonce='([a-f0-9]{32})'", script)[1])
+                if len(attempts) == 1:
+                    self.timeout_probe(timeout_seconds)
+            return original(profile, script, timeout_seconds, **kwargs)
+
+        self.ps = capture
+        warm = self.probe()
+        self.assertEqual(len(set(attempts)), 2)
+        self.assertEqual(warm['nonce'], attempts[-1])
+        self.assertLess(warm['capture_seconds'], 5)
+        self.assertTrue(self.evaluate(warm)['admitted'])
+        recovery = self.evaluate(warm)['hardware']['sample']['recovered_identity_timeout']
+        self.assertEqual(recovery['stage'], 'identity_probe')
+        self.assertEqual(recovery['failure_kind'], 'timeout')
+        self.assertNotIn('never-retain', canonical(recovery))
+        self.clock.advance(8)
+        self.assertFalse(self.evaluate(warm)['admitted'])
+
+    def test_warm_retry_rejects_a_different_instance_without_rehashing(self):
+        self.probe()
+        original = self.ps
+
+        def capture(profile, script, timeout_seconds, **kwargs):
+            if '--query-gpu' in script:
+                self.sample['process']['pid'] += 1
+                self.timeout_probe(timeout_seconds)
+            return original(profile, script, timeout_seconds, **kwargs)
+
+        self.ps = capture
+        with self.assertRaisesRegex(InvalidUpdate, 'identity changed before the warm inspection retry'):
+            self.probe()
+        self.assertEqual(len(self.ps_calls), 4)
+
+    def test_probe_timeout_lasts_one_bounded_retry_and_retains_sanitized_causes(self):
+        self.probe()
+        original = self.ps
+        attempts = []
+
+        def capture(profile, script, timeout_seconds, **kwargs):
             if '--query-gpu' not in script:
-                return original(profile, script, timeout_seconds)
-            self.clock.advance(20)
-            try:
-                raise subprocess.TimeoutExpired('never-retain-this-command', timeout_seconds,
-                    stderr=b'Bearer never-retain-this-secret\nSUTRA_REMOTE_STAGE:gpu_inventory\n')
-            except subprocess.TimeoutExpired:
-                raise InvalidUpdate('Remote host inspection timed out or its pinned SSH connection is unavailable') from None
+                return original(profile, script, timeout_seconds, **kwargs)
+            attempts.append(timeout_seconds)
+            self.timeout_probe(timeout_seconds)
+
         self.ps = capture
         with self.assertRaises(InvalidUpdate) as failed:
             self.probe()
+        self.assertEqual(len(attempts), 2)
+        for seconds in attempts:
+            self.assertAlmostEqual(seconds, 19.6)
         with patch.object(memory, 'probe', side_effect=failed.exception):
             state = memory._observe(self.config, 4096)
         self.assertEqual(state['decision'], 'BRIDGE')
@@ -242,8 +296,31 @@ class RemoteVerificationTests(unittest.TestCase):
         self.assertEqual(diagnostics['failure_kind'], 'timeout')
         self.assertEqual(diagnostics['cause_type'], 'TimeoutExpired')
         self.assertAlmostEqual(diagnostics['timeout_seconds'], 19.6)
-        self.assertEqual(diagnostics['elapsed_seconds'], 20)
+        self.assertEqual(diagnostics['elapsed_seconds'], 19.6)
+        self.assertEqual(diagnostics['prior_timeout']['failure_kind'], 'timeout')
         self.assertNotIn('never-retain', canonical(state))
+
+    def test_cold_timeout_or_insufficient_bridge_time_is_not_retried(self):
+        original = self.ps
+        attempts = []
+
+        def capture(profile, script, timeout_seconds, **kwargs):
+            if '--query-gpu' not in script:
+                return original(profile, script, timeout_seconds, **kwargs)
+            attempts.append(timeout_seconds)
+            self.timeout_probe(timeout_seconds)
+
+        self.ps = capture
+        with self.assertRaisesRegex(InvalidUpdate, 'timed out'):
+            self.probe()
+        self.assertEqual(attempts, [150])
+        self.ps = original
+        self.probe()
+        self.ps = capture
+        with patch('lifecycle.remaining', return_value=39), self.assertRaisesRegex(InvalidUpdate, 'timed out'):
+            self.probe()
+        self.assertEqual(len(attempts), 2)
+        self.assertAlmostEqual(attempts[-1], 19.6)
 
     def test_preflight_failure_is_distinct_and_unknown_stderr_never_becomes_a_step(self):
         def unavailable(*args, **kwargs):

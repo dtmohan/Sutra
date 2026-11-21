@@ -144,8 +144,9 @@ def records(s,session):
  return result
 
 def current_records(s,session):
+ from review_upgrade import repository_policy
  origin=s.origin(session)
- return [r for r in records(s,session) if r['operation']['contract_hash']==origin['contract_hash'] and r['operation']['logic_hash']==s.logic_hash]
+ return [r for r in records(s,session) if r['operation']['contract_hash']==origin['contract_hash'] and repository_policy(s,session,r['operation'])]
 
 def catalog_snapshot(s,session):
  if s.snapshot(session)['constraints'].get('auto_review'):
@@ -434,11 +435,12 @@ def finish(s,op,digest,result,elapsed_seconds):
  return {'id':rid,'operation':op,'result':result}
 
 def record_by_id(s,session,rid):
+ from review_upgrade import repository_policy
  row=s.db.execute('SELECT o.record_json,o.digest,r.record_json FROM repository_ops o JOIN repository_receipts r ON r.operation_id=o.id WHERE r.id=? AND r.session=?',(rid,session)).fetchone()
  if not row:raise InvalidUpdate('Repository receipt absent')
  raw,digest,receipt=row;op=json.loads(raw);r=json.loads(receipt);origin=s.origin(session)
  if sha('repository-op-v1:'+raw)!=digest or sha('repository-receipt-v1:'+receipt)!=rid or r['operation_hash']!=digest or r['operation_id']!=op['id']:raise InvalidUpdate('Repository receipt corrupted')
- if op['contract_hash']!=origin['contract_hash'] or op['logic_hash']!=s.logic_hash:raise RepositoryReceiptStale('Repository receipt stale')
+ if op['contract_hash']!=origin['contract_hash'] or not repository_policy(s,session,op):raise RepositoryReceiptStale('Repository receipt stale')
  return {'id':rid,'operation':op,'result':r['result']}
 
 def evidence(s,session,workspace):

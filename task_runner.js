@@ -5,7 +5,7 @@
 const crypto = require('node:crypto');
 const ID = /^[a-f0-9]{32}$/, HASH = /^[a-f0-9]{64}$/;
 const START_EVENTS = new Set(['start','start_existing','start_review','step','resume',
-  'grant','capability_grant','approve_document','supply_evidence','restart_review','accept_provenance']);
+  'grant','capability_grant','approve_document','supply_evidence','restart_review','continue_parent_report','accept_provenance']);
 const DISPOSITIONS = new Set(['continue','wait','approval','evidence','finished','stopped']);
 const BASE_FIELDS = ['models','tier','armed','chat_key','expected_authority',
   'reviewer_model','require_distinct_reviewer'];

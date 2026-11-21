@@ -176,9 +176,11 @@ class RemoteModel(LocalModel):
 
     def call(self, call_id, system, payload, schema):
         from invocation_gateway import consume_dispatch, transport_seconds
+        from context_window import exact, validate_proof
         from model_activity import ACTIVE
         from model_packet import build
         from reasoning_policy import check_provider
+        from remote_context import supports_parent_output_recovery, verify_parent_reasoning, wire_request
         from storage_policy import write_trace
 
         packet = build(system, payload, schema)
@@ -189,13 +191,15 @@ class RemoteModel(LocalModel):
         if self.remote_instance is None:
             raise InvalidUpdate('Remote model has no admitted, verified GPU instance')
         charge = self.budget.check(system, payload, schema)
-        from remote_context import wire_request
-        body, _, wire_schema = wire_request(self.profile, system, payload, schema,
-                                            self.budget.response_reserve)
-        from context_window import exact, validate_proof
+        recovery = 'parent_draft_recovery' in payload
+        if recovery and not supports_parent_output_recovery(self.budget):
+            raise InvalidUpdate('Bounded remote reasoning requires an exact, verified physical context')
+        window = self.budget.context_window if recovery else self.profile
+        body, _, wire_schema = wire_request(window, system, payload, schema, self.budget.response_reserve)
         physical = getattr(self, 'context_measurement', None) if exact(self.budget) else None
         if exact(self.budget):
-            validate_proof(physical, self.budget, system, payload, schema)
+            validate_proof(physical, self.budget, system, payload, schema,
+                           self.expected_identity if recovery else None)
         transport = {'version': 1, 'phase': 'connect', 'headers_received': False,
                      'frames_received': 0, 'content_bytes': 0, 'reasoning_bytes': 0}
         record = {'call_id': call_id, 'request': body, 'provider': 'sutra_remote',
@@ -207,11 +211,15 @@ class RemoteModel(LocalModel):
                                         'switch_supported': False, 'thinking_only': self.profile['thinking_only']}}
         if physical is not None:
             record['physical_context'] = physical
+        reasoning_observation = {}
+        if recovery:
+            reasoning_observation['reasoning_budget_tokens'] = body['reasoning_budget_tokens']
+            record['reasoning_control'].update(reasoning_observation)
         activity = ACTIVE.get()
         if activity:
             activity.emit('control', requested=self.thinking, policy=payload.get('reasoning'),
                           effective='model_default', switch_supported=False,
-                          thinking_only=self.profile['thinking_only'])
+                          thinking_only=self.profile['thinking_only'], **reasoning_observation)
         started = time.monotonic()
         connection = http.client.HTTPConnection('127.0.0.1', self.port,
                                                 timeout=timeout(transport_seconds(self.transport_deadline_cap)))
@@ -219,7 +227,9 @@ class RemoteModel(LocalModel):
         self.runtime_completed = False
         try:
             remote_control.ensure_tunnel(self.profile)
-            remote_control.verify_server(self.profile)
+            observed = remote_control.verify_server(self.profile)
+            if recovery:
+                verify_parent_reasoning(window, self.profile, observed['props'])
             from remote_memory import require_dispatch_fresh, verify_instance
             verify_instance(self.profile, self.remote_instance)
             if self.health:
@@ -251,7 +261,9 @@ class RemoteModel(LocalModel):
                     result['eval_count'] > self.budget.response_reserve):
                 raise RuntimeError('Remote usage exceeds the admitted context or output allocation')
             self.fresh_context_metadata()
-            remote_control.verify_server(self.profile)
+            observed = remote_control.verify_server(self.profile)
+            if recovery:
+                verify_parent_reasoning(window, self.profile, observed['props'])
             verify_instance(self.profile, self.remote_instance)
             transport['phase'] = 'decode'
             try:

@@ -46,9 +46,8 @@ def _binding(s, sid, p, owner):
     if not owner:
         raise InvalidUpdate('Retained context requires an explicit orchestration owner')
     node = machine.node(s, owner)
-    current = machine.binding(s, sid)
     if (node.get('session') != sid or node.get('kind') not in ('task', 'execution')
-            or node.get('binding') != current
+            or not machine.binding_matches(s, node)
             or node.get('permissions') != machine.permissions(s, sid)
             or machine.state(s, owner) in ('CANCELLED', 'QUARANTINED')):
         raise InvalidUpdate('Retained context owner has a foreign or stale binding')
@@ -61,7 +60,7 @@ def _binding(s, sid, p, owner):
             raise InvalidUpdate('Retained context request differs from execution context')
     else:
         lineage = [node]
-    return dict(current, owner=owner, lineage=[n['id'] for n in lineage],
+    return dict(node['binding'], owner=owner, lineage=[n['id'] for n in lineage],
                 workspace=p['workspace'], request_hash=sha(p['request']),
                 conversation_id=(p.get('conversation_handoff') or {}).get('invocation_id'),
                 parents=list(p.get('derived_from', [])) if node['kind'] == 'task' else None)
@@ -492,7 +491,7 @@ def recover_requests(s, sid, owner, request):
     owner = machine.node(s, owner['id'] if isinstance(owner, dict) else owner)
     if owner.get('kind') != 'execution':
         return None
-    if (owner.get('session') != sid or owner.get('binding') != machine.binding(s, sid)
+    if (owner.get('session') != sid or not machine.binding_matches(s, owner)
             or owner.get('permissions') != machine.permissions(s, sid)):
         raise InvalidUpdate('Retained-context recovery owner has a foreign or stale binding')
     if (machine.state(s, owner['id']) in machine.TERMINAL

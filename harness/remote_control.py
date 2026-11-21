@@ -134,7 +134,7 @@ def ps_literal(value):
     return "'" + value.replace("'", "''") + "'"
 
 
-def run_ps(profile, script, timeout_seconds=15):
+def run_ps(profile, script, timeout_seconds=15, *, reuse_tunnel=False):
     """Run a host-authored metadata script using the approved SSH alias."""
     remote_profiles.require_assignment(profile)
     if not isinstance(script, str) or len(script.encode()) > 96 * 1024:
@@ -148,8 +148,11 @@ def run_ps(profile, script, timeout_seconds=15):
               "& ([ScriptBlock]::Create([Console]::In.ReadToEnd()))")
     encoded = base64.b64encode(loader.encode('utf-16le')).decode('ascii')
     command = 'powershell.exe -NoProfile -NonInteractive -EncodedCommand ' + encoded
+    # Admission has already established the owned, pinned SSH master. Its
+    # session channels avoid fresh authentication for every metadata call.
+    control = ['-S', str(control_socket(profile)), '-T'] if reuse_tunnel else []
     try:
-        result = subprocess.run([_ssh(), *_options(), profile['ssh_alias'], command],
+        result = subprocess.run([_ssh(), *_options(), *control, profile['ssh_alias'], command],
                                 input=script.encode('utf-8'), capture_output=True,
                                 timeout=timeout(timeout_seconds))
     except (OSError, subprocess.SubprocessError):

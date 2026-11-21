@@ -61,11 +61,12 @@ The exact runtime instance is checked around inference; admission freshness is
 checked again immediately before POST. A rejected result retains its spending.
 
 Cold identity verification has a finite file-size-derived allowance for the full
-SHA-256 operation. Warm reuse retains its short inspection allowance. The final
-GPU/RAM observation still must be no more than eight seconds old; a longer hash
-window does not make old capacity measurements admissible. Unavailable checks
-retain their stage, elapsed allowance and bounded failure class, without logging
-credentials or raw SSH output.
+SHA-256 operation. Identity inspection reuses the approved SSH master's session
+channels. A warm inspection timeout can trigger one fresh read-only observation
+when the bridge has enough time. The retry verifies the same identity with a
+new nonce. The final GPU and RAM evidence must still be at most eight seconds
+old. Admission records retain bounded timing and failure details, including a
+timeout that recovered on retry.
 
 ## Context and diagnostics
 

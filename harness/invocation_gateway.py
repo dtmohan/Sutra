@@ -177,10 +177,12 @@ class InvocationLedger(GovernedContext):
                         if any(payload['memory_allocation'][k]!=v for k,v in envelope['budget_profile'].items()):
                             raise InvalidUpdate('Conversation allocation differs from provider budget')
                     elif role=='chat_reviewer':
-                        from chat_runtime import request_check
+                        from chat_runtime import check_parent_output_dispatch, request_check
                         request_check(self,session,payload)
                         if payload['route']['record']['choice']['model']!=model:raise InvalidUpdate('Dispatch model differs from committed route')
                         if payload.get('memory_budget')!=envelope['budget_profile']:raise InvalidUpdate('Review context budget differs from provider')
+                        if 'parent_draft_recovery' in payload:
+                            check_parent_output_dispatch(self, session, payload, model, model_identity)
                     elif role=='static_explainer':
                         from static_role import request_check
                         request_check(self,session,payload)
@@ -400,13 +402,14 @@ class InvocationLedger(GovernedContext):
     def _architect_freshness(self, session, checked):
         """Recheck unique live dependencies, not the ancestry traversal."""
         from calibration import assert_binding, EMPTY_HASH
+        from review_upgrade import result_policy
         contract = self.origin(session, bootstrap=True)['contract_hash']
         revision = self.snapshot(session)['revision']
         calibrations, pages, handoffs, sources = {}, {}, {}, {}
         for receipt, env, payload in checked:
             if self.db.execute('SELECT 1 FROM invocation_quarantine WHERE invocation_id=?', (env['id'],)).fetchone():
                 raise PageFault('Invocation result quarantined')
-            if receipt['resulting_contract_hash'] != contract or receipt['logic_hash'] != self.logic_hash:
+            if receipt['resulting_contract_hash'] != contract or not result_policy(self, session, receipt, env):
                 raise PageFault('Invocation result has stale contract or validator')
             if revision != env['revision']: raise PageFault('Invocation result has stale task state')
             expected = env.get('calibration_binding', {'hash': EMPTY_HASH, 'profiles': []})
@@ -447,14 +450,26 @@ class InvocationLedger(GovernedContext):
             batch['visiting'].remove(invocation_id)
 
     def _load_result(self, session, invocation_id, _architect_batch=None):
-        row = self.db.execute('SELECT record_json FROM invocation_receipts WHERE session=? AND invocation_id=?', (session,invocation_id)).fetchone()
+        row = self.db.execute(
+            'SELECT r.record_json,r.id,i.record_json,i.digest FROM invocation_receipts r'
+            ' JOIN invocations i ON i.id=r.invocation_id AND i.session=r.session'
+            ' WHERE r.session=? AND r.invocation_id=?', (session, invocation_id)).fetchone()
         if not row: raise PageFault('Unknown, wrong-session or pending invocation')
-        receipt = json.loads(row[0])
+        receipt_raw, receipt_hash, envelope_raw, envelope_hash = row
+        receipt, env = json.loads(receipt_raw), json.loads(envelope_raw)
         if receipt['status'] != 'accepted' or self.db.execute('SELECT 1 FROM invocation_quarantine WHERE invocation_id=?', (invocation_id,)).fetchone():
             raise PageFault('Invocation result quarantined')
-        if receipt['resulting_contract_hash'] != self.origin(session, bootstrap=True)['contract_hash'] or receipt['logic_hash'] != self.logic_hash:
+        from review_upgrade import result_policy
+        if (receipt['resulting_contract_hash'] != self.origin(session, bootstrap=True)['contract_hash']
+                or not result_policy(self, session, receipt, env)):
             raise PageFault('Invocation result has stale contract or validator')
-        env = json.loads(self.db.execute('SELECT record_json FROM invocations WHERE id=?', (invocation_id,)).fetchone()[0])
+        historical = receipt['logic_hash'] != self.logic_hash
+        if historical and (sha('invocation-receipt-v1:' + receipt_raw) != receipt_hash
+                           or sha('invocation-v1:' + envelope_raw) != envelope_hash
+                           or receipt['invocation_hash'] != envelope_hash
+                           or env['id'] != invocation_id or receipt['invocation_id'] != invocation_id
+                           or sha(canonical(receipt['proposal'])) != receipt['response_hash']):
+            raise PageFault('Historical invocation receipt or envelope corrupted')
         if _architect_batch is not None and env['role'] != 'architect':
             raise PageFault('Architect result batch requires architect ancestry')
         from calibration import assert_binding,EMPTY_HASH
@@ -471,7 +486,11 @@ class InvocationLedger(GovernedContext):
                 raise PageFault('Worker checkpoint or ancestor quarantined')
         if env['role'] != 'parser' and self.snapshot(session)['revision'] != env['revision']:
             raise PageFault('Invocation result has stale task state')
-        payload = json.loads(self.db.execute('SELECT payload_json FROM deliveries WHERE id=?', (env['delivery_id'],)).fetchone()[0])
+        payload_row = self.db.execute(
+            'SELECT payload_json FROM deliveries WHERE id=? AND session=?', (env['delivery_id'], session)).fetchone()
+        if not payload_row or historical and not (sha(payload_row[0]) == env['payload_hash'] == receipt['payload_hash']):
+            raise PageFault('Invocation result has missing or changed delivery')
+        payload = json.loads(payload_row[0])
         from invocation_timing import validate as validate_timing
         validate_timing(env.get('transport_timing'), env['role'], payload, env['budget_profile']['response_reserve'])
         if env.get('budget_profile', {}).get('context_profile') == 2:

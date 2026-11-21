@@ -25,6 +25,16 @@ COUNT_PATH = '/v1/chat/completions/input_tokens'
 MAX_COUNT = 2 ** 21
 MAX_METADATA_BYTES = 65536
 CONTEXT_SLACK = 8
+PARENT_REASONING_BUDGET_TOKENS = 2048
+
+# llama.cpp b12600's OpenAI adapter enables the sampling budget only when
+# its parsed chat template supplies a reasoning end tag. Scope recovery to
+# the measured b12600 executable and Qwen3.8 GGUF/template combination.
+PARENT_REASONING_IDENTITY = {
+    'executable_sha256': '0f8ec28998ac8f3eb2648d6432ef176817c44e6e81aa5d54ec95d331e76ef781',
+    'model_sha256': 'd15d4b6de55f662ac40e867702d31afe738d032fa06b829b2b1a21a49d4a48ee',
+    'template_sha256': 'af16f654968d47d09a6c604e00370b12dbc21f76456f59c9e98b82e84d9f6375',
+}
 
 
 def validate_window(value):
@@ -46,11 +56,50 @@ def validate_window(value):
     return value
 
 
+def _parent_reasoning_window(window):
+    return isinstance(window, dict) and all(
+        window.get(field) == value for field, value in PARENT_REASONING_IDENTITY.items())
+
+
+def supports_parent_output_recovery(budget):
+    """Only a proven physical-window profile can request the native budget."""
+    window = budget.context_window
+    if not _parent_reasoning_window(window):
+        return False
+    validate_window(window)
+    return budget.context_profile == 2 and budget.response_reserve >= 2 * PARENT_REASONING_BUDGET_TOKENS
+
+
+def _reasoning_budget(window, system, payload, schema, response_reserve):
+    if 'parent_draft_recovery' not in payload:
+        return None
+    from model_packet import role_for
+    recovery = payload['parent_draft_recovery']
+    if (not _parent_reasoning_window(window)
+            or role_for(system) != 'chat_reviewer' or 'report' not in schema.get('properties', {})
+            or not isinstance(payload.get('parent_repair'), dict)
+            or type(payload.get('report_schema_version')) is not int or payload['report_schema_version'] != 2
+            or not isinstance(recovery, dict)
+            or set(recovery) != {'version', 'failed_invocation', 'failed_receipt', 'reasoning_budget_tokens'}
+            or type(recovery['version']) is not int or recovery['version'] != 1
+            or not isinstance(recovery['failed_invocation'], str)
+            or re.fullmatch(r'[0-9a-f]{32}', recovery['failed_invocation']) is None
+            or not isinstance(recovery['failed_receipt'], str)
+            or re.fullmatch(r'[0-9a-f]{64}', recovery['failed_receipt']) is None
+            or type(recovery['reasoning_budget_tokens']) is not int
+            or recovery['reasoning_budget_tokens'] != PARENT_REASONING_BUDGET_TOKENS
+            or response_reserve < 2 * PARENT_REASONING_BUDGET_TOKENS):
+        raise InvalidUpdate('Bounded remote reasoning requires the verified recovered parent draft')
+    validate_window(window)
+    return recovery['reasoning_budget_tokens']
+
+
 def wire_request(profile, system, payload, schema, response_reserve):
     """One transport projection shared by counting and actual generation."""
     from decoder_schema import for_decoder
     from local_model import LocalModel
     from model_packet import build
+    reasoning_budget = _reasoning_budget(profile, system, payload, schema, response_reserve)
     packet = build(system, payload, schema)
     messages = packet['messages'] if packet else LocalModel.messages(None, system, payload)
     output = for_decoder(packet['schema'] if packet else schema, None)
@@ -61,6 +110,8 @@ def wire_request(profile, system, payload, schema, response_reserve):
             'cache_prompt': False,
             'response_format': {'type': 'json_schema', 'json_schema': {
                 'name': 'sutra_response', 'strict': True, 'schema': output}}}
+    if reasoning_budget is not None:
+        body['reasoning_budget_tokens'] = reasoning_budget
     return body, packet, output
 
 
@@ -104,14 +155,23 @@ def _descriptor(profile, props):
         'template_sha256': sha(template), 'defaults_sha256': sha(canonical(settings))})
 
 
-def _identity(window):
+def verify_parent_reasoning(window, profile, props):
+    """Bind generation to the same live reasoning template used for counting."""
+    if (not _parent_reasoning_window(window) or _descriptor(profile, props) != window
+            or '<think>' not in props['chat_template'] or '</think>' not in props['chat_template']):
+        raise InvalidUpdate('Remote parent draft reasoning template changed or is unavailable')
+
+
+def _identity(window, *, parent_reasoning=False):
     import remote_profiles
     from remote_control import ensure_tunnel, verify_server
     profile = remote_profiles.load(window['reference'])
     remote_profiles.require_assignment(profile)
     ensure_tunnel(profile)
-    observed = _descriptor(profile, verify_server(profile)['props'])
-    if observed != window:
+    props = verify_server(profile)['props']
+    if parent_reasoning:
+        verify_parent_reasoning(window, profile, props)
+    elif _descriptor(profile, props) != window:
         raise ValueError('Remote physical context identity changed')
     return profile
 
@@ -174,9 +234,11 @@ def check(budget, system, payload, schema, *, planning=False):
     window = validate_window(budget.context_window)
     if budget.context_limit > window['context_tokens']:
         raise InvalidUpdate('Physical context allocation exceeds the verified remote window')
+    reasoning_budget = _reasoning_budget(window, system, payload, schema, budget.response_reserve)
     try:
-        profile = _identity(window)
-        wire, packet, _ = wire_request(profile, system, payload, schema, budget.response_reserve)
+        identity_kwargs = {'parent_reasoning': True} if reasoning_budget is not None else {}
+        profile = _identity(window, **identity_kwargs)
+        wire, packet, _ = wire_request(window, system, payload, schema, budget.response_reserve)
         # Pre-source probes can have an impossible citation enum. The native
         # counter compiles the response grammar even though it never generates.
         # Count the same messages with a legal placeholder only for planning.
@@ -188,13 +250,15 @@ def check(budget, system, payload, schema, *, planning=False):
         # with another native reasoning default can change its prefix. The
         # dispatch gate separately revalidates the exact live process/weights.
         tokens = _rpc(profile, wire)
-        _identity(window)
+        _identity(window, **identity_kwargs)
     except (OSError, ValueError, TypeError, KeyError, http.client.HTTPException, InvalidUpdate):
         _unavailable(window)
     result = {'version': 1, 'basis': BASIS, 'window': copy.deepcopy(window),
               'wire_sha256': sha(canonical(wire)), 'packet_sha256': sha(canonical(packet)),
               'thinking': None, 'prompt_tokens': tokens, 'output_reserve': budget.response_reserve,
               'context_slack_tokens': CONTEXT_SLACK, 'context_tokens': budget.context_limit}
+    if reasoning_budget is not None:
+        result['reasoning_budget_tokens'] = reasoning_budget
     frame = SmritiAdapter().context(tokens, budget.response_reserve + CONTEXT_SLACK, budget.context_limit)
     if tokens + budget.response_reserve + CONTEXT_SLACK > budget.context_limit or frame['decision'] != 'ALLOW':
         error = ContextBudgetExceeded('Exact remote prompt ' + str(tokens) + ' tokens + output reserve ' +
@@ -218,6 +282,11 @@ def validate_proof(proof, budget, system, payload, schema, model_identity=None):
             or count(proof.get('prompt_tokens')) is None or not 1 <= proof['prompt_tokens'] <= MAX_COUNT):
         raise InvalidUpdate('Missing or invalid exact remote physical context proof')
     wire, packet, _ = wire_request(window, system, payload, schema, budget.response_reserve)
+    reasoning_budget = wire.get('reasoning_budget_tokens')
+    if (reasoning_budget is None and 'reasoning_budget_tokens' in proof
+            or reasoning_budget is not None and (type(proof.get('reasoning_budget_tokens')) is not int
+                                                  or proof['reasoning_budget_tokens'] != reasoning_budget)):
+        raise InvalidUpdate('Exact remote physical context proof differs from its reasoning budget')
     if (proof.get('wire_sha256') != sha(canonical(wire))
             or proof.get('packet_sha256') != sha(canonical(packet))):
         raise InvalidUpdate('Exact remote physical context proof differs from its invocation')

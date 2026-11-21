@@ -8,7 +8,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from context_manager import InvalidUpdate
+from context_manager import InvalidUpdate, canonical, sha
 from invocation_gateway import _permit, request_hash
 from local_model import OutputLimitExceeded, StructuredOutputRejected
 from remote_model import RemoteModel, _json_answer
@@ -40,6 +40,14 @@ class RemoteTransportTests(unittest.TestCase):
                 body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 cls.calls.append({'path': self.path, 'body': body,
                                   'authorization': self.headers.get('Authorization')})
+                if self.path == '/v1/chat/completions/input_tokens':
+                    result = b'{"object":"response.input_tokens","input_tokens":91}'
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(result)))
+                    self.end_headers()
+                    self.wfile.write(result)
+                    return
                 self.send_response(cls.status)
                 self.send_header('Content-Type', 'text/event-stream')
                 self.send_header('Content-Length', str(len(cls.reply)))
@@ -108,6 +116,7 @@ class RemoteTransportTests(unittest.TestCase):
         self.assertEqual(request['body']['response_format']['json_schema']['schema'], self.schema)
         self.assertEqual(request['body']['max_tokens'], 2048)
         self.assertEqual(request['body']['temperature'], 0.6)
+        self.assertNotIn('reasoning_budget_tokens', request['body'])
         self.assertNotIn('unit-test-remote-credential', json.dumps(record))
         trace = (self.root / 'calls/call.json').read_text()
         self.assertNotIn('unit-test-remote-credential', trace)
@@ -211,6 +220,90 @@ class RemoteTransportTests(unittest.TestCase):
         activity.thinking.assert_called_once_with('Observed evidence. ')
         self.assertEqual(self.provider.context_metadata['thinking']['values'], [])
         self.assertFalse(record['reasoning_control']['switch_supported'])
+
+    def recovered_parent(self):
+        import chat_runtime
+        from paging import Budget
+        import remote_context
+
+        identity = remote_context.PARENT_REASONING_IDENTITY
+        profile = descriptor(self.root, port=self.server.server_port,
+                             executable_sha256=identity['executable_sha256'], model_sha256=identity['model_sha256'])
+        remote_profiles.write({'rtx3090': profile}, self.registry)
+        self.provider = RemoteModel(self.root / 'calls', 'sutra:remote/rtx3090', review=True)
+        self.provider.runtime_context_tokens = 8192
+        self.provider.remote_instance = {'pid': 42, 'boot_id': 'observed-test-boot'}
+        props = {'default_generation_settings': {'n_ctx': 8192},
+                 'chat_template': 'Test pinned reasoning template <think> content </think>.'}
+        for guard in (patch('remote_control.verify_server', return_value={'props': props}),
+                      patch.dict(identity, template_sha256=sha(props['chat_template']))):
+            guard.start()
+            self.addCleanup(guard.stop)
+        window = remote_context._descriptor(self.provider.profile, props)
+        self.provider.context_metadata['_sutra_context_window'] = window
+        self.provider.budget = Budget(8192, 4096, context_profile=2,
+                                      reservation_limit=65536, context_window=window)
+        self.system = chat_runtime.SYSTEM
+        self.payload = {'request': 'Review the workspace architecture.',
+                        'contract': {'goal': 'Review the architecture', 'task_id': 'test', 'constraints': {}},
+                        'excerpts': {'a.py': 'def example(): pass'}, 'constraint_echo': [],
+                        'report_schema_version': 2, 'parent_repair': {'version': 1},
+                        'parent_draft_recovery': {'version': 1, 'failed_invocation': 'a' * 32,
+                                                  'failed_receipt': 'b' * 64, 'reasoning_budget_tokens': 2048}}
+        self.schema = chat_runtime.schema(self.payload)
+        return props
+
+    def test_recovered_parent_binds_same_native_reasoning_budget_for_count_and_generation(self):
+        import remote_context
+        self.recovered_parent()
+        self.assertTrue(remote_context.supports_parent_output_recovery(self.provider.budget))
+        proof = remote_context.check(self.provider.budget, self.system, self.payload, self.schema)
+        self.provider.context_measurement = proof
+        _, record = self.call()
+        count_request, generation_request = self.calls
+        self.assertEqual(count_request['path'], remote_context.COUNT_PATH)
+        self.assertEqual(generation_request['path'], '/v1/chat/completions')
+        self.assertEqual(count_request['body'], generation_request['body'])
+        body = generation_request['body']
+        self.assertEqual(proof['wire_sha256'], sha(canonical(body)))
+        self.assertEqual(proof['reasoning_budget_tokens'], 2048)
+        self.assertEqual(record['reasoning_control']['reasoning_budget_tokens'], 2048)
+        self.assertEqual(body['reasoning_budget_tokens'], 2048)
+        self.assertEqual(body['max_tokens'], 4096)
+        self.assertNotIn('parent_draft_recovery', canonical(body['messages']))
+
+    def test_recovered_parent_refuses_altered_proof_or_live_template_before_generation(self):
+        import remote_context
+        props = self.recovered_parent()
+        proof = remote_context.check(self.provider.budget, self.system, self.payload, self.schema)
+        self.provider.context_measurement = dict(proof, reasoning_budget_tokens=8192)
+        with self.assertRaisesRegex(InvalidUpdate, 'proof differs from its reasoning budget'):
+            self.call()
+        self.provider.context_measurement = proof
+        props['chat_template'] = 'A different template with <think> tags </think>.'
+        with self.assertRaisesRegex(InvalidUpdate, 'reasoning template changed'):
+            self.call()
+        self.assertEqual([request['path'] for request in self.calls], [remote_context.COUNT_PATH])
+
+    def test_reasoning_budget_requires_recovered_parent_role_and_pinned_exact_context(self):
+        from paging import Budget
+        import remote_context
+        self.recovered_parent()
+        budget = self.provider.budget
+        for field, update in (('executable_sha256', '0' * 64), ('template_sha256', '0' * 64),
+                              ('model_sha256', '0' * 64)):
+            with self.subTest(field=field):
+                changed_window = dict(budget.context_window, **{field: update})
+                changed = Budget(8192, 4096, context_profile=2,
+                                 reservation_limit=65536, context_window=changed_window)
+                self.assertFalse(remote_context.supports_parent_output_recovery(changed))
+                with self.assertRaisesRegex(InvalidUpdate, 'verified recovered parent draft'):
+                    remote_context.check(changed, self.system, self.payload, self.schema)
+        with self.assertRaisesRegex(InvalidUpdate, 'verified recovered parent draft'):
+            remote_context.check(budget, 'Different role', self.payload, self.schema)
+        with self.assertRaisesRegex(InvalidUpdate, 'verified recovered parent draft'):
+            remote_context.check(budget, self.system, dict(self.payload, parent_repair=None), self.schema)
+        self.assertEqual(self.calls, [])
 
     def test_strict_json_rejects_duplicate_nonfinite_and_fragment_salvage(self):
         for value in ('{"x":1,"x":2}', '{"x":NaN}', '{"x":1e999}', 'Before {"x":1}', '[1]'):
