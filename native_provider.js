@@ -68,6 +68,54 @@ function observationText(observations, final=false){
   }else lines.push('','Completion assessment: '+safe(a?.status||'not recorded')+'.');
   return lines.join('\n')+'\n\n';
 }
+function reviewOutputStopText(stop){
+  const format=value=>Number.isSafeInteger(value)&&value>=0?value.toLocaleString():undefined;
+  const reserve=format(stop.output_reserve),used=format(stop.output_tokens);
+  const reasoning=format(stop.reasoning_tokens);
+  const model=typeof stop.model==='string'&&stop.model
+    ? ' on **'+stop.model.replace(/[\x00-\x1f\x7f]/g,' ').replace(/[\\`*_{}\[\]()<>#|!]/g,'\\$&')+'**':'';
+  const limit=reserve?'**'+reserve+'-token output limit**':'output limit';
+  const compact={
+    output_limit:'That call was Sutra’s compact retry.',
+    timeout:'The compact retry timed out.',
+    provider_error:'The provider failed during the compact retry.',
+    report_rejected:'The compact retry did not produce a draft that passed validation.',
+  };
+  const retryOutcome=Object.hasOwn(compact,stop.compact_failure)?compact[stop.compact_failure]:'';
+  const call=retryOutcome&&stop.compact_failure!=='output_limit'?'A synthesis call':'The final synthesis call';
+  const first=call+model+' reached its '+limit+' before it completed a draft.';
+  const usage=(used?'The provider reported '+used+' output tokens. ':'Output-token usage was unavailable. ')+
+    (reasoning?reasoning+' reasoning tokens were reported separately.':'Separate reasoning-token usage was unavailable.');
+  const elapsed=Number.isFinite(stop.elapsed_seconds)&&stop.elapsed_seconds>=0
+    ? 'That call ran for '+Math.round(stop.elapsed_seconds).toLocaleString()+' seconds.':'';
+  const reasoningBytes=format(stop.reasoning_bytes),answerBytes=format(stop.answer_bytes);
+  const stream=[
+    reasoningBytes&&stop.reasoning_bytes>0?'The stream carried '+reasoningBytes+' reasoning bytes.':'',
+    stop.answer_bytes===0?'The provider returned no answer text.':answerBytes?'The stream carried '+answerBytes+' answer bytes.':'',
+  ].filter(Boolean).join(' ');
+  const count=format(stop.attempt_count),attempts=format(stop.attempt_limit);
+  const retry={
+    attempt_limit:'No automatic retry fits the saved attempt allowance.',
+    compact_attempt_used:'Sutra already used its bounded compact retry.',
+    previous_policy:'The policy for this run did not qualify the failure for automatic repair.',
+  };
+  const spent=(count&&attempts?'Sutra used '+count+' of '+attempts+' allotted synthesis attempts. ':'')+
+    (Object.hasOwn(retry,stop.retry_reason)?retry[stop.retry_reason]+' ':'')+'The failed call remains charged.';
+  const e=stop.evidence||{};
+  const mapped=format(e.mapped_files),files=format(e.source_files);
+  const evidence=[
+    mapped&&files?mapped+' of '+files+' source files mapped':mapped?mapped+' source files mapped':undefined,
+    ...[
+      [e.source_files_sampled,'files sampled for synthesis'],
+      [e.child_reports,'child reports saved'],
+      [e.followup_reads,'files reached by follow-up reads']
+    ].filter(([value])=>format(value)!==undefined).map(([value,label])=>format(value)+' '+label)
+  ].filter(Boolean);
+  const coverage=evidence.length?'**Evidence retained**\n\n'+evidence.map(row=>'- '+row).join('\n'):'';
+  const reason=[first,retryOutcome,'Claim review never started.'].filter(Boolean).join(' ');
+  const body=['**Sutra withheld the architecture report.**',reason,[elapsed,usage,stream].filter(Boolean).join(' '),spent,coverage];
+  return {reason,body:body.filter(Boolean).join('\n\n')};
+}
 function install(vscode,context,deps){
 
   let disposed=false;
@@ -351,7 +399,7 @@ function install(vscode,context,deps){
       paths=chosen.map(f=>path.relative(deps.workspace(),f.fsPath).split(path.sep).join('/'));
     }
     if(descriptor.operation==='test'&&process.platform!=='darwin')throw new Error('Sandboxed test execution is currently available on macOS only. No test permission was granted.');
-    const test_paths=descriptor.operation==='test'?[...paths]:[];
+    const test_paths=descriptor.operation==='test'?(descriptor.test_paths||[...paths]):[];
     const label=descriptor.operation==='edit'?'Allow scoped edits':'Allow scoped tests';
     const yes=await vscode.window.showWarningMessage('Sutra needs permission for this request.',{modal:true,detail:'Files: '+paths.join(', ')+'\nTask: '+descriptor.goal+'\nNetwork and dependencies remain off. This file scope persists with the task across model switches. Workspace access can be revoked from Sutra settings. Every edit or test still has its own confirmation.'},label);
     if(yes!==label||token.isCancellationRequested)return;
@@ -531,8 +579,8 @@ function install(vscode,context,deps){
     try{
       const current=await deps.request({op:'orchestrate',event:'inspect',flow_id:pending.flow_id,...flowScope(pending)});
       if(!sameRequest()||running||routing?.active||deps.isBusy())throw new Error('The saved request changed. Review the current request in Sutra Monitor.');
-        await rememberFlow(current,undefined,pending.nativeChat,pending.stackChat);
-      if(['DONE','CANCELLED'].includes(current.state)){
+      await rememberFlow(current,undefined,pending.nativeChat,pending.stackChat);
+      if(['DONE','CANCELLED'].includes(current.state)&&!restartableReview(current)){
         resumeSubmission=undefined;
         void vscode.window.showInformationMessage('This Sutra request has finished.');
         return;
@@ -1043,7 +1091,7 @@ function install(vscode,context,deps){
       if(!stackChat&&resumeToken&&resumeSubmission?.id===resumeToken)stackChat=resumeSubmission.stackChat;
       const cached=context.workspaceState.get(pendingKey);
       const providerPause=cached?.state==='PAUSED'&&cached.stop?.status==='provider_wait'&&classifying(cached);
-      const resumeFromLink=requestedResume&&(workspaceAccessPause(cached)||providerPause||evidencePause(cached));
+      const resumeFromLink=requestedResume&&(workspaceAccessPause(cached)||providerPause||evidencePause(cached)||restartableReview(cached));
       if(!stackChat&&cached?.workspace===deps.workspace()&&(resumeFromLink||evidenceReply(cached))&&hasFlowLink(cached))
         stackChat=cached.stackChat;
       const unidentifiedResume=!stackChat&&requestedResume&&!!context.workspaceState.get(pendingKey)?.stackChat;
@@ -1485,7 +1533,21 @@ function install(vscode,context,deps){
         if(!data?.result)throw new Error(data?.notice?.message||'No governed response available.');
         const reviewLinks=deps.publishReview(data);lastRoute=data.route?.model||data.result.model||'';publish();
         const assessmentText=observationText(flow.task_observations,true);
-        const r=data.result;recordUsage(r);audit.invocationId=r.invocation_id;audit.model=lastRoute;audit.stage=r.admission.admitted?'admitted':'withheld';publish();if(!r.admission.admitted){audit.taskObservations=flow.task_observations;progress.report(new vscode.LanguageModelTextPart('Sutra withheld the response: '+r.admission.errors.join('; ')));return;}
+        const r=data.result;recordUsage(r);audit.invocationId=r.invocation_id;audit.model=lastRoute;audit.stage=r.admission.admitted?'admitted':'withheld';
+        if(!r.admission.admitted){
+          audit.taskObservations=flow.task_observations;
+          const stop=data.output_stop;
+          if(stop?.stage==='parent_synthesis'&&stop.reason==='output_limit'){
+            const {reason,body}=reviewOutputStopText(stop);
+            audit.message=reason;
+            const recovery=restartableReview(flow)&&flow.recovery.kind==='parent_output_recovery'?'\n\n'+resumeAction(flow):'';
+            progress.report(new vscode.LanguageModelTextPart(body+recovery));
+          }else{
+            progress.report(new vscode.LanguageModelTextPart('Sutra withheld the response: '+r.admission.errors.join('; ')));
+          }
+          publish();return;
+        }
+        publish();
         const p=r.accepted_output;if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&!['edit','run_tests'].includes(p.action?.kind))throw new Error('No admitted action is available to satisfy required tool mode.');
         if(data.report_markdown){
           progress.report(new vscode.LanguageModelTextPart(data.report_markdown+'\n\n'));

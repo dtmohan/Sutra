@@ -10,6 +10,7 @@ import claim_pages as pages
 import chat_runtime as chat
 from context_manager import InvalidUpdate
 from invocation_gateway import InvocationLedger
+from monitoring import ResourceWait
 import model_identity as identity
 from paging import Budget
 import report_review as review
@@ -172,6 +173,79 @@ class ReviewerAvailabilityRecoveryTests(unittest.TestCase):
         self.assert_no_attempt_stop(stopped, cid)
         self.assertEqual(stopped['claim_review_stop']['availability'][-1]['stage'], 'provider_configuration')
         self.assertEqual(self.rows(), rows); self.assertEqual(review_budget.usage(self.s, self.sid), before)
+
+    def test_automatic_claim_review_uses_available_capacity_and_discloses_same_weights(self):
+        cid = self.candidate(); before = review_budget.usage(self.s, self.sid); rows = self.rows()
+        _, env, _ = review.candidate(self.s, self.sid, cid)
+        writer = env['model_identity']
+        roomy = self.reviewer(writer['name'], writer['weights_sha256'])
+        roomy.context_metadata = {'model_info': {'qwen.context_length': 65536}}
+        too_large = known('large-checker', 'different')
+        identities = {roomy.model: roomy.model_identity, too_large['name']: too_large}
+        choices = [{'name': name, 'eligible': True} for name in identities]
+        def provider(_root, name, *, review):
+            if name != roomy.model:
+                raise ResourceWait({'decision': 'BRIDGE', 'runtime': {'kind': 'model_capacity', 'inference_started': False}})
+            return roomy
+        with candidates(choices, lambda name, *_: identities[name]), \
+                patch('api_runtime.provider_for', side_effect=provider) as probe:
+            result = review.run(self.s, self.sid, self.storage, cid)
+        self.assertTrue(result['admission']['admitted'], result)
+        self.assertEqual([call.args[1] for call in probe.call_args_list], [too_large['name'], roomy.model])
+        self.assertEqual(self.rows()[:len(rows)], rows)
+        report, publication = review.published(self.s, self.sid, cid, result['invocation_id'])
+        self.assertFalse(publication['all_reviewers_distinct'])
+        self.assertEqual(publication['independence']['weight_relation'], 'same')
+        self.assertEqual(publication['independence']['admission_attempts'], [{
+            'model': too_large['name'], 'stage': 'resource_admission', 'status': 'unavailable',
+            'blocker': 'model_admission', 'decision': 'BRIDGE', 'inference_started': False}])
+        self.assertIn('same model weights as the writer', report['publication_note'])
+        final = review_budget.usage(self.s, self.sid)
+        self.assertEqual(final['limits'], before['limits'])
+        self.assertEqual(final['used']['calls'], before['used']['calls'] + len(roomy.payloads))
+        self.assertTrue(self.s.verify_invocations(self.sid))
+
+    def test_pressure_preserves_strict_and_explicit_selection(self):
+        cid = self.candidate(); before = review_budget.usage(self.s, self.sid); rows = self.rows()
+        _, env, _ = review.candidate(self.s, self.sid, cid)
+        same = env['model_identity']
+        distinct = known('precise', 'distinct')
+        identities = {m['name']: m for m in (same, distinct)}
+        choices = [{'name': name, 'eligible': True} for name in identities]
+        blocked = ResourceWait({'decision': 'BRIDGE', 'runtime': {'kind': 'model_capacity', 'inference_started': False}})
+        with candidates(choices, lambda name, *_: identities[name]), \
+                patch('api_runtime.provider_for', side_effect=blocked) as configure:
+            result = review.run(self.s, self.sid, self.storage, cid, strict=True)
+            self.assert_no_attempt_stop(result, cid)
+            self.assertEqual([call.args[1] for call in configure.call_args_list], [distinct['name']])
+            configure.reset_mock()
+            with self.assertRaises(ResourceWait):
+                review.run(self.s, self.sid, self.storage, cid, requested=distinct['name'])
+            self.assertEqual([call.args[1] for call in configure.call_args_list], [distinct['name']])
+        self.assertEqual(self.rows(), rows)
+        self.assertEqual(review_budget.usage(self.s, self.sid), before)
+
+    def test_no_automatic_switch_after_a_new_page_invocation(self):
+        cid = self.candidate(); before = review_budget.usage(self.s, self.sid); rows = self.rows()
+        first = self.reviewer('small-checker', 'distinct')
+        first.context_metadata = {'model_info': {'qwen.context_length': 65536}}
+        second = known('large-checker', 'other')
+        identities = {first.model: first.model_identity, second['name']: second}
+        choices = [{'name': first.model, 'eligible': True, 'parameter_count': 4},
+                   {'name': second['name'], 'eligible': True, 'parameter_count': 8}]
+        run_pages = review._review_pages
+        def pause_after_invocation(*args, **kwargs):
+            result = run_pages(*args, **kwargs)
+            self.assertTrue(result['admission']['admitted'])
+            raise ResourceWait({'decision': 'BRIDGE', 'runtime': {'kind': 'model_capacity', 'inference_started': False}})
+        with candidates(choices, lambda name, *_: identities[name]), \
+                patch('api_runtime.provider_for', return_value=first) as configure, \
+                patch('report_review._review_pages', side_effect=pause_after_invocation), self.assertRaises(ResourceWait):
+            review.run(self.s, self.sid, self.storage, cid, max_pages=1)
+        self.assertEqual([call.args[1] for call in configure.call_args_list], [first.model])
+        self.assertEqual(self.rows()[:len(rows)], rows)
+        self.assertEqual(review_budget.usage(self.s, self.sid)['used']['calls'], before['used']['calls'] + 1)
+        self.assertEqual(len(review.page_receipts(self.s, self.sid, pages.find(self.s, self.sid, cid))), 1)
 
 
 if __name__ == '__main__': unittest.main()

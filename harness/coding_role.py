@@ -15,8 +15,19 @@ def coding_schema(payload):
     kinds={'edit':['edit','clarify'],'test':['run_tests','clarify'],'review':['report','clarify'],'auto':['edit','run_tests','report','clarify']}
     mode=payload['mode']
     if mode not in kinds:raise InvalidUpdate('Unknown coding mode')
+    targets = payload['contract']['constraints']['allowed_paths']
+    if 'test_target' in payload:
+        from evidence_admission import explicit_workspace_test
+        named = explicit_workspace_test(payload['request'])
+        target = payload['test_target']
+        constraints = payload['contract']['constraints']
+        if (mode != 'test' or not named or target != named[0]['test_paths'][0]
+                or not constraints.get('tests_allowed')
+                or target not in constraints.get('test_paths', []) or target not in targets):
+            raise InvalidUpdate('Test target differs from the authorized request')
+        targets = [target]
     fields['action']=obj({'kind':{'type':'string','enum':kinds[mode]},
-                         'target':{'type':'string','enum':['']+payload['contract']['constraints']['allowed_paths']},'old':S,'new':S})
+                         'target':{'type':'string','enum':['']+targets},'old':S,'new':S})
     fields['findings']['maxItems']=0
     fields['summary']={'type':'string','maxLength':600}
     for key in ('completed','remaining'):

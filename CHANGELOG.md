@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.57.5
+
+- Preserve exact Python source evidence when an AST call span in a UTF-8 f-string is invalid.
+- Require a separate answer for each explicit case in code-grounded questions, with source defaults and named methods delivered alongside the excerpts.
+- Route explicit Python unittest requests to test consent and keep execution targets separate from supporting snapshot files.
+- Try another eligible claim reviewer when automatic selection is blocked before dispatch. Disclose a same-weight fallback when the task permits it.
+- Recover a generation cap with one compact synthesis attempt within the saved allocation. Explain the stop, measured usage and retained evidence when a report remains unpublished.
+- Keep the canonical STP kernel unchanged.
+
 ## 0.57.4
 
 - Route clear first-turn read-only workspace reviews to the existing access check before making a model call.

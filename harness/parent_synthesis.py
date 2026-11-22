@@ -15,11 +15,13 @@ def origin(s, flow, data):
         return None
     iid = ended.get('invocation_id')
     row = s.db.execute(
-        'SELECT i.record_json, r.record_json FROM invocations i JOIN invocation_receipts r '
-        'ON r.invocation_id=i.id WHERE i.id=?', (iid,)).fetchone()
-    if not row:
+        "SELECT i.record_json,r.record_json,json_extract(d.payload_json,'$.parent_output_policy_version') "
+        "FROM invocations i JOIN invocation_receipts r ON r.invocation_id=i.id "
+        "JOIN deliveries d ON d.id=i.delivery_id WHERE i.id=?", (iid,)).fetchone()
+    if not row or row[2] == 1:
+        # New workflows use their compact attempt in place.
         return None
-    envelope, receipt = map(json.loads, row)
+    envelope, receipt = map(json.loads, row[:2])
     if (envelope['role'] != 'chat_reviewer' or receipt['status'] != 'quarantined'
             or (envelope.get('orchestration') or {}).get('node_id') != data['root_node']):
         return None

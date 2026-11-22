@@ -29,6 +29,20 @@ _OTHER_WORK_OR_TARGET = re.compile(
     r"|[\r\n`/\\\";:]|\w[\w.-]*\.\w",
     re.IGNORECASE,
 )
+_PYTHON_PATH = r"(?:[\w.-]+/)*[\w.-]+\.py"
+_TEST_PATH = rf"(?:`{_PYTHON_PATH}`|\"{_PYTHON_PATH}\"|'{_PYTHON_PATH}'|{_PYTHON_PATH})"
+_TEST_SUPPORT = rf"{_TEST_PATH}(?:(?:\s*,\s*(?:and\s+)?|\s+and\s+){_TEST_PATH})*"
+_DIRECT_TEST = re.compile(
+    rf"(?:(?:can|could|would)\s+you\s+)?(?:please\s+)?(?:run|execute)\s+"
+    rf"(?P<label>(?:the\s+)?(?:(?:existing|permitted)\s+)?(?:python\s+)?"
+    rf"(?:unittest|unit\s+tests?|tests?)(?:\s+file)?(?:\s+in)?\s+)?"
+    rf"(?P<target>{_TEST_PATH})"
+    rf"(?:(?:\s+with\s+|\.\s+include\s+(?:(?:its|the)\s+)?"
+    rf"(?:(?:one|two|three|four|five|six|seven)\s+)?supporting\s+(?:source\s+)?files?\s+)"
+    rf"(?P<support>{_TEST_SUPPORT})\s+in\s+(?:its|the)\s+read-only\s+(?:test\s+)?snapshot)?"
+    r"(?:[.!?]\s+(?:do not edit|leave (?:all (?:three )?)?files unchanged)\.?)?[.!?]?",
+    re.IGNORECASE,
+)
 
 
 def explicit_workspace_review(prompt):
@@ -43,6 +57,28 @@ def explicit_workspace_review(prompt):
     work = {"operation": "read", "scope": "workspace", "paths": []}
     work, status, roots = workspace_target(work, text)
     return (work, roots) if status == "resolved" else None
+
+
+def explicit_workspace_test(prompt):
+    """Resolve a named unittest and any explicit snapshot files without reading them."""
+    text = prompt.strip()
+    match = _DIRECT_TEST.fullmatch(text) if '\n' not in text and '\r' not in text else None
+    if not match:
+        return None
+    from repository_tools import normalized
+
+    target = match['target'].strip("`'\"")
+    basename = target.rsplit('/', 1)[-1].lower()
+    if not (match['label'] or basename.startswith('test') or basename.endswith('_test.py')):
+        return None
+    support = [part.group(0).strip("`'\"") for part in re.finditer(_TEST_PATH, match['support'] or '')]
+    try:
+        paths = list(dict.fromkeys(normalized(name) for name in [target, *support]))
+    except InvalidUpdate:
+        return None
+    if len(paths) > 8 or any(not name.endswith('.py') for name in paths):
+        return None
+    return {'operation': 'test', 'paths': paths, 'test_paths': [target]}, paths
 
 
 def measure(store, session, target, evidence, recoverable):
@@ -82,6 +118,9 @@ def workspace_target(proposal, prompt):
     Named paths still require an exact current-prompt reference; this helper
     never searches source or grants access.
     """
+    if test := explicit_workspace_test(prompt):
+        work, roots = test
+        return work, 'resolved', roots
     if proposal.get('operation') != 'read':
         return proposal, *workspace_roots(proposal)
     paths = proposal.get('paths', [])

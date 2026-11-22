@@ -11,6 +11,13 @@ COMPACT_WRITER_PREDECESSOR = 'a57157dbafb20e77c3b4821fc12d53c99611c4e5de6a9c1eb3
 SUMMARY_REPAIR_PREDECESSOR = '1159af17874e347e75644c6d4583dcebb9db212cab69852e009638b3d1e3c43a'
 SUMMARY_PROJECTION_PREDECESSOR = 'a0d9d8e3c9660ce67a34333c097795c398591e6ced9ffa1ad4083437aa94b306'
 CONTEXT_PROFILE_PREDECESSOR = '71f4db9dbce5d9152ab2800b402754b4b28cce34b871ac5b8a8c4c705b6eba8f'
+REVIEWER_ADMISSION_PREDECESSOR = 'dbcab6c395d6849875185d46ee1ac1366ee6b2ca200a7f9260bf01c35e4ed9c5'
+# Released policies with the original writer and evidence receipts needed to
+# recover a closed output-limit result. Other upgrade paths do not use these.
+PARENT_OUTPUT_LIMIT_PREDECESSORS = frozenset({
+    '082a0b509f9c9ca82724e1eef65b1c82c170958a6a6ff6e16abbacce1ff7278d',  # 0.57.3
+    '6b9fea351001160a1676fdf39ac30403f61cc3d29656dc3d5b9be91573b4e91e',  # 0.57.4
+})
 RESULT_ROLES = {'architect', 'subagent', 'chat_reviewer', 'report_reviewer'}
 REPOSITORY_KINDS = {'catalog', 'list', 'read', 'search', 'static_map', 'api_extract'}
 _MANIFEST = Path(__file__).with_name('review-upgrade.json')
@@ -68,11 +75,28 @@ def parent_origin(s, fid, data, *, target=None):
         return None
     root = machine.node(s, data['root_node'])
     logic = root['binding']['logic_hash']
-    if logic not in {s.logic_hash, PREDECESSOR, SYNTHESIS_PREDECESSOR}:
+    if logic not in PARENT_OUTPUT_LIMIT_PREDECESSORS | {s.logic_hash, PREDECESSOR, SYNTHESIS_PREDECESSOR}:
         return None
     stamp = _scope(s, fid, data, logic, target=target)
     if not stamp or machine.state(s, root['id']) != 'DONE':
         return None
+    if logic in PARENT_OUTPUT_LIMIT_PREDECESSORS:
+        terminal = machine.events(s, fid)[-1]
+        ended = terminal['data']
+        if terminal['kind'] != 'WORKFLOW_FINISHED' or ended.get('observation_delivery') != 'withheld':
+            return None
+        invocation_id = ended.get('invocation_id')
+        if not invocation_id or s.db.execute(
+                'SELECT 1 FROM invocation_quarantine WHERE invocation_id=?', (invocation_id,)).fetchone():
+            return None
+        from chat_runtime import _parent_output_failure
+        try:
+            envelope, _, _ = _parent_output_failure(s, root['session'], invocation_id)
+        except InvalidUpdate:
+            return None
+        if (envelope['logic_hash'] != logic
+                or (envelope.get('orchestration') or {}).get('node_id') != root['id']):
+            return None
     policies = [logic]
     if logic == PREDECESSOR:
         adopted = _scope(s, fid, data, PREDECESSOR, target=SYNTHESIS_PREDECESSOR)
@@ -172,6 +196,49 @@ def _context_profile_scope(s, fid, data, *, stop_receipt=None):
     return dict(stamp, context_stop_receipt=stop['receipt']) if stamp else None
 
 
+def _reviewer_admission_scope(s, fid, data, *, stop_receipt=None):
+    """Resume the exact joined draft that waited for its first claim reviewer."""
+    import orchestration as machine
+    point = data.get('parent_checkpoint') or {}
+    candidate = point.get('candidate_id')
+    if not data.get('git_provenance') or point.get('version') != 1 or not candidate:
+        return None
+    stamp = _scope(s, fid, data, REVIEWER_ADMISSION_PREDECESSOR)
+    if not stamp:
+        return None
+    stop = next((event for event in reversed(machine.events(s, fid))
+                 if (event['receipt'] == stop_receipt if stop_receipt else
+                     event['to'] == 'PAUSED' and event['from'] != 'PAUSED')), None)
+    if not stop or (stop['kind'], stop['from'], stop['to']) != ('RESOURCE_STOPPED', 'SYNTHESIS', 'PAUSED'):
+        return None
+    details = stop['data'].get('workflow_stop') or {}
+    if (details.get('status'), details.get('resume_phase'), details.get('blocker')) != (
+            'resource_wait', 'SYNTHESIS', 'model_admission'):
+        return None
+    sid = stamp['current']['session']
+    row = s.db.execute("""SELECT i.record_json,r.record_json FROM invocations i
+        JOIN invocation_receipts r ON r.invocation_id=i.id
+        WHERE i.id=? AND i.session=?""", (candidate, sid)).fetchone()
+    if not row or s.db.execute(
+            'SELECT 1 FROM invocation_quarantine WHERE invocation_id=?', (candidate,)).fetchone():
+        return None
+    envelope, receipt = map(json.loads, row)
+    if (envelope.get('logic_hash') != REVIEWER_ADMISSION_PREDECESSOR
+            or receipt.get('logic_hash') != REVIEWER_ADMISSION_PREDECESSOR
+            or envelope.get('role') != 'chat_reviewer'
+            or (envelope.get('orchestration') or {}).get('node_id') != stamp['root']
+            or envelope.get('payload_hash') != point.get('packet_hash')
+            or receipt.get('status') != 'accepted' or receipt.get('response_hash') != point.get('candidate_hash')):
+        return None
+    if s.db.execute("""SELECT 1 FROM invocations i JOIN deliveries d ON d.id=i.delivery_id
+        WHERE i.session=? AND json_extract(i.record_json,'$.role')='report_reviewer'
+          AND json_extract(i.record_json,'$.logic_hash')=?
+          AND json_extract(d.payload_json,'$.candidate_id')=? LIMIT 1""",
+                    (sid, REVIEWER_ADMISSION_PREDECESSOR, candidate)).fetchone():
+        return None
+    return dict(stamp, claim_wait_stop_receipt=stop['receipt'])
+
+
 def offer(s, fid, data):
     import orchestration as machine
     stop = data.get('workflow_stop') or {}
@@ -187,7 +254,7 @@ def offer(s, fid, data):
                    and not s.db.execute('SELECT 1 FROM orchestration_charges WHERE node_id=? LIMIT 1',
                                         (linked['active_root'],)).fetchone()):
         return linked
-    return _scope(s, fid, data)
+    return _scope(s, fid, data) or _reviewer_admission_scope(s, fid, data)
 
 
 def recorded(s, fid, data=None):
@@ -209,6 +276,8 @@ def recorded(s, fid, data=None):
     predecessor = machine.node(s, fid).get('parent_synthesis_predecessor')
     if stamp.get('context_stop_receipt') and not predecessor:
         expected = _context_profile_scope(s, fid, data, stop_receipt=stamp['context_stop_receipt'])
+    elif stamp.get('claim_wait_stop_receipt') and not predecessor:
+        expected = _reviewer_admission_scope(s, fid, data, stop_receipt=stamp['claim_wait_stop_receipt'])
     elif stamp.get('active_previous'):
         expected = _active_continuation(s, fid, data)
     else:
@@ -233,10 +302,14 @@ def _active(s, sid):
     return stamp if stamp and stamp['current']['session'] == sid else None
 
 
-def conversation_axis(s, handoff):
-    """Scope historical chat reads to the original handoff of this review."""
+def conversation_policy(s, handoff):
+    """Keep the original policy and chat axis when rebuilding the saved input."""
     stamp = getattr(s, '_review_upgrade', None)
-    if not stamp or not stamp.get('context_stop_receipt'):
+    if not stamp:
+        return None
+    policy = stamp['previous']['logic_hash']
+    if not (stamp.get('context_stop_receipt') or stamp.get('claim_wait_stop_receipt')
+            or policy in PARENT_OUTPUT_LIMIT_PREDECESSORS):
         return None
     import orchestration as machine
     owner = machine.node(s, stamp['root'])
@@ -244,7 +317,8 @@ def conversation_axis(s, handoff):
         return None
     from conversation import chat_axis
     flow = machine.node(s, stamp['flow_id'])
-    return chat_axis(stamp['workspace'], flow.get('chat_key'))
+    axis = chat_axis(stamp['workspace'], flow.get('chat_key'))
+    return (axis, policy) if axis else None
 
 
 def _owner(s, stamp, nid):

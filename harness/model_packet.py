@@ -367,6 +367,8 @@ def build(system, payload, schema):
         if role == 'chat_reviewer' and 'review_intent_version' in payload:
             from review_report import brief
             body['review_brief'] = brief(payload)
+        if role == 'chat_reviewer' and payload.get('case_requirements'):
+            body.update(select(payload, ('case_requirements', 'case_source_details')))
         if payload.get('evidence_discovery_version') == 4:
             body.update(select(payload, ('initial_excerpts', 'discovery_notes_unverified', 'discovery_coverage')))
             if (role == 'chat_reviewer' and payload.get('parent_source_funding_version') == 1
@@ -462,7 +464,7 @@ def build(system, payload, schema):
             body['conversation_note_unverified'] = note_view(handoff)
             if role != 'subagent' and handoff.get('task_commitment'):
                 body['task_commitment'] = select(handoff['task_commitment'], ('request', 'value'))
-        if payload.get('child_results'):
+        if payload.get('child_results') and not body.get('case_requirements'):
             child_notes = payload['child_results']
             if (role == 'chat_reviewer' and payload.get('parent_source_funding_version') == 1
                     and 'parent_child_note_limit' in payload):
@@ -497,6 +499,15 @@ def build(system, payload, schema):
                 feedback['target_file_count'] = len(manifest.splitlines()) if manifest else 0
         if payload.get('repair'): body['repair'] = payload['repair']
         wire_system = system if role == 'review_reader' else SYSTEMS[role]
+        if body.get('case_requirements'):
+            wire_system += (' The user enumerated cases in case_requirements.items. Apply the shared instruction to '
+                            'each literal input and answer each follow-up. Populate every numbered key in case_answers '
+                            'with a short result and its decisive calculation or source rule. Use exact defaults from '
+                            'case_source_details and the fresh excerpts. Apply conditions in source order, preserving '
+                            'the exact operands, equality, and precedence. Compute independently returned fields '
+                            'from their own expressions. Distinguish a result for supplied inputs from evidence that '
+                            'those inputs were measured correctly. When evidence is missing, identify the gap. '
+                            'Use answer for one introductory sentence.')
         if role == 'chat_reviewer' and body.get('review_brief', {}).get('structured'):
             wire_system += (' This request requires the report object, including the project explanation and control flow. '
                             'A short verdict alone does not answer it. Use the requested detail level, explain the actual '
@@ -505,6 +516,11 @@ def build(system, payload, schema):
                             'inputs, helper calls and returned result where shown. Do not replace this with generic module labels. '
                             'Static resolution or type-check diagnostics alone belong in next checks, not claims of runtime failure. '
                             'Use the supplied evidence to develop each section; keep unsupported parts as explicit gaps.')
+            if 'parent_output_compact' in payload:
+                body['review_brief']['detail'] = 'compact'
+                wire_system += (' Deliver the essential source-backed explanation in the compact report schema. '
+                                'Choose the most informative components and flow steps, state any gaps briefly, '
+                                'and finish the JSON before adding optional findings.')
         if role == 'report_reviewer' and payload.get('evidence_set_version') == 1:
             wire_system += (' Select each evidence ID at most once per claim. Repeating a reference adds no support. '
                             'A static unresolved target or type diagnostic alone does not establish a runtime failure; '
@@ -578,6 +594,14 @@ def build(system, payload, schema):
                 text = body.get('excerpts', {}).get(choice['path'], '')
                 address = {'id': index, 'path': choice['path']}
                 line_key = 'line_in_excerpt'
+                details = body.get('case_source_details', {}).get(choice['path'], ())
+                default = next((entry for entry in details if choice['quote'] in entry['text']), None)
+                if choice['quote'] not in text and default:
+                    address['source_line'] = default['line'] + next(
+                        (i for i, line in enumerate(default['text'].splitlines())
+                         if line.startswith(choice['quote'])), 0)
+                    body['citation_choices'].append(address)
+                    continue
                 if choice['quote'] not in text and payload.get('retained_context_version') == 1:
                     page = next(page for page in payload['retained_context']['pages']
                                 if page['kind'] == 'retained_source_unit'

@@ -240,6 +240,8 @@ def dispatch(s,meta,workspace,root,request,provider=None):
         from host_actions import files_at
         system=CODER_SYSTEM;payload.update(mode=request.get('mode','review'),workspace=str(workspace),execution=st['execution'],
             source_versions={k:v['sha256'] for k,v in files_at(s,session,workspace).items()})
+        if 'test_target' in request:
+            payload['test_target'] = request['test_target']
         schema=coding_schema(payload)
     else:schema=review_schema(payload)
     if payload.get('conversation_handoff'):

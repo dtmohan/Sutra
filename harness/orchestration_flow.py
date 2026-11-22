@@ -9,7 +9,7 @@ from review_targets import (
     DOCUMENT_TEXT_REQUIRED, document_file_target, document_input_notice, document_text, has_document_text,
     may_use_retained_document, refers_to_previous_review_target, refers_to_retained_document,
 )
-from evidence_admission import (explicit_workspace_review, measure as evidence_measure, record_document,
+from evidence_admission import (explicit_workspace_review, explicit_workspace_test, measure as evidence_measure, record_document,
                                 workspace_roots, workspace_target)
 
 
@@ -372,9 +372,13 @@ def permission(s,sid,requested):
     c=s.snapshot(sid)['constraints'];operation=requested.get('operation','read');paths=requested.get('paths',[])
     roots=read_scope(s,sid)
     if any(not scoped(p,roots) for p in paths):raise InvalidUpdate('Requested file is outside the armed read scope')
-    needed=(operation=='edit' and not c.get('edits_allowed')) or (operation=='test' and not c.get('tests_allowed'))
+    test_paths = requested.get('test_paths', [])
+    needed = ((operation == 'edit' and not c.get('edits_allowed'))
+              or (operation == 'test' and (not c.get('tests_allowed')
+                                           or not set(test_paths) <= set(c.get('test_paths', [])))))
     if operation in ('edit','test') and c.get('native_task') and any(p not in c['allowed_paths'] for p in paths):needed=True
     return {'operation':operation,'paths':list(dict.fromkeys((c['allowed_paths'] if c.get('native_task') else [])+paths)),
+            **({'test_paths': test_paths} if test_paths else {}),
             'read_scope':roots,'goal':s.snapshot(sid)['goal']} if needed else None
 
 def budget_pause(s, meta, root, req, fid, phase, stop, kind='CONTEXT_STOPPED', **details):
@@ -1014,7 +1018,8 @@ def _handle(s,meta,workspace,root,req,providers=None):
                 meta.update(flow_metadata(root,workspace,previous))
             workspace_handoff(s,meta.get('active'),req.get('conversation_id'),prompt)
             proposal=read(s,req['conversation_id'])['result']['accepted_output']
-            if proposal['intent']!='workspace':raise InvalidUpdate('Continuation requires an admitted workspace intent')
+            if proposal['intent']!='workspace' and not explicit_workspace_test(prompt):
+                raise InvalidUpdate('Continuation requires an admitted workspace intent')
         with s.db:
             f=m.create(s,'flow',objective=prompt,workspace=str(workspace),prompt=prompt,
                        conversation_parent=req.get('parent'),chat_key=chat,
@@ -1362,7 +1367,8 @@ def _handle(s,meta,workspace,root,req,providers=None):
             evidence_gap(s,f,session,'document',p.get('context_question') or DOCUMENT_TEXT_REQUIRED,
                          conversation_id=r['invocation_id'])
             return response(s,fid,conversation=chat)
-        if p['intent']!='workspace':
+        explicit_test = explicit_workspace_test(prompt)
+        if p['intent']!='workspace' and not explicit_test:
             move(s,fid,'DONE','CLASSIFIED',conversation_id=r['invocation_id'])
             return response(s,fid,conversation=chat)
         work,status,roots=workspace_target(work,prompt)
@@ -1378,14 +1384,15 @@ def _handle(s,meta,workspace,root,req,providers=None):
             move(s,fid,'DONE','EVIDENCE_FIN',kernel=frame,conversation_id=r['invocation_id'],
                  request_notice='The task budget is exhausted.')
             return response(s,fid,conversation=chat)
-        target='NEED_ARM' if p['intent']=='workspace' else 'DONE'
+        target='NEED_ARM'
         other=[] if f.get('chat_key') else pending_flows(s,workspace,exclude=fid)
         if target=='NEED_ARM' and other:
             # Only the host can resolve this conflict. No source reads or grants
             # are made, and the existing task/allocations remain untouched.
             move(s,fid,'DONE','WORKSPACE_DEFERRED',kernel=frame,conversation_id=r['invocation_id'],saved_flow_id=other[0])
             return response(s,fid,conversation=chat,deferred_flow_id=other[0])
-        move(s,fid,target,'CLASSIFIED',kernel=frame,conversation_id=r['invocation_id'],permission=work,source_roots=roots)
+        move(s,fid,target,'EXPLICIT_TEST_ROUTED' if explicit_test else 'CLASSIFIED',
+             kernel=frame,conversation_id=r['invocation_id'],permission=work,source_roots=roots)
         return response(s,fid,conversation=chat)
     if phase in m.TERMINAL:return response(s,fid)
     if not req.get('armed'):raise InvalidUpdate('Workspace workflow requires a user-armed harness')
@@ -1415,6 +1422,11 @@ def _handle(s,meta,workspace,root,req,providers=None):
             if event!='grant':raise InvalidUpdate('Explicit permission grant required')
             grant=req.get('grant') or {}
             if grant.get('operation')!=d['permission']['operation']:raise InvalidUpdate('Grant operation differs from pending request')
+            if wanted and wanted.get('test_paths') and (grant.get('test_paths') != wanted['test_paths']
+                    or not isinstance(grant.get('paths'), list)
+                    or any(not isinstance(path, str) for path in grant['paths'])
+                    or sorted(grant['paths']) != sorted(wanted['paths'])):
+                raise InvalidUpdate('Test grant must match the named test and its snapshot files')
             from native_access import grant as grant_access
             grant_access(s,meta,workspace,dict(grant,**identity(s,sid),conversation_id=d['conversation_id']));save(root,meta)
             move(s,fid,'BINDING','PERMISSION_GRANTED');wanted=None
@@ -1558,6 +1570,8 @@ def _handle(s,meta,workspace,root,req,providers=None):
             with m.scope(parent['id']):
                 if phase=='CODING':
                     from native_runtime import turn
+                    if f.get('action_flow_id'):
+                        request['native_action_continuation'] = True
                     out=turn(s,meta,workspace,root,request,provider=provider('coder'))
                 elif d.get('parent_summary_revalidation'):
                     from chat_runtime import resume_revalidated_parent
@@ -1594,7 +1608,8 @@ def _handle(s,meta,workspace,root,req,providers=None):
             return response(s, fid, progress='Continuing the saved review in a fresh execution slice.',
                             claim_review_usage=workflow_usage(s, fid))
         except (StaticSourceChanged, FollowupSourceChanged) as exc:
-            if not claim_retry: raise
+            if not claim_retry and (d.get('parent_generation') or {}).get('reason') != 'compact_output':
+                raise
             stop = {'status': 'provenance_changed', 'error': str(exc)}
             move(s, fid, 'PAUSED', 'GIT_SNAPSHOT_CHANGED', workflow_stop=stop)
             save(root,meta)
@@ -1635,7 +1650,10 @@ def _handle(s,meta,workspace,root,req,providers=None):
                 move(s, fid, 'SYNTHESIS', 'PARENT_GENERATION_CHECKPOINT',
                      parent_generation=out['parent_generation_pending'], **details)
                 save(root, meta)
-                return response(s, fid, progress='Review attempt saved. Continuing its remaining repair allowance.',
+                compact = out['parent_generation_pending'].get('reason') == 'compact_output'
+                progress = ('Report synthesis reached its output allowance. Using a remaining attempt for a compact report.'
+                            if compact else 'Review attempt saved. Continuing its remaining repair allowance.')
+                return response(s, fid, progress=progress,
                                 claim_review_usage=workflow_usage(s, fid))
             if out.get('parent_checkpoint'):
                 move(s, fid, 'SYNTHESIS', 'PARENT_REVIEW_CHECKPOINT',

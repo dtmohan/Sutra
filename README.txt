@@ -1,4 +1,11 @@
-Sutra 0.57.4 — Direct workspace review routing
+Sutra 0.57.5 — Source, synthesis and test recovery
+
+Code-grounded answers address explicit cases individually using source defaults
+and named methods. Python mapping keeps exact source evidence when an f-string
+AST span is invalid. Named unittest requests use scoped test consent and an
+isolated source snapshot. Automatic claim review can choose another eligible
+reviewer when the preferred model cannot be admitted. An exhausted synthesis
+call can use a remaining attempt for a compact report.
 
 Architecture reviews start with the baseline context. The User Settings option
 karma.expandedReviewContextModels allows eligible writers to use up to 64K when

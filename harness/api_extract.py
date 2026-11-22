@@ -8,14 +8,34 @@ PROFILE='lexical-calls-v1'
 
 def identity(prefix,*parts):return prefix+sha(canonical(parts))[:14]
 
+def _callee_expression(text, node, formatted):
+    """Use source spelling when the AST byte span describes this callee."""
+    try:
+        spelling = ast.get_source_segment(text, node)
+    except UnicodeDecodeError:
+        spelling = None
+    # Some Python parsers report offsets into the temporary expression used
+    # to parse an f-string substitution. A slice can decode and still be wrong.
+    if spelling and formatted:
+        try:
+            candidate = ast.parse(spelling, mode='eval').body
+        except SyntaxError:
+            spelling = None
+        else:
+            if ast.dump(candidate) != ast.dump(node):
+                spelling = None
+    # This is a display label. Source evidence still quotes the physical line.
+    return spelling or ast.unparse(node)
+
 def python_facts(path,text):
- tree=ast.parse(text,filename=path);lines=text.splitlines();symbols=[];calls=[];scopes={};bindings=[]
+ tree=ast.parse(text,filename=path);lines=text.replace('\r\n','\n').replace('\r','\n').split('\n')
+ symbols=[];calls=[];scopes={};bindings=[];call_spans={}
  def loc(node):return {'line':node.lineno,'column':node.col_offset,'quote':lines[node.lineno-1].strip()[:200]}
  module=identity('n',path,'<module>',1,0)
  symbols.append(dict(id=module,name='<module>',scope='',kind='module',line=1,column=0,quote=''))
  scopes[module]=None
  class Visitor(ast.NodeVisitor):
-  current=module;qual=[];conditional=0
+  current=module;qual=[];conditional=0;formatted=0
   def bind(self,name,kind,node,**kw):bindings.append(dict(scope=self.current,name=name,kind=kind,**loc(node),**kw))
   def function(self,node):
    name='.'.join(self.qual+[node.name]);nid=identity('n',path,name,node.lineno,node.col_offset)
@@ -57,11 +77,17 @@ def python_facts(path,text):
   def conditional_visit(self,node):
    self.conditional+=1;self.generic_visit(node);self.conditional-=1
   visit_If=conditional_visit;visit_For=conditional_visit;visit_AsyncFor=conditional_visit;visit_While=conditional_visit;visit_Try=conditional_visit
+  def visit_FormattedValue(self,node):
+   self.formatted+=1;self.generic_visit(node);self.formatted-=1
   def visit_Call(self,node):
    f=node.func;base=f.id if isinstance(f,ast.Name) else (f.value.id if isinstance(f,ast.Attribute) and isinstance(f.value,ast.Name) else '')
    attr=f.attr if isinstance(f,ast.Attribute) and isinstance(f.value,ast.Name) else ''
    if isinstance(f,ast.Name) and f.id in ('eval','exec','globals','locals'):scopes[self.current]='opaque'
-   calls.append(dict(id=identity('c',path,node.lineno,node.col_offset,node.end_lineno,node.end_col_offset),caller=self.current,scope=self.current,expression=ast.get_source_segment(text,f) or '?',base=base,attr=attr,**loc(node)))
+   span=(node.lineno,node.col_offset,node.end_lineno,node.end_col_offset)
+   # Distinct substitutions can have the same parser-reported byte span.
+   occurrence=call_spans.get(span,0);call_spans[span]=occurrence+1
+   site=identity('c',path,*span,occurrence) if occurrence else identity('c',path,*span)
+   calls.append(dict(id=site,caller=self.current,scope=self.current,expression=_callee_expression(text,f,self.formatted),base=base,attr=attr,**loc(node)))
    self.generic_visit(node)
  v=Visitor();v.visit(tree)
  return {'symbols':symbols,'bindings':bindings,'scopes':scopes,'calls':calls}

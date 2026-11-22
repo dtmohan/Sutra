@@ -155,6 +155,72 @@ function setup(saved={}){
  assert(!body.includes('protocol invocation'));assert(!body.includes('Remaining:'));
  checks.push('structured workspace report retains Markdown spacing, opens verified diagram, and moves raw IDs into review details');
  {
+  for(const outcome of ['exhausted','recoverable','timeout']){
+   const recoverable=outcome==='recoverable';
+   const host=setup();await host.arm();let terminal,stackChat,continues=0;
+   const backend=host.deps.request;
+   host.deps.request=async(m,t)=>{
+    if(m.event==='recoverable_review'&&terminal&&m.chat_key===stackChat)return terminal;
+    if(m.event==='inspect'&&terminal&&m.flow_id===terminal.flow_id)return terminal;
+    if(m.event==='continue_parent_report'){
+     assert.equal(m.confirmed,true);assert.equal(m.chat_key,stackChat);continues++;
+     return backend({...m,event:'start_existing',flow_id:undefined,prompt:'Review architecture',conversation_id:terminal.conversation_id},t);
+    }
+    const out=await backend(m,t);
+    if(m.event!=='step'||out.state!=='DONE')return out;
+    if(continues)return out;
+    stackChat=m.chat_key;
+    const recovery=recoverable?{kind:'parent_output_recovery',terminal_review:true,restart_allowed:true,
+      stack_cursor:'closed-stack',message:'Continue with the saved evidence.'}:null;
+    const compact=outcome!=='exhausted';
+    const output_stop={stage:'parent_synthesis',reason:'output_limit',model:'model-c',elapsed_seconds:245.9,
+      output_reserve:8192,output_tokens:recoverable?8192:null,reasoning_tokens:null,reasoning_bytes:23916,answer_bytes:0,
+      attempt_count:compact?2:1,attempt_limit:compact?3:1,
+      retry_reason:compact?'compact_attempt_used':'attempt_limit',compact_failure:compact?(recoverable?'output_limit':'timeout'):null,
+      evidence:{mapped_files:87,source_files:91,source_files_sampled:12,child_reports:2,followup_reads:5}};
+    terminal={...out,recovery,task_stack:{focused:null,open_tasks:[],cursor:'closed-stack'},
+      data:{...out.data,output_stop,result:{...out.data.result,
+        admission:{admitted:false,errors:['Raw rejected draft must stay quarantined']},accepted_output:null}}};
+    return terminal;
+   };
+   const first=await host.send('high',[{role:1,content:[new Text('Review architecture')]}]);
+   const rendered=first.map(part=>part.value||'').join('');
+   assert(rendered.includes('Sutra withheld the architecture report'));
+   assert(rendered.toLowerCase().includes('synthesis call on **model-c**'));
+   assert(rendered.includes((8192).toLocaleString()+'-token output limit'));
+   assert(rendered.includes('Claim review never started'));
+   assert(rendered.includes('Separate reasoning-token usage was unavailable'));
+   assert(rendered.includes('That call ran for 246 seconds'));
+   assert(rendered.includes((23916).toLocaleString()+' reasoning bytes'));
+   assert(rendered.includes('The provider returned no answer text'));
+   assert(rendered.includes('87 of 91 source files mapped'));
+   assert(rendered.includes('12 files sampled for synthesis'));
+   assert(rendered.includes('2 child reports saved'));
+   assert(rendered.includes('5 files reached by follow-up reads'));
+   assert(rendered.includes('The failed call remains charged'));
+   assert(!rendered.includes('Raw rejected draft'));
+   assert(host.controller.status().routing.message.includes('synthesis call'));
+   const link=rendered.match(/\[Resume this request\]\(vscode:\/\/deepak-local\.karma-local-harness(\/resume\/[a-f0-9]{32})\)/)?.[1];
+   if(recoverable){
+    assert(link);assert(rendered.includes('already used its bounded compact retry'));
+    assert(rendered.includes('That call was Sutra’s compact retry'));
+    assert(rendered.includes('The provider reported '+(8192).toLocaleString()+' output tokens'));
+    host.v.window.showInformationMessage=async(...args)=>args.at(-1);
+    await host.uriHandler.handleUri({authority:'deepak-local.karma-local-harness',path:link});
+    assert.match(host.copied[0],/^Resume saved Sutra request \[[a-f0-9]{32}\]$/);
+    await host.send('high',[{role:1,content:[new Text('continue')]}]);
+    assert.equal(continues,0);
+    await host.send('high',[{role:2,content:first},{role:1,content:[new Text('continue')]}]);
+    assert.equal(continues,1);
+   }else{
+    assert(!link);assert(rendered.includes('Output-token usage was unavailable'));
+    assert(rendered.includes(outcome==='timeout'?'The compact retry timed out':'No automatic retry fits the saved attempt allowance'));
+    assert(!rendered.includes('send **continue**'));
+   }
+  }
+  checks.push('writer output-limit notice identifies the charged final call, separates measured usage and retained source coverage, and links only host-authorized recovery in the originating chat');
+ }
+ {
   const note='This review used the configured Low tier after a model-capacity refusal.';
   assert(!body.includes(note));
   for(const [route,admitted,expected] of [
@@ -1321,6 +1387,20 @@ function setup(saved={}){
  const named=setup();named.kind('report');named.st.contract.contract.constraints.tests_allowed=false;let selected;
  const previous=named.deps.backendRequest;named.deps.backendRequest=async(m,t)=>{if(m.op==='native_permissions'){selected=m.test_paths;named.st.contract.contract.constraints.tests_allowed=true;return named.st;}const x=await previous(m,t);if(m.op==='conversation')x.result.accepted_output.workspace_request={operation:'test',paths:['checks/foo_test.py','tests/support.py']};return x;};
  await named.arm();await named.send();assert.deepEqual(selected,['checks/foo_test.py','tests/support.py']);checks.push('explicit test file names are preserved without a test-prefix filter');
+ const scopedTest=setup();scopedTest.kind('report');scopedTest.st.contract.contract.constraints.tests_allowed=false;let grant;
+ const scopedBackend=scopedTest.deps.backendRequest;
+ scopedTest.deps.backendRequest=async(m,t)=>{
+  if(m.op==='native_permissions'){
+   grant=m;scopedTest.st.contract.contract.constraints.tests_allowed=true;return scopedTest.st;
+  }
+  const x=await scopedBackend(m,t);
+  if(m.op==='conversation')x.result.accepted_output.workspace_request={operation:'test',paths:['test_ledger_append.py','stp/ledger.py','stp/kernel.py'],test_paths:['test_ledger_append.py']};
+  return x;
+ };
+ await scopedTest.arm();await scopedTest.send();
+ assert.deepEqual(grant.paths,['test_ledger_append.py','stp/ledger.py','stp/kernel.py']);
+ assert.deepEqual(grant.test_paths,['test_ledger_append.py']);
+ checks.push('explicitly named test grants include supporting snapshot inputs without authorizing them as executable targets');
  }
  const paused=setup();paused.kind('report');await paused.arm();const flowRequest=paused.deps.request;let shouldPause=true;
  paused.deps.request=async(m,t)=>{

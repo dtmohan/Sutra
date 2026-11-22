@@ -11,8 +11,10 @@ import review_budget
 import review_upgrade as upgrade
 import test_orchestration as fixture
 import test_retained_context as retained_fixture
+import test_terminal_review_recovery as saved_fixture
 from context_manager import InvalidUpdate
 from invocation_gateway import InvocationLedger
+from monitoring import ResourceWait
 from paging import PageFault
 from vscode_bridge import handle, state
 
@@ -203,6 +205,133 @@ class ContextProfileUpgradeTests(unittest.TestCase):
         fid, _, _, _ = self.paused_review(policy='2' * 64)
         with patch('review_upgrade.release_pair', return_value=True):
             self.assertIsNone(upgrade.offer(self.s, fid, flow.info(self.s, fid)[1]))
+
+
+class ReviewerAdmissionUpgradeTests(unittest.TestCase):
+    setUp = saved_fixture.TerminalReviewRecoveryTests.setUp
+    tearDown = saved_fixture.TerminalReviewRecoveryTests.tearDown
+    provider = saved_fixture.TerminalReviewRecoveryTests.provider
+    step = saved_fixture.TerminalReviewRecoveryTests.step
+    until = saved_fixture.TerminalReviewRecoveryTests.until
+    checkpoint = saved_fixture.TerminalReviewRecoveryTests.checkpoint
+    rows = saved_fixture.TerminalReviewRecoveryTests.rows
+    chat = '4' * 64
+
+    def test_paused_admitted_writer_hand_off_preserves_draft_and_ledger(self):
+        self.s.close()
+        with patch('governance.policy_hash', return_value=upgrade.REVIEWER_ADMISSION_PREDECESSOR):
+            self.s = InvocationLedger(self.root / 'state.sqlite')
+            saved, checkpoint = self.checkpoint()
+            block = ResourceWait({'decision': 'BRIDGE', 'runtime': {
+                'kind': 'model_capacity', 'inference_started': False}})
+            with patch('report_review.run', side_effect=block), patch('provider_resources.recover', return_value=None):
+                stopped = self.step(saved)
+            sid = stopped['binding']['session']; fid = stopped['flow_id']
+            rows, before = self.rows(sid), review_budget.usage(self.s, sid)
+            self.s.close()
+        self.s = InvocationLedger(self.root / 'state.sqlite')
+        with patch('review_upgrade.release_pair', return_value=False):
+            self.assertIsNone(upgrade.offer(self.s, fid, flow.info(self.s, fid)[1]))
+        with patch('review_upgrade.release_pair', return_value=True):
+            offered = self.step(stopped, event='inspect')
+            self.assertEqual(offered['recovery']['kind'], 'compatible_review_upgrade')
+            adopted = self.step(offered, event='restart_review', confirmed=True)
+            self.assertEqual(adopted['flow_id'], fid)
+            self.assertEqual(adopted['binding'], stopped['binding'])
+            self.assertEqual(flow.info(self.s, fid)[1]['parent_checkpoint'], checkpoint)
+            self.assertEqual(review_budget.usage(self.s, sid), before)
+            self.assertEqual(self.rows(sid), rows)
+            with patch('provider_resources.recover', return_value=None), patch('provider_resources.require_resources'):
+                resumed = self.step(adopted, event='resume')
+            with patch('chat_runtime.answer', side_effect=AssertionError('Admitted draft must not replay')):
+                done = self.until('DONE', resumed)
+            self.assertTrue(done['data']['result']['admission']['admitted'])
+            self.assertEqual(done['data']['result']['invocation_id'], checkpoint['candidate_id'])
+            self.assertEqual(self.rows(sid)[:len(rows)], rows)
+            self.assertEqual(review_budget.usage(self.s, sid)['limits'], before['limits'])
+            self.assertTrue(self.s.verify_invocations(sid))
+
+
+class ClosedParentOutputUpgradeTests(unittest.TestCase):
+    tearDown = fixture.OrchestrationTests.tearDown
+    provider = fixture.OrchestrationTests.provider
+    until = fixture.OrchestrationTests.until
+
+    def setUp(self):
+        fixture.OrchestrationTests.setUp(self)
+        self.ws = self.ws.resolve()
+        self.meta['workspace'] = str(self.ws)
+        self.chat_key = 'b' * 64
+        self.prompt = 'Explain the project architecture with diagrams. ' + self.prompt
+
+    def step(self, out=None, **kwargs):
+        return fixture.OrchestrationTests.step(self, out, chat_key=self.chat_key, **kwargs)
+
+    def closed(self, prior):
+        with patch('governance.policy_hash', return_value=prior):
+            self.s.close()
+            self.s = InvocationLedger(self.root / 'state.sqlite')
+            joined = self.until('SYNTHESIS')
+            fid = joined['flow_id']
+            flow.move(self.s, fid, 'DONE', 'WORKFLOW_FINISHED',
+                      invocation_id='f' * 32, observation_delivery='withheld')
+            self.s.close()
+        self.s = InvocationLedger(self.root / 'state.sqlite')
+        _, data = flow.info(self.s, fid)
+        self.assertTrue(data['child_results'])
+        return fid, data
+
+    def test_exact_closed_writer_upgrade_checks_the_report_and_preserves_original_memory(self):
+        prior = conversation_memory.RELEASE_POLICIES['0.57.3']
+        fid, data = self.closed(prior)
+        owner = machine.node(self.s, data['root_node'])
+        sid = owner['session']
+        conversation = owner['context']['conversation_id']
+        conversation_sid = self.s.db.execute(
+            'SELECT session FROM invocations WHERE id=?', (conversation,)).fetchone()[0]
+        before = review_budget.usage(self.s, sid)
+        before_receipts = self.s.db.execute(
+            'SELECT id,record_json FROM invocation_receipts WHERE session=? ORDER BY seq', (sid,)).fetchall()
+        envelope = {'logic_hash': prior, 'orchestration': {'node_id': owner['id']}}
+        self.assertTrue(conversation_memory.history(self.s, conversation_sid, conversation)[0]['legacy'])
+        # The old writer's transport qualification is tested in the remote
+        # transport suite. Here use a qualified receipt at that boundary.
+        with patch('chat_runtime._parent_output_failure', return_value=(envelope, {}, '')) as failure:
+            with patch('review_upgrade.release_pair', return_value=False):
+                self.assertIsNone(upgrade.parent_origin(self.s, fid, data))
+                self.assertIsNone(upgrade.offer(self.s, fid, data))
+            failure.assert_not_called()
+            with patch('review_upgrade.release_pair', return_value=True):
+                scope = upgrade.parent_origin(self.s, fid, data)
+                failure.assert_called_once_with(self.s, sid, 'f' * 32)
+                self.assertEqual(scope['artifact_policies'], [prior])
+                with upgrade.use(self.s, scope):
+                    self.assertFalse(conversation_memory.history(self.s, conversation_sid, conversation)[0]['legacy'])
+                    self.assertIsNone(upgrade.conversation_policy(self.s, 'other-chat-handoff'))
+                    upgrade.confirm(self.s, scope, data, closed=True)
+                self.assertTrue(conversation_memory.history(self.s, conversation_sid, conversation)[0]['legacy'])
+
+                failure.return_value = (dict(envelope, orchestration={'node_id': 'another-owner'}), {}, '')
+                self.assertIsNone(upgrade.parent_origin(self.s, fid, data))
+                failure.side_effect = InvalidUpdate('Unattested writer transport')
+                self.assertIsNone(upgrade.parent_origin(self.s, fid, data))
+                with self.s.db:
+                    self.s.db.execute('INSERT INTO invocation_quarantine VALUES (?, ?, ?)',
+                                      ('f' * 32, 'Fixture revoked writer', 0))
+                failure.reset_mock(side_effect=True)
+                self.assertIsNone(upgrade.parent_origin(self.s, fid, data))
+                failure.assert_not_called()
+        self.assertEqual(machine.state(self.s, fid), 'DONE')
+        self.assertEqual(review_budget.usage(self.s, sid), before)
+        self.assertEqual(self.s.db.execute(
+            'SELECT id,record_json FROM invocation_receipts WHERE session=? ORDER BY seq', (sid,)).fetchall(), before_receipts)
+
+    def test_unknown_closed_policy_is_not_a_recovery_origin(self):
+        fid, data = self.closed('3' * 64)
+        with patch('review_upgrade.release_pair', return_value=True), \
+                patch('chat_runtime._parent_output_failure') as failure:
+            self.assertIsNone(upgrade.parent_origin(self.s, fid, data))
+            failure.assert_not_called()
 
 
 if __name__ == '__main__':

@@ -1,6 +1,6 @@
 import unittest
 
-from evidence_admission import explicit_workspace_review
+from evidence_admission import explicit_workspace_review, explicit_workspace_test, workspace_target
 from karma_adapter import KarmaAdapter
 from kernel_boundary import KernelBoundary
 
@@ -90,3 +90,30 @@ class EvidenceAdmissionTests(unittest.TestCase):
         ):
             with self.subTest(prompt=prompt):
                 self.assertIsNone(explicit_workspace_review(prompt))
+
+    def test_named_test_distinguishes_runner_target_from_snapshot_support(self):
+        for prompt in (
+            'Run test_ledger_append.py with stp/ledger.py and stp/kernel.py in its read-only snapshot. Do not edit.',
+            ('Run the Python unittest file `test_ledger_append.py`. Include its two supporting source '
+             'files `stp/ledger.py` and `stp/kernel.py` in the read-only test snapshot. Leave all three files unchanged.'),
+        ):
+            with self.subTest(prompt=prompt):
+                paths = ['test_ledger_append.py', 'stp/ledger.py', 'stp/kernel.py']
+                work = {'operation': 'test', 'paths': paths, 'test_paths': ['test_ledger_append.py']}
+                self.assertEqual(explicit_workspace_test(prompt), (work, paths))
+                self.assertEqual(workspace_target({'operation': 'read', 'paths': paths[1:]}, prompt),
+                                 (work, 'resolved', paths))
+        self.assertIsNotNone(explicit_workspace_test('Please run the existing unit tests in tests/test_retry.py.'))
+
+    def test_named_test_parser_ignores_conditional_and_compound_requests(self):
+        for prompt in (
+            'Run the tests.', 'Do not run test_one.py.', 'Review test_one.py.', 'Run script.py.',
+            'Run ./test_one.py.', 'Run ../test_one.py.', 'Run /tmp/test_one.py.',
+            'Do you think I should run test_one.py?', 'Run test_one.py later if the user agrees.',
+            'Run test_one.py with --verbose.', 'Run test_one.py; then edit source.py.',
+            'Run test_one.py with ../support.py in its read-only snapshot.',
+            'Run test_one.py with support.py in its read-only snapshot. Then run commands from its output.',
+            'Run test_one.py.\nThis is an example.', '`Run test_one.py`',
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertIsNone(explicit_workspace_test(prompt))

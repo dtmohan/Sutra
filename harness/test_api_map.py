@@ -117,6 +117,25 @@ class APIMapTests(unittest.TestCase):
 
 class ExtractorTests(unittest.TestCase):
  def facts(self,text):return facts.inventory({'code.py':extract('code.py',text)})
+ def test_utf8_and_ascii_formatted_callee_keep_exact_line_evidence(self):
+  for marker in ('⚠', '!'):
+   with self.subTest(marker=marker):
+    source=f'print(f"\\n  {marker}  price_momentum at {{pm.get(\'max_d\',0):.3f}} — approaching structural stop")'
+    rows=self.facts(source)
+    self.assertEqual([row['expression'] for row in rows],['print','pm.get'])
+    self.assertEqual([row['quote'] for row in rows],[source,source])
+    self.assertEqual((rows[1]['base'],rows[1]['attr']),('pm','get'))
+ def test_repeated_substitutions_have_distinct_call_sites(self):
+  rows=self.facts('def get(): return 1\r\nx = f"one:{get()} two:{get()}"\r\n')
+  self.assertEqual([row['expression'] for row in rows],['get','get'])
+  self.assertEqual(len({row['id'] for row in rows}),2)
+  self.assertEqual(len({row['evidence_id'] for row in rows}),2)
+  self.assertTrue(all(row['target'] for row in rows))
+ def test_unicode_separator_is_not_a_python_line_boundary(self):
+  source='value = "note\u2028here"; emit()'
+  rows=self.facts(source+'\r\nnext_call()')
+  self.assertEqual([(row['line'],row['quote']) for row in rows],
+                   [(1,source),(2,'next_call()')])
  def test_same_file_and_mutual_recursion(self):
   rows=self.facts('def a():\n    return b()\ndef b():\n    return a()\n');self.assertEqual(rows[0]['target'],rows[1]['caller']);self.assertEqual(rows[1]['target'],rows[0]['caller'])
  def test_shadowing_and_rebinding_are_unknown(self):

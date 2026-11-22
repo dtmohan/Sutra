@@ -23,12 +23,12 @@ def unavailable_observation(name, exc, *, stage='identity'):
 
 class ReviewerUnavailable(InvalidUpdate):
     """No eligible reviewer identity can currently be observed; no inference."""
-    def __init__(self, requested_model, availability):
+    def __init__(self, requested_model, availability, *, reason=None):
         self.requested_model = requested_model
         self.availability = json.loads(canonical(availability))
-        super().__init__('The requested reviewer identity is unavailable. Resume with an available reviewer.'
+        super().__init__(reason or ('The requested reviewer identity is unavailable. Resume with an available reviewer.'
             if requested_model != 'auto' else
-            'No eligible reviewer identity is currently available. Restore a local reviewer, then Resume the saved review.')
+            'No eligible reviewer identity is currently available. Restore a local reviewer, then Resume the saved review.'))
 
 
 def family(architecture):
@@ -128,7 +128,7 @@ def enforce(separation, strict):
         raise InvalidUpdate('Distinct reviewer weights are not established (' + separation['weight_relation'] + ')')
 
 
-def choose(mapper, requested='auto', models=None):
+def ranked(mapper, requested='auto', models=None):
     if not isinstance(requested, str) or not requested: raise InvalidUpdate('reviewer_model must be a model name or auto')
     observations = []
     if models is None:
@@ -166,7 +166,7 @@ def choose(mapper, requested='auto', models=None):
         raise InvalidUpdate('Reviewer must be an eligible installed local chat model')
     def separation(m): return compare(mapper, m.get('identity') or unknown(m['name']))
     if requested != 'auto' and separation(by[requested])['weight_relation'] == 'different':
-        selected, reason = by[requested], 'requested'
+        ordered, reason = [by[requested]], 'requested'
     else:
         different = [m for m in by.values() if separation(m)['weight_relation'] == 'different']
         unknowns = [m for m in by.values() if m['name'] != mapper['name'] and separation(m)['weight_relation'] == 'unknown']
@@ -174,13 +174,25 @@ def choose(mapper, requested='auto', models=None):
         if not pool: raise ReviewerUnavailable(requested, observations)
         # Prefer known separation before lineage and then cost. Lineage remains
         # a heuristic; a small different-family model is not a verified judge.
-        selected = min(pool, key=lambda m: (separation(m)['same_family'] is not False,
-                         m.get('parameter_count') or m.get('size') or float('inf'), m['name']))
+        def cost(m):
+            return (separation(m)['same_family'] is not False,
+                    m.get('parameter_count') or m.get('size') or float('inf'), m['name'])
+        ordered = sorted(pool, key=cost)
+        if requested == 'auto':
+            ordered = sorted(different, key=cost) + sorted(unknowns, key=cost) + sorted(
+                (m for m in by.values() if m not in different and m not in unknowns), key=cost)
         reason = 'automatic' if requested == 'auto' else 'replaced_unseparated_choice'
-    result = separation(selected)
-    result.update(selection=reason, requested_model=requested)
-    if observations: result['identity_observations'] = observations
-    return selected['name'], result
+    result = []
+    for selected in ordered:
+        proven = separation(selected)
+        proven.update(selection=reason, requested_model=requested)
+        if observations: proven['identity_observations'] = observations
+        result.append((selected['name'], proven))
+    return result
+
+
+def choose(mapper, requested='auto', models=None):
+    return ranked(mapper, requested, models)[0]
 
 
 def label(separation):

@@ -42,17 +42,24 @@ def text(limit):
 def schema(p=None):
     from claim_pages import source_paths
     delivered = source_paths(p) if p else []
-    recovery = bool(p and 'parent_draft_recovery' in p)
+    recovery = bool(p and ('parent_draft_recovery' in p or 'parent_output_compact' in p))
     if recovery:
         paths = dict(arr(dict(text(512), enum=delivered)), minItems=1, maxItems=min(2, len(delivered)))
-        finding = obj({'observation': text(200), 'implication': text(200), 'paths': paths})
+        # Keep the historical recovery schema. For new compact retries use a
+        # narrower prose envelope when the available output reserve is small.
+        tight = ('parent_output_compact' in p
+                 and p.get('memory_budget', {}).get('response_reserve', 0) <= 1024)
+        detail = 120 if tight else 200
+        finding = obj({'observation': text(detail), 'implication': text(detail), 'paths': paths})
         return obj({
-            'overview': text(500),
-            'components': dict(arr(obj({'name': text(80), 'responsibility': text(240), 'paths': paths})), minItems=1, maxItems=4),
-            'flow': dict(arr(obj({'description': dict(text(260), minLength=30), 'paths': paths})), minItems=1, maxItems=5),
+            'overview': text(240 if tight else 500),
+            'components': dict(arr(obj({'name': text(80), 'responsibility': text(140 if tight else 240),
+                                        'paths': paths})), minItems=1, maxItems=2 if tight else 4),
+            'flow': dict(arr(obj({'description': dict(text(140 if tight else 260), minLength=30),
+                                  'paths': paths})), minItems=1, maxItems=2 if tight else 5),
             'strengths': dict(arr(finding), maxItems=1),
             'risks': dict(arr(finding), maxItems=1),
-            'next_steps': dict(arr(dict(text(160), minLength=30)), maxItems=2),
+            'next_steps': dict(arr(dict(text(120 if tight else 160), minLength=30)), maxItems=1 if tight else 2),
         })
     paths = dict(arr(dict(text(512), enum=delivered) if p else text(512)), minItems=1, maxItems=3)
     finding = obj({'observation': text(600), 'implication': text(400), 'paths': paths})

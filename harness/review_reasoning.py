@@ -14,7 +14,8 @@ from review_report import requested
 
 def _synthesis_headroom(payload):
     return (payload.get('memory_budget', {}).get('response_reserve', 0) >= MAX_REVIEW_OUTPUT_RESERVE
-            and len(payload.get('excerpts', {})) > 1 and requested(payload))
+            and len(payload.get('excerpts', {})) > 1
+            and (requested(payload) or bool(payload.get('case_requirements'))))
 
 
 def _claim_headroom(payload):

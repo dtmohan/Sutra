@@ -85,6 +85,66 @@ class OrchestrationTests(unittest.TestCase):
                 ''.join(f'    # source segment {line:03}: unique continuation evidence for part {index}.\n'
                         for line in range(100)))
 
+    def test_named_test_stays_a_test_when_classifier_reads_support_files(self):
+        from test_native_runtime import NativeModel
+        from host_actions import preview
+
+        self.ws = self.ws.resolve()
+        target = 'test_ledger_append.py'
+        paths = [target, 'stp/ledger.py', 'stp/kernel.py']
+        (self.ws / 'stp').mkdir()
+        (self.ws / paths[1]).write_text('def safe():\n    return True\n')
+        (self.ws / paths[2]).write_text('# large snapshot support\n' * 380)
+        (self.ws / target).write_text('from stp.ledger import safe\n')
+        classifier = Conversation(MODELS['low'], lambda result, _: result.update(
+            intent='workspace', workspace_request={'operation': 'read', 'paths': paths[1:]}))
+        coder = NativeModel(MODELS['low'], 'run_tests', lambda result: result['action'].update(target=target))
+
+        def models(role):
+            self.assertIn(role, ('conversation', 'coder'))
+            return classifier if role == 'conversation' else coder
+
+        self.provider = models
+        chat = {'chat_key': 'a' * 64}
+        prompt = 'Run test_ledger_append.py with stp/ledger.py and stp/kernel.py in its read-only snapshot. Do not edit.'
+        with patch('repository_tools.execute', side_effect=AssertionError('No workspace access')):
+            pending = self.step(prompt=prompt, armed=False, **chat)
+            self.assertEqual(pending['state'], 'NEED_ARM')
+            self.assertEqual(m.events(self.s, pending['flow_id'])[-1]['kind'], 'EXPLICIT_TEST_ROUTED')
+            self.assertFalse(coder.calls)
+            with self.assertRaisesRegex(InvalidUpdate, 'user-armed'):
+                self.step(pending, armed=False, **chat)
+        need = self.step(pending, **chat)
+        self.assertEqual(need['state'], 'NEED_PERMISSION')
+        self.assertEqual(need['permission']['operation'], 'test')
+        self.assertEqual(need['permission']['paths'], paths)
+        self.assertEqual(need['permission']['test_paths'], [target])
+        with self.assertRaisesRegex(InvalidUpdate, 'must match the named test'):
+            self.step(need, event='grant', grant={'operation': 'test', 'paths': paths,
+                                                 'test_paths': paths}, **chat)
+        self.assertFalse(coder.calls)
+        scoped = self.step(need, event='grant', grant={'operation': 'test', 'paths': paths,
+                                                       'test_paths': [target]}, **chat)
+        self.assertEqual(scoped['state'], 'WORKSPACE')
+        coding = self.step(scoped, **chat)
+        self.assertEqual(coding['state'], 'CODING')
+        proposed = self.step(coding, **chat)
+        self.assertEqual(proposed['state'], 'AWAITING_ACTION')
+        [payload] = coder.calls
+        self.assertEqual(payload['mode'], 'test')
+        self.assertEqual(payload['test_target'], target)
+        self.assertEqual([item['path'] for item in payload['pages']], [target])
+        c = payload['contract']['constraints']
+        self.assertEqual(c['allowed_paths'], sorted(paths))
+        self.assertEqual(c['test_paths'], [target])
+        self.assertFalse(c['edits_allowed'])
+        self.assertFalse(c['network_allowed'])
+        result = proposed['data']['result']
+        checked = preview(self.s, proposed['binding']['session'], result['invocation_id'], self.ws)
+        self.assertEqual(checked['snapshot_files'], sorted(paths))
+        self.assertEqual(self.s.db.execute('SELECT count(*) FROM host_actions').fetchone()[0], 0)
+        self.assertTrue(self.s.audit_valid())
+
     def test_conversation_parent_stays_in_its_chat_across_reload_and_model_switch(self):
         chat_a, chat_b = 'a' * 64, 'b' * 64
         fact = 'Remember that Silvercliff uses ticket SC-4581.'
