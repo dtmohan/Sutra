@@ -1,4 +1,4 @@
-Sutra 0.57.3 — Optional 64K review context
+Sutra 0.57.4 — Direct workspace review routing
 
 Architecture reviews start with the baseline context. The User Settings option
 karma.expandedReviewContextModels allows eligible writers to use up to 64K when

@@ -62,6 +62,30 @@ class ProviderWaitRecoveryTests(unittest.TestCase):
     def test_charged_timeout_reloads_and_resumes_same_parent_on_another_model(self):
         self.assert_saved_timeout_recovery()
 
+    def test_saved_explicit_review_skips_repeating_its_timed_out_routing_call(self):
+        self.fail_provider = True
+        self.phase = 'response_headers'
+        chat_key = 'a' * 64
+        with patch.object(flow, 'explicit_workspace_review', return_value=None):
+            paused = self.step(prompt='Review this codebase and give a detailed overview.',
+                               chat_key=chat_key, armed=False)
+        self.assertEqual(paused['stop']['status'], 'provider_wait')
+        _, data = flow.info(self.s, paused['flow_id'])
+        session = data['conversation_session']
+        charged = review_budget.usage(self.s, session)
+        self.assertEqual(charged['used']['calls'], 1)
+        self.assertGreater(charged['used']['tokens'], 0)
+        self.s.close()
+        self.s = InvocationLedger(self.root / 'state.sqlite')
+        with patch.object(self, 'provider', side_effect=AssertionError('No routing retry needed')):
+            resumed = self.step(paused, event='resume', chat_key=chat_key, armed=False, tier='high')
+            waiting = self.step(resumed, chat_key=chat_key, armed=False, tier='high')
+        self.assertEqual(waiting['state'], 'NEED_ARM')
+        self.assertEqual(waiting['flow_id'], paused['flow_id'])
+        self.assertIsNone(waiting['conversation_id'])
+        self.assertEqual(review_budget.usage(self.s, session), charged)
+        self.assertTrue(self.s.verify_invocations(session))
+
     def assert_saved_timeout_recovery(self):
         self.fail_provider = False
         self.phase = 'response_headers'

@@ -1035,6 +1035,83 @@ function setup(saved={}){
   assert.equal(reloaded.controller.status().pending,null);
   checks.push('evidence bridge guides continue, preserves the originating flow across reload, and resumes pasted text on the selected model without workspace permission');
  }
+ for(const providerWait of [false,true]){
+  const saved={},traffic=[],flowId='9'.repeat(32);
+  const goal='Please review the code base and explain its architecture.';
+  const stop={status:'provider_wait',resume_phase:'CLASSIFYING',error:'The provider did not return response headers.',budget:{used:{calls:1}}};
+  const user=value=>({role:1,content:[new Text(value)]});
+  let flow,origin;
+  const attach=fixture=>{
+   fixture.v.window.showWarningMessage=async(_message,_options,...choices)=>choices.find(choice=>choice==='Read only');
+   fixture.deps.request=async request=>{
+    traffic.push(structuredClone(request));
+    assert.equal(request.op,'orchestrate');
+    const reply=(value,extra={})=>{
+     const focused=flow?.state!=='DONE'&&origin===request.chat_key?flow:null;
+     return structuredClone({...value,...extra,task_stack:{focused:focused?.flow_id||null,open_tasks:focused?[focused]:[]},focused_flow:focused});
+    };
+    if(request.event==='pending')return reply({state:'DONE',flow_id:null});
+    if(request.event==='start'){
+     assert.equal(request.prompt,goal);
+     assert(!flow);
+     assert(!request.armed);
+     origin=request.chat_key;
+     flow={flow_id:flowId,cursor:'1',prompt:goal,state:providerWait?'PAUSED':'NEED_ARM',...(providerWait?{stop}:{})};
+     return reply(flow);
+    }
+    assert.equal(request.chat_key,origin);
+    assert.equal(request.flow_id,flowId);
+    if(request.event==='inspect')return reply(flow);
+    assert.equal(request.cursor,flow.cursor);
+    if(request.event==='resume'){
+     assert.equal(flow.state,'PAUSED');
+     assert.deepEqual(flow.stop.budget.used,{calls:1});
+     assert(!request.armed);
+     flow={...flow,cursor:'2',state:'CLASSIFYING',stop:undefined};
+     return reply(flow);
+    }
+    assert.equal(request.event,'step');
+    if(flow.state==='CLASSIFYING'){
+     assert(!request.armed);
+     flow={...flow,cursor:'3',state:'NEED_ARM'};
+     return reply(flow);
+    }
+    assert.equal(flow.state,'NEED_ARM');
+    assert.equal(request.tier,'high');
+    assert(request.armed);
+    assert.equal(fixture.controller.status().accessProfile,'read_only');
+    flow={...flow,cursor:'4',state:'DONE'};
+    return reply(flow,{data:{route:{model:'model-c'},result:{
+     invocation_id:'a'.repeat(32),admission:{admitted:true},accepted_output:{answer:'Source review completed.'}
+    }}});
+   };
+  };
+  const first=setup(saved);attach(first);
+  const pause=await first.send('low',[user(goal)],{});
+  const pauseText=pause.map(part=>part.value||'').join('');
+  assert(pauseText.includes(providerWait?'/resume/':'/access/'));
+  assert(!saved['sutra.pendingOrchestration'].conversation_id);
+  const reloaded=setup(saved);attach(reloaded);
+  const beforeForeign=traffic.length;
+  for(const foreign of [[user('continue')],[user(pauseText),user('continue')]]){
+   const denied=await reloaded.send('high',foreign,{});
+   assert(denied.some(part=>part.value?.includes('return to the chat that started it')));
+  }
+  assert.equal(traffic.length,beforeForeign,'Anonymous resumes need the saved link in Assistant history');
+  const history=[user(goal),{role:2,content:pause}];
+  const accessPause=await reloaded.send('low',[...history,user('continue')],{});
+  assert.deepEqual(traffic.slice(beforeForeign).map(request=>request.event),providerWait?['inspect','resume','step']:['inspect']);
+  assert(accessPause.some(part=>part.value?.includes('[Choose workspace access]')));
+  assert(!reloaded.controller.status().armed);
+  await reloaded.arm();
+  const beforeGrant=traffic.length;
+  const reviewed=await reloaded.send('high',[...history,user('continue'),{role:2,content:accessPause},user('continue')],{});
+  assert.deepEqual(traffic.slice(beforeGrant).map(request=>request.event),['inspect','step']);
+  assert(reviewed.some(part=>part.value?.includes('Source review completed.')));
+  assert.equal(traffic.filter(request=>request.event==='start').length,1);
+  assert.equal(reloaded.controller.status().pending,null);
+ }
+ checks.push('anonymous transcripts resume a pre-receipt provider wait or workspace access pause only with their exact Assistant link, and read only after the user grants access');
  {
   const fixture=setup(),traffic=[],file='people/Candidate Resume (1).docx';
   const goal='Can you review this resume please?\nCandidate Resume (1).docx\nSuggest changes to reach more employers.';

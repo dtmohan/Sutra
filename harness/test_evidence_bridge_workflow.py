@@ -719,13 +719,12 @@ class EvidenceBridgeWorkflowTests(unittest.TestCase):
         self.assertEqual(self.ledger.pinned(bound['binding']['session'])['constraints']['allowed_paths'], ['.'])
 
     def test_explicit_workspace_target_enters_existing_arming_path(self):
-        self.router = lambda result, _: result.update(
-            intent='workspace', workspace_request={'operation': 'read', 'scope': 'workspace', 'paths': []})
         with patch('repository_tools.execute', side_effect=AssertionError('Workspace read before arming')):
             admitted = self.request('start', prompt='Review this workspace.')
         self.assertEqual(admitted['state'], 'NEED_ARM')
         self.assertIsNone(admitted['stop'])
-        self.assertEqual(len(self.models), 1)
+        self.assertIsNone(admitted['conversation_id'])
+        self.assertEqual(self.models, [])
 
     def test_broad_workspace_request_uses_user_target_instead_of_router_filenames(self):
         self.router = lambda result, _: result.update(

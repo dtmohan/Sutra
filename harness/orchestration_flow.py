@@ -9,7 +9,8 @@ from review_targets import (
     DOCUMENT_TEXT_REQUIRED, document_file_target, document_input_notice, document_text, has_document_text,
     may_use_retained_document, refers_to_previous_review_target, refers_to_retained_document,
 )
-from evidence_admission import measure as evidence_measure, record_document, workspace_roots, workspace_target
+from evidence_admission import (explicit_workspace_review, measure as evidence_measure, record_document,
+                                workspace_roots, workspace_target)
 
 
 def document_workspace_notice(prompt):
@@ -1281,6 +1282,18 @@ def _handle(s,meta,workspace,root,req,providers=None):
         request['conversation_session']=session_for(s,request,axis=axis)
         if not d.get('conversation_session'):
             move(s,fid,'CLASSIFYING','CONVERSATION_BOUND',conversation_session=request['conversation_session'])
+        if f.get('chat_key') and not any(request.get(key) for key in
+                                        ('parent', 'routing_continuation', 'document_evidence', 'document_offer_flow')):
+            direct = explicit_workspace_review(prompt)
+            if direct:
+                work, roots = direct
+                frame, _ = evidence_measure(s, request['conversation_session'], 'resolved', 'available', False)
+                if frame['decision'] == 'ALLOW':
+                    move(s, fid, 'NEED_ARM', 'EXPLICIT_WORKSPACE_REVIEW', kernel=frame, conversation_id=None,
+                         permission=work, source_roots=roots)
+                else:
+                    move(s, fid, 'DONE', 'EVIDENCE_FIN', kernel=frame, request_notice='The task budget is exhausted.')
+                return response(s, fid)
         try:
             if 'document_evidence' in request:
                 staged = advance_document_stage(s, root, f, d, request, provider)

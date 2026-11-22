@@ -1031,13 +1031,20 @@ function install(vscode,context,deps){
       const requestedResume=/^(continue|resume|please continue|please resume)[.! ]*$/i.test(prompt.trim())||!!resumeToken;
       const suppliedKind=!request.results&&(DOCUMENT_EVIDENCE.test(prompt)?'document':WORKSPACE_EVIDENCE.test(prompt.trim())?'workspace':null);
       const evidenceReply=flow=>evidencePause(flow)&&suppliedKind===flow.stop.evidence_bridge?.target_kind;
-      const hasFlowLink=flow=>!!flow?.resumeLink&&messages.some(message=>message.role===vscode.LanguageModelChatMessageRole.Assistant&&
-        message.content.some(part=>part instanceof vscode.LanguageModelTextPart&&part.value.includes(resumeUri(flow.resumeLink)+')')));
+      const workspaceAccessPause=flow=>flow?.state==='NEED_ARM'&&flow.needsWorkspaceAccess===true;
+      const hasFlowLink=flow=>{
+        if(!flow?.resumeLink)return false;
+        const link=(workspaceAccessPause(flow)?accessUri:resumeUri)(flow.resumeLink);
+        return messages.some(message=>message.role===vscode.LanguageModelChatMessageRole.Assistant&&
+          message.content.some(part=>part instanceof vscode.LanguageModelTextPart&&part.value.includes(']('+link+')')));
+      };
       let stackChat=request.results?(actionScope?.chat_key||(accessContinuation?memory.taskStack(conversationId):undefined)):
         chatKey||(audit.memorySource==='signed_checkpoint'?memory.taskStack(request.parent):undefined);
       if(!stackChat&&resumeToken&&resumeSubmission?.id===resumeToken)stackChat=resumeSubmission.stackChat;
       const cached=context.workspaceState.get(pendingKey);
-      if(!stackChat&&cached?.workspace===deps.workspace()&&evidencePause(cached)&&(requestedResume||evidenceReply(cached))&&hasFlowLink(cached))
+      const providerPause=cached?.state==='PAUSED'&&cached.stop?.status==='provider_wait'&&classifying(cached);
+      const resumeFromLink=requestedResume&&(workspaceAccessPause(cached)||providerPause||evidencePause(cached));
+      if(!stackChat&&cached?.workspace===deps.workspace()&&(resumeFromLink||evidenceReply(cached))&&hasFlowLink(cached))
         stackChat=cached.stackChat;
       const unidentifiedResume=!stackChat&&requestedResume&&!!context.workspaceState.get(pendingKey)?.stackChat;
       if(!stackChat&&!request.results)stackChat=crypto.randomBytes(32).toString('hex');

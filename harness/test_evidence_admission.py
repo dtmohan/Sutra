@@ -1,5 +1,6 @@
 import unittest
 
+from evidence_admission import explicit_workspace_review
 from karma_adapter import KarmaAdapter
 from kernel_boundary import KernelBoundary
 
@@ -63,3 +64,29 @@ class EvidenceAdmissionTests(unittest.TestCase):
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 self.decide(**kwargs)
+
+    def test_explicit_workspace_review_uses_host_scope_only_for_clear_read_requests(self):
+        for prompt in ('Can you please review this codebase?', 'Inspect the open workspace project.',
+                       'Review our repository and provide a brief summary of its purpose.'):
+            with self.subTest(prompt=prompt):
+                self.assertEqual(explicit_workspace_review(prompt),
+                                 ({'operation': 'read', 'scope': 'workspace', 'paths': []}, ['.']))
+        for prompt in (
+            'What is a codebase?', 'Review it again.', 'Do not review the codebase.',
+            '"Review the codebase" is a suggested prompt.', 'Review this codebase design proposal.',
+            'Review the codebase and give a detailed overview of the example below.',
+            'Review the codebase and give a detailed overview of src/.',
+            'Review the codebase and provide a summary of server.py.',
+            'Review the codebase and provide a summary of SERVER.PY.',
+            "Review the codebase and give a detailed overview, but don't read files.",
+            'Review the codebase and give a detailed overview without using workspace files.',
+            'Review the codebase and provide a brief overview if I later authorize reading.',
+            'Review the codebase and give an overview of the risks, excluding generated files.',
+            'Review the codebase and give an overview using the notes I supplied.',
+            'Review the codebase and give an overview after running the tests.',
+            'Review the codebase and give an overview, then edit the controller.',
+            'Review the codebase and run the tests.', 'Review the codebase on GitHub.',
+            'Review the codebase.\n```py\nprint(1)\n```',
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertIsNone(explicit_workspace_review(prompt))

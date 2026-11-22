@@ -42,6 +42,41 @@ class OrchestrationTests(unittest.TestCase):
             if out['state']==phase:return out
         self.fail('Flow never reached '+phase+': '+str(out))
     def children(self):return self.until('CHILDREN')
+    def test_explicit_codebase_review_needs_no_provider_before_workspace_access(self):
+        self.ws = self.ws.resolve()  # The VS Code bridge supplies a canonical workspace path.
+        prompt = ('please review the code base and give a detailed overview of what it is, '
+                  'whats novel and where it finds its most compelling application')
+        chat_key = 'a' * 64
+        with patch.object(self, 'provider', side_effect=AssertionError('No routing model needed')), \
+                patch('repository_tools.execute', side_effect=AssertionError('Workspace access is required')):
+            waiting = self.step(prompt=prompt, chat_key=chat_key, tier='auto', armed=False)
+            self.assertEqual(waiting['state'], 'NEED_ARM')
+            self.assertIsNone(waiting['conversation_id'])
+            self.assertNotIn('conversation', waiting)
+            node, data = flow.info(self.s, waiting['flow_id'])
+            self.assertEqual(node['prompt'], prompt)
+            self.assertEqual(data['permission'], {'operation': 'read', 'scope': 'workspace', 'paths': []})
+            self.assertEqual(data['source_roots'], ['.'])
+            session = data['conversation_session']
+            self.assertTrue(all(value == 0 for value in review_budget.usage(self.s, session)['used'].values()))
+            classified = m.events(self.s, waiting['flow_id'])[-1]
+            self.assertEqual(classified['kind'], 'EXPLICIT_WORKSPACE_REVIEW')
+            self.assertEqual(classified['kernel']['decision'], 'ALLOW')
+            self.s.close()
+            self.s = InvocationLedger(self.root / 'state.sqlite')
+            with self.assertRaisesRegex(InvalidUpdate, 'user-armed'):
+                self.step(waiting, chat_key=chat_key, armed=False)
+        with patch.object(self, 'provider', side_effect=AssertionError('No routing model needed')):
+            bound = self.step(waiting, chat_key=chat_key, tier='high', armed=True)
+        self.assertEqual(bound['state'], 'WORKSPACE')
+        self.assertEqual(bound['flow_id'], waiting['flow_id'])
+        task = self.s.snapshot(bound['binding']['session'])
+        self.assertEqual(task['goal'], prompt)
+        self.assertEqual(task['constraints']['allowed_paths'], ['.'])
+        for permission in ('edits_allowed', 'tests_allowed', 'network_allowed'):
+            self.assertFalse(task['constraints'][permission])
+        self.assertTrue(all(value == 0 for value in review_budget.usage(self.s, session)['used'].values()))
+
     def sources_for_slices(self):
         # Continuation tests need more source than one complete delivered page.
         for index in range(4):

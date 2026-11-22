@@ -8,6 +8,43 @@ from karma_adapter import KarmaAdapter
 from review_budget import usage
 
 
+_DIRECT_REVIEW = re.compile(
+    r"(?:(?:can|could|would)\s+you\s+)?(?:please\s+)?"
+    r"(?:review|inspect|examine|analy[sz]e)\s+"
+    r"(?:the|this|our|my)\s+(?:(?:current|open|whole|entire)\s+)?"
+    r"(?:workspace(?:\s+project)?|code[ -]?base|repository|repo)\b",
+    re.IGNORECASE,
+)
+_EXPLANATION = re.compile(
+    r",?\s+and\s+(?:give|provide|offer)\s+(?:(?:me|us)\s+)?(?:a|an|the)\s+"
+    r"(?:(?:detailed|high[ -]level|brief)\s+)?(?:overview|analysis|explanation|summary)\b",
+    re.IGNORECASE,
+)
+_OTHER_WORK_OR_TARGET = re.compile(
+    r"\b(?:edit|modif|chang|fix|patch|refactor|rewrit|implement|run|execut|install|deploy|"
+    r"commit|push|fetch|download|delet|creat|writ)[a-z]*\b"
+    r"|\b(?:attached|pasted|supplied|below|above|example|external|github|another|other|"
+    r"only|solely|instead|previous|if|unless|before|after|once|without|except|excluding|"
+    r"but|never|no|not|don['’]t)\b"
+    r"|[\r\n`/\\\";:]|\w[\w.-]*\.\w",
+    re.IGNORECASE,
+)
+
+
+def explicit_workspace_review(prompt):
+    """Recognize a self-contained read request without looking at source."""
+    text = prompt.strip()
+    start = _DIRECT_REVIEW.match(text)
+    if not start or _OTHER_WORK_OR_TARGET.search(text):
+        return None
+    tail = text[start.end():].rstrip(" .!?")
+    if tail and (not _EXPLANATION.match(tail) or any(mark in tail for mark in ".!?")):
+        return None
+    work = {"operation": "read", "scope": "workspace", "paths": []}
+    work, status, roots = workspace_target(work, text)
+    return (work, roots) if status == "resolved" else None
+
+
 def measure(store, session, target, evidence, recoverable):
     budget = usage(store, session) if session else None
     adapter = KarmaAdapter()

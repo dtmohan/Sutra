@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.57.4
+
+- Route clear first-turn read-only workspace reviews to the existing access check before making a model call.
+- Resume a saved review in its originating chat after workspace consent or an interrupted routing call. Preserve prior spending and require the same workspace grant.
+
 ## 0.57.3
 
 - Offer an opt-in 64K architecture writer for calibrated local MLX models and verified remote profiles. Expand only when the evidence needs a larger window and the current memory and remaining task allocation admit it.
