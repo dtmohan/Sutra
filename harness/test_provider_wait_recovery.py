@@ -62,6 +62,95 @@ class ProviderWaitRecoveryTests(unittest.TestCase):
     def test_charged_timeout_reloads_and_resumes_same_parent_on_another_model(self):
         self.assert_saved_timeout_recovery()
 
+    def test_standalone_auto_greeting_preserves_parent_and_focused_review(self):
+        self.ws = self.ws.resolve()
+        self.fail_provider = False
+        self.fact = 'Remember that Cedar uses ticket CED724.'
+        chat_key = 'a' * 64
+        with patch.object(self, 'provider', side_effect=AssertionError('Greeting needs no model')):
+            cold = self.step(prompt='hello there', armed=False, chat_key=chat_key, tier='auto',
+                             models=None, local_greeting=True)
+        self.assertEqual(cold['state'], 'DONE')
+        self.assertIsNone(cold['local_greeting']['parent'])
+        self.assertEqual(self.s.db.execute('SELECT COUNT(*) FROM invocations').fetchone()[0], 0)
+        first = self.step(prompt=self.fact, armed=False, chat_key=chat_key)
+        parent = first['conversation_id']
+        session = first['conversation']['session']
+        waiting = self.step(prompt='Review this codebase and give a detailed overview.',
+                            chat_key=chat_key, armed=False)
+        review = self.step(waiting, chat_key=chat_key, armed=True)
+        self.assertEqual(review['state'], 'WORKSPACE')
+        task = review['binding']['session']
+        spending = {sid: review_budget.usage(self.s, sid) for sid in (session, task)}
+        contract = self.s.pinned(task)
+
+        with patch.object(self, 'provider', side_effect=AssertionError('Greeting needs no model')), \
+                patch('repository_tools.execute', side_effect=AssertionError('Greeting needs no source reads')):
+            done = self.step(prompt='  Hello there!  ', armed=False, chat_key=chat_key,
+                             parent=parent, tier='auto', models=None, local_greeting=True)
+            self.assertEqual(done['state'], 'DONE')
+            self.assertEqual(done['local_greeting']['parent'], parent)
+            self.assertIsNone(done['conversation_id'])
+            self.assertNotIn('conversation', done)
+            self.assertEqual(done['task_stack'], review['task_stack'])
+            self.assertEqual(done['focused_flow']['cursor'], review['cursor'])
+            self.assertEqual(flow.latest_chat_flow(self.s, self.ws, chat_key)[0]['id'], review['flow_id'])
+            row = flow.m.events(self.s, done['flow_id'])[-1]
+            self.assertEqual(row['kind'], 'LOCAL_GREETING')
+            inspected = self.step(done, event='inspect', chat_key=chat_key)
+            self.assertEqual(inspected['local_greeting'], done['local_greeting'])
+            with self.assertRaisesRegex(InvalidUpdate, 'belongs to another Sutra chat'):
+                self.step(done, event='inspect', chat_key='b' * 64)
+            with self.assertRaisesRegex(InvalidUpdate, 'standalone Sutra Auto greeting'):
+                self.step(prompt='Hello there! Please review the repo.', armed=False, chat_key=chat_key,
+                          tier='auto', models=None, local_greeting=True)
+        self.assertEqual(self.s.pinned(task), contract)
+        self.assertEqual({sid: review_budget.usage(self.s, sid) for sid in (session, task)}, spending)
+
+    def test_explicit_resume_of_timed_out_greeting_uses_local_response(self):
+        from vscode_bridge import handle as bridge
+        self.ws = self.ws.resolve()
+        self.fail_provider = False
+        self.fact = 'Remember that Cedar uses ticket CED724.'
+        chat_key = 'a' * 64
+        first = self.step(prompt=self.fact, armed=False, chat_key=chat_key)
+        session = first['conversation']['session']
+        parent = first['conversation_id']
+        self.fail_provider = True
+        self.phase = 'response_headers'
+        paused = self.step(prompt='hello there', parent=parent, armed=False, chat_key=chat_key)
+        self.assertEqual(paused['stop']['status'], 'provider_wait')
+        failed = paused['stop']['failed_invocation_id']
+        charged = review_budget.usage(self.s, session)
+        self.assertEqual(charged['used']['calls'], 2)
+        self.s.close()
+        self.s = InvocationLedger(self.root / 'state.sqlite')
+
+        runner = {'version': 1, 'request_id': 'c' * 32, 'request_digest': 'e' * 64}
+        request = {'op': 'orchestrate', 'event': 'resume', 'flow_id': paused['flow_id'],
+                   'cursor': paused['cursor'], 'chat_key': chat_key, 'tier': 'auto',
+                   'armed': False, 'local_greeting': True, 'task_runner': runner}
+        with patch('api_runtime.provider_for', side_effect=AssertionError('Greeting needs no model retry')), \
+                patch('lifecycle.reconcile', side_effect=AssertionError('Greeting needs no workspace reconciliation')):
+            done = bridge(self.root, self.ws, request)
+            receipt = done['continuation']['receipt']
+            summarized = bridge(self.root, self.ws, {'op': 'orchestrate', 'event': 'runner_summary',
+                'flow_id': done['flow_id'], 'cursor': done['cursor'], 'chat_key': chat_key,
+                'binding': done['binding'], 'task_runner': runner, 'continuation_receipt': receipt})
+        self.assertEqual(done['flow_id'], paused['flow_id'])
+        self.assertEqual(done['state'], 'DONE')
+        self.assertEqual(done['local_greeting']['parent'], parent)
+        self.assertTrue(done['local_greeting']['resumed'])
+        self.assertEqual(done['continuation']['next_event'], None)
+        self.assertEqual([call['invocation_id'] for call in summarized['runner_usage']['calls']], [failed])
+        self.assertIsNone(done['task_stack']['focused'])
+        self.assertEqual(flow.latest_chat_flow(self.s, self.ws, chat_key)[0]['id'], first['flow_id'])
+        self.assertEqual(review_budget.usage(self.s, session), charged)
+        receipt, = self.s.db.execute('SELECT record_json FROM invocation_receipts WHERE session=? AND invocation_id=?',
+                                     (session, failed)).fetchone()
+        self.assertEqual(json.loads(receipt)['status'], 'quarantined')
+        self.assertTrue(self.s.verify_invocations(session))
+
     def test_saved_explicit_review_skips_repeating_its_timed_out_routing_call(self):
         self.fail_provider = True
         self.phase = 'response_headers'

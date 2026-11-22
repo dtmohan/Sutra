@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.57.6
+
+- Answer standalone Sutra Auto greetings locally without invoking a model or interrupting the focused saved task.
+- Resume a saved greeting that timed out waiting for the provider, preserving its conversation checkpoint and original charge.
+- Keep eligible small Ollama Low-tier chat models warm for up to 60 seconds and reuse compatible resident contexts after fresh memory admission.
+- Accept Ollama inventory timestamps with nanosecond precision on Python 3.9.
+
 ## 0.57.5
 
 - Preserve exact Python source evidence when an AST call span in a UTF-8 f-string is invalid.

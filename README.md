@@ -1,4 +1,8 @@
-# Sutra 0.57.5 — Source, synthesis and test recovery
+# Sutra 0.57.6 — Direct greetings and Low-tier model reuse
+
+Sutra Auto answers standalone greetings without a model call. Eligible local
+Ollama Low-tier chat calls keep the model warm for up to 60 seconds and can
+reuse its context when fresh memory admission allows it.
 
 Code-grounded answers address explicit cases individually using source defaults
 and named methods. Python mapping keeps exact source evidence when an f-string

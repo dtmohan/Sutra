@@ -198,6 +198,78 @@ class RuntimeMemoryTests(unittest.TestCase):
                 with rm.dispatch(p,self.root,'next','system',{},{}):raise KeyboardInterrupt()
         self.assertIsNone(rm.read_state()['owned']);self.assertTrue(rm.read_state()['active']['uncertain'])
 
+    def test_low_chat_bounded_warmth_and_reuse_preserve_the_admitted_packet(self):
+        from conversation import SYSTEM, schema
+        p = self.provider()
+        p.model = 'small'
+        p.memory_weights = 2 * rm.GIB
+        p.manifest_digest = 'small-weights'
+        # /api/show omits the runner while /api/ps identifies llama.cpp.
+        p.context_metadata = dict(self.metadata, details={'format': 'gguf'})
+        installed = {'name': p.model, 'digest': p.manifest_digest, 'size': p.memory_weights}
+        resident = dict(self.row, **installed, runner='llamacpp', format='gguf', context_length=32768,
+                        expires_at='9999-01-01T00:00:00.123456789Z')
+        payload = {'route': {'mode': 'auto', 'tier': 'low', 'model': p.model, 'models': {'low': p.model}},
+                   'constraints': {'network_allowed': False}, 'request': 'Explain a binary search',
+                   'context_binding': 'test', 'memory_allocation': {'summary_max_chars': 800}}
+        fmt = schema(payload)
+        original = copy.deepcopy(payload)
+        budget = p.budget
+        minimum = rm.dispatch_context(p, SYSTEM, payload, fmt)
+        self.assertLess(minimum, 32768)
+        with patch.object(rm, 'fresh_resources', return_value=self.healthy), \
+                patch.object(rm, 'api', return_value={'models': [installed]}) as api, \
+                patch.object(rm, 'running', side_effect=[[], [resident], [resident], [resident]]):
+            with rm.dispatch(p, self.root, 'cold', SYSTEM, payload, fmt) as plan:
+                self.assertEqual(plan['context_tokens'], minimum)
+                self.assertEqual(p.keep_alive, 60)
+                self.assertFalse(plan['resident_context_reused'])
+                p.runtime_completed = True
+            with rm.dispatch(p, self.root, 'warm', SYSTEM, payload, fmt) as plan:
+                self.assertTrue(plan['resident_context_reused'])
+                self.assertEqual(p.runtime_context_tokens, 32768)
+                self.assertEqual(p.keep_alive, 60)
+                self.assertEqual(plan['resident_weight_credit_bytes'], 0)
+                p.runtime_completed = True
+        self.assertEqual([item.args for item in api.call_args_list], [('/api/tags',), ('/api/tags',)])
+        saved = rm.read_state()
+        self.assertEqual(saved['events'][-1]['status'], 'still_resident')
+        self.assertIsNone(saved['owned'])
+        self.assertEqual(payload, original)
+        self.assertIs(p.budget, budget)
+
+    def test_low_chat_reuse_requires_identity_context_and_memory_admission(self):
+        from conversation import SYSTEM, schema
+        p = self.provider()
+        p.memory_weights = 2 * rm.GIB
+        p.manifest_digest = 'weights1'
+        installed = {'name': p.model, 'digest': p.manifest_digest, 'size': p.memory_weights}
+        row = dict(self.row, context_length=32768)
+        route = {'mode': 'auto', 'tier': 'low', 'model': p.model, 'models': {'low': p.model}}
+        moderate = dict(self.healthy, sample={'free_bytes': 7 * rm.GIB, 'inactive_bytes': 0})
+        for label, resident, payload, hardware, keep in (
+            ('manifest', dict(row, digest='old'), {'route': route}, self.healthy, 60),
+            ('expiry', dict(row, expires_at='2000-01-01T00:00:00Z'), {'route': route}, self.healthy, 60),
+            ('backend', dict(row, runner='mlx'), {'route': route}, self.healthy, 60),
+            ('context', dict(row, context_length=65536), {'route': route}, self.healthy, 60),
+            ('memory', row, {'route': route}, moderate, 60),
+            ('tier', row, {'route': dict(route, tier='high')}, self.healthy, 0),
+            ('document', row, {'route': route, 'document_evidence': {}}, self.healthy, 0),
+        ):
+            with self.subTest(label=label), \
+                    patch.object(rm, 'fresh_resources', return_value=hardware), \
+                    patch.object(rm, 'api', return_value={'models': [installed]}), \
+                    patch.object(rm, 'running', return_value=[resident]):
+                payload.update(request='Explain a binary search', context_binding='test',
+                               memory_allocation={'summary_max_chars': 800})
+                fmt = schema(payload)
+                minimum = rm.dispatch_context(p, SYSTEM, payload, fmt)
+                with rm.dispatch(p, self.root, label, SYSTEM, payload, fmt) as plan:
+                    self.assertFalse(plan['resident_context_reused'])
+                    self.assertEqual(plan['context_tokens'], minimum)
+                    self.assertEqual(p.keep_alive, keep)
+                    p.runtime_completed = True
+
     def test_cross_process_slot_and_crash_releases_os_lock(self):
         child_env=dict(os.environ,PYTHONPATH=str(Path(__file__).parent))
         script="import runtime_memory as m\nwith m.lease(): print('acquired',flush=True)\n"

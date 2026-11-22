@@ -271,6 +271,8 @@ function activate(context) {
     const {think_for_turn:thinkForTurn,conversation_step:conversationStep,...payload}=message||{};
     if(thinkForTurn!==undefined&&(thinkForTurn!==true||!internal||message.op!=='orchestrate'||!['start','step'].includes(message.event)))throw new Error('Invalid Sutra reasoning override.');
     if(conversationStep!==undefined&&(conversationStep!==true||!internal||message.op!=='orchestrate'||message.event!=='step'))throw new Error('Invalid Sutra conversation step.');
+    const localGreeting=message?.local_greeting;
+    if(localGreeting!==undefined&&(localGreeting!==true||thinkForTurn||!internal||message.op!=='orchestrate'||!['start','resume'].includes(message.event)))throw new Error('Invalid Sutra local greeting.');
     const documentEvidence=message?.op==='orchestrate'&&['locate_document','approve_document'].includes(message.event);
     if(documentEvidence&&!internal)throw new Error('Document access must be requested in Sutra chat.');
     const diagnostic=message?.op==='dashboard';
@@ -278,7 +280,7 @@ function activate(context) {
     const managementRead=['state','models','conversation_read','capability_list','calibration_list'].includes(message?.op);
     if ((((strataChanging||strataSetupRunning||engineChanging)&&!managementRead) || busy || ((sequence || nativeController?.status().working) && !internal)) && !diagnostic) throw new Error('A Sutra request or native model operation is running. Switch models after it finishes.');
     if (!['capability_list','capability_preview','capability_execute','orchestrate','conversation_read','conversation','native_permissions','native_work','native_preview','native_execute','chat_answer','calibration_register','calibration_list','calibration_bind','calibration_revoke','calibration_evaluate','models','state','new','save','switch','review','work','preview','execute','dashboard','quarantine','review_new','architecture','repository_tool','api_build','api_verify','static_build','static_explain','auto_new','auto_step','auto_report'].includes(message?.op)) throw new Error('Unknown Sutra request.');
-    if((['native_work','chat_answer','static_build','static_explain','auto_step','auto_report'].includes(message.op)||(message.op==='orchestrate'&&!conversationStep&&!documentEvidence&&!['start','inspect','pending','cancel','task_list','task_focus','task_close','supply_evidence'].includes(message.event)))&&hasDirtyFiles())throw new Error('Save or discard unsaved workspace buffers before mapping current source.');
+    if((['native_work','chat_answer','static_build','static_explain','auto_step','auto_report'].includes(message.op)||(message.op==='orchestrate'&&!conversationStep&&!documentEvidence&&!localGreeting&&!['start','inspect','pending','cancel','task_list','task_focus','task_close','supply_evidence'].includes(message.event)))&&hasDirtyFiles())throw new Error('Save or discard unsaved workspace buffers before mapping current source.');
     if(['execute','native_execute'].includes(message.op) && hasDirtyFiles())throw new Error('Save or discard unsaved workspace buffers before applying an edit or running tests.');
     const cwd = workspace(), stateDir = storage();
     fs.mkdirSync(stateDir,{recursive:true});startTelemetry();
@@ -299,7 +301,7 @@ function activate(context) {
         SUTRA_ACTIVITY:'1',SUTRA_THINKING:thinking,SUTRA_CHILD_THINKING:thinkForTurn?baseThinking:null,KARMA_NODE:process.execPath,
         KARMA_TYPESCRIPT:path.join(context.extensionPath,'vendor','typescript','typescript.js'),
         SUTRA_RAM_CACHE_MIB:String(ramMiB)};
-      const authorization=!managementRead?nativeController?.permissionEvidence(transport?.authority):undefined;
+      const authorization=!managementRead&&!localGreeting?nativeController?.permissionEvidence(transport?.authority):undefined;
       const result=await worker.send(payload,environment,{token,transport,authorization,onActivity:event=>{if(event.kind!=='workflow')usage?.activity(event);onActivity?.(event);}});
       output.appendLine(new Date().toISOString()+' '+message.op+' completed');
       const data=bridgeResult(result);

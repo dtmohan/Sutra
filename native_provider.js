@@ -28,6 +28,7 @@ const documentFilePause=flow=>evidencePause(flow)&&flow.stop.evidence_bridge?.ta
   (flow.stop.evidence_bridge.required==='document_file'||/\.docx\b/i.test(flow.prompt||''));
 const DOCUMENT_EVIDENCE=/^\s*(?:document|r[eé]sum[eé]|cv|cover[ -]+letter)[ \t]+text:[ \t]*\r?\n\s*\S/i;
 const WORKSPACE_EVIDENCE=/^(?:use this workspace[.!?]*|workspace files:[ \t]*\r?\n\s*\S[\s\S]*)$/i;
+const standaloneGreeting=prompt=>typeof prompt==='string'&&/^[ \t\r\n]*(?:hello(?: there)?|hi(?: there)?|hey)[.!?]*[ \t\r\n]*$/i.test(prompt);
 function latestRequest(vscode,messages){
   const last=messages.at(-1);
   const results=last?.content?.filter(p=>p instanceof vscode.LanguageModelToolResultPart)||[];
@@ -638,8 +639,9 @@ function install(vscode,context,deps){
   let activityProgress;
   async function flowEvent(flow,event,tier,token,extra,thinkForTurn,chatKey,stackChat,onFallback,onTicket){
     if(disposed)throw Object.assign(new Error('Sutra chat disconnected. The runner retains its request for reconnection.'),{code:'COORDINATOR_DETACHED'});
-    const access=refreshAccess();
-    const models=['inspect','pending','recoverable_review','cancel','locate_document'].includes(event)?undefined:await deps.configureModels(false,token,{tier,onFallback});
+    const access=extra?.local_greeting?undefined:refreshAccess();
+    const models=extra?.local_greeting||['inspect','pending','recoverable_review','cancel','locate_document'].includes(event)?undefined:
+      await deps.configureModels(false,token,{tier,onFallback});
     const workspaceStep=['step','resume','grant','capability_grant','restart_review','continue_parent_report','accept_provenance'].includes(event) && !classifying(flow);
     if(workspaceStep){
       assertCurrent(access,token);
@@ -1107,7 +1109,10 @@ function install(vscode,context,deps){
         }
       };
       const advance=async(flow,event,extra)=>{
-        const next=await flowEvent(flow,event,tier,activeCancel.token,extra,
+        const localGreeting=tier==='auto'&&options.toolMode!==vscode.LanguageModelChatToolMode.Required&&
+          !thinkForTurn&&((event==='start'&&standaloneGreeting(extra?.prompt))||
+            (event==='resume'&&flow.stop?.status==='provider_wait'&&standaloneGreeting(flow.prompt)));
+        const next=await flowEvent(flow,event,tier,activeCancel.token,localGreeting?{...extra,local_greeting:true}:extra,
           classifying(flow)?savedClassifierThinking??thinkForTurn:thinkForTurn,chatKey,legacyResume?undefined:flow?.stackChat||stackChat,
           reportModelFallbacks,ticket=>{currentRunnerTicket=ticket;});
         if(next.runner_usage)recordUsage({token_usage:next.runner_usage});
@@ -1380,6 +1385,15 @@ function install(vscode,context,deps){
           }
           if(resuming&&flow.state==='PAUSED'&&flow.stop?.resume_phase==='CLASSIFYING'){
             flow=await advance(flow,'resume');
+          }
+          if(flow.local_greeting){
+            if(activeCancel.token.isCancellationRequested)return;
+            const {answer,resumed,parent}=flow.local_greeting;
+            const checkpoint=parent?'\n\n<!-- KARMA_CONTEXT_V1:'+parent+':'+await rememberMemory(parent)+' -->':'';
+            audit.stage='local_greeting';audit.memoryUsed=!!parent;publish();
+            progress.report(new vscode.LanguageModelTextPart(answer+(resumed?
+              '\n\nAnswered locally. The earlier model call remains charged.':'')+checkpoint));
+            return;
           }
           if(resuming&&flow.state==='CLASSIFYING')flow=await advance(flow,'step');
           let documentLookupAttempted=false;

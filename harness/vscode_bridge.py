@@ -341,7 +341,10 @@ def handle(root,workspace,request):
                 meta=json.loads(metadata.read_text()) if metadata.exists() else {'workspace':str(Path(workspace).resolve())}
                 if not metadata.exists():metadata.write_text(canonical(meta))
                 # Document evidence has its own scoped read and ledger reservation.
-                reconcile_workspace=request.get('event') not in (
+                # A local greeting can only settle an exact provider-wait greeting.
+                event=request.get('event')
+                greeting_resume=event=='resume' and request.get('local_greeting') is True
+                reconcile_workspace=not greeting_resume and event not in (
                     'start','task_list','pending','recoverable_review','inspect','supply_evidence','locate_document','approve_document',
                     'runner_summary','continuation_probe')
                 if reconcile_workspace:reconcile(s,workspace)

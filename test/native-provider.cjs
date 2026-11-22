@@ -1864,6 +1864,46 @@ function setup(saved={}){
   assert.equal(reloaded.controller.status().pending,null);
   checks.push('provider timeout is a saved classifier pause with charged usage; reload and explicit model-switch continuation preserve the original greeting without arming or automatic retry');
  }
+ {
+  const host=setup(),options={modelOptions:{_conversationId:'greetings'}};
+  const message=prompt=>({role:1,content:[new Text(prompt)]});
+  const previous=await host.send('low',[message('Hello, remember Cedar.')],options);
+  const parent=previous.map(p=>p.value||'').join('').match(/karma-preview:\/conversation\/([a-f0-9]{32})\//)?.[1];
+  assert(parent);
+  const backend=host.deps.request,configureModels=host.deps.configureModels;
+  const localRequests=[];
+  host.deps.request=async(m,t)=>{
+   if(m.local_greeting){
+    localRequests.push(m);
+    return {state:'DONE',flow_id:'greeting',local_greeting:{answer:'Hello! How can I help?',parent:m.parent}};
+   }
+   return backend(m,t);
+  };
+  host.deps.configureModels=async()=>{throw Error('Greeting must not need provider discovery');};
+  host.v.window.showWarningMessage=async()=>{throw Error('Greeting must not request permission');};
+  const transcript=[message('Hello, remember Cedar.'),{role:2,content:previous}];
+  const hello=await host.send('auto',[...transcript,message('  Hello there!  ')],options);
+  const text=hello.map(p=>p.value||'').join('');
+  assert(text.startsWith('Hello! How can I help?'));
+  assert(text.includes('KARMA_CONTEXT_V1:'+parent+':'));
+  assert(!text.includes('conversation details'));
+  assert.equal(host.calls.length,1);
+  assert.equal(localRequests.length,1);
+  assert.equal(localRequests[0].parent,parent);
+  assert.equal(localRequests[0].models,undefined);
+  assert.equal(localRequests[0].armed,false);
+  assert.equal(host.controller.status().routing.stage,'local_greeting');
+
+  host.deps.configureModels=configureModels;
+  await host.send('auto',[{role:2,content:hello},message('Hello there! Can you explain Cedar?')],options);
+  assert.equal(host.calls.at(-1).parent,parent);
+  await assert.rejects(host.send('auto',[message('Hello')],{...options,toolMode:2,tools:[{name:'karma_native_action'}]}),/No admitted action/);
+  await host.commands['karma.toggleThinkingForNextRequest']();
+  await host.send('auto',[message('Hello')],options);
+  assert.equal(host.calls.at(-1).think_for_turn,true);
+  assert.equal(localRequests.length,1);
+  checks.push('standalone Auto greetings skip discovery and model dispatch while preserving the signed conversation checkpoint and honoring Required tool mode and explicit Thinking On');
+ }
  for(const approve of [false,true]){
   const upgraded=setup();upgraded.kind('report');
   const originalPrompt='Review saved workspace architecture';

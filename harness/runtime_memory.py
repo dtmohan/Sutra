@@ -11,6 +11,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import time
 
 from context_manager import InvalidUpdate, canonical
@@ -21,6 +22,10 @@ PROFILE = 'runtime-memory-v1'
 GIB = 1024 ** 3
 HEADROOM = 4 * GIB
 MAX_RECOVERY_SECONDS = 3
+LOW_CHAT_KEEP_ALIVE_SECONDS = 60
+LOW_CHAT_MAX_WEIGHTS = 4 * GIB
+LOW_CHAT_MAX_CONTEXT = 32768
+LOW_CHAT_MAX_ESTIMATED_MEMORY = 8 * GIB
 
 
 def enabled():
@@ -65,7 +70,9 @@ def running():
         if not isinstance(r, dict) or not isinstance(r.get('name'), str) or not isinstance(r.get('digest'), str):
             denied('Model memory identity unavailable')
         row={k:r.get(k) for k in ('name','digest','size','size_vram','context_length','runner','expires_at')}
-        row['runner']=row['runner'] or (r.get('details') or {}).get('runner')
+        details = r.get('details') or {}
+        row['runner'] = row['runner'] or details.get('runner')
+        row['format'] = details.get('format')
         rows.append(row)
     return rows
 
@@ -166,6 +173,23 @@ def kv_bytes_per_token(metadata):
     return layers * kv_heads * (key + value) * 2
 
 
+def resident_entry(model, models, digest, now=None):
+    now=time.time() if now is None else now
+    rows=[r for r in models if r.get('name')==model]
+    if len(rows)!=1:return None,'No unique resident model'
+    row=rows[0]
+    if not digest or row.get('digest')!=digest:return None,'Resident manifest does not match installed model'
+    try:
+        # Ollama uses RFC 3339 nanoseconds. Python 3.9 requires a fixed
+        # fractional precision, so truncate to microseconds before parsing.
+        stamp = re.sub(r'\.([0-9]{1,9})(?=Z$|[+-][0-9]{2}:[0-9]{2}$)',
+                       lambda match: '.' + match[1][:6].ljust(6, '0'), row['expires_at'])
+        expiry = datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+        if expiry.tzinfo is None or expiry.timestamp()<=now:return None,'Resident inventory entry expired'
+    except (KeyError,TypeError,ValueError,AttributeError,OverflowError):return None,'Resident expiry is unavailable'
+    return row, None
+
+
 def resident_credit(model, metadata, weights, models, context_tokens, digest, now=None):
     """Estimate reusable weights, never credit KV, workspace, or reclaimable RAM.
 
@@ -173,16 +197,12 @@ def resident_credit(model, metadata, weights, models, context_tokens, digest, no
     Matching an alias by name alone is insufficient. This remains a planning
     estimate: external clients can change a shared server after observation.
     """
-    now=time.time() if now is None else now
-    rows=[r for r in models if r.get('name')==model]
-    if len(rows)!=1:return 0,'No unique resident model'
-    row=rows[0];backend=(metadata.get('details') or {}).get('runner')
-    if not digest or row.get('digest')!=digest:return 0,'Resident manifest does not match installed model'
-    if not backend or row.get('runner')!=backend:return 0,'Resident backend is unverified'
-    try:
-        expiry=datetime.fromisoformat(row['expires_at'].replace('Z','+00:00'))
-        if expiry.tzinfo is None or expiry.timestamp()<=now:return 0,'Resident inventory entry expired'
-    except (KeyError,TypeError,ValueError,AttributeError,OverflowError):return 0,'Resident expiry is unavailable'
+    row, reason = resident_entry(model, models, digest, now)
+    if row is None:
+        return 0, reason
+    backend = (metadata.get('details') or {}).get('runner')
+    if not backend or row.get('runner') != backend:
+        return 0, 'Resident backend is unverified'
     if not positive(row.get('context_length')) or row['context_length']<context_tokens:
         return 0,'Requested context exceeds resident context; plan a cold allocation'
     bounds=[weights,row.get('size')]
@@ -368,13 +388,27 @@ def dispatch_context(provider, system, payload, schema):
     return min(provider.budget.context_limit, int(math.ceil((required + 256) / 1024)) * 1024)
 
 
+def low_chat_can_stay_warm(provider, system, payload, metadata, weights):
+    from context_window import exact
+    route = payload.get('route') or {}
+    if (route.get('mode') not in ('low', 'auto') or route.get('tier') != 'low'
+            or route.get('model') != provider.model or route.get('models', {}).get('low') != provider.model
+            or any(key in payload for key in ('document_evidence', 'document_offer', 'document_stage_flow'))
+            or exact(provider.budget) or not getattr(provider, 'manifest_digest', None)
+            or weights > LOW_CHAT_MAX_WEIGHTS or kv_bytes_per_token(metadata) is None
+            or (metadata.get('details') or {}).get('runner') == 'mlx'
+            or provider.runtime_context_tokens > LOW_CHAT_MAX_CONTEXT):
+        return False
+    from conversation import SYSTEM
+    return system == SYSTEM
+
+
 @contextlib.contextmanager
 def dispatch(provider, root, call_id, system, payload, schema):
     provider.runtime_context_tokens = dispatch_context(provider, system, payload, schema)
     if not enabled() or provider.port != 11434:
         yield None
         return
-    from monitoring import require_resources
     with lease():
         data = read_state()
         hardware = fresh_resources(root)
@@ -407,8 +441,35 @@ def dispatch(provider, root, call_id, system, payload, schema):
         previous=getattr(provider,'memory_profile',None)
         if previous and (not calibration or previous['sha256']!=calibration['sha256']):
             denied('MLX calibration changed after context selection; retry with a fresh allocation.')
-        plan = estimate(provider.model, metadata, weights, models, provider.runtime_context_tokens, hardware,calibration,
-                        getattr(provider,'manifest_digest',None))
+        minimum_context = provider.runtime_context_tokens
+        plan = estimate(provider.model, metadata, weights, models, minimum_context, hardware,
+                        calibration, expected_digest)
+        warm = low_chat_can_stay_warm(provider, system, payload, metadata, weights)
+        reuse = False
+        if warm:
+            resident, _ = resident_entry(provider.model, models, expected_digest)
+            if resident:
+                context = resident.get('context_length')
+                runner = (metadata.get('details') or {}).get('runner')
+                # Older /api/show responses omit the runner even when /api/ps
+                # identifies llama.cpp. Use GGUF for reuse, without memory credit.
+                if runner:
+                    compatible = resident.get('runner') == runner
+                else:
+                    compatible = (resident.get('format') == 'gguf'
+                                  and resident.get('runner') in (None, 'llamacpp'))
+                if (compatible and positive(context)
+                        and minimum_context <= context <= min(provider.budget.context_limit, LOW_CHAT_MAX_CONTEXT)):
+                    candidate = plan if context == minimum_context else estimate(
+                        provider.model, metadata, weights, models, context, hardware,
+                        calibration, expected_digest)
+                    if (candidate['decision'] == 'ALLOW'
+                            and candidate['cold_estimate_bytes'] <= LOW_CHAT_MAX_ESTIMATED_MEMORY):
+                        provider.runtime_context_tokens = context
+                        plan, reuse = candidate, True
+        keep_alive = (LOW_CHAT_KEEP_ALIVE_SECONDS if warm and plan['decision'] == 'ALLOW'
+                      and plan['cold_estimate_bytes'] <= LOW_CHAT_MAX_ESTIMATED_MEMORY else 0)
+        plan.update(keep_alive_seconds=keep_alive, resident_context_reused=reuse)
         plan['calibration_status']=status
         data.update(plan=plan, resident_models=models)
         if plan['decision'] != 'ALLOW':
@@ -420,7 +481,7 @@ def dispatch(provider, root, call_id, system, payload, schema):
         data.update(active={'call_id':call_id,'model':provider.model,'pid':os.getpid()}, owned=None)
         note(data, 'dispatch', call_id=call_id, model=provider.model, context_tokens=provider.runtime_context_tokens,
              calibration_sha256=calibration['sha256'] if calibration else None)
-        provider.keep_alive = 0
+        provider.keep_alive = keep_alive
         provider.runtime_completed = False
         try:
             yield plan

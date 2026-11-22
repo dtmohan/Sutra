@@ -13,6 +13,23 @@ from evidence_admission import (explicit_workspace_review, explicit_workspace_te
                                 workspace_roots, workspace_target)
 
 
+def standalone_greeting(req, prompt):
+    """The Auto chat shortcut is an exact match, never an intent guess."""
+    if req.get('local_greeting') is not True:
+        return False
+    if (req.get('tier') != 'auto' or req.get('think_for_turn') or len(prompt)>1800
+            or not re.fullmatch(r'(?:hello(?: there)?|hi(?: there)?|hey)[.!?]*', prompt.strip(' \t\r\n'), re.I | re.ASCII)):
+        raise InvalidUpdate('Local greeting is only available for a standalone Sutra Auto greeting')
+    return True
+
+
+def finish_greeting(s, flow, *, resumed=False):
+    move(s, flow['id'], 'DONE', 'LOCAL_GREETING',
+         local_greeting={'answer': 'Hello! How can I help?', 'resumed': resumed,
+                         'parent': flow.get('conversation_parent')}, workflow_stop=None)
+    return response(s, flow['id'])
+
+
 def document_workspace_notice(prompt):
     notice=document_input_notice(prompt)
     if not notice and has_document_text(prompt):
@@ -24,6 +41,8 @@ def latest_chat_flow(s,workspace,chat):
             """SELECT id FROM orchestration_nodes
                WHERE json_extract(record_json,'$.kind')='flow'
                AND json_extract(record_json,'$.workspace')=? AND json_extract(record_json,'$.chat_key')=?
+               AND (SELECT json_extract(e.record_json,'$.kind') FROM orchestration_events e
+                    WHERE e.node_id=orchestration_nodes.id ORDER BY e.seq DESC LIMIT 1) IS NOT 'LOCAL_GREETING'
                ORDER BY rowid DESC LIMIT 1""",(str(workspace),chat)).fetchone()
     return info(s,previous[0]) if previous else None
 
@@ -46,6 +65,8 @@ def _latest_ask_flow(s, workspace, chat):
     original = s.db.execute("""SELECT id FROM orchestration_nodes
         WHERE json_extract(record_json,'$.kind')='flow'
         AND json_extract(record_json,'$.workspace')=? AND json_extract(record_json,'$.chat_key')=?
+        AND (SELECT json_extract(e.record_json,'$.kind') FROM orchestration_events e
+             WHERE e.node_id=orchestration_nodes.id ORDER BY e.seq DESC LIMIT 1) IS NOT 'LOCAL_GREETING'
         AND json_extract(record_json,'$.restarted_from') IS NULL ORDER BY rowid DESC LIMIT 1""",
         (str(workspace), chat)).fetchone()
     if not original: return None
@@ -195,7 +216,7 @@ def response(s,fid,*,_runner_poll=False,**extra):
         extra.setdefault('capability_proposal',p)
         extra['capability_settled']=bool(p and capabilities.completed(s,p['id']))
     if m.state(s,fid)=='DONE':
-        for key in ('capability_result','request_notice'):
+        for key in ('capability_result','request_notice','local_greeting'):
             if key in data:extra.setdefault(key,data[key])
     if m.state(s,fid)=='AWAITING_ACTION':
         extra.setdefault('pending_action',data.get('invocation_id'))
@@ -452,7 +473,9 @@ def _handle_chat(s,meta,workspace,root,req,providers=None):
         return dict(projection['focused_flow'] or {'state':'DONE','flow_id':None},**projection)
     if fid:
         n=m.node(s,fid)
-        if n.get('workspace')!=str(workspace) or owner(s,workspace,fid)!=chat:
+        original_chat = (n.get('chat_key') if n.get('local_greeting') and event in ('inspect','runner_summary')
+                         else owner(s,workspace,fid))
+        if n.get('workspace')!=str(workspace) or original_chat!=chat:
             raise InvalidUpdate('Workflow belongs to another Sutra chat')
         meta=flow_metadata(root,workspace,fid)
         if event in ('task_focus','task_close','cancel'):
@@ -971,6 +994,8 @@ def _handle(s,meta,workspace,root,req,providers=None):
     # Model proposals cannot invoke this endpoint or set permissions.
     from conversation import answer as converse, chat_axis, session_for
     event=req.get('event','step');models=req.get('models');tier=req.get('tier','auto')
+    if req.get('local_greeting') is True and event not in ('start','resume'):
+        raise InvalidUpdate('Local greeting can only start or resume a Sutra Auto request')
     def provider(stage):return providers(stage) if providers else None
     if event=='pending':
         pending=pending_flows(s,workspace)
@@ -982,6 +1007,12 @@ def _handle(s,meta,workspace,root,req,providers=None):
         axis=chat_axis(workspace,chat)
         if event=='start' and req.get('parent'):
             session_for(s,{'prompt':prompt,'parent':req['parent']},axis=axis)
+        if event=='start' and standalone_greeting(req, prompt):
+            with s.db:
+                greeting=m.create(s,'flow',objective=prompt,workspace=str(workspace),prompt=prompt,
+                                  conversation_parent=req.get('parent'),chat_key=chat,local_greeting=True)
+                m.transition(s,greeting['id'],'CLASSIFYING','REQUEST')
+                return finish_greeting(s, greeting)
         retained=retained_chat_document(s,workspace,chat,req.get('parent'),prompt) if event=='start' else None
         notice=None if retained else (document_input_notice(prompt) if event=='start' else document_workspace_notice(prompt))
         if not retained and not notice and event=='start':
@@ -1088,6 +1119,12 @@ def _handle(s,meta,workspace,root,req,providers=None):
             return response(s,fid,**extra)
         if req.get('cursor')!=response(s,fid,_runner_poll=event=='continuation_probe')['cursor']:raise InvalidUpdate('Workflow event is stale or replayed')
     f,d=info(s,fid);phase=m.state(s,fid);prompt=f['prompt']
+    if event=='resume' and standalone_greeting(req, prompt):
+        stop=d.get('workflow_stop') or {}
+        if (phase!='PAUSED' or stop.get('status')!='provider_wait' or stop.get('resume_phase')!='CLASSIFYING'
+                or d.get('document_evidence')):
+            raise InvalidUpdate('Local greeting resume requires a saved conversation provider wait')
+        return finish_greeting(s, f, resumed=True)
     if event == 'continuation_probe' or event == 'resume' and 'continuation_fingerprint' in req:
         from task_continuation import describe, probe
         current = response(s, fid, _runner_poll=True)
