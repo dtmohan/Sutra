@@ -145,21 +145,26 @@ def review(s, sid, root, flow_id, provider=None):
     fmt = schema(payload)
     charge = provider.budget.check(SYSTEM, payload, fmt)
     run = s.begin_run(sid, payload['request'], [], None, max_calls=2, max_repairs=1)
-    for attempt in range(2):
-        s.reserve(run, 'ATTEMPT', {'attempt': attempt})
-        delivery = s.prepare_delivery(sid, payload, charge)
-        result = InvocationGateway(s.path, run, provider, ledger=s).invoke(ROLE, uuid.uuid4().hex, SYSTEM, payload, fmt, delivery)
-        if result['admission']['admitted']:
-            s.event(run, 'ALLOW', {'reason': 'document_verdict_assessment', 'invocation_id': result['invocation_id']})
-            break
-        errors = result['admission']['errors']
-        s.event(run, 'NACK', {'reason': 'document_verdict_assessment_rejected', 'errors': errors})
-        if attempt or result.get('blocked'):
-            s.event(run, 'FIN', {'reason': 'document_verdict_assessment_unavailable'})
-            break
-        s.event(run, 'BRIDGE', {'reason': 'bounded_document_verdict_review_repair'})
-        payload['repair'] = {'errors': [error[:160] for error in errors[:2]]}
-        charge = provider.budget.check(SYSTEM, payload, fmt)
+    try:
+        for attempt in range(2):
+            s.reserve(run, 'ATTEMPT', {'attempt': attempt})
+            delivery = s.prepare_delivery(sid, payload, charge)
+            result = InvocationGateway(s.path, run, provider, ledger=s).invoke(ROLE, uuid.uuid4().hex, SYSTEM, payload, fmt, delivery)
+            if result['admission']['admitted']:
+                s.event(run, 'ALLOW', {'reason': 'document_verdict_assessment', 'invocation_id': result['invocation_id']})
+                break
+            errors = result['admission']['errors']
+            s.event(run, 'NACK', {'reason': 'document_verdict_assessment_rejected', 'errors': errors})
+            if attempt or result.get('blocked'):
+                s.event(run, 'FIN', {'reason': 'document_verdict_assessment_unavailable'})
+                break
+            s.event(run, 'BRIDGE', {'reason': 'bounded_document_verdict_review_repair'})
+            payload['repair'] = {'errors': [error[:160] for error in errors[:2]]}
+            charge = provider.budget.check(SYSTEM, payload, fmt)
+    except BaseException as exc:
+        if not any(event['kind'] in ('ALLOW', 'FIN', 'RESOURCE_WAIT') for event in s.run(run)['events']):
+            s.event(run, 'FIN', {'reason': 'document_verdict_review_interrupted', 'error_type': type(exc).__name__})
+        raise
     result.pop('record', None)
     result.pop('model_proposal', None)
     return dict(result, stage=ROLE, route=route)

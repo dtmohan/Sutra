@@ -127,6 +127,25 @@ class HardeningTests(unittest.TestCase):
         storage_policy.prune(f.storage,f.s);self.assertFalse(directory.exists())
         self.assertEqual(f.apply(r)['id'],receipt['id']);self.assertTrue(f.s.audit_valid())
 
+    def test_retention_ignores_unavailable_traces_and_reclaims_old_tool_quarantines(self):
+        root = self.f.storage
+        calls = root/'calls'
+        calls.mkdir(exist_ok=True)
+        broken = calls/'broken.json'
+        broken.symlink_to(calls/'missing')
+        tools = root/'tools'
+        tools.mkdir(exist_ok=True)
+        package = tools/('ruff-1.2.3-'+'a'*12)
+        package.mkdir()
+        previous = package.with_name(package.name+'.quarantine-'+'b'*32)
+        previous.mkdir()
+        (previous/'receipt.txt').write_text('disposable fixture')
+        os.utime(previous, (0,0))
+        removed = storage_policy.prune(root, self.f.s, now=storage_policy.MAX_AGE+1)
+        self.assertEqual(removed, ['tools/'+previous.name])
+        self.assertTrue(package.is_dir())
+        self.assertTrue(broken.is_symlink())
+
     def test_missing_source_does_not_prevent_task_creation(self):
         f=self.f;request=dict(f.request);request['constraints']=dict(request['constraints'],allowed_paths=['missing.py'],tests_allowed=False);request['constraints'].pop('test_paths')
         state=handle(f.storage,f.workspace,request)

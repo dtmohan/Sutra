@@ -93,6 +93,22 @@ class RemoteControlTests(unittest.TestCase):
         self.assertIn('StrictHostKeyChecking=yes', command)
         self.assertNotIn('unit-test-remote-credential', repr(command))
 
+    def test_existing_tunnel_timeout_becomes_governed_observation_without_replacement(self):
+        import remote_memory
+
+        control_path = MagicMock(spec=Path)
+        control_path.exists.return_value = True
+        with patch('remote_control.control_socket', return_value=control_path), \
+                patch('remote_control._ssh', return_value='/usr/bin/ssh'), \
+                patch('remote_control.subprocess.run', side_effect=subprocess.TimeoutExpired('fixture status', 5)) as probe:
+            paused = remote_memory._observe(self.profile, 4096)
+        self.assertFalse(paused['admitted'])
+        self.assertEqual(paused['observation_failure']['stage'], 'ssh_tunnel')
+        self.assertEqual(paused['observation_failure']['failure_kind'], 'timeout')
+        self.assertIn('status check timed out', paused['reason'])
+        probe.assert_called_once()
+        control_path.unlink.assert_not_called()
+
     def test_metadata_auth_errors_do_not_echo_body_or_secret(self):
         response = MagicMock(); response.status = 401
         response.read.return_value = b'PRIVATE_SERVER_BODY'

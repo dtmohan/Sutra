@@ -103,6 +103,22 @@ class WorkspaceAllocationTests(unittest.TestCase):
         with patch.dict(os.environ, {allocation.ENVIRONMENT_KEY: '{}'}):
             self.assertEqual(allocation.try_amend(self.s, out['flow_id'], self.meta)['dimension'], 'tokens')
 
+    def test_legacy_mapping_stop_authorizes_only_its_measured_amendment(self):
+        out = self.until('MAPPING')
+        sid = self.meta['active']
+        before = usage(self.s, sid)
+        frame = KarmaAdapter().allocations(before['used'], before['limits'],
+            {'source_bytes': before['limits']['source_bytes'] - before['used']['source_bytes'] + 1})
+        move = flow.move(self.s, out['flow_id'], 'PAUSED', 'MAPPING_STOPPED',
+                         mapping_stop={'status': 'budget_stopped', 'stage': 'MAPPING', 'frame': frame})
+        with patch.dict(os.environ, {allocation.ENVIRONMENT_KEY: '{}'}):
+            amendment = allocation.try_amend(self.s, out['flow_id'], self.meta)
+            self.assertEqual(amendment['dimension'], 'source_bytes')
+            stored = self.s.db.execute('SELECT record_json FROM allocation_amendments WHERE session=?', (sid,)).fetchone()
+            self.assertEqual(json.loads(stored[0])['workspace_policy']['stop_receipt'], move['receipt'])
+            self.assertEqual(allocation.try_amend(self.s, out['flow_id'], self.meta)['reason'], 'already_amended')
+        self.assertEqual(usage(self.s, sid)['used'], before['used'])
+
     def test_bad_policy_values_fail_closed(self):
         for value in ('{', '{"actions":7}', '{"source_bytes":0}', '{"calls":true}',
                       '{"enabled":"false"}', '{"tokens":1000001}'):

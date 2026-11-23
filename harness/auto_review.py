@@ -105,10 +105,10 @@ def select_files(s,meta,workspace,st):
  candidates=ranked([p for p in names if Path(p).suffix in CODE and p not in done and p not in a.get('failures',{})],s.snapshot(meta['active'])['goal'],a.get('preferred',[]))
  if not candidates:return [],[]
  config=['tsconfig.json'] if 'tsconfig.json' in names and any(Path(p).suffix!='.py' for p in candidates) else []
- selected=list(config);size=sum((workspace/p).stat().st_size for p in config);primary=[]
+ selected=list(config);size=sum(repo.source_size(workspace,p) for p in config);primary=[]
  # Byte allocation, rather than file count, sets the page. No source is executed.
  for p in candidates:
-  length=(workspace/p).stat().st_size
+  length=repo.source_size(workspace,p)
   if size+length>cap:
    if not primary:fail_page(a,workspace,p,'File exceeds this page byte allocation; increase review_page_kib in a new contract.',cap)
    continue
@@ -152,9 +152,9 @@ def step(s,meta,workspace,root,request,provider=None):
   # a smaller page before asking the user to increase the task ceiling.
   from source_paging import select, remaining
   left=remaining(s,meta['active'])
-  required=sum((workspace/p).stat().st_size for p in files)
+  required=sum(repo.source_size(workspace,p) for p in files)
   if required*2>=left['source_bytes']:
-   smallest=min((workspace/p).stat().st_size for p in primary)
+   smallest=min(repo.source_size(workspace,p) for p in primary)
    if valid and smallest*2>=left['source_bytes']:
     a['status']='bounded_source_pass'
     with s.db:s._audit('MAPPING_BREADTH_DEFERRED',{'session':meta['active'],'remaining':left,'pending_files':st['pending_files']})

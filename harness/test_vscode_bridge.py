@@ -65,6 +65,22 @@ class VSCodeBridgeTests(unittest.TestCase):
         self.assertFalse(r['result']['admission']['admitted']);self.assertEqual(len(model.payloads),3)
         with self.assertRaises(PageFault):self.s.load_result(self.session,r['result']['invocation_id'])
         self.assertEqual(self.s.run(r['result']['run_id'])['events'][-1]['kind'],'FIN')
+    def test_repair_prompt_budget_failure_settles_the_run_before_return(self):
+        model = FakeModel(lambda answer: answer['constraints'].pop())
+        original = Budget.check
+
+        def check(budget, system, payload, schema):
+            if payload.get('repair'):
+                raise ContextBudgetExceeded('fixture repair packet does not fit')
+            return original(budget, system, payload, schema)
+
+        with patch.object(Budget, 'check', check):
+            with self.assertRaisesRegex(ContextBudgetExceeded, 'fixture repair packet'):
+                self.review(model)
+        run, = self.s.db.execute('SELECT id FROM protocol_runs').fetchone()
+        self.assertEqual(self.s.run(run)['events'][-1]['kind'], 'FIN')
+        self.assertEqual(len(model.payloads), 1)
+        self.assertTrue(self.s.verify_invocations(self.session))
     def test_invented_source_quote_is_quarantined(self):
         r=self.review(FakeModel(lambda a:a['findings'][0].update(quote='invented source')))
         self.assertFalse(r['result']['admission']['admitted'])
@@ -121,11 +137,20 @@ class VSCodeBridgeTests(unittest.TestCase):
         self.assertEqual(other['last_result']['summary'],result['result']['accepted_output']['summary'])
     def test_path_escape_and_symlink_escape_rejected(self):
         (self.workspace/'outside').symlink_to(self.root)
-        for name in ('../secrets','/etc/passwd','outside/secret'):
+        for name in ('../secrets','/etc/passwd','outside/secret',' src/retry.py'):
             with self.assertRaises(InvalidUpdate):safe_path(self.workspace,name)
     def test_missing_constraint_cannot_be_removed_by_saving_form(self):
         update=copy.deepcopy(self.contract);update['op']='save';del update['constraints']['timeout_ms']
         with self.assertRaises(InvalidUpdate):handle(self.storage,self.workspace,update)
+    def test_saved_identity_survives_failed_state_projection(self):
+        update=copy.deepcopy(self.contract);update['goal']='Study another retry configuration.'
+        with patch('vscode_bridge.state',side_effect=InvalidUpdate('Projection unavailable')):
+            with self.assertRaisesRegex(InvalidUpdate,'Projection unavailable'):
+                handle(self.storage,self.workspace,update)
+        projected=json.loads((self.storage/'workspace.json').read_text())
+        self.assertNotEqual(projected['active'],self.session)
+        self.assertEqual(self.s.snapshot(projected['active'])['goal'],update['goal'])
+        self.assertEqual(handle(self.storage,self.workspace,{'op':'state'})['session'],projected['active'])
     def test_budget_failure_occurs_before_dispatch(self):
         model=FakeModel();model.budget=Budget(context_limit=2000)
         with self.assertRaises(ContextBudgetExceeded):self.review(model)

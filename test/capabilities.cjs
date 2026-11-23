@@ -11,14 +11,18 @@ function fixture(){
 }
 (async()=>{
  const h=fixture();h.choose(undefined);assert.equal(await h.ui.approve(h.p),null);assert.equal(h.prompts.length,1);
- h.choose('Approve');assert.equal((await h.ui.approve(h.p)).kind,'user');
+ h.choose('Approve');const userApproval=await h.ui.approve(h.p);assert.equal(userApproval.kind,'user');
+ assert.deepEqual(h.ui.evidence(userApproval).approval,userApproval);
+ assert.equal(h.ui.evidence(userApproval).action,'check');
  h.cfg['tools.mode']='disabled';await assert.rejects(h.ui.approve(h.p),/disabled/);
  h.cfg['tools.mode']='preapproved';h.cfg['tools.preapproved']={ruff:['check']};h.choose('Approve policy');
- assert.equal((await h.ui.approve(h.p)).kind,'workspace_policy');const count=h.prompts.length;
+ const preapproved=await h.ui.approve(h.p);assert.equal(preapproved.kind,'workspace_policy');
+ assert.deepEqual(h.ui.evidence(preapproved).policy.allowed,{ruff:['check']});const count=h.prompts.length;
  const reloaded=controller(h.vscode,h.context,h.deps);assert.equal((await reloaded.approve({...h.p,id:'p2'})).kind,'workspace_policy');assert.equal(h.prompts.length,count);
  // Same workspace policy works after a model switch, but no model supplies it.
  h.cfg.model='larger';assert.equal((await reloaded.approve({...h.p,id:'p3'})).kind,'workspace_policy');assert.equal(h.prompts.length,count);
- h.cfg['tools.preapproved']={ruff:['check','install']};assert.equal((await h.ui.approve(h.p)).kind,'workspace_policy');assert.equal(h.prompts.length,count+1);
+ h.cfg['tools.preapproved']={ruff:['check','install']};assert.throws(()=>h.ui.evidence(preapproved),/changed/);
+ assert.equal((await h.ui.approve(h.p)).kind,'workspace_policy');assert.equal(h.prompts.length,count+1);
  await h.ui.approve({...h.p,binding:{...h.p.binding,registry_hash:'registry2'}});assert.equal(h.prompts.length,count+2);
  h.cfg['tools.mode']='ask';h.choose(()=>{h.cfg['tools.mode']='disabled';return 'Approve';});await assert.rejects(h.ui.approve(h.p),/changed/);
  h.cfg['tools.mode']='ask';h.choose('Approve');h.arm(false);await assert.rejects(h.ui.approve(h.p),/workspace access/);h.arm(true);

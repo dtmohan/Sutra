@@ -16,12 +16,18 @@ from review_role import SYSTEM, compact, review_schema
 
 
 def ollama(path, body=None):
-    c=http.client.HTTPConnection('127.0.0.1',11434,timeout=10)
+    from lifecycle import timeout
+
+    response_limit = 1024 * 1024
+    c=http.client.HTTPConnection('127.0.0.1',11434,timeout=timeout(10))
     try:
         c.request('POST' if body is not None else 'GET',path,
                   json.dumps(body) if body is not None else None, {'Content-Type':'application/json'})
-        r=c.getresponse(); raw=r.read()
+        r=c.getresponse()
         if r.status!=200: raise InvalidUpdate('Local Ollama: HTTP '+str(r.status))
+        raw=r.read(response_limit + 1)
+        if len(raw)>response_limit:
+            raise InvalidUpdate('Local Ollama metadata exceeds its response allocation')
         return json.loads(raw)
     except OSError as exc:
         raise InvalidUpdate('Cannot reach Ollama at 127.0.0.1:11434. Start the Ollama app or run ollama serve, then choose Retry model discovery in Sutra Settings.') from exc
@@ -29,13 +35,11 @@ def ollama(path, body=None):
 
 
 def safe_path(workspace, name):
+    from repository_tools import normalized, source_size
     workspace=workspace.resolve()
-    if not isinstance(name,str) or not name or Path(name).is_absolute() or '..' in Path(name).parts or '\\' in name:
-        raise InvalidUpdate('Use a relative workspace path')
-    if str(Path(name))!=name:raise InvalidUpdate('Use a canonical relative path without dot or repeated-slash aliases')
-    target=(workspace/name).resolve()
-    if workspace not in target.parents: raise InvalidUpdate('Path escapes workspace')
-    return target
+    normalized(name)
+    source_size(workspace,name,allow_missing=True)
+    return workspace/name
 
 
 def save_contract(s, session, data, workspace):
@@ -43,7 +47,9 @@ def save_contract(s, session, data, workspace):
     if not goal or len(goal)>1800: raise InvalidUpdate('Goal must be 1..1800 characters')
     if not isinstance(constraints,dict) or set(constraints)-CONSTRAINT_KEYS: raise InvalidUpdate('Unsupported constraint')
     paths=constraints.get('allowed_paths',[])
-    if not isinstance(paths,list) or not 1<=len(paths)<=8: raise InvalidUpdate('Choose 1..8 exact workspace paths')
+    if (not isinstance(paths,list) or not 1<=len(paths)<=8
+            or any(not isinstance(path,str) for path in paths) or len(paths)!=len(set(paths))):
+        raise InvalidUpdate('Choose 1..8 unique exact workspace paths')
     if constraints.get('review_only') is True:
         from repository_tools import normalized
         for name in paths: normalized(name,root=True)
@@ -68,10 +74,12 @@ def save_contract(s, session, data, workspace):
     if constraints.get('edits_allowed') or constraints.get('tests_allowed'):
         if type(constraints.get('max_actions')) is not int or not 1<=constraints['max_actions']<=32:
             raise InvalidUpdate('Action budget must be 1..32')
-    if constraints.get('tests_allowed'):
-        tests=constraints.get('test_paths',[])
-        if not isinstance(tests,list) or not tests or not set(tests)<=set(paths) or any(not p.endswith('.py') for p in tests):
+    tests=constraints.get('test_paths',[])
+    if 'test_paths' in constraints or constraints.get('tests_allowed'):
+        if (not isinstance(tests,list) or not tests or any(not isinstance(p,str) or not p.endswith('.py') for p in tests)
+                or not set(tests)<=set(paths) or len(tests)!=len(set(tests))):
             raise InvalidUpdate('Test paths must be in-scope Python unittest files')
+    if constraints.get('tests_allowed'):
         if type(constraints.get('test_timeout_ms')) is not int or not 100<=constraints['test_timeout_ms']<=120000:
             raise InvalidUpdate('Test timeout must be 100..120000 ms')
     values={'task_id':session,'goal':goal,**constraints};ops=[];lines=[]
@@ -89,21 +97,20 @@ def save_contract(s, session, data, workspace):
 
 
 def sync_sources(s,session,workspace):
+    from repository_tools import read_bytes
     if s.snapshot(session)['constraints'].get('review_only'):return []
     rows=[]
     for name in s.snapshot(session)['constraints']['allowed_paths']:
-        path=safe_path(workspace,name)
-        if not path.is_file():
+        raw=read_bytes(workspace,name,allow_missing=True)
+        if raw is None:
             rows.append({'path':name,'status':'missing','pages':[]});continue
-        raw=path.read_bytes()
-        if len(raw)>64000: raise InvalidUpdate(name+': file exceeds 64 KB prototype limit; select smaller files')
         text=raw.decode('utf-8');digest=sha(text)
         try:doc=s.document(session,name)
         except PageFault:doc=None
         # Refresh expired pages explicitly; changed documents create new versions.
         changed=not doc or doc['digest']!=digest
         if changed:
-            doc=s.put_document(session,name,text,authority='file',source={'path':str(path),'sha256':digest},
+            doc=s.put_document(session,name,text,authority='file',source={'path':str(workspace/name),'sha256':digest},
                                expected_version=doc['version'] if doc else 0)
         pages=[];start=0;number=0
         while start<len(text):
@@ -252,30 +259,38 @@ def dispatch(s,meta,workspace,root,request,provider=None):
                                            schema_for=lambda p:schema,materialize=True)
     provider.budget.check(system,payload,schema)
     from context_window import check as check_window
+    from lifecycle import Interrupted
     check_window(provider.budget,system,payload,schema,planning=True)
     run=s.begin_run(session,prompt,[],None,max_calls=3,max_repairs=2)
     meta['model']=model_name;last=None
-    for attempt in range(3):
-        s.reserve(run,'ATTEMPT',{'attempt':attempt})
-        if provider.__class__ is LocalModel:
-            from monitoring import require_resources
-            try:
-                hardware=require_resources(root)
-                with s.db:s._audit('RESOURCE_GATE',{'run_id':run,'measurement':hardware})
-            except InvalidUpdate as exc:
-                s.event(run,'RESOURCE_WAIT',{'reason':str(exc)})
-                raise
-        charge=provider.budget.check(system,payload,schema)
-        delivery=s.prepare_delivery(session,payload,charge)
-        last=InvocationGateway(s.path, run, provider, ledger=s).invoke(role,uuid.uuid4().hex,system,payload,schema,delivery)
-        if last['admission']['admitted']:
-            s.event(run,'ALLOW',{'reason':'validated_review','invocation_id':last['invocation_id']})
-            meta['checkpoint']=last['invocation_id'];break
-        s.event(run,'NACK',{'reason':'invalid_review','invocation_id':last['invocation_id'],'errors':last['admission']['errors']})
-        if attempt==2 or last.get('blocked'):
-            s.event(run,'FIN',{'reason':'repair_exhausted_or_transport','errors':last['admission']['errors']});break
-        s.event(run,'BRIDGE',{'reason':'bounded_repair','attempt':attempt+1})
-        payload['repair']={'errors':[e[:140] for e in last['admission']['errors'][:2]]}
+    try:
+        for attempt in range(3):
+            s.reserve(run,'ATTEMPT',{'attempt':attempt})
+            if provider.__class__ is LocalModel:
+                from monitoring import require_resources
+                try:
+                    hardware=require_resources(root)
+                    with s.db:s._audit('RESOURCE_GATE',{'run_id':run,'measurement':hardware})
+                except InvalidUpdate as exc:
+                    s.event(run,'RESOURCE_WAIT',{'reason':str(exc)})
+                    raise
+            charge=provider.budget.check(system,payload,schema)
+            if attempt:
+                check_window(provider.budget,system,payload,schema,planning=True)
+            delivery=s.prepare_delivery(session,payload,charge)
+            last=InvocationGateway(s.path, run, provider, ledger=s).invoke(role,uuid.uuid4().hex,system,payload,schema,delivery)
+            if last['admission']['admitted']:
+                s.event(run,'ALLOW',{'reason':'validated_review','invocation_id':last['invocation_id']})
+                meta['checkpoint']=last['invocation_id'];break
+            s.event(run,'NACK',{'reason':'invalid_review','invocation_id':last['invocation_id'],'errors':last['admission']['errors']})
+            if attempt==2 or last.get('blocked'):
+                s.event(run,'FIN',{'reason':'repair_exhausted_or_transport','errors':last['admission']['errors']});break
+            s.event(run,'BRIDGE',{'reason':'bounded_repair','attempt':attempt+1})
+            payload['repair']={'errors':[e[:140] for e in last['admission']['errors'][:2]]}
+    except (Exception, Interrupted):
+        if not any(e['kind'] in ('ALLOW', 'FIN', 'RESOURCE_WAIT') for e in s.run(run)['events']):
+            s.event(run, 'FIN', {'reason': 'review_dispatch_aborted'})
+        raise
     last.pop('record',None);last.pop('model_proposal',None)
     last['run_id']=run;last['model']=model_name;last['handoff_from']=parent
     return {'result':last,'state':state(s,meta,workspace)}
@@ -397,6 +412,10 @@ def handle(root,workspace,request):
             raise
 
 
+def persist_metadata(metadata, meta):
+    temp=metadata.with_suffix('.tmp');temp.write_text(canonical(meta));temp.replace(metadata)
+
+
 def _handle(root,workspace,request,metadata=None,prepare_catalog=True):
     root=root.resolve();workspace=workspace.resolve()
     root.mkdir(parents=True,exist_ok=True);metadata=metadata or root/'workspace.json'
@@ -457,7 +476,7 @@ def _handle(root,workspace,request,metadata=None,prepare_catalog=True):
                 from native_access import bind
                 bind(s,meta['active'],request['conversation_id'])
             # Persist identity before the first interruptible repository action.
-            temp=metadata.with_suffix('.tmp');temp.write_text(canonical(meta));temp.replace(metadata)
+            persist_metadata(metadata,meta)
             if prepare_catalog:
                 from repository_tools import execute
                 execute(s,meta['active'],workspace,root,'catalog',resource_check=False)
@@ -465,6 +484,7 @@ def _handle(root,workspace,request,metadata=None,prepare_catalog=True):
         elif op=='native_permissions':
             from native_access import grant
             grant(s,meta,workspace,request)
+            persist_metadata(metadata,meta)
             result=state(s,meta,workspace)
         elif op=='chat_answer':
             if not meta.get('active') or not s.snapshot(meta['active'])['constraints'].get('auto_review'):raise InvalidUpdate('Start a Karma chat review task first')
@@ -509,6 +529,7 @@ def _handle(root,workspace,request,metadata=None,prepare_catalog=True):
                 for key in ('api_candidate','api_review','api_position','static_map','auto','chat'):meta.pop(key,None)
                 meta['active']='task-'+uuid.uuid4().hex[:12];s.create(meta['active']);meta.pop('checkpoint',None)
             save_contract(s,meta['active'],request,workspace)
+            persist_metadata(metadata,meta)
             result=state(s,meta,workspace)
         elif op=='state':result=state(s,meta,workspace)
         elif op=='switch':
@@ -529,7 +550,7 @@ def _handle(root,workspace,request,metadata=None,prepare_catalog=True):
             s.quarantine_invocation(meta['active'],request['invocation_id'],'Explicit host quarantine')
             result=state(s,meta,workspace)
         else:raise InvalidUpdate('Unknown operation')
-        temp=metadata.with_suffix('.tmp');temp.write_text(canonical(meta));temp.replace(metadata)
+        persist_metadata(metadata,meta)
         return result
     finally:s.close()
 
@@ -540,6 +561,7 @@ REQUEST_ENVIRONMENT = frozenset((
     'SUTRA_ENGINE_MODELS', 'SUTRA_ENGINE_ONLY', 'SUTRA_ENGINE_PYTHON', 'SUTRA_ENGINE_REGISTRY', 'SUTRA_ENGINE_APPROVALS',
     'SUTRA_ENGINE_CONTEXT',
     'SUTRA_STRATA_PORT', 'SUTRA_STRATA_MODEL', 'SUTRA_STRATA_MODELS', 'SUTRA_STRATA_ONLY', 'SUTRA_CAPABILITIES_MODE',
+    'SUTRA_CAPABILITY_AUTHORIZATION',
     'SUTRA_RUNTIME_DIR', 'SUTRA_MEMORY_OWNERSHIP', 'SUTRA_WORKSPACE_ALLOCATION',
     'KARMA_STORAGE_LIMIT_MIB', 'SUTRA_LOGIT_SENSOR', 'SUTRA_ACTIVITY',
     'SUTRA_THINKING', 'SUTRA_CHILD_THINKING', 'KARMA_NODE', 'KARMA_TYPESCRIPT', 'SUTRA_RAM_CACHE_MIB',

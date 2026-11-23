@@ -22,7 +22,7 @@ from platform_support import lock_file
 VERSION = 2
 FRAME_LIMIT = 2 * 1024 * 1024
 RUNTIME_FILES = ('engine_client.py', 'engine_service.py', 'engine_process.py',
-                 'engine_codec.py', 'engine_profiles.py')
+                 'engine_codec.py', 'engine_profiles.py', 'provider_startup.py')
 
 
 class EngineServiceError(RuntimeError):
@@ -277,6 +277,21 @@ def _retire_legacy(record):
     operation('shutdown')
 
 
+def _wait_for_retirement(root, until):
+    while True:
+        if not (root / 'worker.json').exists():
+            try:
+                with lock_file(root / 'owner.lock'):
+                    return
+            except InvalidUpdate:
+                pass
+        remaining = until - time.monotonic()
+        if remaining <= 0:
+            _failure({'status': 'uncertain',
+                      'error': 'The previous engine worker has not released ownership; no replacement was started'})
+        time.sleep(min(.05, remaining))
+
+
 def ensure_service():
     startup_until = time.monotonic() + 20
     root = directory()
@@ -288,11 +303,7 @@ def ensure_service():
             record = metadata(root, allow_legacy=True)
             if record.get('version') == 1:
                 _retire_legacy(record)
-                until = min(startup_until, time.monotonic() + 5)
-                while (root / 'worker.json').exists() and time.monotonic() < until:
-                    time.sleep(.05)
-                if (root / 'worker.json').exists():
-                    _failure({'status': 'uncertain', 'error': 'The previous Sutra worker has not confirmed protocol retirement; no new worker was started'})
+                _wait_for_retirement(root, min(startup_until, time.monotonic() + 5))
                 try:
                     Path(record['socket']).parent.rmdir()
                 except OSError:
@@ -316,12 +327,7 @@ def ensure_service():
             if live.get('busy'):
                 _failure({'status': 'busy', 'error': 'The previous engine worker is still busy; wait before upgrading it'})
             _exchange(record, {'op': 'shutdown'}, seconds=5)
-            for _ in range(50):
-                if not (root / 'worker.json').exists():
-                    break
-                time.sleep(.05)
-            if (root / 'worker.json').exists():
-                _failure({'status': 'uncertain', 'error': 'The previous engine worker has not confirmed shutdown; retry after it settles'})
+            _wait_for_retirement(root, min(startup_until, time.monotonic() + 5))
         if not executable or not Path(executable).is_absolute() or not Path(executable).is_file():
             raise EngineServiceError('Set up Sutra engine dependencies in Model settings before loading a model')
         from engine_process import sanitized_environment

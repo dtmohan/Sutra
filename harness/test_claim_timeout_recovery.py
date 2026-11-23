@@ -43,7 +43,7 @@ class TimedReviewer(WireModel):
         if packet.get('review_protocol') != 2 or not self.timeout:
             return super().call(cid, system, packet, schema)
         self.payloads.append(copy.deepcopy(packet))
-        connection = SimpleNamespace(sock=None, request=lambda *a, **kw: None,
+        connection = SimpleNamespace(sock=None, connect=lambda: None, request=lambda *a, **kw: None,
             getresponse=lambda: SimpleNamespace(status=200), close=lambda: None)
         def http(*args, **kwargs):
             self.http_timeouts.append(kwargs['timeout'])

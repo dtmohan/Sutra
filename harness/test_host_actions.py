@@ -160,6 +160,13 @@ class ActionTests(unittest.TestCase):
             r=self.propose(model=Coder(lambda a:a['action'].update(new=text)))
             self.assertFalse(r['result']['admission']['admitted'])
         self.assertEqual((self.workspace/'src/retry.py').read_text(),SOURCE)
+    def test_named_dynamic_import_applies_the_same_dependency_rule(self):
+        for name,admitted in (('math',True),('fixture_dependency',False)):
+            loop='for attempt in range(MAX_ATTEMPTS - 1):'
+            text=f'from importlib import import_module as load\n    load({name!r})\n    {loop}'
+            r=self.propose(model=Coder(lambda a:a['action'].update(old=loop,new=text)))
+            self.assertEqual(r['result']['admission']['admitted'],admitted)
+        self.assertEqual((self.workspace/'src/retry.py').read_text(),SOURCE)
     def test_wrong_preimage_rejected(self):
         r=self.propose(model=Coder(lambda a:a['action'].update(old='absent code')))
         self.assertFalse(r['result']['admission']['admitted'])

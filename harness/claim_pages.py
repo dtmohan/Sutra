@@ -75,6 +75,8 @@ def _statement_in_excerpt(source, statement):
 
 
 def inventory(candidate_id, source):
+    from review_context import inclusive_evidence_lines
+    inclusive_ends = inclusive_evidence_lines(source)
     result = {}
     for path, text in sorted(source['excerpts'].items()):
         # Keep line boundaries where possible; split very long source lines too.
@@ -87,9 +89,10 @@ def inventory(candidate_id, source):
             quote = text[offset:end]
             eid = 'e' + sha(canonical([candidate_id, path, sha(text), offset, end]))[:12]
             line = source.get('excerpt_locations', {}).get(path, {}).get('start_line')
+            line_end = end - 1 if inclusive_ends else end
             result[eid] = {'path': path, 'text': quote, 'excerpt_start': offset, 'excerpt_end': end,
                            'start_line': line + text[:offset].count('\n') if line else None,
-                           'end_line': line + text[:end].count('\n') if line else None}
+                           'end_line': line + text[:line_end].count('\n') if line else None}
             offset = end
     # Retained source units can contain disjoint windows from the same file.
     # Each has already passed the writer's scoped receipt/freshness check.
@@ -114,9 +117,10 @@ def inventory(candidate_id, source):
                 if newline >= offset + 128: end = newline + 1
             eid = 'e' + sha(canonical(['retained-source-v1', candidate_id, unit['id'], sha(text), offset, end]))[:12]
             line = unit.get('line')
+            line_end = end - 1 if inclusive_ends else end
             result[eid] = {'kind': 'retained_source_unit', 'path': unit['path'], 'text': text[offset:end],
                            'start_line': line + text[:offset].count('\n') if line else None,
-                           'end_line': line + text[:end].count('\n') if line else None}
+                           'end_line': line + text[:line_end].count('\n') if line else None}
             offset = end
     for statement in static_statements(source):
         if _statement_in_excerpt(source, statement):
@@ -130,9 +134,10 @@ def inventory(candidate_id, source):
                 if newline >= offset + 128: end = newline + 1
             eid = 'e' + sha(canonical(['delivered-static-source-v2', candidate_id, path, line,
                                        sha(text), offset, end]))[:12]
+            line_end = end - 1 if inclusive_ends else end
             result[eid] = {'kind': 'static_source_statement', 'path': path, 'text': text[offset:end],
                            'start_line': line + text[:offset].count('\n'),
-                           'end_line': line + text[:end].count('\n'),
+                           'end_line': line + text[:line_end].count('\n'),
                            'meaning': 'Exact delivered static source text; not proof of runtime execution or order.'}
             offset = end
     return result
@@ -144,7 +149,10 @@ def affected(claims, evidence, ids):
 
 
 def source_hash(source):
+    from review_context import inclusive_evidence_lines
     value = {k: source.get(k) for k in ('excerpts', 'excerpt_locations', 'snapshot_receipts')}
+    if inclusive_evidence_lines(source):
+        value['evidence_line_version'] = 1
     if type(source.get('claim_source_version')) is int and source['claim_source_version'] == 2:
         value.update(claim_source_version=2, static_source_statements=static_statements(source))
     if source.get('retained_context_version') == 1:

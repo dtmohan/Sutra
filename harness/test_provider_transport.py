@@ -10,8 +10,9 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from invocation_gateway import consume_dispatch
-from local_model import LocalModel, transport_observation
+from local_model import LocalModel, OutputLimitExceeded, transport_observation
 from model_packet import build
+from paging import Budget
 import test_conversation as fixture
 import conversation
 import review_budget
@@ -85,6 +86,19 @@ class TransportTests(unittest.TestCase):
             answer,record=self.run_call(connection,directory)
             self.assertEqual(answer,{'answer':'done'});self.assertEqual(record['transport']['phase'],'complete')
             self.assertEqual(record['response']['eval_count'],9)
+
+    def test_measured_output_beyond_reserve_withholds_completed_response(self):
+        response = io.BytesIO(json.dumps({'message': {'content': '{}'}, 'done': True,
+            'done_reason': 'stop', 'prompt_eval_count': 20,
+            'eval_count': Budget().response_reserve + 1}).encode() + b'\n')
+        response.status = 200
+        connection = MagicMock()
+        connection.getresponse.return_value = response
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(OutputLimitExceeded, 'admitted output allocation') as stopped:
+                self.run_call(connection, directory)
+        self.assertIn('eval_count', stopped.exception.call_record['response'])
+        self.assertFalse(stopped.exception.call_record['ok'])
 
     def test_optional_observation_is_bounded_typed_and_contains_no_text(self):
         valid=dict(version=1,phase='response_headers',headers_received=False,frames_received=0,

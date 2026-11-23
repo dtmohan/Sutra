@@ -337,6 +337,22 @@ class EngineServiceTests(unittest.TestCase):
                 _exchange(record, {'op': 'status'})
         self.assertIsNone(self.worker.engine)
 
+    def test_frame_limit_failure_keeps_sequence_for_the_bounded_error(self):
+        from engine_client import EngineServiceError
+
+        _, record = self.start_server()
+
+        def produce(request, emit, cancel):
+            emit('progress', data={'read': 1, 'total': 1})
+            return {'ok': True, 'content': 'fixture response ' * 64}
+
+        progress = []
+        with patch.object(self.worker, 'operation', side_effect=produce), \
+                patch('engine_service.FRAME_LIMIT', 512):
+            with self.assertRaisesRegex(EngineServiceError, 'result exceeds its transport allocation'):
+                _exchange(record, {'op': 'status'}, on_progress=progress.append)
+        self.assertEqual(progress, [{'read': 1, 'total': 1}])
+
     def test_real_socket_authentication_and_result_framing(self):
         from engine_client import EngineServiceError
         directory, record = self.start_server()

@@ -31,6 +31,11 @@ def has_binding(s, sid, iid, p):
     return False
 
 
+def _clear_previous_scope(meta):
+    for key in ('checkpoint', 'chat', 'auto', 'api_candidate', 'api_review', 'api_position', 'static_map'):
+        meta.pop(key, None)
+
+
 def grant(s, meta, workspace, request):
     from native_runtime import binding
     from repository_tools import normalized, scoped
@@ -43,10 +48,19 @@ def grant(s, meta, workspace, request):
     roots = read_scope(s, sid)
     paths, tests = request.get('paths'), request.get('test_paths', [])
     operation = request.get('operation')
-    if operation not in ('edit', 'test') or not isinstance(paths, list) or not 1 <= len(paths) <= 8 or len(paths) != len(set(paths)):
+    if (operation not in ('edit', 'test') or not isinstance(paths, list) or not 1 <= len(paths) <= 8
+            or any(not isinstance(name, str) for name in paths) or len(paths) != len(set(paths))):
         raise InvalidUpdate('Confirm exact Python file permissions for this request')
-    if not isinstance(tests, list) or not set(tests) <= set(paths) or (operation == 'test' and not tests):
+    if (not isinstance(tests, list) or any(not isinstance(name, str) for name in tests)
+            or not set(tests) <= set(paths) or (operation == 'test' and not tests)):
         raise InvalidUpdate('Confirm exact permitted test paths')
+    existing_tests = set(c.get('test_paths', []))
+    if operation == 'edit' and not existing_tests.issubset(paths):
+        raise InvalidUpdate('The confirmed edit scope must include previously permitted test paths')
+    paths = sorted(set(paths) | existing_tests)
+    tests = sorted(set(tests) | existing_tests)
+    if len(paths) > 8:
+        raise InvalidUpdate('Choose at most eight exact Python paths including previously permitted tests')
     for name in paths:
         normalized(name)
         if not name.endswith('.py') or not scoped(name, roots):
@@ -67,7 +81,7 @@ def grant(s, meta, workspace, request):
     c.update(allowed_paths=paths, native_task=True, review_only=False, auto_review=False,
              edits_allowed=c.get('edits_allowed', False) or operation == 'edit',
              tests_allowed=c.get('tests_allowed', False) or bool(tests),
-             test_paths=sorted(set(tests) | set(c.get('test_paths', []))),
+             test_paths=tests,
              test_timeout_ms=c.get('test_timeout_ms', 10000), max_actions=actions_left)
     if not c['test_paths']:
         c.pop('test_paths')
@@ -76,15 +90,68 @@ def grant(s, meta, workspace, request):
     with s.db:
         s._audit('NATIVE_PERMISSION_INTENT', {'session': sid, 'before': prior_hash,
             'constraints': c, 'goal': old['goal'], 'carry_usage': before['used'] if before else {},
-            'conversation_id': request['conversation_id'], 'read_scope': roots})
+            'conversation_id': request['conversation_id'], 'read_scope': roots,
+            'operation': operation, 'flow_id': meta.get('_flow')})
     save_contract(s, sid, {'goal': old['goal'], 'constraints': c}, workspace)
     with s.db:
         s._audit('NATIVE_PERMISSION_GRANT', {'session': sid, 'before': prior_hash,
             'after': s.origin(sid)['contract_hash'], 'carry_usage': before['used'] if before else {},
             'operation': operation, 'paths': paths, 'tests': tests, 'read_scope': roots})
-    for key in ('checkpoint', 'chat', 'auto', 'api_candidate', 'api_review', 'api_position', 'static_map'):
-        meta.pop(key, None)
+    _clear_previous_scope(meta)
     bind(s, sid, request['conversation_id'])
+
+
+def settle_interrupted_grant(s, meta, previous, iid, operation):
+    """Restore the handoff for an exact grant already committed to the contract."""
+    from calibration import current as calibration_binding
+    sid = meta.get('active')
+    if not iid or sid != previous['session'] or operation not in ('edit', 'test'):
+        return False
+    origin = s.origin(sid)
+    if (origin['previous_hash'] != previous['contract_hash']
+            or calibration_binding(s, sid, usable=True)['hash'] != previous['calibration_hash']):
+        return False
+    state = s.snapshot(sid)
+    constraints = state['constraints']
+    if (not constraints.get('native_task') or constraints.get('network_allowed') is not False
+            or constraints.get('dependencies_allowed') is not False
+            or constraints.get('edits_allowed' if operation == 'edit' else 'tests_allowed') is not True):
+        return False
+    for raw, in s.db.execute(
+            "SELECT payload_json FROM page_audit WHERE event='NATIVE_PERMISSION_INTENT' "
+            "AND json_extract(payload_json,'$.session')=? AND json_extract(payload_json,'$.before')=? "
+            "AND json_extract(payload_json,'$.conversation_id')=? ORDER BY seq DESC",
+            (sid, previous['contract_hash'], iid)):
+        intent = json.loads(raw)
+        if intent['constraints'] != constraints or intent['goal'] != state['goal']:
+            continue
+        if 'operation' in intent or 'flow_id' in intent:
+            if intent.get('operation') != operation or intent.get('flow_id') != meta.get('_flow'):
+                continue
+        else:
+            # The older intent omitted the operation and workflow. Require its
+            # exact completion receipt before carrying that grant forward.
+            row = s.db.execute(
+                "SELECT payload_json FROM page_audit WHERE event='NATIVE_PERMISSION_GRANT' "
+                "AND json_extract(payload_json,'$.session')=? AND json_extract(payload_json,'$.before')=? "
+                "AND json_extract(payload_json,'$.after')=? AND json_extract(payload_json,'$.operation')=? "
+                "ORDER BY seq DESC LIMIT 1",
+                (sid, previous['contract_hash'], origin['contract_hash'], operation)).fetchone()
+            if not row:
+                continue
+            settled = json.loads(row[0])
+            if (settled.get('read_scope') != intent['read_scope']
+                    or settled.get('carry_usage') != intent['carry_usage']
+                    or settled.get('paths') != constraints.get('allowed_paths')):
+                continue
+        if not s.audit_valid():
+            raise InvalidUpdate('Interrupted permission grant has a corrupt receipt chain')
+        source = handoff_source(s, iid)
+        if not has_binding(s, sid, iid, source):
+            bind(s, sid, iid)
+        _clear_previous_scope(meta)
+        return True
+    return False
 
 
 def read_scope(s, sid):

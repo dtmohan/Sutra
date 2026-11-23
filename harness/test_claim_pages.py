@@ -17,10 +17,16 @@ from paging import Budget
 
 class PartitionTests(unittest.TestCase):
     def test_all_unicode_and_long_line_source_is_retained(self):
-        source = {'excerpts': {'a.py': 'λ' * 1500 + '\nlast\n'}, 'excerpt_locations': {'a.py': {'start_line': 7}}}
+        legacy = {'excerpts': {'a.py': 'λ' * 1500 + '\nlast\n'},
+                  'excerpt_locations': {'a.py': {'start_line': 7}}, 'claim_source_version': 2}
+        source = dict(legacy, evidence_line_version=1)
         values = pages.inventory('a' * 32, source)
+        self.assertEqual(list(pages.inventory('a' * 32, legacy).values())[-1]['end_line'], 9)
+        # A legacy source-aware packet still uses its original locations.
+        self.assertNotEqual(pages.source_hash(source), pages.source_hash(legacy))
         self.assertEqual(''.join(v['text'] for v in values.values()), source['excerpts']['a.py'])
         self.assertEqual(next(iter(values.values()))['start_line'], 7)
+        self.assertEqual(list(values.values())[-1]['end_line'], 8)
         self.assertEqual(values, pages.inventory('a' * 32, source))
         self.assertFalse(set(values) & set(pages.inventory('b' * 32, source)))
         claims = {'one': {'paths': ['a.py']}, 'two': {'paths': ['a.py']}, 'missing': {'paths': ['b.py']}}

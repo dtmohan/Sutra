@@ -31,7 +31,7 @@ def decode_value(key, value):
         if value not in ('true','false'): raise InvalidUpdate('Invalid Boolean')
         return value == 'true'
     if key in INT_KEYS:
-        if not value.isdigit(): raise InvalidUpdate('Invalid positive integer')
+        if not value.isdecimal(): raise InvalidUpdate('Invalid positive integer')
         number = int(value)
         if not 0 < number <= 1_000_000: raise InvalidUpdate('Integer out of range')
         return number
@@ -138,6 +138,8 @@ class ContextStore:
         return self._append(session,source_id,'assistant','claim',text,{'claim':text},expected_revision)
     def observe_file(self, session, source_id, logical_path, actual_path, expected_revision):
         digest=hashlib.sha256(pathlib.Path(actual_path).read_bytes()).hexdigest()
+        return self.observe_digest(session,source_id,logical_path,digest,expected_revision)
+    def observe_digest(self, session, source_id, logical_path, digest, expected_revision):
         payload={'path':logical_path,'sha256':digest}
         return self._append(session,source_id,'tool','artifact',canonical(payload),payload,expected_revision)
     def record_test(self, session, source_id, artifact_versions, returncode, description, expected_revision, authority='tool'):

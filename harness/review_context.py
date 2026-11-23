@@ -443,7 +443,17 @@ def select_sites(graph, excerpts):
     return result
 
 
+def inclusive_evidence_lines(packet):
+    if 'evidence_line_version' not in packet:
+        return False
+    version = packet['evidence_line_version']
+    if type(version) is not int or version != 1:
+        raise InvalidUpdate('Unknown evidence line numbering')
+    return True
+
+
 def evidence(p, data):
+    inclusive_ends = inclusive_evidence_lines(p)
     p['review_capabilities'] = dict(CAPABILITIES)
     version = p.get('child_evidence_version', p.get('parent_context_version', 1))
     notes = p.get('child_checkpoint') or p.get('recovery_checkpoint') or []
@@ -472,7 +482,9 @@ def evidence(p, data):
         else:
             source = data['sources'][name]
             line, partial = source[:source.find(excerpt)].count('\n') + 1, excerpt != source
-        p['excerpt_locations'][name] = {'start_line': line, 'end_line': line + excerpt.count('\n'), 'partial_file': partial}
+        line_text = excerpt[:-1] if inclusive_ends else excerpt
+        p['excerpt_locations'][name] = {'start_line': line, 'end_line': line + line_text.count('\n'),
+                                        'partial_file': partial}
     p['evidence_coverage'] = {
         'fresh_snapshot_files': p['workspace_map']['source_files'], 'excerpt_files': sorted(p['excerpts']),
         'excerpt_bytes': sum(len(t.encode()) for t in p['excerpts'].values()),

@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -31,9 +32,20 @@ class CapabilityTests(unittest.TestCase):
         self.space=patch('storage_policy.require_space',return_value={});self.space.start()
     def tearDown(self):self.s.close();self.hw.stop();self.space.stop();self.tmp.cleanup()
     def preview(self,action='install',paths=None):return tools.preview(self.s,self.sid,self.ws,self.root,'ruff',action,paths or [])
+    def approval(self,p,kind='user',mode='ask',allowed=None):
+        policy={'workspace':p['binding']['workspace'],'registryHash':p['binding']['registry_hash'],
+                'mode':mode,'allowed':allowed or {}}
+        digest=hashlib.sha256(json.dumps(policy,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
+        auth={'kind':kind,'proposal_id':p['id'],'policy_hash':digest}
+        proof={'approval':auth,'policy':policy,'capability':p['capability'],'action':p['action'],
+               'issued':int(time.time()*1000)}
+        return auth,patch.dict('os.environ',{'SUTRA_CAPABILITIES_MODE':mode,
+                                         'SUTRA_CAPABILITY_AUTHORIZATION':json.dumps(proof)})
     def approve(self,p,**updates):
-        auth={'kind':'user','proposal_id':p['id']};auth.update(updates)
-        return tools.execute(self.s,self.sid,self.ws,self.root,p['id'],auth)
+        from os import environ
+        auth,environment=self.approval(p,mode=environ.get('SUTRA_CAPABILITIES_MODE','ask'))
+        auth.update(updates)
+        with environment:return tools.execute(self.s,self.sid,self.ws,self.root,p['id'],auth)
     def install(self):
         def fixture(root,name):
             dest=packages.folder(root,name);dest.mkdir(parents=True);(dest/'binary').write_bytes(b'verified fixture')
@@ -57,6 +69,17 @@ class CapabilityTests(unittest.TestCase):
         with self.assertRaisesRegex(InvalidUpdate,'Source changed'):self.approve(p)
         for paths in (['../outside.py'],['.vscode/settings.json'],['code.py','code.py']):
             with self.assertRaises(InvalidUpdate):self.preview('check',paths)
+    def test_workspace_tool_policy_is_bound_to_exact_current_operation(self):
+        p=self.preview();before=usage(self.s,self.sid)
+        auth,environment=self.approval(p,kind='workspace_policy',mode='ask',allowed={'ruff':['install']})
+        with environment, self.assertRaisesRegex(InvalidUpdate,'not covered'),patch.object(packages,'install') as install:
+            tools.execute(self.s,self.sid,self.ws,self.root,p['id'],auth)
+        install.assert_not_called()
+        auth,environment=self.approval(p,kind='workspace_policy',mode='preapproved',allowed={'ruff':['check']})
+        with environment, self.assertRaisesRegex(InvalidUpdate,'not covered'),patch.object(packages,'install') as install:
+            tools.execute(self.s,self.sid,self.ws,self.root,p['id'],auth)
+        install.assert_not_called()
+        self.assertEqual(usage(self.s,self.sid),before)
     def test_tampered_installation_cannot_execute(self):
         self.install();self.assertTrue(tools.installed(self.s,self.root,'ruff'))
         (packages.folder(self.root,'ruff')/'binary').write_bytes(b'changed')
@@ -168,14 +191,17 @@ class CapabilityTests(unittest.TestCase):
         def fixture(root,name):
             dest=packages.folder(root,name);dest.mkdir(parents=True);(dest/'binary').write_bytes(b'verified')
             return {'status':'installed','files':packages.hashes(dest)}
-        with patch.object(packages,'install',side_effect=fixture):
-            req=dict(common,event='capability_grant',flow_id=out['flow_id'],cursor=out['cursor'],binding=out['binding'],authorization={'kind':'user','proposal_id':install_id})
+        auth,environment=self.approval(out['capability_proposal'])
+        self.assertEqual(auth['proposal_id'],install_id)
+        with environment,patch.object(packages,'install',side_effect=fixture):
+            req=dict(common,event='capability_grant',flow_id=out['flow_id'],cursor=out['cursor'],binding=out['binding'],authorization=auth)
             out=flow.handle(self.s,self.meta,self.ws,self.root,req,provider)
         self.assertEqual(out['state'],'WORKSPACE')
         out=step(out);self.assertEqual(out['capability_proposal']['action'],'check')
         self.s.close();self.s=InvocationLedger(self.root/'state.sqlite');common['tier']='high'
-        with patch.object(packages,'run',return_value={'status':'finished','returncode':1,'output':'[{"filename":"code.py","message":"unused import","location":{"row":1}}]'}) as run:
-            req=dict(common,event='capability_grant',flow_id=out['flow_id'],cursor=out['cursor'],binding=out['binding'],authorization={'kind':'workspace_policy','policy_hash':'approved-settings','proposal_id':out['capability_proposal']['id']})
+        auth,environment=self.approval(out['capability_proposal'],kind='workspace_policy',mode='preapproved',allowed={'ruff':['check']})
+        with environment,patch.object(packages,'run',return_value={'status':'finished','returncode':1,'output':'[{"filename":"code.py","message":"unused import","location":{"row":1}}]'}) as run:
+            req=dict(common,event='capability_grant',flow_id=out['flow_id'],cursor=out['cursor'],binding=out['binding'],authorization=auth)
             original_move=flow.move
             def lost_reply(s,fid,state,*args,**kw):
                 if state=='DONE':raise KeyboardInterrupt()

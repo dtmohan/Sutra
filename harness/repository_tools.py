@@ -1,5 +1,6 @@
 """Scoped repository reads/search with durable commitments and host receipts."""
 import hashlib,json,os,stat,time,uuid
+from contextlib import contextmanager
 from pathlib import Path,PurePosixPath
 from context_manager import InvalidUpdate,canonical,sha
 from karma_adapter import budget_decision
@@ -31,10 +32,13 @@ def initialize(s):
  s.db.commit()
 
 def normalized(name,root=False):
- if not isinstance(name,str) or not name or len(name)>180 or '\\' in name or ',' in name:raise InvalidUpdate('Invalid repository path')
+ # Contract serialization trims each path and uses a comma delimiter.
+ if (not isinstance(name,str) or not name or len(name)>180 or name!=name.strip()
+     or '\\' in name or ',' in name):
+  raise InvalidUpdate('Invalid repository path')
  p=PurePosixPath(name)
  if name=='.' and root:return name
- if ':' in name or p.is_absolute() or '..' in p.parts or str(p)!=name or any(x.startswith('.') or x in EXCLUDE or x.endswith((' ','.')) or x.split('.')[0].upper() in {'CON','PRN','AUX','NUL',*[f'COM{i}' for i in range(1,10)],*[f'LPT{i}' for i in range(1,10)]} for x in p.parts):raise InvalidUpdate('Repository path is outside permitted code scope')
+ if ':' in name or p.is_absolute() or '..' in p.parts or str(p)!=name or any(x.startswith('.') or x.casefold() in EXCLUDE or x.endswith((' ','.')) or x.split('.')[0].upper() in {'CON','PRN','AUX','NUL',*[f'COM{i}' for i in range(1,10)],*[f'LPT{i}' for i in range(1,10)]} for x in p.parts):raise InvalidUpdate('Repository path is outside permitted code scope')
  if any(ord(c)<32 for c in name):raise InvalidUpdate('Control characters in path')
  return name
 
@@ -49,31 +53,64 @@ def settings(s,session):
 
 def scoped(name,roots):return any(r=='.' or name==r or name.startswith(r+'/') for r in roots)
 
-def read_bytes(workspace,name,limit=MAX_FILE,*,binary=False):
- if type(limit) is not int or limit<=0:raise InvalidUpdate('Invalid source byte allocation')
- if os.name=='nt':
-  from platform_support import windows_read
-  normalized(name)
-  try:return windows_read(workspace,name,limit,binary=binary)
-  except (OSError,UnicodeError) as exc:raise InvalidUpdate('Repository read rejected: '+str(exc)) from None
- normalized(name);parts=Path(name).parts;fd=os.open(str(Path(workspace).resolve()),os.O_RDONLY|os.O_DIRECTORY)
+@contextmanager
+def source_directory(workspace,parts):
+ fd=os.open(str(Path(workspace).resolve()),os.O_RDONLY|os.O_DIRECTORY)
  try:
-  for part in parts[:-1]:
+  for part in parts:
    nxt=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd);os.close(fd);fd=nxt
-  f=os.open(parts[-1],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=fd)
-  with os.fdopen(f,'rb') as stream:
-   before=os.fstat(stream.fileno())
-   if not stat.S_ISREG(before.st_mode):raise InvalidUpdate('Source is not a regular file: '+name)
-   if before.st_nlink!=1:raise InvalidUpdate('Source has multiple hard links: '+name)
-   if before.st_size>limit:raise SourceReadLimitExceeded(f'Source {name} needs {before.st_size} bytes; remaining page allocation is {limit} bytes')
-   raw=stream.read(limit+1);after=os.fstat(stream.fileno())
-   if len(raw)>limit or (before.st_mtime_ns,before.st_size)!=(after.st_mtime_ns,after.st_size):raise InvalidUpdate('File changed while reading')
+  yield fd
+ finally:os.close(fd)
+
+@contextmanager
+def source_stream(parent,name):
+ fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=parent)
+ with os.fdopen(fd,'rb') as stream:yield stream
+
+def source_stat(stream,name):
+ result=os.fstat(stream.fileno())
+ if not stat.S_ISREG(result.st_mode):raise InvalidUpdate('Source is not a regular file: '+name)
+ if result.st_nlink!=1:raise InvalidUpdate('Source has multiple hard links: '+name)
+ return result
+
+@contextmanager
+def opened_source(workspace,name):
+ normalized(name)
+ if os.name=='nt':
+  from platform_support import windows_source
+  with windows_source(workspace,name) as stream:yield stream
+ else:
+  parts=Path(name).parts
+  with source_directory(workspace,parts[:-1]) as parent,source_stream(parent,parts[-1]) as stream:
+   yield stream
+
+def source_size(workspace,name,*,allow_missing=False):
+ try:
+  with opened_source(workspace,name) as stream:return source_stat(stream,name).st_size
+ except FileNotFoundError:
+  if allow_missing:return None
+  raise InvalidUpdate('Source is missing: '+name) from None
+ except OSError as exc:raise InvalidUpdate('Repository stat rejected: '+str(exc)) from None
+
+def read_source(stream,name,limit):
+ before=source_stat(stream,name)
+ if before.st_size>limit:raise SourceReadLimitExceeded(f'Source {name} needs {before.st_size} bytes; remaining page allocation is {limit} bytes')
+ raw=stream.read(limit+1);after=source_stat(stream,name)
+ if len(raw)>limit or (before.st_mtime_ns,before.st_size)!=(after.st_mtime_ns,after.st_size):raise InvalidUpdate('File changed while reading')
+ return raw,before
+
+def read_bytes(workspace,name,limit=MAX_FILE,*,binary=False,allow_missing=False):
+ if type(limit) is not int or limit<=0:raise InvalidUpdate('Invalid source byte allocation')
+ try:
+  with opened_source(workspace,name) as stream:raw,_=read_source(stream,name,limit)
   if not binary:
    if b'\0' in raw:raise InvalidUpdate('Binary file rejected')
    raw.decode('utf-8')
   return raw
+ except FileNotFoundError:
+  if allow_missing:return None
+  raise InvalidUpdate('Source is missing: '+name) from None
  except (OSError,UnicodeError) as exc:raise InvalidUpdate('Repository read rejected: '+str(exc)) from None
- finally:os.close(fd)
 
 def link_reason(metadata):
  if stat.S_ISLNK(metadata.st_mode):return 'symlink'
@@ -327,16 +364,16 @@ def execute(s,session,workspace,root,kind,*,target='',query='',line=1,cursor=Non
    raise InvalidUpdate('Read profile differs from the admitted architect decision budget')
  if replayed:return replayed
  from review_budget import require
- source_charge=sum((Path(workspace)/p).stat().st_size for p in target.split('\n')) if kind=='static_map' else 0 if kind in ('catalog','list') else MAX_FILE
+ source_charge=sum(source_size(workspace,p) for p in target.split('\n')) if kind=='static_map' else 0 if kind in ('catalog','list') else MAX_FILE
  if planned_read:
-  source_charge=min(MAX_FILE,max(1,(Path(workspace)/target).stat().st_size))
+  source_charge=min(MAX_FILE,max(1,source_size(workspace,target)))
  read_limit=source_charge if planned_read else MAX_FILE;source_limits={}
  if automatic and discovery and kind in ('read','search'):
   # This version already has a committed automatic catalog and a governed
   # source-byte allocation. Keep the historical 64KB tool profile unchanged.
   read_limit=c['review_page_kib']*1024
   names=[target] if kind=='read' or (kind=='search' and search_version==1 and target) else catalog(s,session)
-  sizes=[(Path(workspace)/name).stat().st_size for name in names]
+  sizes=[source_size(workspace,name) for name in names]
   source_limits={name:max(1,size) for name,size in zip(names,sizes)}
   source_charge=max(1,sum(sizes))
   if kind=='read' and sizes[0]>read_limit:
@@ -394,7 +431,7 @@ def execute(s,session,workspace,root,kind,*,target='',query='',line=1,cursor=Non
    selected=[target] if kind=='read' else names;excerpts=[];versions={};started=time.monotonic();truncated=False;next_position=None
    for name in selected:
     if time.monotonic()-started>3:truncated=True;break
-    if automatic and discovery and kind=='search' and (Path(workspace)/name).stat().st_size>read_limit:
+    if automatic and discovery and kind=='search' and source_limits[name]>read_limit:
      truncated=True;continue
     raw=read_bytes(workspace,name,limit=min(read_limit,source_limits.get(name,read_limit)));text=raw.decode();version=hashlib.sha256(raw).hexdigest();versions[name]=version;lines=text.splitlines(True)
     if kind=='read':

@@ -286,19 +286,29 @@ def serve(directory, registry, *, worker=None, ready=None, stop=None):
             stream = None
             nonce = None
             sequence = 0
+            watcher = None
+            write_failed = False
 
             def emit(event, **fields):
-                nonlocal sequence
+                nonlocal sequence, write_failed
                 if nonce is None:
                     raise WorkerError('The request was not authenticated')
                 if event == 'progress':
                     progress_frame(fields.get('data'))
-                frame = json.dumps(signed(dict(event=event, nonce=nonce, seq=sequence, **fields), owner), separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode() + b'\n'
-                sequence += 1
-                if len(frame) > FRAME_LIMIT:
-                    raise WorkerError('Engine result exceeds its transport allocation')
                 with write_lock:
-                    peer.sendall(frame)
+                    if write_failed:
+                        raise WorkerError('The engine response connection was interrupted')
+                    value = signed(dict(event=event, nonce=nonce, seq=sequence, **fields), owner)
+                    frame = json.dumps(value, separators=(',', ':'), ensure_ascii=False,
+                                       allow_nan=False).encode() + b'\n'
+                    if len(frame) > FRAME_LIMIT:
+                        raise WorkerError('Engine result exceeds its transport allocation')
+                    try:
+                        peer.sendall(frame)
+                    except OSError:
+                        write_failed = True
+                        raise
+                    sequence += 1
 
             def disconnected():
                 while not ended.wait(.1):
@@ -307,7 +317,7 @@ def serve(directory, registry, *, worker=None, ready=None, stop=None):
                         if readable and not peer.recv(1, socket.MSG_PEEK):
                             cancel.set()
                             return
-                    except OSError:
+                    except (OSError, ValueError):
                         cancel.set()
                         return
 
@@ -352,6 +362,8 @@ def serve(directory, registry, *, worker=None, ready=None, stop=None):
                     pass
             finally:
                 ended.set()
+                if watcher and watcher.ident is not None:
+                    watcher.join(.25)
                 if stream is not None:
                     stream.close()
                 peer.close()

@@ -345,6 +345,21 @@ def recovery(s,fid):
 def identity(s,sid):
     return {k:v for k,v in m.binding(s,sid).items() if k!='logic_hash'}
 
+
+def prepare_initial_catalog(s, fid, sid, workspace, root, data):
+    """Keep catalog retries on the task which admitted or attempted the scan."""
+    import repository_tools as repo
+    if not data.get('binding'):
+        task = m.task(s, sid)
+        move(s, fid, 'BINDING', 'INITIAL_CATALOG_BOUND', binding=identity(s, sid), root_node=task['id'])
+    row = s.db.execute(
+        "SELECT r.id FROM repository_ops o JOIN repository_receipts r ON r.operation_id=o.id "
+        "WHERE o.session=? AND json_extract(o.record_json,'$.kind')='catalog' ORDER BY r.seq DESC LIMIT 1",
+        (sid,)).fetchone()
+    if not row or repo.record_by_id(s, sid, row[0])['result']['status'] == 'interrupted':
+        repo.execute(s, sid, workspace, root, 'catalog', resource_check=False)
+    move(s, fid, 'BINDING', 'INITIAL_CATALOG_SETTLED', initial_catalog_pending=False)
+
 def plan(s,meta,workspace,prompt,conversation_id,parent_id=None):
     """Measured partition proposal; every allocation still needs kernel ALLOW.
 
@@ -1273,7 +1288,8 @@ def _handle(s,meta,workspace,root,req,providers=None):
                 move(s, fid, 'PAUSED', 'PROVENANCE_CONFIRMATION_REQUIRED', workflow_stop=stop,
                      git_provenance=snapshot)
                 return response(s, fid)
-            move(s, fid, 'BINDING', 'GIT_SNAPSHOT_CONFIRMED', workflow_stop=None, git_provenance=snapshot)
+            move(s, fid, 'BINDING', 'GIT_SNAPSHOT_CONFIRMED', workflow_stop=None, git_provenance=snapshot,
+                 prebinding_version=1)
             return response(s, fid, progress=summary(snapshot))
         if event!='resume':raise InvalidUpdate('Workflow paused. Choose Resume or Discard; allocations remain unchanged.')
         saved_phase_stops = ('RESOURCE_STOPPED', 'ROUTING_STOPPED', 'MEMORY_STOPPED',
@@ -1284,9 +1300,22 @@ def _handle(s,meta,workspace,root,req,providers=None):
         last=stopped[-1]
         target=(last['data']['workflow_stop']['resume_phase'] if last['kind'] in saved_phase_stops
                 else last['from'] if last['kind']=='CONTEXT_STOPPED' else 'MAPPING')
-        if target!='CLASSIFYING':
+        if target != 'CLASSIFYING':
             if not req.get('armed'):raise InvalidUpdate('Workspace workflow requires a user-armed harness')
-            if d.get('binding')!=identity(s,meta.get('active')) or req.get('binding')!=d['binding']:
+            sid = meta.get('active')
+            saved = d.get('permission_binding') if target == 'NEED_PERMISSION' else d.get('binding')
+            if (target == 'BINDING' and not saved and d.get('prebinding_version') != 1):
+                raise InvalidUpdate('This older binding pause has no verified task identity. Its receipts are retained.')
+            unbound = target in ('NEED_ARM', 'BINDING') and saved is None and not d.get('root_node')
+            if req.get('binding') not in ((None, saved) if unbound or target == 'NEED_PERMISSION' else (saved,)):
+                raise InvalidUpdate('Workflow task, calibration or permissions changed')
+            if target == 'NEED_PERMISSION' and saved and sid == saved['session'] and identity(s, sid) != saved:
+                from native_access import settle_interrupted_grant
+                if settle_interrupted_grant(s, meta, saved, d['conversation_id'], d['permission']['operation']):
+                    save(root, meta)
+                    move(s, fid, 'BINDING', 'PERMISSION_RECOVERED', workflow_stop=None, prebinding_version=1)
+                    return response(s, fid)
+            if not unbound and (not sid or not saved or identity(s, sid) != saved):
                 raise InvalidUpdate('Workflow task, calibration or permissions changed')
         if target != 'CLASSIFYING' and provenance_changed(s, workspace, fid, d):
             return response(s, fid)
@@ -1302,9 +1331,11 @@ def _handle(s,meta,workspace,root,req,providers=None):
                 from monitoring import ResourceWait
                 raise ResourceWait(dict(recovered['after'],runtime_recovery=recovered))
             require_resources(root,model=selected)
-        move(s,fid,target,'RESUME_REQUESTED',workflow_stop=None,
+        move(s,fid,target,'RESUME_REQUESTED',workflow_stop=None,mapping_stop=None,
              resumed_followup_source=stop.get('followup_source_changed'),
              reason='User resumed with existing contract and allocation')
+        if target == 'NEED_PERMISSION':
+            return response(s, fid, permission=permission(s, sid, d['permission']), bound_task=saved)
         return response(s,fid)
     if phase=='CLASSIFYING':
         axis=chat_axis(workspace,f.get('chat_key'))
@@ -1437,7 +1468,7 @@ def _handle(s,meta,workspace,root,req,providers=None):
         snapshot, pending = review_provenance(s, meta, workspace, fid, d, prompt)
         if pending:
             return pending
-        move(s,fid,'BINDING','ARM_CONFIRMED');phase='BINDING'
+        move(s,fid,'BINDING','ARM_CONFIRMED',prebinding_version=1);phase='BINDING'
     else:
         snapshot = None
     if phase in ('BINDING','NEED_PERMISSION'):
@@ -1450,9 +1481,22 @@ def _handle(s,meta,workspace,root,req,providers=None):
             if not roots:raise InvalidUpdate('A workspace review requires an admitted source target')
             work=d['permission']
             catalog=not (work['operation']=='capability' and work.get('capability_action')=='install')
-            _handle(Path(root),Path(workspace),{'op':'auto_new','goal':prompt,'roots':roots,'conversation_id':d['conversation_id']},
-                    metadata=path,prepare_catalog=catalog)
-            meta.clear();meta.update(json.loads(path.read_text()));sid=meta['active']
+            if catalog:
+                import repository_tools as repo
+                repo.initialize(s)
+                move(s, fid, 'BINDING', 'INITIAL_CATALOG_PENDING', initial_catalog_pending=True)
+            try:
+                _handle(Path(root), Path(workspace), {'op':'auto_new','goal':prompt,'roots':roots,'conversation_id':d['conversation_id']},
+                        metadata=path, prepare_catalog=False)
+            finally:
+                if path.exists():
+                    saved = json.loads(path.read_text())
+                    meta.clear()
+                    meta.update(saved)
+            sid = meta['active']
+            _, d = info(s, fid)
+        if phase == 'BINDING' and d.get('initial_catalog_pending'):
+            prepare_initial_catalog(s, fid, sid, workspace, root, d)
         wanted=permission(s,sid,d['permission'])
         if phase=='NEED_PERMISSION':
             if d.get('permission_binding')!=identity(s,sid):raise InvalidUpdate('Task changed while asking for permission')
@@ -1466,9 +1510,10 @@ def _handle(s,meta,workspace,root,req,providers=None):
                 raise InvalidUpdate('Test grant must match the named test and its snapshot files')
             from native_access import grant as grant_access
             grant_access(s,meta,workspace,dict(grant,**identity(s,sid),conversation_id=d['conversation_id']));save(root,meta)
-            move(s,fid,'BINDING','PERMISSION_GRANTED');wanted=None
+            move(s,fid,'BINDING','PERMISSION_GRANTED',prebinding_version=1);wanted=None
         if wanted:
-            move(s,fid,'NEED_PERMISSION','PERMISSION_REQUIRED',permission_binding=identity(s,sid))
+            move(s,fid,'NEED_PERMISSION','PERMISSION_REQUIRED',permission_binding=identity(s,sid),
+                 binding=None,root_node=None)
             return response(s,fid,permission=wanted,bound_task=identity(s,sid))
         from conversation import workspace_handoff
         if d['conversation_id']:workspace_handoff(s,sid,d['conversation_id'],prompt)
@@ -1631,10 +1676,17 @@ def _handle(s,meta,workspace,root,req,providers=None):
                     if checkpoint:
                         out = resume_parent_review(s, meta, workspace, root, request, checkpoint,
                                                    review_provider=provider('synthesis'))
-                    elif d.get('parent_output_retry'):
+                    elif d.get('parent_output_retry') and not request.get('context_recall'):
                         from chat_runtime import resume_parent_output
-                        out = resume_parent_output(s, meta, workspace, root, request, d['parent_output_retry'],
-                                                   provider=provider('synthesis'))
+                        from retained_context import recover_requests
+                        retry = d['parent_output_retry']
+                        recalled = recover_requests(s, sid, parent, request,
+                                                    parent_output_failure=retry['failed_invocation'])
+                        if recalled:
+                            out = {'retained_context_pending': recalled}
+                        else:
+                            out = resume_parent_output(s, meta, workspace, root, request, retry,
+                                                       provider=provider('synthesis'))
                     else:
                         out = answer(s,meta,workspace,root,request,provider=provider('synthesis'))
         except BridgeStepRequired:
@@ -1670,7 +1722,7 @@ def _handle(s,meta,workspace,root,req,providers=None):
                 return response(s, fid)
             if out.get('retained_context_pending'):
                 move(s, fid, 'SYNTHESIS', 'RETAINED_CONTEXT_REQUESTED',
-                     context_recall=out['retained_context_pending'], parent_checkpoint=None)
+                     context_recall=out['retained_context_pending'], parent_checkpoint=None, parent_output_retry=None)
                 save(root, meta)
                 return response(s, fid, progress='Recalling saved context for the next review step.',
                                 claim_review_usage=workflow_usage(s, fid))

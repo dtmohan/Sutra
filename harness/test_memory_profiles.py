@@ -169,6 +169,7 @@ class MemoryProfilesTests(unittest.TestCase):
             provider.memory_profile=self.p
             def call(cid,system,payload,schema):
                 consume_dispatch(cid,'large',system,payload,schema)
+                rm.mark_transport_started(provider, cid)
                 provider.runtime_completed=True
                 return {'ok':True},{'ok':True,'response':{'prompt_eval_count':50,'eval_count':5}}
             run=s.begin_run(sid,REQUEST,[],None,max_calls=1,max_repairs=0)

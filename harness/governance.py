@@ -24,7 +24,8 @@ POLICY_FILES = ('remote_profiles.py','remote_control.py','remote_model.py','remo
                 'review_role.py', 'child_checkpoint_progress.py', 'review_upgrade.py', 'parent_synthesis.py', 'expanded_review_context.py', 'vscode_bridge.py', 'coding_role.py', 'host_actions.py',
                 'monitoring.py', 'unittest_entry.py', 'telemetry.m', 'lifecycle.py', 'storage_policy.py',
                 'repository_tools.py', 'architecture_role.py', 'architecture_runtime.py','api_extract.py','api_extract.js','api_facts.py','api_roles.py','api_runtime.py',
-                'static_typescript.js','static_analysis.py','static_role.py','static_runtime.py','platform_support.py','telemetry_portable.js','review_budget.py','accounting_batches.py','accounting_metrics.py','accounting_audit.py','ledger_sqlite.py','auto_review.py')
+                'static_typescript.js','static_analysis.py','static_role.py','static_runtime.py','platform_support.py','telemetry_portable.js','review_budget.py','accounting_batches.py','accounting_metrics.py','accounting_audit.py','ledger_sqlite.py','auto_review.py',
+                'logit_sensor.py', 'provider_startup.py', 'ram_compartments.py', 'sandbox_process.py')
 
 
 def policy_hash():
@@ -132,7 +133,8 @@ class GovernedContext(EvidenceContext):
                   max_calls=12, max_seconds=600, parents=(), run_id=None, purpose='task'):
         if type(max_repairs) is not int or not 0 <= max_repairs <= 2:
             raise InvalidUpdate('Repair limit must be 0..2')
-        if type(max_calls) is not int or not 1 <= max_calls <= 32 or not 1 <= max_seconds <= 3600:
+        if (type(max_calls) is not int or not 1 <= max_calls <= 32
+                or type(max_seconds) is not int or not 1 <= max_seconds <= 3600):
             raise InvalidUpdate('Invalid protocol budget')
         if purpose not in ('task', 'parser'): raise InvalidUpdate('Unknown run purpose')
         contract = self.origin(session, bootstrap=purpose == 'parser')

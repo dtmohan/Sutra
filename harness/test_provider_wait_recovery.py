@@ -263,6 +263,7 @@ class ProviderWaitRecoveryTests(unittest.TestCase):
             def dispatched(cid, system, packet, schema):
                 try:
                     with runtime_memory.dispatch(model, self.root, cid, system, packet, schema):
+                        runtime_memory.mark_transport_started(model, cid)
                         result = call(cid, system, packet, schema)
                         model.runtime_completed = True
                         return result

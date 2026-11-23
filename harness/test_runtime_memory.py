@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from context_manager import canonical, ContextBudgetExceeded
+from context_manager import canonical, ContextBudgetExceeded, InvalidUpdate
 from karma_adapter import KarmaAdapter
 from local_model import LocalModel
 from model_context import allocation
@@ -191,11 +191,15 @@ class RuntimeMemoryTests(unittest.TestCase):
     def test_completed_call_release_observation_and_interruption(self):
         p=self.provider()
         with patch('monitoring.require_resources',return_value=self.healthy),patch.object(rm,'running',side_effect=[[],[]]):
-            with rm.dispatch(p,self.root,'id','system',{},{}):p.runtime_completed=True
+            with rm.dispatch(p,self.root,'id','system',{},{}):
+                rm.mark_transport_started(p, 'id')
+                p.runtime_completed=True
         self.assertEqual(rm.read_state()['events'][-1]['status'],'unloaded');self.assertEqual(p.keep_alive,0)
         with patch.dict(os.environ,{'SUTRA_MEMORY_OWNERSHIP':'exclusive'}),patch.object(rm,'fresh_resources',return_value=self.healthy),patch.object(rm,'running',return_value=[self.row]):
             with self.assertRaises(KeyboardInterrupt):
-                with rm.dispatch(p,self.root,'next','system',{},{}):raise KeyboardInterrupt()
+                with rm.dispatch(p,self.root,'next','system',{},{}):
+                    rm.mark_transport_started(p, 'next')
+                    raise KeyboardInterrupt()
         self.assertIsNone(rm.read_state()['owned']);self.assertTrue(rm.read_state()['active']['uncertain'])
 
     def test_low_chat_bounded_warmth_and_reuse_preserve_the_admitted_packet(self):
@@ -224,12 +228,14 @@ class RuntimeMemoryTests(unittest.TestCase):
                 self.assertEqual(plan['context_tokens'], minimum)
                 self.assertEqual(p.keep_alive, 60)
                 self.assertFalse(plan['resident_context_reused'])
+                rm.mark_transport_started(p, 'cold')
                 p.runtime_completed = True
             with rm.dispatch(p, self.root, 'warm', SYSTEM, payload, fmt) as plan:
                 self.assertTrue(plan['resident_context_reused'])
                 self.assertEqual(p.runtime_context_tokens, 32768)
                 self.assertEqual(p.keep_alive, 60)
                 self.assertEqual(plan['resident_weight_credit_bytes'], 0)
+                rm.mark_transport_started(p, 'warm')
                 p.runtime_completed = True
         self.assertEqual([item.args for item in api.call_args_list], [('/api/tags',), ('/api/tags',)])
         saved = rm.read_state()
@@ -268,6 +274,7 @@ class RuntimeMemoryTests(unittest.TestCase):
                     self.assertFalse(plan['resident_context_reused'])
                     self.assertEqual(plan['context_tokens'], minimum)
                     self.assertEqual(p.keep_alive, keep)
+                    rm.mark_transport_started(p, label)
                     p.runtime_completed = True
 
     def test_cross_process_slot_and_crash_releases_os_lock(self):
@@ -290,6 +297,7 @@ class RuntimeMemoryTests(unittest.TestCase):
                 patch.object(rm,'running',return_value=[self.row]), patch.object(rm,'api') as api:
             with rm.dispatch(p,self.root,'new','system',payload,{}) as plan:
                 self.assertEqual(plan['decision'],'ALLOW')
+                rm.mark_transport_started(p, 'new')
                 self.assertEqual(rm.read_state()['active']['call_id'],'new')
                 p.runtime_completed = True
         fresh.assert_called_once_with(self.root)
@@ -349,6 +357,7 @@ class RuntimeMemoryTests(unittest.TestCase):
                 patch.object(rm,'running',return_value=[]):
             with self.assertRaises(TimeoutError):
                 with rm.dispatch(p,self.root,'old','system',{},{}):
+                    rm.mark_transport_started(p, 'old')
                     raise TimeoutError('no completion receipt')
         saved = rm.read_state()
         self.assertTrue(saved['active']['uncertain'])
@@ -359,6 +368,7 @@ class RuntimeMemoryTests(unittest.TestCase):
                 patch.object(rm,'fresh_resources',return_value=self.healthy), \
                 patch.object(rm,'running',side_effect=[[],[self.row]]):
             with rm.dispatch(p,self.root,'new','system',{},{}):
+                rm.mark_transport_started(p, 'new')
                 p.runtime_completed = True
         self.assertIsNone(rm.read_state()['owned'])
         with patch.dict(os.environ, SUTRA_MEMORY_OWNERSHIP='exclusive'), \
@@ -369,6 +379,43 @@ class RuntimeMemoryTests(unittest.TestCase):
         api.assert_not_called()
         self.assertEqual(result['action'],'no_confirmed_idle_owned_model')
         self.assertEqual(rm.read_state()['interrupted']['latest_call_id'],'old')
+
+    def test_gateway_preflight_rejection_preserves_existing_backend_ownership(self):
+        from invocation_gateway import InvocationGateway
+
+        self.owned()
+        provider = self.provider()
+        gateway = InvocationGateway(self.root / 'state.sqlite', 'fixture-run', provider)
+        with patch.dict(os.environ, SUTRA_MEMORY_OWNERSHIP='exclusive'), \
+                patch.object(rm, 'fresh_resources', return_value=self.healthy), \
+                patch.object(rm, 'running', return_value=[self.row]), \
+                patch('storage_policy.require_space', side_effect=InvalidUpdate('storage preflight rejected')), \
+                patch.object(provider, 'call') as send:
+            with self.assertRaisesRegex(InvalidUpdate, 'storage preflight rejected'):
+                gateway.invoke('reviewer', 'preflight', 'system', {}, {}, 'fixture-delivery')
+            send.assert_not_called()
+        saved = rm.read_state()
+        self.assertIsNone(saved['active'])
+        self.assertNotIn('interrupted', saved)
+        self.assertEqual(saved['owned']['digest'], self.row['digest'])
+        self.assertEqual(saved['events'][-1]['event'], 'transport_not_started')
+        self.assertFalse((self.root / 'state.sqlite').exists())
+
+    def test_connect_failure_never_marks_transport_started(self):
+        provider = self.provider()
+        with patch.object(rm, 'fresh_resources', return_value=self.healthy), \
+                patch.object(rm, 'running', return_value=[]), \
+                patch('invocation_gateway.consume_dispatch'), \
+                patch('local_model.http.client.HTTPConnection') as connect:
+            connection = connect.return_value
+            connection.connect.side_effect = ConnectionRefusedError('fixture disconnected')
+            with self.assertRaises(ConnectionRefusedError) as stopped:
+                with rm.dispatch(provider, self.root, 'connection', 'system', {}, {}):
+                    provider.call('connection', 'system', {}, {})
+            connection.request.assert_not_called()
+        self.assertEqual(stopped.exception.call_record['transport']['phase'], 'connect')
+        self.assertIsNone(rm.read_state().get('active'))
+        self.assertNotIn('interrupted', rm.read_state())
 
     def test_recovery_independently_refuses_owned_model_with_sticky_uncertainty(self):
         self.owned(interrupted={'latest_call_id':'old','backend_completion_verified':False})

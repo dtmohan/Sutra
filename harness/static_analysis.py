@@ -1,6 +1,6 @@
 from lifecycle import timeout as operation_timeout
 """Fresh, governed snapshots; deterministic graphs are independent of model prose."""
-import json,os,platform,subprocess,time
+import json,os,platform,time
 from html.parser import HTMLParser
 from pathlib import Path
 from context_manager import InvalidUpdate,canonical,sha
@@ -112,9 +112,12 @@ def analyze(texts,item_budget=1024):
  if js:
   node=os.environ.get('KARMA_NODE');compiler=os.environ.get('KARMA_TYPESCRIPT')
   if not node or not compiler:raise InvalidUpdate('Static TypeScript graph requires trusted host parser paths')
-  run=subprocess.run([node,str(Path(__file__).with_name('static_typescript.js'))],input=canonical({'files':js,'configs':configs,'typescript':compiler,'item_budget':item_budget}),text=True,capture_output=True,timeout=operation_timeout(20),env=dict(os.environ,ELECTRON_RUN_AS_NODE='1'))
-  if run.returncode:raise InvalidUpdate('TypeScript compiler rejected snapshot: '+run.stderr[:400])
-  data=json.loads(run.stdout)
+  from sandbox_process import parser_output
+  request={'files':js,'configs':configs,'item_budget':item_budget}
+  status,output,error=parser_output(node,Path(__file__).with_name('static_typescript.js'),compiler,request,
+                                    seconds=operation_timeout(20),output_limit=item_budget*2048+65536)
+  if status:raise InvalidUpdate('TypeScript compiler rejected snapshot: '+error[:400])
+  data=json.loads(output)
   restore_html_locations(data,locations)
   nodes+=data['nodes'];calls+=data['calls'];diagnostics+=data['diagnostics'];dependencies+=data['module_dependencies'];profiles.append(data['profile'])
   diagnostic_count+=data['diagnostic_count']

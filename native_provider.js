@@ -585,10 +585,23 @@ function install(vscode,context,deps){
     if(discard){
       const yes=await vscode.window.showWarningMessage('Discard the saved Sutra request?',{modal:true,detail:'Consumed budgets, receipts and task permissions are retained. Unused child reservations are released. Executed actions are not undone.'},'Discard request');
       if(yes!=='Discard request')return;
-      const current=await deps.request({op:'orchestrate',event:'inspect',flow_id:pending.flow_id,...flowScope(pending)});
+      const inspect={op:'orchestrate',event:'inspect',flow_id:pending.flow_id,...flowScope(pending)};
+      const current=await deps.request(inspect);
       if(!sameRequest()||running||routing?.active)throw new Error('The saved request changed. Review the current request in Sutra Monitor.');
-      await rememberFlow(['DONE','CANCELLED'].includes(current.state)?current:await deps.request({op:'orchestrate',event:'cancel',flow_id:current.flow_id,cursor:current.cursor,...flowScope(pending)}),
-        undefined,pending.nativeChat,pending.stackChat);
+      let closed=current;
+      if(!['DONE','CANCELLED'].includes(current.state)){
+        try{
+          closed=await deps.request({...inspect,event:'cancel',cursor:current.cursor});
+        }catch(error){
+          if(!['EXECUTING_ACTION','CANCELLING'].includes(current.state)||
+             !String(error.message).includes('Workflow event is stale or replayed')||
+             !sameRequest()||running||routing?.active||deps.isBusy())throw error;
+          closed=await deps.request(inspect);
+          if(closed.flow_id!==current.flow_id||closed.state!=='DONE'||!sameRequest()||running||routing?.active)throw error;
+          void vscode.window.showInformationMessage('The action settled during recovery. Its receipt and spending are retained.');
+        }
+      }
+      await rememberFlow(closed,undefined,pending.nativeChat,pending.stackChat);
       return;
     }
     if(resumeSubmission?.expires>Date.now())return;

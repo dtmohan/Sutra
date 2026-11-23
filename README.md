@@ -1,4 +1,8 @@
-# Sutra 0.57.7 — Workspace consent and HTML reviews
+# Sutra 0.57.8 — Workflow recovery and permission integrity
+
+Saved reviews can continue through workspace consent, catalog setup and
+synthesis context recall with their approved scope and spent budgets.
+The Ollama runtime distinguishes a preflight stop from interrupted inference.
 
 Clear codebase review requests go directly to workspace consent. Approving
 access continues the saved request in the same chat. Automatic reviews map

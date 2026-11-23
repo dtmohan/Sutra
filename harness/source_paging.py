@@ -7,6 +7,7 @@ from math import ceil
 from pathlib import Path
 from context_manager import InvalidUpdate
 import orchestration as m
+from repository_tools import source_size
 
 
 def remaining(s, sid):
@@ -26,7 +27,7 @@ def select(s, sid, workspace, files, purpose, reserve_fraction=0):
     cap = int(max(0, min(page_cap, left['source_bytes'] - 1,
                          left['source_bytes'] * (1 - reserve_fraction))))
     configs = [p for p in files if Path(p).name == 'tsconfig.json']
-    sizes = {p: (Path(workspace) / p).stat().st_size for p in files}
+    sizes = {p: source_size(workspace,p) for p in files}
     size = sum(sizes[p] for p in configs)
     chosen = list(configs)
     for name in files:

@@ -1,4 +1,4 @@
-import copy,json,tempfile,unittest
+import copy,json,os,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
 from context_manager import InvalidUpdate,ContextBudgetExceeded,canonical
@@ -121,6 +121,293 @@ class OrchestrationTests(unittest.TestCase):
         sid = out['binding']['session']
         self.assertTrue(self.s.verify_invocations(sid))
         self.assertTrue(self.s.audit_valid())
+
+    def test_prebinding_catalog_pause_recovers_the_same_task_at_a_higher_ceiling(self):
+        from vscode_bridge import handle
+
+        self.ws = self.ws.resolve()
+        ask = 'can you review the codebase please'
+        common = {'op': 'orchestrate', 'tier': 'auto', 'chat_key': 'a' * 64}
+
+        def request(event, previous, **fields):
+            return handle(self.root, self.ws, dict(common, event=event, armed=True,
+                flow_id=previous['flow_id'], cursor=previous['cursor'], binding=previous.get('binding'), **fields))
+
+        with patch.dict(os.environ, SUTRA_WORKSPACE_ALLOCATION='{"seconds":10}'):
+            waiting = handle(self.root, self.ws, dict(common, event='start', prompt=ask, armed=False))
+            paused = request('step', waiting)
+            self.assertEqual(paused['state'], 'PAUSED')
+            self.assertEqual(paused['stop']['resume_phase'], 'BINDING')
+            self.assertEqual(paused['stop']['automatic_allocation']['reason'], 'workspace_limit')
+            self.assertIsNone(paused['execution_id'])
+            sid = paused['binding']['session']
+            snapshot = self.s.pinned(sid)
+            budget = review_budget.usage(self.s, sid)
+            self.assertEqual(budget['used']['operations'], 0)
+            self.assertEqual(budget['used']['calls'], 0)
+            proposal = request('allocation_preview', paused)['allocation_proposal']
+            self.assertEqual(proposal['additions'], {'seconds': 11})
+
+        self.s.close()
+        self.s = InvocationLedger(self.root / 'state.sqlite')
+        with patch.dict(os.environ, SUTRA_WORKSPACE_ALLOCATION='{"seconds":120}'):
+            resumed = request('resume', paused)
+            self.assertEqual(resumed['state'], 'BINDING')
+            amended = request('step', resumed)
+            self.assertEqual(amended['state'], 'BINDING')
+            self.assertEqual(amended['allocation_amendment']['used'], budget['used'])
+            bound = request('step', amended)
+        self.assertEqual(bound['state'], 'WORKSPACE')
+        self.assertEqual(bound['flow_id'], waiting['flow_id'])
+        self.assertEqual(bound['binding'], paused['binding'])
+        self.assertEqual(self.s.pinned(sid), snapshot)
+        self.assertEqual(review_budget.usage(self.s, sid)['used']['operations'], 1)
+        self.assertEqual(review_budget.usage(self.s, sid)['used']['calls'], 0)
+        self.assertTrue(self.s.audit_valid())
+
+    def test_prebind_arming_interruption_resumes_without_assuming_task_authority(self):
+        from lifecycle import Interrupted
+
+        self.ws = self.ws.resolve()
+        chat = {'chat_key': 'a' * 64}
+        waiting = self.step(prompt='can you review the codebase please', armed=False, **chat)
+        with patch('orchestration_flow.review_provenance', side_effect=Interrupted('Pause before initial task identity')):
+            paused = self.step(waiting, **chat)
+        self.assertEqual(paused['stop']['resume_phase'], 'NEED_ARM')
+        self.assertIsNone(paused['binding'])
+        with self.assertRaisesRegex(InvalidUpdate, 'user-armed'):
+            self.step(paused, event='resume', armed=False, **chat)
+        with self.assertRaisesRegex(InvalidUpdate, 'permissions changed'):
+            self.step(paused, event='resume', binding={'session': 'foreign'}, **chat)
+        resumed = self.step(paused, event='resume', **chat)
+        self.assertEqual(resumed['state'], 'NEED_ARM')
+        self.assertEqual(resumed['flow_id'], waiting['flow_id'])
+        self.assertEqual(self.step(resumed, **chat)['state'], 'WORKSPACE')
+        self.assertEqual(self.models, [])
+
+    def test_interrupted_catalog_charges_stay_on_the_bound_task(self):
+        from lifecycle import Interrupted
+        import repository_tools as repo
+
+        self.ws = self.ws.resolve()
+        chat = {'chat_key': 'a' * 64}
+        waiting = self.step(prompt='can you review the codebase please', armed=False, **chat)
+        with patch('repository_tools.inventory', side_effect=Interrupted('Stop during catalog scan')):
+            paused = self.step(waiting, **chat)
+        self.assertEqual(paused['stop']['resume_phase'], 'BINDING')
+        sid = paused['binding']['session']
+        records = repo.records(self.s, sid)
+        self.assertEqual([row['result']['status'] for row in records], ['interrupted'])
+        charged = review_budget.usage(self.s, sid)['used']
+        self.assertEqual(charged['operations'], 1)
+        resumed = self.step(paused, event='resume', **chat)
+        bound = self.step(resumed, **chat)
+        self.assertEqual(bound['state'], 'WORKSPACE')
+        self.assertEqual(bound['binding'], paused['binding'])
+        rows = repo.records(self.s, sid)
+        self.assertEqual(rows[0], records[0])
+        self.assertEqual([row['result']['status'] for row in rows], ['interrupted', 'ok'])
+        self.assertEqual(review_budget.usage(self.s, sid)['used']['operations'], charged['operations'] + 1)
+        self.assertTrue(self.s.audit_valid())
+
+    def test_legacy_prebind_pause_cannot_recreate_an_unidentified_task(self):
+        self.ws = self.ws.resolve()
+        chat = {'chat_key': 'a' * 64}
+        waiting = self.step(prompt='can you review the codebase please', armed=False, **chat)
+        fid = waiting['flow_id']
+        flow.move(self.s, fid, 'BINDING', 'ARM_CONFIRMED')
+        flow.move(self.s, fid, 'PAUSED', 'BRIDGE_INTERRUPTED',
+                  workflow_stop={'status': 'interrupted', 'resume_phase': 'BINDING'})
+        paused = flow.response(self.s, fid)
+        with self.assertRaisesRegex(InvalidUpdate, 'no verified task identity'):
+            self.step(paused, event='resume', **chat)
+        self.assertEqual(flow.response(self.s, fid)['cursor'], paused['cursor'])
+
+    def test_interrupted_permission_decision_waits_for_confirmation_or_recovers_exact_commit(self):
+        from lifecycle import Interrupted
+        from vscode_bridge import save_contract
+
+        self.ws = self.ws.resolve()
+        self.operation = 'edit'
+        grant = {'operation': 'edit', 'paths': ['part0.py']}
+
+        def saved_pause(key):
+            chat = {'chat_key': key * 64}
+            waiting = self.step(armed=False, **chat)
+            need = self.step(waiting, **chat)
+            self.assertEqual(need['state'], 'NEED_PERMISSION')
+            return chat, need
+
+        chat, need = saved_pause('1')
+        sid = need['bound_task']['session']
+        old_contract = self.s.pinned(sid)
+        old_usage = review_budget.usage(self.s, sid)['used']
+        with patch('native_access.grant', side_effect=Interrupted('Stop before permission grant')):
+            paused = self.step(need, event='grant', grant=grant, **chat)
+        self.assertEqual(paused['stop']['resume_phase'], 'NEED_PERMISSION')
+        waiting = self.step(paused, event='resume', **chat)
+        self.assertEqual(waiting['state'], 'NEED_PERMISSION')
+        self.assertEqual(waiting['bound_task'], need['bound_task'])
+        self.assertEqual(waiting['permission'], need['permission'])
+        self.assertEqual(self.s.pinned(sid), old_contract)
+        self.assertEqual(review_budget.usage(self.s, sid)['used'], old_usage)
+        with self.assertRaisesRegex(InvalidUpdate, 'Explicit permission grant'):
+            self.step(waiting, **chat)
+
+        chat, need = saved_pause('2')
+        sid = need['bound_task']['session']
+        old_usage = review_budget.usage(self.s, sid)['used']
+
+        def commit_then_interrupt(*args, **kwargs):
+            save_contract(*args, **kwargs)
+            raise Interrupted('Stop after scope contract commit')
+
+        with patch('vscode_bridge.save_contract', side_effect=commit_then_interrupt):
+            paused = self.step(need, event='grant', grant=grant, **chat)
+        authorized = self.s.pinned(sid)
+        self.assertTrue(authorized['constraints']['edits_allowed'])
+        self.assertFalse(authorized['constraints']['tests_allowed'])
+        self.assertEqual(review_budget.usage(self.s, sid)['used'], old_usage)
+        with self.assertRaisesRegex(InvalidUpdate, 'permissions changed'):
+            self.step(paused, event='resume', binding={'session': 'foreign'}, **chat)
+        resumed = self.step(paused, event='resume', **chat)
+        self.assertEqual(resumed['state'], 'BINDING')
+        bound = self.step(resumed, **chat)
+        self.assertEqual(bound['state'], 'WORKSPACE')
+        self.assertEqual(bound['binding']['session'], sid)
+        self.assertEqual(self.s.pinned(sid), authorized)
+        self.assertEqual(review_budget.usage(self.s, sid)['used'], old_usage)
+        self.assertTrue(self.s.audit_valid())
+
+    def test_interrupted_legacy_permission_recovers_matching_completion_receipt(self):
+        from lifecycle import Interrupted
+
+        self.ws = self.ws.resolve()
+        self.operation = 'edit'
+        chat = {'chat_key': 'a' * 64}
+        need = self.step(self.step(armed=False, **chat), **chat)
+        sid = need['bound_task']['session']
+        old_usage = review_budget.usage(self.s, sid)['used']
+        real_audit = self.s._audit
+
+        def legacy_audit(event, payload):
+            if event == 'NATIVE_PERMISSION_INTENT':
+                payload = {key: value for key, value in payload.items() if key not in ('operation', 'flow_id')}
+            real_audit(event, payload)
+
+        with patch.object(self.s, '_audit', side_effect=legacy_audit), \
+                patch('native_access.bind', side_effect=Interrupted('Stop after grant receipt')):
+            paused = self.step(need, event='grant', grant={'operation': 'edit', 'paths': ['part0.py']}, **chat)
+        self.assertEqual(paused['stop']['resume_phase'], 'NEED_PERMISSION')
+        committed = self.s.pinned(sid)
+        resumed = self.step(paused, event='resume', **chat)
+        self.assertEqual(resumed['state'], 'BINDING')
+        self.assertEqual(self.step(resumed, **chat)['state'], 'WORKSPACE')
+        self.assertEqual(review_budget.usage(self.s, sid)['used'], old_usage)
+        self.assertEqual(self.s.pinned(sid), committed)
+        self.assertTrue(self.s.audit_valid())
+
+    def test_successive_test_grants_keep_revalidated_exact_paths_and_spending(self):
+        from native_access import grant
+
+        self.ws = self.ws.resolve()
+        old_test, new_test = 'test_zeta.py', 'test_alpha.py'
+        for name in (old_test, new_test):
+            (self.ws / name).write_text('import unittest\n')
+        chat = {'chat_key': 'a' * 64}
+        waiting = self.step(prompt='Review the project. Remember project Cedar, ticket CED724. No network or new dependencies.',
+                            armed=False, **chat)
+        self.assertEqual(waiting['state'], 'NEED_ARM')
+        bound = self.step(waiting, **chat)
+        self.assertEqual(bound['state'], 'WORKSPACE')
+        sid = bound['binding']['session']
+        meta = json.loads(flow.metadata_path(self.root, bound['flow_id']).read_text())
+        first = dict(bound['binding'], conversation_id=bound['conversation_id'], operation='test',
+                     paths=[old_test], test_paths=[old_test])
+        grant(self.s, meta, self.ws, first)
+        previous = flow.identity(self.s, sid)
+        before = review_budget.usage(self.s, sid)
+        self.assertGreater(before['used']['operations'], 0)
+
+        def receipts(kind):
+            return [json.loads(raw) for raw, in self.s.db.execute(
+                'SELECT payload_json FROM page_audit WHERE event=? ORDER BY seq', (kind,))]
+
+        request = dict(previous, conversation_id=bound['conversation_id'], operation='test',
+                       paths=[new_test, 'part0.py'], test_paths=[new_test])
+        initial_intents = receipts('NATIVE_PERMISSION_INTENT')
+        edit = dict(request, operation='edit', paths=['part0.py'], test_paths=[])
+        with self.assertRaisesRegex(InvalidUpdate, 'confirmed edit scope'):
+            grant(self.s, meta, self.ws, edit)
+        overflow = dict(request, paths=[new_test] + [f'extra{i}.py' for i in range(7)])
+        with self.assertRaisesRegex(InvalidUpdate, 'at most eight exact Python paths'):
+            grant(self.s, meta, self.ws, overflow)
+        old_file = self.ws / old_test
+        parked = old_file.rename(self.ws / 'temporarily_missing.py')
+        with self.assertRaisesRegex(InvalidUpdate, f'Source is missing: {old_test}'):
+            grant(self.s, meta, self.ws, request)
+        parked.rename(old_file)
+        self.assertEqual(receipts('NATIVE_PERMISSION_INTENT'), initial_intents)
+        self.assertEqual(flow.identity(self.s, sid), previous)
+        self.assertEqual(review_budget.usage(self.s, sid), before)
+
+        grant(self.s, meta, self.ws, request)
+        contract = self.s.snapshot(sid)['constraints']
+        expected_paths = ['part0.py', new_test, old_test]
+        self.assertEqual(contract['allowed_paths'], expected_paths)
+        self.assertEqual(contract['test_paths'], [new_test, old_test])
+        self.assertTrue(contract['tests_allowed'])
+        for name in ('edits_allowed', 'network_allowed', 'dependencies_allowed'):
+            self.assertFalse(contract[name])
+        self.assertEqual(review_budget.usage(self.s, sid), before)
+        self.assertEqual(receipts('NATIVE_PERMISSION_INTENT')[-1]['constraints'], contract)
+        completed = receipts('NATIVE_PERMISSION_GRANT')[-1]
+        self.assertEqual(completed['paths'], expected_paths)
+        self.assertEqual(completed['tests'], [new_test, old_test])
+        self.assertEqual(completed['carry_usage'], before['used'])
+        self.assertTrue(self.s.audit_valid())
+
+    def test_parent_output_recall_retires_the_paid_retry_checkpoint(self):
+        out = self.until('SYNTHESIS')
+        fid = out['flow_id']
+        checkpoint = {'failed_invocation': 'a' * 32}
+        recall = {'invocation_id': 'b' * 32, 'refs': ['c' * 64]}
+        flow.move(self.s, fid, 'SYNTHESIS', 'FIXTURE_RETRY', parent_output_retry=checkpoint)
+        out = flow.response(self.s, fid)
+        with patch('chat_runtime.resume_parent_output', return_value={'retained_context_pending': recall}):
+            next_step = self.step(out)
+        self.assertEqual(next_step['state'], 'SYNTHESIS')
+        _, data = flow.info(self.s, fid)
+        self.assertIsNone(data['parent_output_retry'])
+        self.assertEqual(data['context_recall'], recall)
+
+        def assert_recalled(_s, _meta, _workspace, _root, request, **_options):
+            self.assertEqual(request['context_recall'], recall)
+            return {'result': {'invocation_id': 'd' * 32, 'accepted_output': {'answer': 'Review completed.'},
+                               'admission': {'admitted': True}}}
+
+        # The old coexistence of recall and retry fields can also be encountered
+        # when resuming a previously saved workflow.
+        flow.move(self.s, fid, 'SYNTHESIS', 'FIXTURE_OLDER_RECALL', parent_output_retry=checkpoint)
+        saved = flow.response(self.s, fid)
+        with patch('chat_runtime.resume_parent_output', side_effect=AssertionError('Paid retry was already accepted')), \
+                patch('chat_runtime.answer', side_effect=assert_recalled):
+            self.assertEqual(self.step(saved)['state'], 'DONE')
+
+    def test_lost_parent_output_recall_acknowledgement_recovers_before_retry(self):
+        out = self.until('SYNTHESIS')
+        fid = out['flow_id']
+        failed = 'a' * 32
+        recalled = {'invocation_id': 'b' * 32, 'refs': ['c' * 64]}
+        flow.move(self.s, fid, 'SYNTHESIS', 'FIXTURE_RETRY', parent_output_retry={'failed_invocation': failed})
+        with patch('retained_context.recover_requests', return_value=recalled) as recovered, \
+                patch('chat_runtime.resume_parent_output', side_effect=AssertionError('Paid retry was already accepted')):
+            next_step = self.step(flow.response(self.s, fid))
+        self.assertEqual(next_step['state'], 'SYNTHESIS')
+        self.assertEqual(recovered.call_args.kwargs, {'parent_output_failure': failed})
+        _, data = flow.info(self.s, fid)
+        self.assertIsNone(data['parent_output_retry'])
+        self.assertEqual(data['context_recall'], recalled)
 
     def sources_for_slices(self):
         # Continuation tests need more source than one complete delivered page.

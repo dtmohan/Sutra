@@ -5,6 +5,7 @@ is a user setting, not something /api/ps can establish. Estimates are planning
 signals, not a proof of backend peak RAM or semantic sufficiency.
 """
 import contextlib
+from contextvars import ContextVar
 from datetime import datetime
 import http.client
 import json
@@ -26,6 +27,7 @@ LOW_CHAT_KEEP_ALIVE_SECONDS = 60
 LOW_CHAT_MAX_WEIGHTS = 4 * GIB
 LOW_CHAT_MAX_CONTEXT = 32768
 LOW_CHAT_MAX_ESTIMATED_MEMORY = 8 * GIB
+_transport_start = ContextVar('ollama_transport_start', default=None)
 
 
 def enabled():
@@ -403,6 +405,16 @@ def low_chat_can_stay_warm(provider, system, payload, metadata, weights):
     return system == SYSTEM
 
 
+def mark_transport_started(provider, call_id):
+    """Record that request bytes may leave Sutra while its runtime lease is held."""
+    dispatch = _transport_start.get()
+    if dispatch is not None:
+        bound_provider, bound_call, start = dispatch
+        if provider is not bound_provider or call_id != bound_call:
+            raise InvalidUpdate('Ollama transport differs from its admitted dispatch')
+        start()
+
+
 @contextlib.contextmanager
 def dispatch(provider, root, call_id, system, payload, schema):
     provider.runtime_context_tokens = dispatch_context(provider, system, payload, schema)
@@ -476,39 +488,56 @@ def dispatch(provider, root, call_id, system, payload, schema):
             note(data, 'allocation_paused', model=provider.model, decision=plan['decision'])
             denied('Runtime memory allocation requires recovery before loading this model.', plan=plan,
                    kind='model_capacity',stage='dispatch',inference_started=False)
-        # Detached interruptions never grant permission to unload, including
-        # after a later successful dispatch or a shared-to-exclusive switch.
-        data.update(active={'call_id':call_id,'model':provider.model,'pid':os.getpid()}, owned=None)
-        note(data, 'dispatch', call_id=call_id, model=provider.model, context_tokens=provider.runtime_context_tokens,
-             calibration_sha256=calibration['sha256'] if calibration else None)
+        active = None
+
+        def start():
+            nonlocal active
+            if active is not None:
+                raise InvalidUpdate('Ollama transport already started for this dispatch')
+            pending = {'call_id': call_id, 'model': provider.model, 'pid': os.getpid()}
+            staged = dict(data, active=pending, owned=None, events=list(data.get('events', [])))
+            note(staged, 'dispatch', call_id=call_id, model=provider.model,
+                 context_tokens=provider.runtime_context_tokens,
+                 calibration_sha256=calibration['sha256'] if calibration else None)
+            data.update(staged)
+            active = pending
+
         provider.keep_alive = keep_alive
         provider.runtime_completed = False
+        token = _transport_start.set((provider, call_id, start))
         try:
             yield plan
         finally:
-            data['active'] = None
-            try:
-                rows = running(); data['resident_models'] = rows
-                resident = next((m for m in rows if m['name'] == provider.model), None)
-                complete = getattr(provider, 'runtime_completed', False)
-                data['owned'] = ({'name':resident['name'],'digest':resident['digest'],'completed_at':time.time()}
-                                 if resident and complete and ownership() == 'exclusive'
-                                 and not data.get('interrupted') else None)
-                release = 'still_resident' if resident else 'unloaded'
-                if not complete:
-                    release = 'interrupted_ownership_unknown'
-                    data['active']={'call_id':call_id,'model':provider.model,'uncertain':True}
-                    retain_interruption(data, data['active'])
-            except Exception:
-                data['owned'] = None; release = 'verification_unavailable'
-                if not getattr(provider,'runtime_completed',False):
-                    data['active']={'call_id':call_id,'model':provider.model,'uncertain':True}
-                    try: retain_interruption(data, data['active'])
-                    except OSError: pass
-            # Failure to collect diagnostics must not turn a settled model result
-            # into a new request error. The OS lease still releases in all cases.
-            try: note(data, 'release_observed', call_id=call_id, status=release)
-            except OSError: pass
+            _transport_start.reset(token)
+            if active is None:
+                # Storage, context and admission checks can fail under the lease
+                # before any request is sent. Preserve existing backend evidence.
+                try: note(data, 'transport_not_started', call_id=call_id, model=provider.model)
+                except OSError: pass
+            else:
+                complete = provider.runtime_completed
+                data['active'] = None if complete else dict(active, uncertain=True)
+                try:
+                    rows = running()
+                    data['resident_models'] = rows
+                    resident = next((m for m in rows if m['name'] == provider.model), None)
+                    data['owned'] = ({'name': resident['name'], 'digest': resident['digest'],
+                                      'completed_at': time.time()}
+                                     if resident and complete and ownership() == 'exclusive'
+                                     and not data.get('interrupted') else None)
+                    release = 'still_resident' if resident else 'unloaded'
+                except Exception:
+                    data['owned'] = None
+                    release = 'verification_unavailable'
+                # Keep actual transport uncertainty sticky even if the inventory
+                # is unavailable. Diagnostics cannot replace the original result.
+                try:
+                    if not complete:
+                        release = 'interrupted_ownership_unknown'
+                        retain_interruption(data, data['active'])
+                    note(data, 'release_observed', call_id=call_id, status=release)
+                except OSError:
+                    pass
 
 
 def stable_resources(root):

@@ -216,9 +216,21 @@ class EngineClientTests(unittest.TestCase):
             spawn.assert_not_called()
 
     def test_idle_worker_registry_change_starts_one_owned_child_with_clean_environment(self):
+        from contextlib import ExitStack
+        from platform_support import lock_file
+
         new_registry = self.root / 'new-models.json'
         new_record = dict(self.record, registry=str(new_registry), pid=54321)
         requests = []
+        sleeps = []
+        previous_owner = ExitStack()
+        self.addCleanup(previous_owner.close)
+        previous_owner.enter_context(lock_file(self.root / 'owner.lock'))
+
+        def release_owner(delay):
+            sleeps.append(delay)
+            previous_owner.close()
+
         def exchange(record, request, **options):
             requests.append(request['op'])
             return {'ok': True, 'runtime_hash': 'b' * 64, 'busy': False}
@@ -227,12 +239,14 @@ class EngineClientTests(unittest.TestCase):
                 patch.object(client, 'metadata', side_effect=[self.record, new_record]), \
                 patch.object(client, '_exchange', side_effect=exchange), \
                 patch.object(client, 'runtime_hash', return_value='b' * 64), \
+                patch.object(client.time, 'sleep', side_effect=release_owner), \
                 patch('engine_profiles.registry_path', return_value=new_registry), \
                 patch.dict(os.environ, SUTRA_ENGINE_PYTHON=sys.executable, STRATA_COMPONENTS_DIR='/foreign',
                            PYTHONPATH='/foreign', PYTHONHOME='/foreign', VIRTUAL_ENV='/foreign'), \
                 patch.object(client.subprocess, 'Popen', return_value=child) as spawn:
             self.assertEqual(client.ensure_service(), new_record)
             spawn.assert_called_once()
+            self.assertEqual(len(sleeps), 1)
             options = spawn.call_args.kwargs
             for key in ('STRATA_COMPONENTS_DIR', 'PYTHONPATH', 'PYTHONHOME', 'VIRTUAL_ENV'):
                 self.assertNotIn(key, options['env'])

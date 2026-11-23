@@ -18,6 +18,11 @@ class ContextTests(unittest.TestCase):
         self.s.apply_user_patch('A','u2','Timeout 750.',[{'key':'timeout_ms','value':'750','quote':'Timeout 750.'}],1)
         s=self.s.snapshot('A'); self.assertEqual(s['constraints']['timeout_ms'],750)
         self.assertFalse(s['constraints']['network_allowed']); self.assertEqual(s['task_id'],'T-1')
+    def test_positive_numbers_serialize_decimal_digits_and_reject_superscripts(self):
+        from context_manager import decode_value
+        self.assertEqual(decode_value('timeout_ms', '٥٠٠'), 500)
+        with self.assertRaisesRegex(InvalidUpdate, 'positive integer'):
+            decode_value('timeout_ms', '²')
     def test_source_ids_copy_evidence_without_model_rewriting(self):
         msg='Ticket X-1. Edit only src/a.py and tests/test_a.py.'
         units=source_units(msg); self.assertEqual(len(units),2)

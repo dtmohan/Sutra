@@ -33,6 +33,19 @@ CASES={
 
 class StaticCompilerTests(unittest.TestCase):
  @requires_typescript
+ @unittest.skipUnless(os.sys.platform=='darwin','requires macOS Seatbelt')
+ def test_parser_uses_canonical_compiler_path_inside_sandbox(self):
+  from api_extract import extract
+  compiler = Path(ENV['KARMA_TYPESCRIPT']).resolve()
+  source = 'function leaf(){return 1;} export const answer=leaf();'
+  with tempfile.TemporaryDirectory() as scratch:
+   alias = Path(scratch)/'compiler'
+   alias.symlink_to(compiler.parent, target_is_directory=True)
+   with patch.dict(os.environ, dict(ENV, KARMA_TYPESCRIPT=str(alias/compiler.name))):
+    self.assertEqual(extract('a.ts',source)['calls'][0]['expression'],'leaf')
+    self.assertIsNotNone(analysis.analyze({'a.ts':source})['calls'][0]['target'])
+
+ @requires_typescript
  def test_html_maps_only_inline_script_at_original_locations(self):
   lines = [
    '<!doctype html>',

@@ -9,7 +9,7 @@ from xml.sax.saxutils import escape
 import conversation
 import orchestration
 import orchestration_flow
-from context_manager import InvalidUpdate
+from context_manager import ContextBudgetExceeded, InvalidUpdate
 from invocation_gateway import InvocationLedger, consume_dispatch
 from paging import Budget, PageFault
 from repository_tools import read_bytes
@@ -108,6 +108,138 @@ class DocumentStagesTests(unittest.TestCase):
     def provider(self, role):
         self.assertIn(role, ('conversation', 'document_extract', 'document_verdict_reviewer'))
         return {model: StageProvider(self, role, model) for model in MODELS.values()}
+
+    def pending_stage(self, role):
+        import document_stages
+        import document_verdict_review
+        flow, sid, _ = self.approved()
+        if role == 'document_extract':
+            flow = self.next_capture(flow)
+            data = self.saved(flow)
+            plan = data['document_stage_plan']
+            provider = self.provider(role)[plan['extract_model']]
+            invoke = lambda: document_stages.extract(
+                self.ledger, sid, self.storage, flow['flow_id'], plan,
+                data['document_stage_receipts'], provider=provider)
+        else:
+            for _ in range(20):
+                if self.saved(flow).get('document_candidate_id'):
+                    break
+                flow = self.request('step', flow)
+            else:
+                self.fail('Document synthesis candidate was not committed')
+            _, route = document_verdict_review._delivery(self.ledger, sid, flow['flow_id'])
+            provider = self.provider(role)[route['model']]
+            invoke = lambda: document_verdict_review.review(
+                self.ledger, sid, self.storage, flow['flow_id'], provider=provider)
+        return sid, provider, invoke
+
+    def assert_repair_budget_failure_closes_stage(self, role):
+        sid, provider, invoke = self.pending_stage(role)
+        original_call = provider.call
+        original_budget = provider.budget
+
+        class RepairLimitedBudget(Budget):
+            def check(self, system, payload, schema):
+                if 'repair' in payload:
+                    raise ContextBudgetExceeded('The repair packet exceeds the admitted context')
+                return super().check(system, payload, schema)
+
+        provider.budget = RepairLimitedBudget(original_budget.context_limit,
+                                              original_budget.response_reserve,
+                                              original_budget.template_reserve)
+        if role == 'document_extract':
+            self.forge_quote = True
+        else:
+            def invalid_assessment(*args):
+                proposal, record = original_call(*args)
+                proposal['reason'] = ''
+                return proposal, record
+            provider.call = invalid_assessment
+        before = usage(self.ledger, sid)
+        contract = conversation.contract(self.ledger, sid)
+        with self.assertRaisesRegex(ContextBudgetExceeded, 'repair packet'):
+            invoke()
+        run_id = self.ledger.db.execute(
+            'SELECT id FROM protocol_runs WHERE session=? ORDER BY rowid DESC LIMIT 1', (sid,)).fetchone()[0]
+        events = self.ledger.run(run_id)['events']
+        self.assertEqual([event['kind'] for event in events][-3:], ['NACK', 'BRIDGE', 'FIN'])
+        after = usage(self.ledger, sid)
+        self.assertEqual(after['used']['calls'], before['used']['calls'] + 1)
+        self.assertGreater(after['used']['tokens'], before['used']['tokens'])
+        self.assertEqual(conversation.contract(self.ledger, sid), contract)
+        self.assertTrue(self.ledger.verify_invocations(sid))
+        self.ledger.close()
+        self.ledger = InvocationLedger(self.ledger_path)
+        self.assertEqual(usage(self.ledger, sid), after)
+        self.assertEqual(conversation.contract(self.ledger, sid), contract)
+        self.forge_quote = False
+        provider.call = original_call
+        provider.budget = original_budget
+        self.assertTrue(invoke()['admission']['admitted'])
+        self.assertEqual(usage(self.ledger, sid)['used']['calls'], after['used']['calls'] + 1)
+        self.assertEqual(self.ledger.run(run_id)['events'], events)
+
+    def assert_cancel_before_stage_dispatch_closes_run(self, role):
+        from lifecycle import Interrupted
+        sid, _, invoke = self.pending_stage(role)
+        before = usage(self.ledger, sid)
+        with patch('invocation_gateway.InvocationGateway.invoke', side_effect=Interrupted('cancelled')):
+            with self.assertRaises(Interrupted):
+                invoke()
+        run_id = self.ledger.db.execute(
+            'SELECT id FROM protocol_runs WHERE session=? ORDER BY rowid DESC LIMIT 1', (sid,)).fetchone()[0]
+        self.assertEqual(self.ledger.run(run_id)['events'][-1]['kind'], 'FIN')
+        self.assertEqual(usage(self.ledger, sid), before)
+        self.assertTrue(self.ledger.verify_invocations(sid))
+
+    def test_extraction_repair_budget_failure_closes_run_and_preserves_spending(self):
+        self.assert_repair_budget_failure_closes_stage('document_extract')
+
+    def test_verdict_repair_budget_failure_closes_run_and_preserves_spending(self):
+        self.assert_repair_budget_failure_closes_stage('document_verdict_reviewer')
+
+    def test_cancel_before_extraction_dispatch_closes_run_without_spending(self):
+        self.assert_cancel_before_stage_dispatch_closes_run('document_extract')
+
+    def test_cancel_before_verdict_dispatch_closes_run_without_spending(self):
+        self.assert_cancel_before_stage_dispatch_closes_run('document_verdict_reviewer')
+
+    def assert_cancel_after_stage_dispatch_keeps_reservation(self, role):
+        from lifecycle import Interrupted, reconcile
+        sid, provider, invoke = self.pending_stage(role)
+        original_call = provider.call
+        before = usage(self.ledger, sid)
+        contract = conversation.contract(self.ledger, sid)
+
+        def interrupted(cid, system, payload, schema):
+            consume_dispatch(cid, provider.model, system, payload, schema)
+            raise Interrupted('Cancelled after the invocation was committed')
+
+        provider.call = interrupted
+        with self.assertRaises(Interrupted):
+            invoke()
+        run_id = self.ledger.db.execute(
+            'SELECT id FROM protocol_runs WHERE session=? ORDER BY rowid DESC LIMIT 1', (sid,)).fetchone()[0]
+        self.assertEqual(self.ledger.run(run_id)['events'][-1]['kind'], 'FIN')
+        charged = usage(self.ledger, sid)
+        self.assertEqual(charged['used']['calls'], before['used']['calls'] + 1)
+        self.assertGreater(charged['used']['tokens'], before['used']['tokens'])
+        self.ledger.close()
+        self.ledger = InvocationLedger(self.ledger_path)
+        reconcile(self.ledger, self.workspace)
+        self.assertEqual(usage(self.ledger, sid), charged)
+        self.assertEqual(conversation.contract(self.ledger, sid), contract)
+        self.assertTrue(self.ledger.verify_invocations(sid))
+        provider.call = original_call
+        self.assertTrue(invoke()['admission']['admitted'])
+        self.assertEqual(usage(self.ledger, sid)['used']['calls'], charged['used']['calls'] + 1)
+
+    def test_cancel_after_extraction_dispatch_keeps_paid_reservation_on_recovery(self):
+        self.assert_cancel_after_stage_dispatch_keeps_reservation('document_extract')
+
+    def test_cancel_after_verdict_dispatch_keeps_paid_reservation_on_recovery(self):
+        self.assert_cancel_after_stage_dispatch_keeps_reservation('document_verdict_reviewer')
 
     def request(self, event, flow=None, **fields):
         request = {'event': event, 'chat_key': self.chat_key, 'models': MODELS,

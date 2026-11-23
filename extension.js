@@ -275,6 +275,8 @@ function activate(context) {
     if(localGreeting!==undefined&&(localGreeting!==true||thinkForTurn||!internal||message.op!=='orchestrate'||!['start','resume'].includes(message.event)))throw new Error('Invalid Sutra local greeting.');
     const documentEvidence=message?.op==='orchestrate'&&['locate_document','approve_document'].includes(message.event);
     if(documentEvidence&&!internal)throw new Error('Document access must be requested in Sutra chat.');
+    const capabilityExecution=message?.op==='capability_execute'||(message?.op==='orchestrate'&&message.event==='capability_grant');
+    if(capabilityExecution&&!internal)throw new Error('Sutra tool execution requires workspace host approval.');
     const diagnostic=message?.op==='dashboard';
     if(diagnostic)return requestDashboard();
     const managementRead=['state','models','conversation_read','capability_list','calibration_list'].includes(message?.op);
@@ -300,7 +302,8 @@ function activate(context) {
         SUTRA_LOGIT_SENSOR:({'off':'','numbers':'1','tokens':'tokens'})[config.get('logitSensor','off')]||'',
         SUTRA_ACTIVITY:'1',SUTRA_THINKING:thinking,SUTRA_CHILD_THINKING:thinkForTurn?baseThinking:null,KARMA_NODE:process.execPath,
         KARMA_TYPESCRIPT:path.join(context.extensionPath,'vendor','typescript','typescript.js'),
-        SUTRA_RAM_CACHE_MIB:String(ramMiB)};
+        SUTRA_RAM_CACHE_MIB:String(ramMiB),
+        SUTRA_CAPABILITY_AUTHORIZATION:capabilityExecution?JSON.stringify(toolController.evidence(message.authorization)):null};
       const authorization=!managementRead&&!localGreeting?nativeController?.permissionEvidence(transport?.authority):undefined;
       const result=await worker.send(payload,environment,{token,transport,authorization,onActivity:event=>{if(event.kind!=='workflow')usage?.activity(event);onActivity?.(event);}});
       output.appendLine(new Date().toISOString()+' '+message.op+' completed');

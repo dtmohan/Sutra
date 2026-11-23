@@ -288,6 +288,15 @@ def preview(s, fid, meta, additions=None):
         additions = {k: min(math.ceil(v), MAXIMA[k] - budget['limits'][k])
                      for k, v in budget['used'].items()
                      if v > 0 and budget['limits'][k] < MAXIMA[k]}
+        stop = data.get('workflow_stop') or {}
+        if stop.get('stage') == 'BINDING' and data.get('initial_catalog_pending'):
+            from workspace_allocation import _need
+            need = _need(stop)
+            if need:
+                dimension, minimum = need
+                room = MAXIMA[dimension] - budget['limits'][dimension]
+                if minimum <= room:
+                    additions[dimension] = max(additions.get(dimension, 0), minimum)
         if not additions:
             raise InvalidUpdate('The task is already at the supported allocation ceiling')
     after = increased(budget['limits'], additions)

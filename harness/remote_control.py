@@ -66,8 +66,13 @@ def ensure_tunnel(profile):
     command = [_ssh(), *_options(), '-S', str(target)]
     with _tunnel_lock:
         if target.exists():
-            result = subprocess.run(command + ['-O', 'check', profile['ssh_alias']],
-                                    capture_output=True, timeout=timeout(5))
+            try:
+                result = subprocess.run(command + ['-O', 'check', profile['ssh_alias']],
+                                        capture_output=True, timeout=timeout(5))
+            except subprocess.TimeoutExpired:
+                raise InvalidUpdate('Remote SSH status check timed out; the tunnel state is uncertain') from None
+            except (OSError, subprocess.SubprocessError):
+                raise InvalidUpdate('Remote SSH status check was unavailable; the tunnel state is uncertain') from None
             if result.returncode == 0:
                 return {'ready': True, 'owned': True, 'port': profile['port']}
             # Only remove this profile's stale private Unix socket, not any

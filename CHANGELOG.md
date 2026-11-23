@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.57.8
+
+- Resume saved reviews through workspace consent, initial catalog allocation and synthesis context recall. Keep the task identity, approved scope and recorded spending.
+- Keep Ollama model ownership intact when a call stops before transport. Correct worker retirement, IPC sequencing, SSH timeout recovery and concurrent RAM cache accounting.
+- Require exact approval for optional tools and enforce bounded source reads and scoped macOS parser sandboxes.
+- Record interrupted runs and grants in the existing ledger. Keep historical citation receipts and correct the end lines of new citations.
+- Verify the canonical STP kernel hash in the packaged extension.
+
 ## 0.57.7
 
 - Route clear codebase review requests with trailing “please” directly to workspace consent without a classifier call.

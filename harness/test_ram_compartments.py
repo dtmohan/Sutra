@@ -1,6 +1,8 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import tempfile
+from threading import Barrier, Event, get_ident
 import unittest
 from unittest.mock import patch
 
@@ -193,6 +195,66 @@ class CompartmentTests(unittest.TestCase):
                 with self.cache.request('nested'):
                     self.fail('Nested request should not enter')
         self.assertIsNone(CURRENT.get())
+
+    def test_simultaneous_same_key_misses_count_one_retained_entry(self):
+        raw = '{"values":[1,2,3],"label":"Cedar"}'
+        original = json.loads
+        barrier = Barrier(2)
+
+        def together(value):
+            decoded = original(value)
+            barrier.wait(timeout=3)
+            return decoded
+
+        with patch('ram_compartments.json.loads', side_effect=together):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(self.cache.decode, 'workspace', 'page', raw) for _ in range(2)]
+                first, second = [future.result(timeout=5) for future in futures]
+        first['values'].append(99)
+        self.assertEqual(second, original(raw))
+        observed = self.cache.snapshot()
+        reference = Compartments(self.cache.max_bytes)
+        reference.decode('workspace', 'page', raw)
+        self.assertEqual(observed['active_entries'], 1)
+        self.assertEqual(observed['misses'], 2)
+        self.assertEqual(observed['retained_bytes'], reference.snapshot()['retained_bytes'])
+        self.cache.resize(0)
+        self.assertEqual(self.cache.snapshot()['retained_bytes'], 0)
+
+    def test_delayed_miss_replaces_entry_demoted_by_request_boundary(self):
+        raw = '{"values":[1,2,3]}'
+        original = json.loads
+        decoded = Event()
+        release = Event()
+        main_thread = get_ident()
+
+        def delayed(value):
+            result = original(value)
+            if get_ident() != main_thread:
+                decoded.set()
+                if not release.wait(3):
+                    raise RuntimeError('Decoder was not released')
+            return result
+
+        with patch('ram_compartments.json.loads', side_effect=delayed):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pending = pool.submit(self.cache.decode, 'workspace', 'page', raw)
+                try:
+                    self.assertTrue(decoded.wait(3))
+                    self.cache.decode('workspace', 'page', raw)
+                    with self.cache.request('workspace'):
+                        self.assertEqual(self.cache.snapshot()['warm_entries'], 1)
+                finally:
+                    release.set()
+                self.assertEqual(pending.result(timeout=5), original(raw))
+        self.assertEqual(self.cache.snapshot()['warm_entries'], 0)
+        reference = Compartments(self.cache.max_bytes)
+        reference.decode('workspace', 'page', raw)
+        with self.cache.request('workspace'):
+            observed = self.cache.snapshot()
+            self.assertEqual(observed['active_entries'], 0)
+            self.assertEqual(observed['warm_entries'], 1)
+            self.assertEqual(observed['retained_bytes'], reference.snapshot()['retained_bytes'])
 
 
 class PageValidationTests(unittest.TestCase):

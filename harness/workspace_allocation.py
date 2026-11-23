@@ -159,7 +159,7 @@ def try_amend(s, fid, meta):
             return dict(result, reason='policy_disabled')
         events = m.events(s, fid)
         stop_event = next((e for e in reversed(events) if e['to'] == 'PAUSED'
-                           and e['data'].get('workflow_stop') == stop), None)
+                           and (e['data'].get('workflow_stop') or e['data'].get('mapping_stop')) == stop), None)
         if stop_event is None:
             return None
         budget = usage(s, sid)

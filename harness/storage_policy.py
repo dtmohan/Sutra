@@ -13,6 +13,8 @@ from memory_layer import LIMITS
 TRACE_BYTES=LIMITS['trace_bytes']
 SNAPSHOT_BYTES=LIMITS['settled_snapshot_bytes']
 MAX_AGE=LIMITS['max_age_seconds']
+ACTION_ID = re.compile(r'[a-f0-9]{32}')
+QUARANTINED_TOOL = re.compile(r'(?:ruff|pyright)-[0-9][a-zA-Z0-9.-]*-[a-f0-9]{12}\.quarantine-[a-f0-9]{32}')
 
 def size(path):
     path=Path(path)
@@ -35,14 +37,21 @@ def require_space(root, reserve=16*1024**2):
 
 def prune(root, s=None, now=None):
     root=Path(root);now=time.time() if now is None else now;removed=[]
-    groups=[(sorted((root/'calls').glob('*.json'),key=lambda p:p.stat().st_mtime),TRACE_BYTES)]
+    calls = [p for p in (root/'calls').glob('*.json') if not p.is_symlink() and p.is_file()]
+    groups=[(sorted(calls,key=lambda p:p.stat().st_mtime),TRACE_BYTES)]
     if s is not None:
         eligible=[]
         for aid,raw in s.db.execute('SELECT action_id,record_json FROM host_action_receipts'):
+            if not isinstance(aid, str) or not ACTION_ID.fullmatch(aid):continue
             if json.loads(raw)['result']['status'] in ('pending','interrupted_unknown'):continue
             path=root/'actions'/aid
-            if path.is_dir() and not path.is_symlink():eligible.append(path)
+            if not path.is_symlink() and path.is_dir():eligible.append(path)
         groups.append((sorted(eligible,key=lambda p:p.stat().st_mtime),SNAPSHOT_BYTES))
+    tools = root/'tools'
+    if not tools.is_symlink() and tools.is_dir():
+        quarantined = [p for p in tools.iterdir() if QUARANTINED_TOOL.fullmatch(p.name)
+                       and not p.is_symlink() and p.is_dir()]
+        groups.append((sorted(quarantined,key=lambda p:p.stat().st_mtime),SNAPSHOT_BYTES))
     for paths,cap in groups:
         total=sum(size(p) for p in paths)
         for p in paths:

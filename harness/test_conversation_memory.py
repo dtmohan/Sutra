@@ -83,6 +83,31 @@ class MemoryTests(unittest.TestCase):
         self.s.quarantine_invocation(first['session'], selection, 'Invalid selection')
         with self.assertRaises(PageFault): self.s.load_result(first['session'], out['result']['invocation_id'])
 
+    def test_recent_window_rollback_restores_directory_before_optional_retrieval(self):
+        from review_budget import usage
+        first = self.ask('Orchid archive', provider=Fake(fault=lambda r, p: r.update(
+            answer='Older evidence. ' * 170, summary='An older topic.')))
+        recent = self.ask('Unrelated notes', first['result']['invocation_id'], Fake(fault=lambda r, p: r.update(
+            answer='Recent notes. ' * 120, summary='Recent unrelated notes.')))
+        latest = self.ask('Hello', recent['result']['invocation_id'], Fake(fault=lambda r, p: r.update(
+            answer='Latest reply. ' * 8, summary='Latest.')))
+        sid = first['session']
+        parent = latest['result']['invocation_id']
+        cm.materialize(self.s, sid, cm.history(self.s, sid, parent))
+        before = usage(self.s, sid)
+        contract = chat.contract(self.s, sid)
+        budget = Budget(3990, 128, 0)
+        memory = cm.working_set(self.s, sid, parent, 'Orchid', budget, {}, '', lambda p: {})
+        bodies = {row['id'] for field in ('recent_turns', 'retrieved_turns') for row in memory[field]}
+        directory = {row['id'] for row in memory['toc']}
+        self.assertNotIn(recent['result']['invocation_id'], bodies)
+        self.assertIn(recent['result']['invocation_id'], directory)
+        self.assertIn(first['result']['invocation_id'], bodies | directory)
+        self.assertIn(parent, bodies)
+        self.assertEqual(chat.contract(self.s, sid), contract)
+        self.assertEqual(usage(self.s, sid), before)
+        budget.check('', {'memory': memory, 'repair': {'errors': ['x' * 140] * 2}}, {})
+
     def test_capacity_comes_from_model_metadata_and_runtime_allocation(self):
         b, info = allocation({'model_info': {'general.architecture':'qwen', 'qwen.context_length':131072}, 'parameters':'temperature 0\nnum_ctx 32768\n'})
         self.assertEqual(b.context_limit, 32768)

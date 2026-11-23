@@ -17,6 +17,7 @@ function policy(vscode, workspace, registryHash) {
 
 function controller(vscode, context, deps) {
   const key = 'sutra.approvedToolPolicy.v1';
+  const approvals = new WeakMap();
   const cancelled = token => { if (token?.isCancellationRequested) throw new Error('Tool approval cancelled.'); };
   async function approve(p, token) {
     cancelled(token);
@@ -46,7 +47,20 @@ function controller(vscode, context, deps) {
       if (choice !== 'Approve') return null;
     }
     if (policy(vscode, deps.workspace(), p.binding.registry_hash).hash !== before.hash || !deps.armed()) throw new Error('Tool policy or workspace permissions changed during approval.');
-    return {kind, proposal_id: p.id, policy_hash: before.hash};
+    const approval=Object.freeze({kind, proposal_id:p.id, policy_hash:before.hash});
+    approvals.set(approval,{proposal:p,issued:Date.now()});
+    return approval;
+  }
+  function evidence(approval) {
+    const record=approvals.get(approval);
+    if(!record||!deps.armed())throw new Error('Approve the specific Sutra tool proposal before execution.');
+    const {proposal:p,issued}=record;
+    const {hash,...current}=policy(vscode,deps.workspace(),p.binding.registry_hash);
+    if(current.mode==='disabled'||current.workspace!==p.binding.workspace||hash!==approval.policy_hash||
+        (approval.kind==='workspace_policy'&&(current.mode!=='preapproved'||context.workspaceState.get(key)!==hash||
+          !current.allowed[p.capability]?.includes(p.action))))
+      throw new Error('Tool policy or workspace permissions changed before execution.');
+    return {approval,policy:current,capability:p.capability,action:p.action,issued};
   }
   async function manage(token) {
     const data = await deps.request({op: 'capability_list'},token);
@@ -82,7 +96,7 @@ function controller(vscode, context, deps) {
     await context.workspaceState.update(key,undefined);
     await vscode.window.showInformationMessage('Tool policy saved. Sutra will ask before trusting preapprovals for this workspace and registry.');
   }
-  return {approve, manage, configure};
+  return {approve, evidence, manage, configure};
 }
 
 function report(receipt) {

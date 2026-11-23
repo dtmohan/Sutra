@@ -2,7 +2,6 @@
 import base64
 import hashlib
 import io
-import json
 import os
 from pathlib import Path, PurePosixPath
 import selectors
@@ -143,7 +142,8 @@ def install(root, name):
 def run(root, name, files):
     """Read-only sandbox; project config/plugins and arbitrary command flags excluded."""
     from lifecycle import timeout
-    from monitoring import require_resources
+    from monitoring import resource_state
+    from sandbox_process import node_runtime_roots, profile
     if sys.platform != 'darwin': raise InvalidUpdate('Tool execution needs the macOS sandbox; installation is portable')
     spec = registry.artifact(name); tool = folder(root, name).resolve()
     with tempfile.TemporaryDirectory(prefix='tool-check-', dir=root) as temp:
@@ -154,8 +154,9 @@ def run(root, name, files):
         env={'HOME':str(scratch),'TMPDIR':str(scratch),'LANG':'en_US.UTF-8','PATH':'/usr/bin:/bin'}
         entry=tool/spec['entry']
         if name == 'ruff':
-            command=[str(entry),'check','--isolated','--no-cache','--output-format=json',*files]
+            command=[str(entry),'check','--isolated','--no-cache','--output-format=json','--',*files]
             executable=entry
+            runtime_roots=()
         else:
             executable=Path(os.environ.get('KARMA_NODE','')).resolve()
             if not executable.is_file(): raise InvalidUpdate('Pyright requires the host Node runtime')
@@ -167,22 +168,25 @@ def run(root, name, files):
             env['ELECTRON_RUN_AS_NODE']='1'
             command=[str(executable),str(entry),'--project',str(config),'--outputjson',
                      '--pythonpath',str(scratch/'no-interpreter')]
-        def lit(p): return json.dumps(str(p))
-        profile='(version 1)(deny default)(allow file-read-metadata)(allow sysctl-read)'+\
-            '(allow process-exec (literal '+lit(executable)+'))'+\
-            '(allow file-read* (literal "/") (literal "/dev/null") (literal "/dev/urandom") '+\
-            ' '.join('(subpath '+lit(p)+')' for p in ('/System','/usr','/Library/Apple',tool,base,executable.parent.parent))+')'+\
-            '(allow file-write* (subpath '+lit(scratch)+'))'
-        sandbox=base/'tool.sb';sandbox.write_text(profile)
+            runtime_roots=node_runtime_roots(executable)
+        sandbox=base/'tool.sb'
+        sandbox.write_text(profile(executable,(tool,base,*runtime_roots),write_roots=(scratch,)),encoding='utf-8')
+        started=time.monotonic();end=started+timeout(30)
         proc=subprocess.Popen(['/usr/bin/sandbox-exec','-f',str(sandbox),*command],cwd=snapshot,
             env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,start_new_session=True)
-        output=bytearray();status='finished';end=time.monotonic()+timeout(30)
+        output=bytearray();status='finished'
+        next_sample=started+1;health=None
         selector=selectors.DefaultSelector();selector.register(proc.stdout,selectors.EVENT_READ)
         try:
             while selector.get_map():
-                if time.monotonic()>end: status='timeout';break
-                require_resources(root)
-                for key,_ in selector.select(.1):
+                now=time.monotonic()
+                if now>=end:status='timeout';break
+                if now>=next_sample:
+                    health=resource_state(root,refresh=True,max_wait=end-now)
+                    now=time.monotonic();next_sample=now+1
+                    if not health['admitted']:status='resource_wait';break
+                    if now>=end:status='timeout';break
+                for key,_ in selector.select(min(.1,end-now)):
                     block=os.read(key.fileobj.fileno(),8192)
                     if not block: selector.unregister(key.fileobj);continue
                     output.extend(block)
@@ -193,6 +197,8 @@ def run(root, name, files):
             selector.close();proc.stdout.close()
         if status=='finished' and proc.returncode not in (0,1): status='process_failed'
         text=bytes(output[:65536]).decode('utf8','replace').replace(str(snapshot)+'/','')
-        return {'status':status,'returncode':proc.returncode,'output':text,'output_sha256':sha(text),
-                'evidence_kind':'static_tool_diagnostics','correctness_verified':False,
-                'network_allowed':False,'project_writes_allowed':False}
+        receipt={'status':status,'returncode':proc.returncode,'output':text,'output_sha256':sha(text),
+                 'evidence_kind':'static_tool_diagnostics','correctness_verified':False,
+                 'network_allowed':False,'project_writes_allowed':False}
+        if status=='resource_wait':receipt['resource']=health
+        return receipt

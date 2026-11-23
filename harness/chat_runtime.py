@@ -788,7 +788,7 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
     p = {'_request_nonce': repair_state['packet']['_request_nonce'] if repair_state else uuid.uuid4().hex, 'contract': s.pinned(sid), 'workspace': str(workspace),
          'request': prompt, 'pages': [], 'snapshot_owner': owner, 'handoff': None,
          'parent_context_version': PARENT_CONTEXT_VERSION, 'citation_policy_version': 2, 'report_schema_version': 2, 'claim_timeout_recovery_version': 1,
-         'claim_source_version': 2}
+         'claim_source_version': 2, 'evidence_line_version': 1}
     if 'review_intent_version' in intent_packet:
         p['review_intent_version'] = intent_packet['review_intent_version']
     judgment_version = repair_state['packet'].get('review_judgment_version') if repair_state else REVIEW_JUDGMENT_VERSION
@@ -805,10 +805,11 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
             p['review_transport_version'] = repair_state['packet']['review_transport_version']
         else:
             p.pop('review_transport_version', None)
-        if 'claim_source_version' in repair_state['packet']:
-            p['claim_source_version'] = repair_state['packet']['claim_source_version']
-        else:
-            p.pop('claim_source_version', None)
+        for key in ('claim_source_version', 'evidence_line_version'):
+            if key in repair_state['packet']:
+                p[key] = repair_state['packet'][key]
+            else:
+                p.pop(key, None)
         if 'parent_source_funding_version' in repair_state['packet']:
             p['parent_source_funding_version'] = repair_state['packet']['parent_source_funding_version']
         p['parent_repair'] = dict(repair_state['packet']['parent_repair'])

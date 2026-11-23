@@ -485,7 +485,7 @@ def apply_recall(s, sid, p, requestrecord, *, owner=None, limit=None):
                  owner=owner, required_refs=mapped)
 
 
-def recover_requests(s, sid, owner, request):
+def recover_requests(s, sid, owner, request, *, parent_output_failure=None):
     """Recover receipt-only IPC after a crash, without replaying an older draft.
 
     Only the latest accepted writer in this compatible execution lineage is
@@ -516,6 +516,10 @@ def recover_requests(s, sid, owner, request):
                 or packet.get('request') != request['prompt']
                 or (packet.get('conversation_handoff') or {}).get('invocation_id') != request.get('conversation_id')):
             continue
+        if parent_output_failure is not None and (
+                (env.get('orchestration') or {}).get('node_id') != owner['id']
+                or (packet.get('parent_draft_recovery') or {}).get('failed_invocation') != parent_output_failure):
+            return None
         # Never bypass a newer accepted variant to resurrect an older request.
         if ([item['invocation_id'] for item in packet.get('child_results', [])] != request.get('child_results', [])
                 or (packet.get('child_results') and

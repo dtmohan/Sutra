@@ -1,5 +1,6 @@
 """Bounded host actions: exact Python edits and sandboxed unittest snapshots."""
 import ast
+from collections import Counter
 import difflib
 import hashlib
 import json
@@ -35,24 +36,17 @@ def initialize(s):
 
 
 def source_path(workspace, name):
-    from vscode_bridge import safe_path
-    target=safe_path(workspace,name);walk=Path(workspace).resolve()
-    for component in Path(name).parts:
-        walk=walk/component
-        if walk.is_symlink():raise InvalidUpdate('Symlink source paths are not supported')
-    if not target.is_file() or not stat.S_ISREG(target.stat().st_mode):raise InvalidUpdate('Action requires an existing regular file')
-    if target.stat().st_nlink!=1:raise InvalidUpdate('Hard-linked source files are not supported')
-    return target
+    from repository_tools import source_size
+    source_size(workspace,name)
+    return Path(workspace).resolve()/name
 
 
 def files_at(s, session, workspace, allow_missing=False):
+    from repository_tools import read_bytes
     result={}
     for name in s.snapshot(session)['constraints']['allowed_paths']:
-        from vscode_bridge import safe_path
-        target=safe_path(workspace,name)
-        if allow_missing and not target.exists() and not target.is_symlink():continue
-        p=source_path(workspace,name);raw=p.read_bytes()
-        if len(raw)>64000:raise InvalidUpdate('Scoped file exceeds 64 KB')
+        raw=read_bytes(workspace,name,allow_missing=allow_missing)
+        if raw is None:continue
         result[name]={'sha256':hashlib.sha256(raw).hexdigest(),'text':raw.decode('utf-8')}
     return result
 
@@ -63,6 +57,33 @@ def imports(tree):
         if isinstance(n,ast.Import):roots.update(a.name.split('.')[0] for a in n.names)
         if isinstance(n,ast.ImportFrom) and n.module and n.level==0:roots.add(n.module.split('.')[0])
     return roots
+
+
+def dynamic_imports(tree):
+    roots,unresolved=set(),Counter()
+    modules={'importlib':'import_module','builtins':'__import__'}
+    aliases={name:operation for name,operation in modules.items()}
+    functions={'__import__'}
+    for node in ast.walk(tree):
+        if isinstance(node,ast.Import):
+            aliases.update({item.asname or item.name:modules[item.name] for item in node.names if item.name in modules})
+        elif isinstance(node,ast.ImportFrom) and node.level==0 and node.module in modules:
+            functions.update(item.asname or item.name for item in node.names if item.name==modules[node.module])
+    for node in ast.walk(tree):
+        if not isinstance(node,ast.Call):continue
+        fn=node.func
+        direct=isinstance(fn,ast.Name) and fn.id in functions
+        attribute=(isinstance(fn,ast.Attribute) and isinstance(fn.value,ast.Name)
+                   and aliases.get(fn.value.id)==fn.attr)
+        if not (direct or attribute):continue
+        name=node.args[0] if node.args else next((kw.value for kw in node.keywords if kw.arg=='name'),None)
+        if isinstance(name,ast.Constant) and isinstance(name.value,str):
+            root=name.value.split('.',1)[0]
+            if root.isidentifier():
+                roots.add(root)
+                continue
+        unresolved[ast.dump(node)]+=1
+    return roots,unresolved
 
 
 def stdlib_modules():
@@ -93,6 +114,7 @@ def stdlib_modules():
 
 
 def proposed_edit(workspace, constraints, action, payload, *, read_scope=None):
+    from repository_tools import read_bytes
     name=action['target'];old=action['old'];new=action['new']
     if constraints.get('edits_allowed') is not True:raise InvalidUpdate('Code edits are not allowed by the contract')
     if name not in constraints['allowed_paths'] or not name.endswith('.py'):raise InvalidUpdate('Edit target must be an in-scope Python file')
@@ -103,7 +125,7 @@ def proposed_edit(workspace, constraints, action, payload, *, read_scope=None):
     if not old or old==new or len(old)>2400 or len(new)>2400:raise InvalidUpdate('Edit needs a nonempty, changed, bounded exact replacement')
     if not any(p.get('path')==name and old in p['text'] for p in payload['pages']):
         raise InvalidUpdate('Replacement preimage is absent from the delivered source page')
-    path=source_path(workspace,name);before=path.read_bytes().decode('utf-8')
+    before=read_bytes(workspace,name).decode('utf-8')
     if before.count(old)!=1:raise InvalidUpdate('Replacement preimage must occur exactly once')
     observed=payload.get('source_versions',{}).get(name)
     if observed!=sha(before):raise InvalidUpdate('Source changed since proposal delivery')
@@ -116,7 +138,11 @@ def proposed_edit(workspace, constraints, action, payload, *, read_scope=None):
     except SyntaxError as exc:raise InvalidUpdate('Python syntax check failed: '+str(exc)) from None
     if constraints.get('dependencies_allowed') is False:
         allowed=stdlib_modules()|{Path(p).parts[0].split('.')[0] for p in constraints['allowed_paths']}
-        added=imports(b)-imports(a)-allowed
+        old_dynamic,old_unresolved=dynamic_imports(a)
+        new_dynamic,new_unresolved=dynamic_imports(b)
+        if new_unresolved-old_unresolved:
+            raise InvalidUpdate('New dynamic import lacks a bounded dependency name')
+        added=(imports(b)|new_dynamic)-(imports(a)|old_dynamic)-allowed
         if added and read_scope is not None:
             from repository_tools import inventory
             names=inventory(Path(workspace),read_scope,automatic=True)
@@ -267,25 +293,25 @@ def preview(s,session,iid,workspace):
 def replace_file(workspace, change):
     # Directory FDs and O_NOFOLLOW prevent a path component from redirecting the
     # write to a symlink target. Atomic replacement follows a last preimage check.
-    parts=Path(change['target']).parts;fd=os.open(str(Path(workspace).resolve()),os.O_RDONLY|os.O_DIRECTORY)
+    from repository_tools import MAX_FILE, normalized, read_source, source_directory, source_stream
+    name=normalized(change['target']);parts=Path(name).parts
     tmp='.karma-'+uuid.uuid4().hex+'.tmp'
-    try:
-        for part in parts[:-1]:
-            next_fd=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd);os.close(fd);fd=next_fd
-        original=os.open(parts[-1],os.O_RDONLY|os.O_NOFOLLOW,dir_fd=fd)
-        with os.fdopen(original,'rb') as f:
-            st=os.fstat(f.fileno());raw=f.read(64001)
-        if st.st_nlink!=1 or hashlib.sha256(raw).hexdigest()!=change['before_hash']:raise InvalidUpdate('Edit preimage changed before write')
-        temp_fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=fd)
-        with os.fdopen(temp_fd,'wb') as f:f.write(change['after'].encode());os.fchmod(f.fileno(),stat.S_IMODE(st.st_mode));f.flush();os.fsync(f.fileno())
-        now=os.stat(parts[-1],dir_fd=fd,follow_symlinks=False)
-        if (now.st_ino,now.st_mtime_ns,now.st_size)!=(st.st_ino,st.st_mtime_ns,st.st_size):raise InvalidUpdate('File changed during edit preparation')
-        os.replace(tmp,parts[-1],src_dir_fd=fd,dst_dir_fd=fd)
-        return hashlib.sha256((Path(workspace)/change['target']).read_bytes()).hexdigest()
-    finally:
-        try:os.unlink(tmp,dir_fd=fd)
-        except FileNotFoundError:pass
-        os.close(fd)
+    with source_directory(workspace,parts[:-1]) as fd:
+        try:
+            with source_stream(fd,parts[-1]) as stream:raw,st=read_source(stream,name,MAX_FILE)
+            if hashlib.sha256(raw).hexdigest()!=change['before_hash']:raise InvalidUpdate('Edit preimage changed before write')
+            temp_fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=fd)
+            with os.fdopen(temp_fd,'wb') as f:f.write(change['after'].encode());os.fchmod(f.fileno(),stat.S_IMODE(st.st_mode));f.flush();os.fsync(f.fileno())
+            now=os.stat(parts[-1],dir_fd=fd,follow_symlinks=False)
+            if ((now.st_dev,now.st_ino,now.st_mtime_ns,now.st_size,now.st_nlink)
+                    !=(st.st_dev,st.st_ino,st.st_mtime_ns,st.st_size,st.st_nlink)):
+                raise InvalidUpdate('File changed during edit preparation')
+            os.replace(tmp,parts[-1],src_dir_fd=fd,dst_dir_fd=fd)
+            with source_stream(fd,parts[-1]) as stream:raw,_=read_source(stream,name,MAX_FILE)
+            return hashlib.sha256(raw).hexdigest()
+        finally:
+            try:os.unlink(tmp,dir_fd=fd)
+            except FileNotFoundError:pass
 
 
 def test_runtime():
@@ -294,16 +320,9 @@ def test_runtime():
 
 
 def sandbox_profile(snapshot,scratch,runner):
-    def lit(p):return json.dumps(str(Path(p).resolve()))
-    runtime=test_runtime()
-    # Root-directory read is needed by macOS dyld's openat bootstrap, not a
-    # recursive root grant. No mach-lookup, fork, network or host writes allowed.
-    roots=['/System','/usr','/Library/Developer/CommandLineTools',sys.base_prefix,snapshot,scratch]
-    return '(version 1)(deny default)(allow file-read-metadata)(allow sysctl-read)'+\
-        '(allow process-exec (literal '+lit(runtime)+'))'+\
-        '(allow file-read* (literal "/") (literal "/dev/null") (literal "/dev/urandom") (literal '+lit(runner)+') '+\
-        ' '.join('(subpath '+lit(p)+')' for p in roots)+')'+\
-        '(allow file-write* (subpath '+lit(scratch)+'))'
+    from sandbox_process import profile
+    return profile(test_runtime(),('/Library/Developer/CommandLineTools',sys.base_prefix,snapshot),
+                   (runner,), (scratch,))
 
 
 def run_tests_snapshot(directory,files,target,timeout_ms,root=None):
@@ -311,7 +330,7 @@ def run_tests_snapshot(directory,files,target,timeout_ms,root=None):
     for name,item in files.items():
         p=snapshot/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(item['text'].encode('utf-8'))
     runner=Path(__file__).parent/'unittest_entry.py';profile=sandbox_profile(snapshot,scratch,runner)
-    (directory/'sandbox.sb').write_text(profile)
+    (directory/'sandbox.sb').write_text(profile,encoding='utf-8')
     command=['/usr/bin/sandbox-exec','-f',str(directory/'sandbox.sb'),str(test_runtime()),'-I','-B',str(runner),str(snapshot),target]
     env={'PATH':str(test_runtime().parent),'HOME':str(scratch),'TMPDIR':str(scratch),'LANG':'en_US.UTF-8'}
     started=time.monotonic();data=bytearray();reason=None
@@ -413,7 +432,7 @@ def execute(s,session,iid,workspace,root,resource_check=True):
             (directory/'before.py').write_bytes(change['before'].encode());(directory/'after.py').write_bytes(change['after'].encode());(directory/'change.diff').write_text(change['diff'])
             after=replace_file(workspace,change)
             if after!=change['after_hash']:raise InvalidUpdate('Edited file changed before receipt')
-            s.observe_file(session,'action-'+aid,action['target'],str(Path(workspace)/action['target']),s.snapshot(session)['revision'])
+            s.observe_digest(session,'action-'+aid,action['target'],after,s.snapshot(session)['revision'])
             result={'status':'applied','after_hash':after,'backup':str(directory/'before.py')}
         else:
             execution=execution_identity(s,session,constraints)

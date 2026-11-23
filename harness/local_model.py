@@ -71,11 +71,15 @@ class LocalModel:
                 'decoder_compatibility':getattr(self,'decoder_compatibility',None)}
         from lifecycle import timeout
         from invocation_gateway import transport_seconds, transport_timeout
+        from runtime_memory import mark_transport_started
+        encoded_body = json.dumps(body)
         call_seconds=transport_seconds()
         c=http.client.HTTPConnection('127.0.0.1',self.port,timeout=timeout(call_seconds)); started=time.monotonic()
         if self.health: self.health.active=c
         try:
-            c.request('POST','/api/chat',json.dumps(body),{'Content-Type':'application/json'})
+            c.connect()
+            mark_transport_started(self, call_id)
+            c.request('POST','/api/chat',encoded_body,{'Content-Type':'application/json'})
             transport['phase']='response_headers'
             r=c.getresponse()
             transport.update(headers_received=True,phase='stream')
@@ -110,7 +114,7 @@ class LocalModel:
                     try:sensor.observe(chunk)
                     except Exception:pass
                 if activity and thought: activity.thinking(thought)
-                if chunk.get('done'):
+                if chunk.get('done') is True:
                     self.runtime_completed=True
                     response=dict(chunk); response.pop('logprobs',None)
                     response['message']={'role':'assistant','content':''.join(content),'thinking':''.join(reasoning)}
@@ -120,8 +124,12 @@ class LocalModel:
             if response.get('done_reason')=='length':
                 raise OutputLimitExceeded('Incomplete generation: output allowance exhausted before a complete answer; '
                                           'reasoning and answer share the output allowance')
-            if not response.get('done'): raise RuntimeError('Incomplete generation')
-            if response.get('prompt_eval_count',0)+self.budget.response_reserve>body['options']['num_ctx']:
+            from token_usage import count
+            input_tokens = count(response.get('prompt_eval_count'))
+            output_tokens = count(response.get('eval_count'))
+            if output_tokens is not None and output_tokens > self.budget.response_reserve:
+                raise OutputLimitExceeded('Actual generation exceeds the admitted output allocation')
+            if input_tokens is not None and input_tokens+self.budget.response_reserve>body['options']['num_ctx']:
                 raise RuntimeError('Actual prompt exceeds admitted context budget')
             transport['phase']='decode'
             answer=json.loads(response['message']['content']); record['answer']=answer; record['ok']=True

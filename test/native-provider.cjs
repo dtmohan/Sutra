@@ -837,6 +837,30 @@ function setup(saved={}){
  assert.equal(savedCase.calls.filter(c=>c.op==='conversation').length,oldConversationCount);
  assert.equal(savedCase.calls.filter(c=>c.op==='native_work').at(-1).prompt,'Fix retry');
  checks.push('Monitor Resume redisplays after dismissal, copies one single-use originating-chat instruction, rejects foreign chats/workspaces/stale cursors and never opens a sign-in surface');
+ for(const settled of [true,false]){
+  const saved={'sutra.pendingOrchestration':{workspace:'/project',flow_id:'action-flow',stackChat:'original-chat'}};
+  const host=setup(saved),traffic=[];
+  host.v.window.showWarningMessage=async()=> 'Discard request';
+  let reconciled=false;
+  host.deps.request=async request=>{
+   traffic.push(request);
+   assert.equal(request.chat_key,'original-chat');
+   assert.equal(request.flow_id,'action-flow');
+   if(request.event==='inspect')
+    return {state:reconciled&&settled?'DONE':'EXECUTING_ACTION',flow_id:request.flow_id,
+      cursor:reconciled&&settled?'settled':'pending'};
+   assert.equal(request.event,'cancel');
+   assert.equal(request.cursor,'pending');
+   reconciled=true;
+   throw Error('InvalidUpdate: Workflow event is stale or replayed');
+  };
+  await host.commands['karma.discardWorkflow']();
+  assert.deepEqual(traffic.map(request=>request.event),['inspect','cancel','inspect']);
+  assert.equal(host.controller.status().pending===null,settled);
+  assert.equal(host.uiCalls.some(call=>call[0]==='notice'&&call[1].includes('settled during recovery')),settled);
+  assert.equal(host.uiCalls.some(call=>call[0]==='error'&&call[1].includes('stale or replayed')),!settled);
+ }
+ checks.push('Discard reports a reconciled action without replaying cancellation; an unresolved action remains saved');
  const discarded=setup();discarded.kind('report');await discarded.arm();discarded.hold(()=>{throw Error('stopped fixture');});await assert.rejects(discarded.send(),/stopped/);discarded.hold(null);
  discarded.v.window.showWarningMessage=async()=> 'Discard and use new request';
  await discarded.send('high',[{role:1,content:[new Text('New request')]}]);assert(discarded.flowRequests.some(r=>r.event==='cancel'));

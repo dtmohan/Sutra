@@ -99,7 +99,11 @@ class Compartments:
             raise RuntimeError('RAM compartment requests cannot be nested on the same worker')
         with self._request_lock:
             with self._lock:
-                self._warm.update(self._active)
+                for key, entry in self._active.items():
+                    previous = self._warm.pop(key, None)
+                    if previous is not None:
+                        self._warm_bytes -= previous[1]
+                    self._warm[key] = entry
                 self._warm_bytes += self._active_bytes
                 self._active.clear()
                 self._active_bytes = 0
@@ -178,6 +182,15 @@ class Compartments:
             if retained > self.max_bytes:
                 self._count('bypasses')
                 return detached
+            # Another decoder may have populated this key while JSON decoding
+            # or copying ran outside the lock. Replace its counted entry once,
+            # including a copy demoted by an intervening request boundary.
+            previous = self._active.pop(key, None)
+            if previous is not None:
+                self._active_bytes -= previous[1]
+            previous = self._warm.pop(key, None)
+            if previous is not None:
+                self._warm_bytes -= previous[1]
             self._trim(retained)
             self._active[key] = (value, retained)
             self._active_bytes += retained

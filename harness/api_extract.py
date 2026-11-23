@@ -1,6 +1,6 @@
 from lifecycle import timeout as operation_timeout
 """Bounded syntactic call facts. Never import or execute the inspected project."""
-import ast,hashlib,json,os,subprocess
+import ast,hashlib,json,os
 from pathlib import Path
 from context_manager import InvalidUpdate,sha,canonical
 
@@ -100,9 +100,12 @@ def extract(path,text,*,item_budget=None):
  elif Path(path).suffix in ('.js','.jsx','.ts','.tsx'):
   node=os.environ.get('KARMA_NODE');ts=os.environ.get('KARMA_TYPESCRIPT')
   if not node or not ts:raise InvalidUpdate('JavaScript/TypeScript API indexing requires the VS Code parser runtime')
-  result=subprocess.run([node,str(Path(__file__).with_name('api_extract.js'))],input=json.dumps({'path':path,'text':text,'typescript':ts}),text=True,capture_output=True,timeout=operation_timeout(10),env=dict(os.environ,ELECTRON_RUN_AS_NODE='1'))
-  if result.returncode:raise InvalidUpdate('API parser rejected source: '+result.stderr[:300])
-  data=json.loads(result.stdout)
+  from sandbox_process import parser_output
+  request={'path':path,'text':text}
+  status,output,error=parser_output(node,Path(__file__).with_name('api_extract.js'),ts,request,
+                                    seconds=operation_timeout(10),output_limit=16*1024**2)
+  if status:raise InvalidUpdate('API parser rejected source: '+error[:300])
+  data=json.loads(output)
  else:raise InvalidUpdate('API profile supports Python, JavaScript and TypeScript files')
  cap=128 if item_budget is None else item_budget
  if len(data['calls'])>cap or len(data['symbols'])>cap or len(data['bindings'])>4*cap:

@@ -199,6 +199,14 @@ class GovernanceTests(unittest.TestCase):
         with self.assertRaises(InvalidUpdate): s.reserve(run, 'DISPATCH', {'call_id':'two'})
         s.close()
 
+    def test_boolean_is_not_an_execution_time_allocation(self):
+        s = self.store()
+        try:
+            with self.assertRaisesRegex(InvalidUpdate, 'protocol budget'):
+                s.begin_run(self.session, 'task', [], None, max_seconds=True)
+        finally:
+            s.close()
+
     def test_terminal_run_cannot_reopen_or_change_budget(self):
         result = self.run_model(); s = self.store(); run = result['protocol']['run_id']
         with self.assertRaises(InvalidUpdate): s.reserve(run, 'DISPATCH', {'call_id':'again'})

@@ -885,7 +885,7 @@ def run(s,meta,workspace,root,nid,models,tier='auto',provider=None):
             raise InvalidUpdate('Child provider differs from routed model')
         p = {'contract': s.pinned(sid), 'branch': machine.packet(n), 'workspace': str(workspace),
              'request': request['prompt'], 'pages': [], 'child_evidence_version': CHILD_EVIDENCE_VERSION,
-             'citation_policy_version': 2}
+             'citation_policy_version': 2, 'evidence_line_version': 1}
         if CHILD_REPAIR_CONTROL_VERSION == 1:
             p['child_repair_control_version'] = 1
         if cursor:

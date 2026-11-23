@@ -19,11 +19,11 @@ def build_partition(s,meta,workspace,root,files,real=True):
  """Fresh pages inside one child allocation; never enlarge the source-page cap."""
  cap=s.snapshot(meta['active'])['constraints']['review_page_kib']*1024
  configs=[p for p in files if Path(p).name=='tsconfig.json']
- config_bytes=sum((Path(workspace)/p).stat().st_size for p in configs)
+ config_bytes=sum(repo.source_size(workspace,p) for p in configs)
  pages=[];page=list(configs);size=config_bytes
  for name in files:
   if name in configs:continue
-  length=(Path(workspace)/name).stat().st_size
+  length=repo.source_size(workspace,name)
   if length+config_bytes>cap:
    raise InvalidUpdate(f'Source page cannot fit {name}: {length+config_bytes} bytes including config, allocation {cap}')
   if size+length>cap:

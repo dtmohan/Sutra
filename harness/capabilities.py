@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import time
 import uuid
 from context_manager import InvalidUpdate, canonical, sha
@@ -161,18 +162,50 @@ def recover(s):
     return result
 
 
+def verify_authorization(p, authorization):
+    mode = os.environ.get('SUTRA_CAPABILITIES_MODE','ask')
+    if mode not in ('ask','preapproved'):
+        raise InvalidUpdate('Optional tools are disabled')
+    if (not isinstance(authorization,dict) or set(authorization)!= {'kind','proposal_id','policy_hash'}
+            or authorization['kind'] not in ('user','workspace_policy') or authorization['proposal_id']!=p['id']
+            or not isinstance(authorization['policy_hash'],str)
+            or not re.fullmatch(r'[a-f0-9]{64}',authorization['policy_hash'])):
+        raise InvalidUpdate('Explicit host approval or approved workspace policy required')
+    try:
+        proof=json.loads(os.environ.get('SUTRA_CAPABILITY_AUTHORIZATION','null'))
+    except ValueError as exc:
+        raise InvalidUpdate('Invalid host tool approval') from exc
+    if (not isinstance(proof,dict) or set(proof)!= {'approval','policy','capability','action','issued'}
+            or proof['approval']!=authorization or proof['capability']!=p['capability'] or proof['action']!=p['action']
+            or type(proof['issued']) is not int or not 0<=time.time()*1000-proof['issued']<=600000):
+        raise InvalidUpdate('A fresh host tool approval is required for this proposal')
+    policy=proof['policy']
+    if (not isinstance(policy,dict) or set(policy)!= {'workspace','registryHash','mode','allowed'}
+            or policy['workspace']!=p['binding']['workspace'] or policy['registryHash']!=p['binding']['registry_hash']
+            or policy['mode']!=mode or not isinstance(policy['allowed'],dict)):
+        raise InvalidUpdate('Host tool approval does not match the active workspace policy')
+    allowed=policy['allowed']
+    names=registry.registry()['tools']
+    if any(name not in names or not isinstance(actions,list)
+           or any(action not in ('install','check') for action in actions) or actions!=sorted(set(actions))
+           for name,actions in allowed.items()):
+        raise InvalidUpdate('Invalid approved tool operations')
+    signed={key:policy[key] for key in ('workspace','registryHash','mode')}
+    signed['allowed']={name:allowed[name] for name in sorted(allowed)}
+    digest=sha(json.dumps(signed,ensure_ascii=False,separators=(',',':')))
+    if digest!=authorization['policy_hash']:
+        raise InvalidUpdate('Host tool approval policy digest does not match')
+    if authorization['kind']=='workspace_policy' and (mode!='preapproved' or p['action'] not in allowed.get(p['capability'],[])):
+        raise InvalidUpdate('This tool operation is not covered by the approved workspace policy')
+
+
 def execute(s, sid, workspace, root, pid, authorization):
     from monitoring import require_resources
     from storage_policy import require_space
     initialize(s);p=proposal(s,pid)
-    if os.environ.get('SUTRA_CAPABILITIES_MODE','ask') not in ('ask','preapproved'):
-        raise InvalidUpdate('Optional tools are disabled')
-    if not isinstance(authorization,dict) or authorization.get('kind') not in ('user','workspace_policy') or authorization.get('proposal_id')!=pid:
-        raise InvalidUpdate('Explicit host approval or approved workspace policy required')
-    if authorization['kind']=='workspace_policy' and not isinstance(authorization.get('policy_hash'),str):
-        raise InvalidUpdate('Workspace policy approval is missing')
     if p['binding']!=binding(s,sid,workspace) or p['expires_at']<time.time(): raise InvalidUpdate('Capability proposal expired or task changed')
     if s.db.execute('SELECT 1 FROM capability_operations WHERE id=?',(pid,)).fetchone(): raise InvalidUpdate('Capability approval already consumed; work will not be replayed')
+    verify_authorization(p,authorization)
     files=sources(s,sid,workspace,p['requested_paths']) if p['action']=='check' else {}
     if p['source_versions']!={n:sha(b.decode()) for n,b in files.items()}: raise InvalidUpdate('Source changed while awaiting approval; request a new preview')
     if p['action']=='check' and not installed(s,root,p['capability']): raise InvalidUpdate('Tool installation changed or is unverified')
@@ -180,6 +213,7 @@ def execute(s, sid, workspace, root, pid, authorization):
     hardware=require_resources(root)
     with s.db:
         s.db.execute('BEGIN IMMEDIATE')
+        verify_authorization(p,authorization)
         # Recheck remaining allocation atomically with the durable reservation.
         owner=orchestration.admit(s,sid,'capability',pid,p['cost'],paths=list(files),resource=hardware)
         op=dict(p,session=sid,authorization=authorization,owner=owner)
