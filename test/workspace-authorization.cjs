@@ -62,7 +62,7 @@ function host(fixture, buttons = {}) {
   const synthesisContextChecks = [];
   const commands = new Map();
   const subscriptions = [];
-  let provider, tool;
+  let provider, tool, beforePrompt;
   const vscode = {
     EventEmitter, CancellationTokenSource: Cancellation, LanguageModelTextPart: Text,
     LanguageModelToolCallPart: Call, LanguageModelToolResultPart: Result,
@@ -75,6 +75,7 @@ function host(fixture, buttons = {}) {
     window: {
       showWarningMessage: async (message, _options, ...choices) => {
         prompts.push({message, choices});
+        beforePrompt?.(message);
         return choices.find(choice => buttons[choice]);
       },
       showInformationMessage: async () => undefined,
@@ -134,7 +135,8 @@ function host(fixture, buttons = {}) {
     controller.dispose();
     for (const subscription of subscriptions.reverse()) subscription.dispose();
   }
-  return {controller, requests, prompts, synthesisReads, synthesisContextChecks, tool, send, close, token, command: vscode.commands.executeCommand};
+  return {controller, requests, prompts, synthesisReads, synthesisContextChecks, tool, send, close, token,
+    command: vscode.commands.executeCommand, checkBeforePrompt: check => { beforePrompt = check; }};
 }
 function lastFlow(snapshot) { return snapshot.flows.findLast(flow => flow.binding) || snapshot.flows.at(-1); }
 function sameTask(before, after) {
@@ -211,23 +213,27 @@ function changePreparedSource(fixture, paused) {
 
 async function authorizeSavedRequest(h, fixture, prompt, tier = 'low', asParts = false) {
   const before = fixture.snapshot(), prompts = h.prompts.length;
-  const waiting = text(await h.send(prompt, tier));
-  assert.match(waiting, /Workspace access needed/, waiting);
-  assert.equal(h.prompts.length, prompts, 'A model response must not wait on a permission modal');
-  assert(!h.controller.status().working, 'The response must finish before explicit workspace consent');
-  const saved = fixture.snapshot();
-  assert.deepEqual(saved.contract, before.contract);
-  assert.deepEqual(saved.budget, before.budget, 'Permission guidance cannot spend workspace task capacity');
-  assert.deepEqual(saved.source_events, before.source_events, 'No source work may precede consent');
-  assert.deepEqual(saved.synthesis_receipts, before.synthesis_receipts);
-  const requestCount = h.requests.length;
-  await h.command('karma.armNative');
-  assert(h.controller.status().armed, 'The explicit Workspace Access choice must persist authorization');
-  assert.equal(h.prompts.length, prompts + 1);
-  assert.equal(h.requests.length, requestCount, 'Granting access alone cannot read source or dispatch inference');
-  assert.deepEqual(fixture.snapshot(), saved, 'The explicit grant preserves the saved workflow and all spending');
-  const continued = await h.send('continue', tier);
-  return asParts ? continued : text(continued);
+  let waiting;
+  h.checkBeforePrompt(message => {
+    if (message !== 'Workspace access for Sutra') return;
+    const saved = fixture.snapshot();
+    assert(!h.controller.status().armed);
+    assert.deepEqual(saved.contract, before.contract);
+    assert.deepEqual(saved.budget, before.budget, 'Permission guidance cannot spend workspace task capacity');
+    assert.deepEqual(saved.source_events, before.source_events, 'No source work may precede consent');
+    assert.deepEqual(saved.synthesis_receipts, before.synthesis_receipts);
+    assert.equal(lastFlow(saved).state, 'NEED_ARM');
+    waiting = lastFlow(saved);
+  });
+  try {
+    const continued = await h.send(prompt, tier);
+    assert.match(text(continued), /Workspace access approved\. Continuing your request/);
+    assert(h.controller.status().armed, 'The explicit Workspace Access choice must persist authorization');
+    assert.equal(h.prompts.length, prompts + 1);
+    assert(waiting, 'The real bridge created a paused workflow before the dialog');
+    assert.equal(lastFlow(fixture.snapshot()).flow_id, waiting.flow_id);
+    return asParts ? continued : text(continued);
+  } finally { h.checkBeforePrompt(undefined); }
 }
 
 async function reviewJourney(base) {
@@ -285,8 +291,6 @@ async function reviewJourney(base) {
     assert(!h.controller.status().armed, 'Revocation survives reload');
     const since = h.requests.length;
     assert.match(text(await h.send('continue', 'high')), /Workspace access needed/i);
-    assert.equal(h.prompts.length, 0, 'Revoked access defers consent until the response has ended');
-    await h.command('karma.armNative');
     assert(!h.controller.status().armed);
     assert.equal(h.prompts.length, 1);
     assert(h.requests.slice(since).every(request => ['pending', 'inspect', 'recoverable_review'].includes(request.event)),
@@ -295,7 +299,6 @@ async function reviewJourney(base) {
 
     h.close();
     h = host(fixture, {'Read only': true});
-    await h.command('karma.armNative');
     const response = text(await h.send('continue', 'high'));
     assert.match(response, /Entry/, response);
     const done = fixture.snapshot();
@@ -378,15 +381,13 @@ async function automaticAllocationJourney(base) {
     h.close();
     h = host(fixture);
     assert.match(text(await h.send('continue', 'high')), /Workspace access needed/i);
-    assert.equal(h.prompts.length, 0);
-    await h.command('karma.armNative');
+    assert.equal(h.prompts.length, 1);
     assert(!h.controller.status().armed);
     const revoked = fixture.snapshot();
     assert.deepEqual(revoked, greeted, 'An available reserve cannot authorize a revoked workspace');
 
     h.close();
     h = host(fixture, {'Read only': true});
-    await h.command('karma.armNative');
     const response = text(await h.send('continue', 'high'));
     assert.match(response, /Entry/, response);
     const done = fixture.snapshot();

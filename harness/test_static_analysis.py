@@ -33,6 +33,48 @@ CASES={
 
 class StaticCompilerTests(unittest.TestCase):
  @requires_typescript
+ def test_html_maps_only_inline_script_at_original_locations(self):
+  lines = [
+   '<!doctype html>',
+   '<main>',
+   '<script src="./foreign.js">foreign()</script>',
+   '<script type="application/json">{"payload":"notCode()"}</script>',
+   '😀<script>function leaf() { return 1; } function start() { return leaf(); }</script>',
+   '<script>leaf();</script>',
+   '</main>',
+  ]
+  source = '\r\n'.join(lines)
+  with patch.dict(os.environ,ENV):
+   graph=analysis.analyze({'index.html':source})
+  self.assertIn('html-inline-v1',graph['profiles'])
+  self.assertEqual(graph['versions'], {'index.html': analysis.sha(source)})
+  self.assertIn('<main>', {node['name'] for node in graph['nodes']})
+  self.assertEqual({row['path'] for row in graph['nodes']+graph['calls']+graph['diagnostics']},{'index.html'})
+  self.assertEqual([(row['expression'],bool(row['target'])) for row in graph['calls']],
+                   [('leaf',True),('leaf',False)])
+  inside=graph['calls'][0]
+  column=lines[4].index('leaf();')
+  expected=len(lines[4][:column].encode('utf-16-le'))//2
+  self.assertEqual((inside['line'],inside['column'],inside['text']),(5,expected,lines[4]))
+  self.assertEqual(graph['calls'][1]['line'],6)
+  self.assertEqual(graph['module_dependencies'],[])
+
+ def test_html_landmarks_share_parser_work_unit_limit(self):
+  graph=analysis.analyze({'index.html':'<main>\n  <h1>Example</h1>\n</main>\n'})
+  self.assertEqual(graph['profiles'],['html-inline-v1'])
+  self.assertEqual([node['line'] for node in graph['nodes']],[1,2])
+  with self.assertRaisesRegex(InvalidUpdate,'work-unit allocation'):
+   analysis.analyze({'index.html':'<main><h1>Example</h1></main>'},item_budget=1)
+  # Newer parsers can ignore this malformed declaration. Older ones must
+  # surface a source-mapping failure through the existing guarded path.
+  try:
+   malformed=analysis.analyze({'index.html':'<![UNKNOWN[value]> <main>Fixture</main>'})
+  except InvalidUpdate as exc:
+   self.assertIn('HTML declaration',str(exc))
+  else:
+   self.assertEqual([node['name'] for node in malformed['nodes']],['<main>'])
+
+ @requires_typescript
  def test_labelled_relationships(self):
   with patch.dict(os.environ,ENV):
    for label,(texts,edges,unknown) in CASES.items():

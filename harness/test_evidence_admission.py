@@ -67,7 +67,9 @@ class EvidenceAdmissionTests(unittest.TestCase):
 
     def test_explicit_workspace_review_uses_host_scope_only_for_clear_read_requests(self):
         for prompt in ('Can you please review this codebase?', 'Inspect the open workspace project.',
-                       'Review our repository and provide a brief summary of its purpose.'):
+                       'can you review the codebase please',
+                       'Could you inspect this workspace, Please?',
+                       'Review our repository and provide a brief summary of its purpose, please.'):
             with self.subTest(prompt=prompt):
                 self.assertEqual(explicit_workspace_review(prompt),
                                  ({'operation': 'read', 'scope': 'workspace', 'paths': []}, ['.']))
@@ -85,7 +87,8 @@ class EvidenceAdmissionTests(unittest.TestCase):
             'Review the codebase and give an overview using the notes I supplied.',
             'Review the codebase and give an overview after running the tests.',
             'Review the codebase and give an overview, then edit the controller.',
-            'Review the codebase and run the tests.', 'Review the codebase on GitHub.',
+            'Review the codebase and run the tests, please.', 'Review the codebase on GitHub.',
+            'Review the codebase, please, if I later authorize reading.',
             'Review the codebase.\n```py\nprint(1)\n```',
         ):
             with self.subTest(prompt=prompt):

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.57.7
+
+- Route clear codebase review requests with trailing “please” directly to workspace consent without a classifier call.
+- Open the workspace access dialog in the originating chat when the native access tool is unavailable. Approval resumes the saved request in the same turn.
+- Include HTML and inline JavaScript in automatic source reviews. Preserve original paths and positions for source citations.
+- Preserve the original conversation receipt and spending when restarting an eligible saved review from 0.57.6.
+
 ## 0.57.6
 
 - Answer standalone Sutra Auto greetings locally without invoking a model or interrupting the focused saved task.

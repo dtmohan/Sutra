@@ -20,6 +20,7 @@ _EXPLANATION = re.compile(
     r"(?:(?:detailed|high[ -]level|brief)\s+)?(?:overview|analysis|explanation|summary)\b",
     re.IGNORECASE,
 )
+_TRAILING_PLEASE = re.compile(r"(?:\s*,\s*|\s+)please$", re.IGNORECASE)
 _OTHER_WORK_OR_TARGET = re.compile(
     r"\b(?:edit|modif|chang|fix|patch|refactor|rewrit|implement|run|execut|install|deploy|"
     r"commit|push|fetch|download|delet|creat|writ)[a-z]*\b"
@@ -48,10 +49,13 @@ _DIRECT_TEST = re.compile(
 def explicit_workspace_review(prompt):
     """Recognize a self-contained read request without looking at source."""
     text = prompt.strip()
-    start = _DIRECT_REVIEW.match(text)
-    if not start or _OTHER_WORK_OR_TARGET.search(text):
+    if _OTHER_WORK_OR_TARGET.search(text):
         return None
-    tail = text[start.end():].rstrip(" .!?")
+    text = _TRAILING_PLEASE.sub("", text.rstrip(" .!?"))
+    start = _DIRECT_REVIEW.match(text)
+    if not start:
+        return None
+    tail = text[start.end():]
     if tail and (not _EXPLANATION.match(tail) or any(mark in tail for mark in ".!?")):
         return None
     work = {"operation": "read", "scope": "workspace", "paths": []}

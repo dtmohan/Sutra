@@ -299,10 +299,11 @@ def context_budget(provider, s, sid, slots=2, expand_output=True, *, physical_fi
 
 
 def overview(data, limit, request='Architecture overview', *, version=1, latest=''):
+    from static_analysis import SOURCE_EXTENSIONS
     if type(limit) is not int or not 512 <= limit <= 65536:
         raise InvalidUpdate('Invalid structural context allocation')
     graph = data['graph']; sources = data['sources']
-    paths = sorted(p for p in sources if Path(p).suffix in {'.py', '.js', '.jsx', '.ts', '.tsx'})
+    paths = sorted(p for p in sources if Path(p).suffix in SOURCE_EXTENSIONS)
     modules = []
     ordered = ordered_sources({p:sources[p] for p in paths}, graph, request, version=version, latest=latest)
     for p in ordered:

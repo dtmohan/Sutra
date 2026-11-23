@@ -44,8 +44,7 @@ class OrchestrationTests(unittest.TestCase):
     def children(self):return self.until('CHILDREN')
     def test_explicit_codebase_review_needs_no_provider_before_workspace_access(self):
         self.ws = self.ws.resolve()  # The VS Code bridge supplies a canonical workspace path.
-        prompt = ('please review the code base and give a detailed overview of what it is, '
-                  'whats novel and where it finds its most compelling application')
+        prompt = 'can you review the codebase please'
         chat_key = 'a' * 64
         with patch.object(self, 'provider', side_effect=AssertionError('No routing model needed')), \
                 patch('repository_tools.execute', side_effect=AssertionError('Workspace access is required')):
@@ -76,6 +75,52 @@ class OrchestrationTests(unittest.TestCase):
         for permission in ('edits_allowed', 'tests_allowed', 'network_allowed'):
             self.assertFalse(task['constraints'][permission])
         self.assertTrue(all(value == 0 for value in review_budget.usage(self.s, session)['used'].values()))
+
+    def test_standalone_html_codebase_review_publishes_original_source_citations(self):
+        import os
+        from shutil import which
+
+        node = os.environ.get('KARMA_NODE') or which('node')
+        if not node:
+            self.skipTest('Node is required for inline JavaScript mapping')
+        compiler = Path(__file__).resolve().parent.parent / 'vendor' / 'typescript' / 'typescript.js'
+        self.ws = self.ws.resolve().parent / 'single-page'
+        self.ws.mkdir()
+        self.prompt = 'can you review the codebase please'
+        code = 'function start() { return leaf(); }'
+        source = ('<!DOCTYPE html>\n<title>Demo</title>\n<script>\n'
+                  'function leaf() { return 7; }\n' + code + '\nstart();\n</script>\n')
+        (self.ws / 'index.html').write_text(source)
+        chat_key = 'a' * 64
+
+        def cite_inline_script(result, packet):
+            self.assertIn(code, packet['excerpts']['index.html'])
+            result['citations'] = [{'path': 'index.html', 'quote': code}]
+
+        def provider(role):
+            self.assertNotEqual(role, 'conversation')
+            return Review(MODELS['low'], cite_inline_script)
+        self.provider = provider
+
+        waiting = self.step(chat_key=chat_key, armed=False)
+        self.assertEqual(waiting['state'], 'NEED_ARM')
+        with self.assertRaisesRegex(InvalidUpdate, 'user-armed'):
+            self.step(waiting, chat_key=chat_key, armed=False)
+        out = waiting
+        with patch.dict(os.environ, KARMA_NODE=node, KARMA_TYPESCRIPT=str(compiler)):
+            for _ in range(25):
+                out = self.step(out, chat_key=chat_key)
+                if out['state'] in ('PAUSED', 'DONE'):
+                    break
+        self.assertEqual(out['state'], 'DONE', out.get('stop'))
+        self.assertEqual(out['flow_id'], waiting['flow_id'])
+        result = out['data']['result']
+        self.assertTrue(result['admission']['admitted'], result['admission'])
+        self.assertIn({'path': 'index.html', 'quote': code}, result['accepted_output']['citations'])
+        self.assertEqual((self.ws / 'index.html').read_text(), source)
+        sid = out['binding']['session']
+        self.assertTrue(self.s.verify_invocations(sid))
+        self.assertTrue(self.s.audit_valid())
 
     def sources_for_slices(self):
         # Continuation tests need more source than one complete delivered page.

@@ -10,7 +10,7 @@ import static_runtime as runtime
 import review_budget as budget
 from orchestration import OrchestrationStop
 
-CODE={'.py','.js','.jsx','.ts','.tsx'}
+CODE=analysis.SOURCE_EXTENSIONS
 
 def failure_environment(s,sid):
  # A failed parse belongs to its parser, allocation and task, not just its source.

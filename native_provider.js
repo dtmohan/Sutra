@@ -339,14 +339,14 @@ function install(vscode,context,deps){
   }
   async function arm(owner,agentOnly){
     if(nativeSetting)throw new Error('Sutra chat controls are updating. Wait for the change to finish.');
-    const ownsRequest=()=>owner&&routing===owner.audit&&routing.active&&running&&activeCancel?.token===owner.token;
+    const ownsRequest=()=>owner&&!disposed&&routing===owner.audit&&routing.active&&running&&activeCancel?.token===owner.token;
     if(arming||selecting||deps.isBusy()||((running||routing?.active)&&!ownsRequest()))throw new Error('Wait for the active Sutra request before changing workspace access.');
     if(!enabled())throw new Error('Enable Sutra native chat first.');
     const previous=refreshAccess(),epoch=accessEpoch,workspace=deps.workspace();
     const scope=authorization.scope(),record=authorization.read();
     const stillValid=()=>{
       if(epoch!==accessEpoch||!enabled()||deps.workspace()!==workspace||authorization.scope()!==scope||
-        authorization.read()?.id!==record?.id||owner&&(!ownsRequest()||owner.token.isCancellationRequested))
+        authorization.read()?.id!==record?.id||owner&&(!ownsRequest()||owner.token.isCancellationRequested||!owner.isCurrent()))
         throw new Error('Workspace permission choice cancelled because the request or workspace changed.');
       if(deps.isBusy())throw new Error('Workspace became busy during the permission choice.');
     };
@@ -363,11 +363,12 @@ function install(vscode,context,deps){
       }
     };
     try{
+      stillValid();
       publish();
       recordAccess('requested');
       const choices=agentOnly?[profiles.workspace_agent]:Object.values(profiles);
       const choice=await vscode.window.showWarningMessage('Workspace access for Sutra',{modal:true,detail:
-        workspace+'\n\n'+(previous?'Current access: '+profiles[previous.profile]+'\n':'')+
+        workspace+'\n\n'+(owner?.goal?'Request: '+owner.goal+'\n\n':'')+(previous?'Current access: '+profiles[previous.profile]+'\n':'')+
         'Read only lets Sutra read the scoped project files. Workspace agent also enables scoped edits and sandboxed tests. Sutra requests action confirmation through VS Code and confirms actions separately for tool calls outside chat. Your choice is saved for this workspace. Optional tools keep their separate approval rules.'},...choices);
       stillValid();
       const profile=Object.keys(profiles).find(key=>profiles[key]===choice);
@@ -458,6 +459,7 @@ function install(vscode,context,deps){
     const pending=context.workspaceState.get(pendingKey);
     if(link&&(!pending||pending.workspace!==deps.workspace()||pending.resumeLink!==link))
       throw new Error('This workspace access action is stale. Use the current request in Sutra Monitor.');
+    if(armPromise)return armPromise;
     const granted=await beginArm(undefined,pending?.requestedAccessProfile==='workspace_agent');
     if(pending&&context.workspaceState.get(pendingKey)?.flow_id===pending.flow_id){
       const message=granted?'Workspace access saved. Return to the original Sutra chat and send continue.':
@@ -469,29 +471,45 @@ function install(vscode,context,deps){
   }
   async function requestWorkspaceAccess(flow,audit,progress,agentOnly=false,native){
     const pending=context.workspaceState.get(pendingKey);
-    if(!pending||pending.flow_id!==flow.flow_id)throw new Error('The saved request changed before workspace access could be requested.');
-    await context.workspaceState.update(pendingKey,{...pending,needsWorkspaceAccess:true,
-      requestedAccessProfile:agentOnly?'workspace_agent':undefined});
+    if(!pending||pending.flow_id!==flow.flow_id||pending.cursor!==flow.cursor||pending.workspace!==deps.workspace())
+      throw new Error('The saved request changed before workspace access could be requested.');
+    const saved={...pending,needsWorkspaceAccess:true,requestedAccessProfile:agentOnly?'workspace_agent':undefined};
+    await context.workspaceState.update(pendingKey,saved);
     audit.stage='awaiting_workspace_permission';audit.message='Workspace access is required; no model call is waiting for consent.';publish();
-    if(agentOnly?native?.canAuthorizeAgent:native?.canAuthorize){
+    const isCurrent=()=>{
+      const current=context.workspaceState.get(pendingKey);
+      return current?.flow_id===saved.flow_id&&current.cursor===saved.cursor&&
+        current.resumeLink===saved.resumeLink&&current.workspace===saved.workspace&&
+        current.nativeChat===saved.nativeChat&&current.stackChat===saved.stackChat;
+    };
+    if(agentOnly?native.canAuthorizeAgent:native.canAuthorize){
       const id=crypto.randomUUID(),callId=crypto.randomUUID(),prior=authorization.read();
       const ticket={id,callId,kind:'workspace_access',profile:agentOnly?'workspace_agent':'read_only',
         scope:authorization.scope(),priorGrant:prior?.id,epoch:accessEpoch,
         requireFreshConsent:!!prior?.id&&(prior.revoked===true||prior.scope!==authorization.scope()||!Object.hasOwn(profiles,prior.profile)),
-        expires:Date.now()+300000,pending:structuredClone(context.workspaceState.get(pendingKey)),
+        expires:Date.now()+300000,pending:structuredClone(saved),
         nativeChat:native.chatKey,thinkForTurn:native.thinkForTurn};
       accessTickets.set(id,ticket);
       audit.workspaceAccess={state:'proposed',workspace:pending.workspace,profile:ticket.profile,callId};publish();
       progress.report(new vscode.LanguageModelTextPart('**Workspace access needed**\n\nApprove the workspace access request below to continue here. Your choice is remembered for this workspace. '+
         (agentOnly?'Each edit or test still requires confirmation.':'No workspace files have been read.')+'\n\n'));
       progress.report(new vscode.LanguageModelToolCallPart(callId,agentOnly?ACCESS_AGENT:ACCESS,{ticket:id}));
-      return;
+      return false;
     }
-    const action=vscode.window.registerUriHandler
-      ?'[Choose workspace access]('+accessUri(pending.resumeLink)+')':'Choose **Workspace access** in Sutra Monitor.';
-    progress.report(new vscode.LanguageModelTextPart('**Workspace access needed**\n\n'+action+
-      (agentOnly?' Scoped edits and tests need Workspace agent access.':' No workspace files have been read.')+
-      '\n\nYour request, context and consumed budget are saved. After choosing access, send **continue** in this chat.'));
+    progress.report(new vscode.LanguageModelTextPart('**Workspace access needed**\n\n'+
+      (agentOnly?'Choose **Workspace agent** in the dialog to continue. Edits and tests still require separate confirmation.':
+        'Choose access in the dialog to continue here. No workspace files have been read.')+'\n\n'));
+    const goal=String(saved.prompt||'').replace(/\s+/g,' ').trim().slice(0,240);
+    const granted=await beginArm({audit,token:native.token,isCurrent,goal},agentOnly);
+    if(granted){
+      await context.workspaceState.update(pendingKey,{...saved,needsWorkspaceAccess:false,requestedAccessProfile:undefined});
+      progress.report(new vscode.LanguageModelTextPart('Workspace access approved. Continuing your request.\n\n'));
+      return true;
+    }
+    const action=vscode.window.registerUriHandler?'\n\n[Choose workspace access]('+accessUri(saved.resumeLink)+')':'';
+    progress.report(new vscode.LanguageModelTextPart('Workspace access was not granted. Your request, context and consumed budget are saved. '+
+      'Send **continue** here to reopen the access dialog.'+action));
+    return false;
   }
   function resumeAction(flow){
     const pending=context.workspaceState.get(pendingKey);
@@ -892,16 +910,6 @@ function install(vscode,context,deps){
     }
     finally{
       audit.active=false;activeNativeChat=undefined;audit.finishedAt=new Date().toISOString();publish();publishRoute(audit);
-      if(audit.stage==='awaiting_workspace_permission'&&!audit.workspaceAccess?.callId){
-        const pending=context.workspaceState.get(pendingKey),link=pending?.resumeLink;
-        // Consent runs outside the model response, so dismissing its dialog
-        // cannot be reported by VS Code as an interrupted model generation.
-        void Promise.resolve(vscode.window.showInformationMessage('Workspace access is needed for the saved Sutra request.',
-          'Choose workspace access')).then(choice=>{
-          if(choice==='Choose workspace access'&&context.workspaceState.get(pendingKey)?.resumeLink===link)
-            return chooseWorkspaceAccess(link);
-        }).catch(error=>vscode.window.showErrorMessage?.(error.message));
-      }
     }
   }
   function ticket(input){
@@ -1081,7 +1089,7 @@ function install(vscode,context,deps){
       const requestedResume=/^(continue|resume|please continue|please resume)[.! ]*$/i.test(prompt.trim())||!!resumeToken;
       const suppliedKind=!request.results&&(DOCUMENT_EVIDENCE.test(prompt)?'document':WORKSPACE_EVIDENCE.test(prompt.trim())?'workspace':null);
       const evidenceReply=flow=>evidencePause(flow)&&suppliedKind===flow.stop.evidence_bridge?.target_kind;
-      const workspaceAccessPause=flow=>flow?.state==='NEED_ARM'&&flow.needsWorkspaceAccess===true;
+      const workspaceAccessPause=flow=>flow?.needsWorkspaceAccess===true||flow?.state==='NEED_ARM';
       const hasFlowLink=flow=>{
         if(!flow?.resumeLink)return false;
         const link=(workspaceAccessPause(flow)?accessUri:resumeUri)(flow.resumeLink);
@@ -1188,8 +1196,10 @@ function install(vscode,context,deps){
       async function allowActionProfile(flow){
         assertCurrent(a,activeCancel.token);
         if(a.profile==='workspace_agent')return true;
-        await requestWorkspaceAccess(flow,audit,progress,true,{canAuthorize,canAuthorizeAgent,chatKey,thinkForTurn});
-        return false;
+        const granted=await requestWorkspaceAccess(flow,audit,progress,true,
+          {canAuthorize,canAuthorizeAgent,chatKey,thinkForTurn,token:activeCancel.token});
+        if(granted)a=assertArmed();
+        return granted;
       }
       const activityToken=activeCancel.token;let activityOpen=true;
       const renderActivity=chatActivity(vscode,progress,deps.activityLink);
@@ -1458,9 +1468,10 @@ function install(vscode,context,deps){
           conversationId=r.invocation_id;audit.conversationInvocationId=r.invocation_id;
           }
           if(!a){
-            audit.stage='awaiting_workspace_permission';publish();
-            await requestWorkspaceAccess(flow,audit,progress,false,{canAuthorize,canAuthorizeAgent,chatKey,thinkForTurn});
-            return;
+            const granted=await requestWorkspaceAccess(flow,audit,progress,false,
+              {canAuthorize,canAuthorizeAgent,chatKey,thinkForTurn,token:activeCancel.token});
+            if(!granted)return;
+            a=assertArmed();
           }else{
             audit.workspaceAccess={state:'reused',workspace:a.workspace,profile:a.profile};publish();
           }

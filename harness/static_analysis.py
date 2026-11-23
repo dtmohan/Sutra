@@ -1,26 +1,122 @@
 from lifecycle import timeout as operation_timeout
 """Fresh, governed snapshots; deterministic graphs are independent of model prose."""
 import json,os,platform,subprocess,time
+from html.parser import HTMLParser
 from pathlib import Path
 from context_manager import InvalidUpdate,canonical,sha
 import repository_tools as repo
 
+JAVASCRIPT_EXTENSIONS = {'.js', '.jsx', '.ts', '.tsx'}
+SOURCE_EXTENSIONS = JAVASCRIPT_EXTENSIONS | {'.py', '.html'}
+HTML_LANDMARKS = {'html', 'title', 'body', 'header', 'main', 'nav', 'aside', 'footer',
+                  'section', 'article', 'form', 'h1', 'h2', 'h3', 'style', 'script'}
+INLINE_SCRIPT_TYPES = {'', 'module', 'text/javascript', 'application/javascript',
+                       'text/ecmascript', 'application/ecmascript'}
+
 class StaticSourceChanged(InvalidUpdate):
  """The committed source version differs from the current scoped file."""
+
+
+class HTMLSource(HTMLParser):
+    """Locate source landmarks and executable script bodies without loading resources."""
+
+    def __init__(self, path, text, item_budget):
+        super().__init__(convert_charrefs=False)
+        self.path = path
+        self.lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+        self.item_budget = item_budget
+        self.nodes = []
+        self.scripts = []
+        self.inline_script = False
+        self.feed('\n'.join(self.lines))
+        self.close()
+
+    def error(self, message):
+        raise InvalidUpdate('Could not map an HTML declaration in ' + self.path)
+
+    def handle_starttag(self, tag, attrs):
+        if tag not in HTML_LANDMARKS:
+            return
+        line, column = self.getpos()
+        self.nodes.append({'id': 'n' + sha(canonical([self.path, line, column, tag]))[:16],
+                           'name': '<'+tag+'>', 'kind': 'html_element', 'path': self.path,
+                           'line': line, 'column': self.column(line, column),
+                           'text': self.lines[line - 1].strip()[:240]})
+        if len(self.nodes) > self.item_budget:
+            raise InvalidUpdate(f'Static graph work-unit allocation exceeded ({self.item_budget} nodes/calls)')
+        if tag == 'script':
+            attributes = dict(attrs)
+            kind = (attributes.get('type') or '').split(';', 1)[0].strip().lower()
+            self.inline_script = 'src' not in attributes and kind in INLINE_SCRIPT_TYPES
+
+    def handle_data(self, data):
+        if self.inline_script and data.strip():
+            line, column = self.getpos()
+            self.scripts.append((line, self.column(line, column), data))
+
+    def handle_endtag(self, tag):
+        if tag == 'script':
+            self.inline_script = False
+
+    def column(self, line, column):
+        # TypeScript uses UTF-16 columns. HTMLParser reports code points.
+        return len(self.lines[line - 1][:column].encode('utf-16-le')) // 2
+
+
+def restore_html_locations(graph, locations):
+    if not locations:
+        return
+    inline_nodes = {row['id']: row['path'] for row in graph['nodes'] if row['path'] in locations}
+    for row in graph['calls']:
+        target = inline_nodes.get(row['target'])
+        if target and target != row['path']:
+            row.update(target=None, relation='unresolved', reason='Inline script scopes are isolated')
+    for key in ('nodes', 'calls', 'module_dependencies', 'diagnostics'):
+        for row in graph[key]:
+            position = locations.get(row['path'])
+            if position:
+                html, line, column = position
+                if row['line'] == 1 and 'column' in row:
+                    row['column'] += column
+                row['line'] += line - 1
+                row['path'] = html.path
+                if 'text' in row:
+                    row['text'] = html.lines[row['line'] - 1].strip()[:240]
+            if key == 'module_dependencies':
+                if position:
+                    row['source'] = row['path']
+                if row['target'] in locations:
+                    row['target'] = None
+
 
 def analyze(texts,item_budget=1024):
  if type(item_budget) is not int or not 1<=item_budget<=16384:raise InvalidUpdate('Invalid parser work-unit allocation')
  started=time.monotonic();nodes=[];calls=[];diagnostics=[];dependencies=[];profiles=[];toolchain={};diagnostic_count=0
- js={p:t for p,t in texts.items() if Path(p).suffix in ('.js','.jsx','.ts','.tsx')}
+ js={p:t for p,t in texts.items() if Path(p).suffix in JAVASCRIPT_EXTENSIONS}
  py={p:t for p,t in texts.items() if Path(p).suffix=='.py'}
+ html={p:t for p,t in texts.items() if Path(p).suffix=='.html'}
  configs={p:t for p,t in texts.items() if Path(p).name=='tsconfig.json'}
- if len(configs)>1 or len(js)+len(py)+len(configs)!=len(texts) or not (js or py):raise InvalidUpdate('Static graph supports Python, JS/TS and one explicit tsconfig.json')
+ if len(configs)>1 or len(js)+len(py)+len(html)+len(configs)!=len(texts) or not (js or py or html):
+  raise InvalidUpdate('Static graph supports Python, JS/TS, HTML and one explicit tsconfig.json')
+ locations={}
+ for path,text in html.items():
+  page=HTMLSource(path,text,item_budget-len(nodes))
+  nodes.extend(page.nodes)
+  for number,(line,column,body) in enumerate(page.scripts):
+   # The compiler treats .mjs files as their own scopes. A private filename
+   # keeps each block's relative directory and isolates browser globals.
+   name=Path(path).with_name('.sutra-inline-'+sha(path)[:16]+'-'+str(number)+'.mjs').as_posix()
+   locations[name]=(page,line,column)
+   js[name]=body
+ if html:profiles.append('html-inline-v1')
  if js:
   node=os.environ.get('KARMA_NODE');compiler=os.environ.get('KARMA_TYPESCRIPT')
   if not node or not compiler:raise InvalidUpdate('Static TypeScript graph requires trusted host parser paths')
   run=subprocess.run([node,str(Path(__file__).with_name('static_typescript.js'))],input=canonical({'files':js,'configs':configs,'typescript':compiler,'item_budget':item_budget}),text=True,capture_output=True,timeout=operation_timeout(20),env=dict(os.environ,ELECTRON_RUN_AS_NODE='1'))
   if run.returncode:raise InvalidUpdate('TypeScript compiler rejected snapshot: '+run.stderr[:400])
-  data=json.loads(run.stdout);nodes+=data['nodes'];calls+=data['calls'];diagnostics+=data['diagnostics'];dependencies+=data['module_dependencies'];profiles.append(data['profile'])
+  data=json.loads(run.stdout)
+  restore_html_locations(data,locations)
+  nodes+=data['nodes'];calls+=data['calls'];diagnostics+=data['diagnostics'];dependencies+=data['module_dependencies'];profiles.append(data['profile'])
   diagnostic_count+=data['diagnostic_count']
   toolchain={'typescript':data['compiler'],'typescript_sha256':sha(Path(compiler).read_bytes().decode()),'library_hashes':data['library_hashes'],'options':data['compiler_options']}
  if py:
@@ -33,6 +129,8 @@ def analyze(texts,item_budget=1024):
   for p,d in parsed.items():nodes += [{'id':n['id'],'name':n['name'],'kind':n['kind'],'path':p,'line':n['line'],'column':n['column'],'text':n['quote']} for n in d['symbols']]
   for c in api_facts.inventory(parsed):calls.append({'id':c['id'],'source':c['caller'],'target':c['target'],'expression':c['expression'],'relation':'static_call_reference' if c['target'] else 'unresolved','reason':c['reason'],'path':c['path'],'line':c['line'],'column':c['column'],'text':c['quote']})
   profiles.append('python-lexical-v1');toolchain['python']=platform.python_version()
+ if len(nodes)>item_budget or len(calls)>item_budget:
+  raise InvalidUpdate(f'Static graph work-unit allocation exceeded ({item_budget} nodes/calls)')
  return {'profiles':profiles,'toolchain':toolchain,'versions':{p:sha(t) for p,t in texts.items()},'nodes':nodes,'calls':calls,'diagnostics':diagnostics,'diagnostic_count':diagnostic_count,'diagnostics_truncated':diagnostic_count>len(diagnostics),'module_dependencies':dependencies,'analysis_ms':round((time.monotonic()-started)*1000,3),'fresh_source_read':True,'cache_used':False}
 
 def snapshot(workspace,files,max_total=None):

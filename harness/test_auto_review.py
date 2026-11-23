@@ -5,6 +5,7 @@ from vscode_bridge import handle
 from invocation_gateway import InvocationLedger
 from context_manager import InvalidUpdate
 from test_static_analysis import Fake
+from test_support import ENV,requires_typescript
 from kernel_adapter import HarnessKernelAdapter
 import repository_tools as repo
 import auto_review as auto
@@ -126,5 +127,51 @@ class AutomaticTests(unittest.TestCase):
  def test_interrupted_dispatch_reservation_not_reset(self):
   m=Fake();self.step(m);frame=budget.decision(self.s,self.sid);self.assertEqual(frame['used']['calls'],1);self.assertGreater(frame['used']['tokens'],0)
   with patch.object(self.s,'snapshot',return_value={'constraints':dict(self.initial['contract']['contract']['constraints'],review_calls=1)}):self.assertEqual(budget.decision(self.s,self.sid)['decision'],'COMPOUND_FIN')
+
+class HTMLAutomaticTests(unittest.TestCase):
+ @requires_typescript
+ def test_single_large_html_reaches_receipt_backed_source_review(self):
+  import static_analysis as analysis
+  from chat_runtime import answer
+  from review_context import overview
+  from test_chat import Fake as Review,MODELS
+
+  source=('<!doctype html>\n<title>Fixture</title>\n<script>\n'
+          + '  // ' + 'pad ' * 32 + '\n') + ('\n  // ' + 'pad ' * 32) * 1000 + (
+           '\nfunction leaf(){ return 1; }\nfunction main(){ return leaf(); }\n</script>\n')
+  with tempfile.TemporaryDirectory() as tmp,patch.dict(os.environ,ENV):
+   root=Path(tmp);workspace=root/'project';workspace.mkdir();state=root/'state'
+   target=workspace/'index.html';target.write_bytes(source.encode())
+   handle(state,workspace,{'op':'auto_new','goal':'Review this codebase.','roots':['.'],'review_page_kib':512})
+   meta=json.loads((state/'workspace.json').read_text());s=InvocationLedger(state/'state.sqlite')
+   try:
+    sid=meta['active'];contract=s.current_contract(sid);model=Fake()
+    out=auto.step(s,meta,workspace,state,{'explain':False},provider=model)['auto']
+    self.assertEqual((out['status'],out['mapped_files'],out['source_files']),('structural_pass_complete',1,1))
+    self.assertFalse(out['semantic_review_complete'])
+    self.assertEqual(model.calls,0)
+    receipt=out['last_page']['receipt'];data=analysis.load(s,sid,workspace,receipt)
+    self.assertEqual(data['sources'],{'index.html':source})
+    self.assertTrue(data['graph']['calls'][0]['target'])
+    self.assertEqual(data['graph']['calls'][0]['text'],'function main(){ return leaf(); }')
+    evidence=overview(data,1024)
+    self.assertEqual(evidence['files'],['index.html'])
+    self.assertIn('main',evidence['modules'][0]['declarations'])
+    self.assertEqual(budget.usage(s,sid)['used']['source_bytes'],len(source.encode()))
+    reviewer=Review()
+    review=answer(s,meta,workspace,state,{'prompt':'Explain main.','models':MODELS,'tier':'low'},provider=reviewer)
+    self.assertTrue(review['result']['admission']['admitted'])
+    packet=reviewer.payloads[0]
+    self.assertEqual(packet['workspace_map']['files'],['index.html'])
+    citation=review['result']['accepted_output']['citations'][0]
+    self.assertEqual(citation,{'path':'index.html','quote':'function main(){ return leaf(); }'})
+    self.assertTrue(s.verify_invocations(sid))
+    self.assertEqual(s.current_contract(sid),contract)
+    target.write_bytes(source.replace('return 1','return 2').encode())
+    self.assertEqual(auto.status(s,meta,workspace)['mapped_files'],0)
+    with self.assertRaises(analysis.StaticSourceChanged):
+     analysis.load(s,sid,workspace,receipt)
+   finally:
+    s.close()
 
 if __name__=='__main__':unittest.main()

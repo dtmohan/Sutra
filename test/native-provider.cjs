@@ -1101,14 +1101,22 @@ function setup(saved={}){
   assert.equal(reloaded.controller.status().pending,null);
   checks.push('evidence bridge guides continue, preserves the originating flow across reload, and resumes pasted text on the selected model without workspace permission');
  }
- for(const providerWait of [false,true]){
+ for(const originStage of ['direct','provider-wait','classified']){
+  const providerWait=originStage==='provider-wait',classified=originStage==='classified';
   const saved={},traffic=[],flowId='9'.repeat(32);
-  const goal='Please review the code base and explain its architecture.';
+  const goal='can you review the codebase please',receipt='d'.repeat(32);
   const stop={status:'provider_wait',resume_phase:'CLASSIFYING',error:'The provider did not return response headers.',budget:{used:{calls:1}}};
   const user=value=>({role:1,content:[new Text(value)]});
-  let flow,origin;
+  let flow,origin,approve=false,dialogs=0;
   const attach=fixture=>{
-   fixture.v.window.showWarningMessage=async(_message,_options,...choices)=>choices.find(choice=>choice==='Read only');
+   fixture.v.window.showWarningMessage=async(message,options,...choices)=>{
+    dialogs++;
+    assert.equal(message,'Workspace access for Sutra');
+    assert.equal(options.modal,true);
+    assert(options.detail.includes(goal));
+    assert(!traffic.some(request=>request.event==='step'&&request.armed),'Source work waits for consent');
+    return approve?choices.find(choice=>choice==='Read only'):undefined;
+   };
    fixture.deps.request=async request=>{
     traffic.push(structuredClone(request));
     assert.equal(request.op,'orchestrate');
@@ -1123,7 +1131,11 @@ function setup(saved={}){
      assert(!request.armed);
      origin=request.chat_key;
      flow={flow_id:flowId,cursor:'1',prompt:goal,state:providerWait?'PAUSED':'NEED_ARM',...(providerWait?{stop}:{})};
-     return reply(flow);
+     if(classified)flow.conversation_id=receipt;
+     return reply(flow,classified?{conversation:{route:{model:'model-a'},result:{
+      invocation_id:receipt,admission:{admitted:true},accepted_output:{intent:'workspace',answer:'Unpublished routing proposal'},
+      token_usage:{calls:[{invocation_id:receipt,model:'model-a',stage:'conversation',input_tokens:1726,output_tokens:256}]}
+     }}}:{});
     }
     assert.equal(request.chat_key,origin);
     assert.equal(request.flow_id,flowId);
@@ -1156,7 +1168,10 @@ function setup(saved={}){
   const pause=await first.send('low',[user(goal)],{});
   const pauseText=pause.map(part=>part.value||'').join('');
   assert(pauseText.includes(providerWait?'/resume/':'/access/'));
-  assert(!saved['sutra.pendingOrchestration'].conversation_id);
+  assert.equal(dialogs,providerWait?0:1);
+  assert.equal(saved['sutra.pendingOrchestration'].conversation_id,classified?receipt:undefined);
+  if(!providerWait)assert(pauseText.includes('reopen the access dialog'));
+  assert(!first.controller.status().armed);
   const reloaded=setup(saved);attach(reloaded);
   const beforeForeign=traffic.length;
   for(const foreign of [[user('continue')],[user(pauseText),user('continue')]]){
@@ -1165,19 +1180,67 @@ function setup(saved={}){
   }
   assert.equal(traffic.length,beforeForeign,'Anonymous resumes need the saved link in Assistant history');
   const history=[user(goal),{role:2,content:pause}];
-  const accessPause=await reloaded.send('low',[...history,user('continue')],{});
-  assert.deepEqual(traffic.slice(beforeForeign).map(request=>request.event),providerWait?['inspect','resume','step']:['inspect']);
-  assert(accessPause.some(part=>part.value?.includes('[Choose workspace access]')));
-  assert(!reloaded.controller.status().armed);
-  await reloaded.arm();
-  const beforeGrant=traffic.length;
-  const reviewed=await reloaded.send('high',[...history,user('continue'),{role:2,content:accessPause},user('continue')],{});
-  assert.deepEqual(traffic.slice(beforeGrant).map(request=>request.event),['inspect','step']);
+  approve=true;
+  const reviewed=await reloaded.send('high',[...history,user('continue')],{});
+  assert.deepEqual(traffic.slice(beforeForeign).map(request=>request.event),providerWait?['inspect','resume','step','step']:['inspect','step']);
+  assert(reviewed.some(part=>part.value?.includes('Workspace access approved. Continuing your request.')));
+  assert(!reviewed.some(part=>part.value?.includes('send **continue**')));
   assert(reviewed.some(part=>part.value?.includes('Source review completed.')));
+  assert.equal(dialogs,providerWait?1:2);
+  assert.equal(reloaded.controller.status().accessProfile,'read_only');
   assert.equal(traffic.filter(request=>request.event==='start').length,1);
+  assert.equal(traffic.filter(request=>request.event==='step'&&request.armed).length,1);
   assert.equal(reloaded.controller.status().pending,null);
  }
- checks.push('anonymous transcripts resume a pre-receipt provider wait or workspace access pause only with their exact Assistant link, and read only after the user grants access');
+ checks.push('anonymous saved reviews with or without a classifier receipt open the dialog on same-chat continue and run once on approval; foreign chats cannot authorize them');
+ for(const outcome of ['approve','cancel','revoke','advanced']){
+  const saved={},host=setup(saved),traffic=[];
+  const goal='can you review the codebase please';
+  const flow={state:'NEED_ARM',flow_id:'7'.repeat(32),cursor:'1',prompt:goal};
+  const options={modelOptions:{_conversationId:'direct-permission-'+outcome}};
+  const user=value=>[{role:1,content:[new Text(value)]}];
+  host.deps.request=async request=>{
+   traffic.push(request);
+   if(request.event==='pending')return {state:'DONE',flow_id:null};
+   if(request.event==='start'){assert.equal(request.prompt,goal);assert(!request.armed);return flow;}
+   assert.equal(request.event,'step');
+   assert(request.armed);
+   assert.equal(request.flow_id,flow.flow_id);
+   assert.equal(request.cursor,flow.cursor);
+   assert.equal(host.controller.status().accessProfile,'read_only');
+   return {...flow,state:'DONE',cursor:'2',data:{route:{model:'model-a'},result:{
+    invocation_id:'review',admission:{admitted:true},accepted_output:{answer:'Source review completed.'}
+   }}};
+  };
+  let approve,dialogs=0;
+  const opened=new Promise(resolve=>{
+   host.v.window.showWarningMessage=(_message,detail,...choices)=>{
+    dialogs++;
+    assert(detail.detail.includes(goal));
+    assert.equal(detail.modal,true);
+    assert(choices.includes('Read only'));
+    return new Promise(choose=>{approve=choose;resolve();});
+   };
+  });
+  const result=host.send('auto',user(goal),options);
+  const completed=outcome==='approve'?result:assert.rejects(result,/permission choice cancelled/);
+  await opened;
+  assert.equal(host.controller.status().routing.workspaceAccess.state,'requested');
+  assert(!host.controller.status().armed);
+  assert.deepEqual(traffic.map(request=>request.event),['pending','start']);
+  const duplicate=await host.send('auto',user('continue'),options);
+  assert(duplicate.some(part=>part.value?.includes('current request in this chat')));
+  assert.equal(dialogs,1);
+  if(outcome==='cancel')host.token.cancel();
+  if(outcome==='revoke')host.commands['karma.disarmNative']();
+  if(outcome==='advanced')saved['sutra.pendingOrchestration'].cursor='2';
+  approve('Read only');
+  const response=await completed;
+  assert.equal(host.controller.status().armed,outcome==='approve');
+  assert.equal(traffic.filter(request=>request.event==='step').length,outcome==='approve'?1:0);
+  if(outcome==='approve')assert(response.some(part=>part.value?.includes('Source review completed.')));
+ }
+ checks.push('the initial no-tool review resumes in the current chat on one modal grant; overlap, cancellation, revocation and stale approvals cannot dispatch source work');
  {
   const fixture=setup(),traffic=[],file='people/Candidate Resume (1).docx';
   const goal='Can you review this resume please?\nCandidate Resume (1).docx\nSuggest changes to reach more employers.';
@@ -1348,19 +1411,14 @@ function setup(saved={}){
   assert(!pause.some(part=>part.value?.includes('Continuing this request through Sutra’s workspace workflow')));
   assert.equal(permissionPrompts,0);
   const before=traffic.length;
-  const accessPause=await workspace.send('auto',user('Use this workspace.'),chat);
-  assert.deepEqual(traffic.slice(before).map(m=>m.event),['inspect','supply_evidence']);
-  assert(accessPause.some(part=>part.value?.includes('Workspace access needed')));
-  assert.equal(permissionPrompts,0,'Selecting the scope must finish the response before consent');
-  assert(!workspace.controller.status().armed);
-  assert.equal(workspace.controller.status().pending.flow_id,flowId);
-  await workspace.commands['karma.armNative']();assert.equal(permissionPrompts,1);
-  const beforeContinue=traffic.length;
-  const reviewed=await workspace.send('high',user('continue'),chat);
-  assert.deepEqual(traffic.slice(beforeContinue).map(m=>m.event),['inspect','step']);
-  assert.equal(traffic.at(-1).tier,'high');
+  const reviewed=await workspace.send('auto',user('Use this workspace.'),chat);
+  assert.deepEqual(traffic.slice(before).map(m=>m.event),['inspect','supply_evidence','step']);
+  assert(reviewed.some(part=>part.value?.includes('Workspace access needed')));
+  assert.equal(permissionPrompts,1);
+  assert(workspace.controller.status().armed);
+  assert.equal(traffic.at(-1).tier,'auto');
   assert(reviewed.some(part=>part.value?.includes('Workspace review completed')));
-  checks.push('a missing workspace target requests explicit scope, defers consent outside the response, and retains the workflow across model-switch continuation');
+  checks.push('a missing workspace target requires scope before consent, then the review continues in the same response');
  }
  const routingFlow=setup();let routingStep=0;const routingEvents=[];
  const routingChat=(id,model,followup)=>({route:{model},routing_followup:followup,result:{invocation_id:id,admission:{admitted:true},accepted_output:{intent:'conversation',answer:followup?'UNPUBLISHED DRAFT':'Final routed answer'},token_usage:{calls:[{invocation_id:id,model,stage:'conversation',input_tokens:100,output_tokens:20}]}}});
@@ -1970,24 +2028,26 @@ function setup(saved={}){
    }
    return backend(m,t);
   };
-  let dialogs=0;
+  let dialogs=0,accessDialogs=0;
   terminal.v.window.showWarningMessage=async(message,detail,...labels)=>{
    if(labels.at(-1)===recoveryAction){dialogs++;return approve?recoveryAction:undefined;}
-   return labels.at(-1);
+   assert.equal(message,'Workspace access for Sutra');accessDialogs++;
+   assert(!traffic.some(m=>m.event===recoveryEvent),'Recovery must still wait for consent');
+   return 'Read only';
   };
   const result=await terminal.send('high',[{role:1,content:[new Text('continue')]}],options);
   assert(traffic.some(m=>m.event==='recoverable_review'));assert.equal(dialogs,1);
   assert.equal(traffic[0].event,'recoverable_review');
-  assert(!traffic.some(m=>m.event===recoveryEvent));assert(!terminal.calls.some(m=>m.op==='native_work'));
   if(approve){
    assert(result.some(p=>p.value?.includes('Workspace access needed')));
-   assert.equal(terminal.controller.status().pending.flow_id,original.flow_id);
-   await terminal.commands['karma.armNative']();
-   await terminal.send('high',[{role:1,content:[new Text('continue')]}],options);
+   assert.equal(accessDialogs,1);
    assert.equal(traffic.filter(m=>m.event===recoveryEvent).length,1);
    assert.equal(terminal.calls.find(m=>m.op==='native_work').prompt,original.prompt);
    assert.equal(terminal.calls.find(m=>m.op==='native_work').tier,'high');
-  }else assert(result.some(p=>p.value?.includes('Saved request retained')));
+  }else{
+   assert.equal(accessDialogs,0);assert(!traffic.some(m=>m.event===recoveryEvent));assert(!terminal.calls.some(m=>m.op==='native_work'));
+   assert(result.some(p=>p.value?.includes('Saved request retained')));
+  }
   assert.deepEqual(original,frozen);assert(!traffic.some(m=>m.event==='cancel'));
  }
  for(const scenario of ['new ask','published','other chat']){
@@ -2351,6 +2411,7 @@ function setup(saved={}){
   host.deps.resumeRequest=async()=>{reconnects++;throw Object.assign(new Error('Transport record unavailable'),{code:'COORDINATOR_REQUEST_MISSING'});};
   host.deps.ackRequest=async()=>{acks++;};
   host.deps.allocateRequest=async()=>{throw Error('A missing record cannot submit another request');};
+  host.v.window.showWarningMessage=async()=>undefined;
   const prior=host.deps.request;
   const checkpoint={flow_id:'retained-existing-flow',cursor:'saved-cursor',state:'NEED_ARM',prompt:'Review original workspace',children:[]};
   host.deps.request=async(m,t,a)=>{

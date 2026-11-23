@@ -1,4 +1,8 @@
-Sutra 0.57.6 — Direct greetings and Low-tier model reuse
+Sutra 0.57.7 — Workspace consent and HTML reviews
+
+Clear codebase review requests go directly to workspace consent. Approving
+access continues the saved request in the same chat. Automatic reviews map
+HTML and inline JavaScript with citations to the original file.
 
 Sutra Auto answers standalone greetings without a model call. Eligible local
 Ollama Low-tier chat calls keep the model warm for up to 60 seconds and can
