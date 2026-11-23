@@ -292,6 +292,9 @@ class RemoteModel(LocalModel):
             error.call_record = record
             raise
         finally:
+            refresh = getattr(self, 'dispatch_refresh', None)
+            if refresh is not None:
+                record['remote_admission_refresh'] = refresh
             if self.health:
                 self.health.active = None
             if response is not None:

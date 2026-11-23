@@ -196,11 +196,10 @@ class InvocationLedger(GovernedContext):
                             raise InvalidUpdate('Discovery context budget differs from provider')
                         prefix = (context_measurement or {}).get('prefix_reuse')
                         if prefix is not None:
-                            from remote_prefix import binding, isolated
+                            from remote_prefix import attested, binding
                             window = allocation.context_window
                             memory = (resource or {}).get('runtime_memory') or {}
-                            sample = memory.get('hardware', {}).get('sample') or {}
-                            if (not isolated(sample, window)
+                            if (not attested(memory, window)
                                     or prefix['scope_sha256'] != binding(self, run_id, window, memory.get('instance'))):
                                 raise InvalidUpdate('Remote review prefix scope changed before dispatch')
                     else:
@@ -229,7 +228,8 @@ class InvocationLedger(GovernedContext):
         return envelope
 
     def finalize(self, envelope, payload, proposal, transport_error=None, elapsed_seconds=None, token_usage=None,
-                 accounting_settlement=None, failure_kind=None, generation_progress=None, transport_failure=None):
+                 accounting_settlement=None, failure_kind=None, generation_progress=None, transport_failure=None,
+                 *, remote_admission_refresh=None):
         session = envelope['session']; rid = envelope['delivery_id']
         model_proposal = copy.deepcopy(proposal)
         from task_observations import split, capture
@@ -290,6 +290,8 @@ class InvocationLedger(GovernedContext):
             transport_failure = (transport_observation({'transport':transport_failure}) if transport_error else None)
             if transport_failure is not None:
                 receipt['transport_failure'] = transport_failure
+            if remote_admission_refresh is not None:
+                receipt['remote_admission_refresh'] = remote_admission_refresh
             observation = capture(self, envelope, payload, proposal, observation_fields)
             if observation is not None:
                 receipt['task_observation'] = observation
@@ -819,7 +821,12 @@ class InvocationGateway:
                 validate_proof(measurement, self.provider.budget, system, payload, schema, identity)
                 self.provider.context_measurement = measurement
                 if prefix is not None:
-                    self.provider.runtime_context_tokens = runtime_context(self.provider.budget, measurement)
+                    context = runtime_context(self.provider.budget, measurement)
+                    self.provider.runtime_context_tokens = context
+                    resource = require_resources(Path(self.db).parent, provider=self.provider, committed=True)
+                    memory = dict(self.provider.memory_plan, context_tokens=context, hardware=resource)
+                    self.provider.memory_plan = memory
+                    resource = dict(resource, runtime_memory=memory)
             from invocation_timing import plan as timing_plan, require_headroom
             timing = timing_plan(self.provider, role, payload, ledger=ledger, run_id=self.run_id)
             require_headroom(timing)
@@ -871,7 +878,9 @@ class InvocationGateway:
             except Exception: progress = None
             result = ledger.finalize(envelope, payload, proposal, error, time.monotonic() - started,
                                      measured(record), settlement(envelope, record), failure_kind,
-                                     progress, record.get('transport') if isinstance(record,dict) else None)
+                                     progress, record.get('transport') if isinstance(record,dict) else None,
+                                     remote_admission_refresh=record.get('remote_admission_refresh')
+                                     if isinstance(record, dict) and record.get('provider') == 'sutra_remote' else None)
             activity.finish(result['admission']['admitted'], measured(record))
             result['token_usage'] = history(ledger.db, run_id=self.run_id)
             if error and not repairable: result['blocked'] = error

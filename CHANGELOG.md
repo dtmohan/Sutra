@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.58.1
+
+- Refresh an age-only RTX telemetry stop once before dispatch on the same warm server instance. Record the refresh and preserve the task's context, permissions, and allocation.
+- Bind new prefix scopes to committed calibration and verify the effective slot-save setting. Eligible calls use prompt caching off when cache isolation cannot be verified. Earlier proofs remain verifiable offline.
+- Size the runtime context using the framing allowance recorded in the provider's exact context proof.
+
 ## 0.58.0
 
 - Add opt-in prompt-prefix reuse for architecture discovery on a verified RTX runtime with one slot, the RAM prompt store disabled, and disk slot saves off.

@@ -291,6 +291,265 @@ class RemoteMemoryTests(unittest.TestCase):
         self.assertEqual(blocked.exception.state['runtime']['stage'], 'remote_pre_transport')
         self.assertFalse(blocked.exception.state['runtime']['inference_started'])
 
+    def refresh_fixture(self, fresh=None):
+        """A real private inference lease, with only hardware transport mocked."""
+        now = [101.]
+        latest = copy.deepcopy(self.sample) if fresh is None else fresh
+        if fresh is None:
+            latest.update(wall_time=110., capture_started_at=109., capture_seconds=1., nonce='1' * 32)
+            latest['model'].update(hash_ms=0., digest_basis='verified_hash_reused_with_stat_and_instance')
+        provider = SimpleNamespace(model=self.profile['name'], profile=copy.deepcopy(self.profile),
+            budget=Budget(8192, 1024, 256), fresh_context_metadata=lambda: {},
+            task_context={'fact': 'Cedar CED724', 'read_only': True, 'network_allowed': False},
+            consumed={'calls': 3, 'tokens': 10240, 'source_bytes': 9000})
+        memory._remember(self.profile, self.sample)
+        mocks = [patch.dict(os.environ, SUTRA_RUNTIME_DIR=str(self.root / 'runtime'),
+                    SUTRA_REMOTE_MODELS=json.dumps([self.profile['name']])),
+                 patch('runtime_memory.dispatch_context', return_value=4096),
+                 patch('remote_profiles.load', return_value=self.profile),
+                 patch.object(memory.time, 'time', side_effect=lambda: now[0]),
+                 patch.object(memory, 'probe', side_effect=[copy.deepcopy(self.sample), latest])]
+        values = []
+        for mocked in mocks:
+            values.append(mocked.start())
+            self.addCleanup(mocked.stop)
+        return provider, now, values[-1]
+
+    def test_age_only_refresh_holds_lease_keeps_context_permissions_spending_and_original_plan(self):
+        from invocation_gateway import _permit
+        import runtime_memory
+        provider, now, probe = self.refresh_fixture()
+        unchanged = copy.deepcopy((vars(provider.budget), provider.task_context, provider.consumed))
+        permit = {'hash': 'committed-original', 'used': True, 'transport_seconds': 150}
+        token = _permit.set(permit)
+        self.addCleanup(_permit.reset, token)
+        with memory.dispatch(provider, self.root, 'same-call', 'system', {}, {}) as original:
+            before = copy.deepcopy(original)
+            # Prefix counting may refine this logical packet allocation within
+            # the same fixed, verified native context pool.
+            provider.runtime_context_tokens = 5120
+            now[0] = 110.
+            with self.assertRaises(ResourceWait):
+                with runtime_memory.lease():
+                    self.fail('The existing shared inference lease was released')
+            fresh = memory.require_dispatch_fresh(provider)
+            self.assertTrue(fresh['admitted'])
+            self.assertEqual(fresh['context_tokens'], 5120)
+            self.assertEqual(fresh['instance'], before['instance'])
+            self.assertEqual(original, before)
+            self.assertEqual((vars(provider.budget), provider.task_context, provider.consumed), unchanged)
+            self.assertEqual(permit, {'hash': 'committed-original', 'used': True, 'transport_seconds': 150})
+            report = fresh['dispatch_refresh']
+            self.assertEqual(report['reason'], 'sample_age_only')
+            self.assertTrue(report['warm_only'])
+            self.assertFalse(report['inference_started'])
+            self.assertEqual((report['attempt'], report['max_attempts']), (1, 1))
+            self.assertEqual(report['before']['hardware']['sample']['wall_time'], 100.)
+            self.assertEqual(report['after']['hardware']['sample']['wall_time'], 110.)
+            self.assertEqual(provider.dispatch_refresh, report)
+            self.assertEqual(provider.memory_plan, fresh)
+            self.assertTrue(memory.require_dispatch_fresh(provider)['admitted'])
+            self.assertEqual(probe.call_count, 2)  # Initial admission plus one metadata refresh.
+            self.assertEqual(probe.call_args.kwargs,
+                             {'warm_binding': memory._cache_binding(self.sample)})
+            now[0] = 120.
+            with self.assertRaises(ResourceWait) as stopped:
+                memory.require_dispatch_fresh(provider)
+            self.assertEqual(stopped.exception.state['runtime']['stage'], 'remote_pre_transport')
+            self.assertEqual(stopped.exception.state['dispatch_refresh'], report)
+            self.assertEqual(probe.call_count, 2)
+        self.assertIsNone(memory._dispatch_scope.get())
+
+    def test_age_refresh_never_accepts_capacity_contention_identity_or_invalid_new_evidence(self):
+        cases = ('capacity', 'busy', 'restarted', 'model', 'context', 'malformed', 'stale', 'replayed_nonce')
+        for case in cases:
+            with self.subTest(case=case):
+                fresh = copy.deepcopy(self.sample)
+                fresh.update(wall_time=110., capture_started_at=109., capture_seconds=1., nonce='1' * 32)
+                fresh['model'].update(hash_ms=0., digest_basis='verified_hash_reused_with_stat_and_instance')
+                if case == 'capacity':
+                    fresh['gpu'].update(free_bytes=GIB, used_bytes=23 * GIB)
+                elif case == 'busy':
+                    fresh['server']['slots'][0]['is_processing'] = True
+                elif case == 'restarted':
+                    fresh['listener']['pid'] = fresh['process']['pid'] = 4321
+                    fresh['gpu']['process_pids'] = [4321]
+                elif case == 'model':
+                    fresh['model']['sha256'] = 'f' * 64
+                elif case == 'context':
+                    fresh['server']['context_tokens'] = 4096
+                elif case == 'malformed':
+                    del fresh['model']['bytes']
+                elif case == 'stale':
+                    fresh.update(wall_time=100., capture_started_at=99.)
+                else:
+                    fresh['nonce'] = self.sample['nonce']
+                provider, now, probe = self.refresh_fixture(fresh)
+                with memory.dispatch(provider, self.root, 'same-call', 'system', {}, {}) as initial:
+                    before = copy.deepcopy(initial)
+                    now[0] = 110.
+                    with self.assertRaises(ResourceWait) as stopped:
+                        memory.require_dispatch_fresh(provider)
+                    self.assertFalse(stopped.exception.state['admitted'])
+                    self.assertEqual(stopped.exception.state['runtime']['stage'], 'remote_pre_transport')
+                    self.assertFalse(stopped.exception.state['runtime']['inference_started'])
+                    self.assertFalse(stopped.exception.state['dispatch_refresh']['after']['admitted'])
+                    self.assertEqual(provider.memory_plan, before)
+                    self.assertEqual(probe.call_count, 2)
+                    with self.assertRaises(ResourceWait):
+                        memory.require_dispatch_fresh(provider)
+                    self.assertEqual(probe.call_count, 2)
+
+    def test_reused_provider_does_not_attach_a_previous_calls_refresh_report(self):
+        provider, now, probe = self.refresh_fixture()
+        with memory.dispatch(provider, self.root, 'call-one', 'system', {}, {}):
+            now[0] = 110.
+            self.assertTrue(memory.require_dispatch_fresh(provider)['admitted'])
+            self.assertIsNotNone(provider.dispatch_refresh)
+        next_sample = copy.deepcopy(provider.memory_plan['hardware']['sample'])
+        probe.side_effect = [next_sample]
+        with memory.dispatch(provider, self.root, 'call-two', 'system', {}, {}):
+            self.assertIsNone(provider.dispatch_refresh)
+            current = memory.require_dispatch_fresh(provider)
+            self.assertTrue(current['admitted'])
+            self.assertNotIn('dispatch_refresh', current)
+            self.assertNotIn('dispatch_refresh', provider.memory_plan)
+        self.assertEqual(probe.call_count, 3)
+
+    def test_only_age_can_refresh_an_originally_valid_same_instance_sample(self):
+        for case in ('capacity', 'busy', 'bad_capture', 'missing', 'instance', 'context', 'profile', 'other_provider'):
+            with self.subTest(case=case):
+                provider, now, probe = self.refresh_fixture()
+                with memory.dispatch(provider, self.root, 'same-call', 'system', {}, {}):
+                    now[0] = 110.
+                    sample = provider.memory_plan['hardware']['sample']
+                    if case == 'capacity':
+                        sample['gpu'].update(free_bytes=GIB, used_bytes=23 * GIB)
+                    elif case == 'busy':
+                        sample['server']['slots'][0]['is_processing'] = True
+                    elif case == 'bad_capture':
+                        sample['capture_seconds'] = 21.
+                    elif case == 'missing':
+                        sample.pop('model')
+                    elif case == 'instance':
+                        provider.remote_instance = dict(provider.remote_instance, pid=4321)
+                    elif case == 'context':
+                        provider.runtime_context_tokens = 16384
+                    elif case == 'profile':
+                        provider.profile = dict(provider.profile, profile_hash='f' * 64)
+                    else:
+                        provider = SimpleNamespace(**vars(provider))
+                    with self.assertRaises(ResourceWait):
+                        memory.require_dispatch_fresh(provider)
+                    self.assertEqual(probe.call_count, 1)
+
+    def test_refresh_requires_current_assignment_and_registered_profile(self):
+        for case in ('revoked', 'changed'):
+            with self.subTest(case=case):
+                provider, now, probe = self.refresh_fixture()
+                with memory.dispatch(provider, self.root, 'same-call', 'system', {}, {}):
+                    now[0] = 110.
+                    change = (patch.dict(os.environ, SUTRA_REMOTE_MODELS='[]') if case == 'revoked' else
+                              patch('remote_profiles.load', return_value=dict(self.profile, profile_hash='f' * 64)))
+                    with change, self.assertRaises(ResourceWait) as stopped:
+                        memory.require_dispatch_fresh(provider)
+                    self.assertEqual(probe.call_count, 1)
+                    self.assertFalse(stopped.exception.state['dispatch_refresh']['after']['admitted'])
+
+    def test_context_or_instance_mutation_during_refresh_cannot_rebind_the_dispatch(self):
+        for field in ('context', 'instance'):
+            with self.subTest(field=field):
+                provider, now, probe = self.refresh_fixture()
+                fresh = copy.deepcopy(self.sample)
+                fresh.update(wall_time=110., capture_started_at=109., capture_seconds=1., nonce='1' * 32)
+                fresh['model'].update(hash_ms=0., digest_basis='verified_hash_reused_with_stat_and_instance')
+                with memory.dispatch(provider, self.root, 'same-call', 'system', {}, {}) as initial:
+                    before = copy.deepcopy(initial)
+                    def changed(*args, **kwargs):
+                        if field == 'context':
+                            provider.runtime_context_tokens += 1024
+                        else:
+                            provider.remote_instance = dict(provider.remote_instance, pid=4321)
+                        return fresh
+                    probe.side_effect = changed
+                    now[0] = 110.
+                    with self.assertRaises(ResourceWait) as stopped:
+                        memory.require_dispatch_fresh(provider)
+                    self.assertEqual(stopped.exception.state['blocker'], 'runtime_uncertain')
+                    self.assertEqual(provider.memory_plan, before)
+                    self.assertEqual(probe.call_count, 2)
+
+    def test_cancellation_during_refresh_keeps_allocation_and_diagnostics_without_retry(self):
+        from lifecycle import Interrupted
+        provider, now, probe = self.refresh_fixture()
+        unchanged = copy.deepcopy((vars(provider.budget), provider.task_context, provider.consumed))
+        with self.assertRaises(Interrupted):
+            with memory.dispatch(provider, self.root, 'same-call', 'system', {}, {}) as initial:
+                before = copy.deepcopy(initial)
+                now[0] = 110.
+                probe.side_effect = Interrupted('Synthetic cancellation')
+                memory.require_dispatch_fresh(provider)
+        self.assertEqual(provider.memory_plan, before)
+        self.assertEqual((vars(provider.budget), provider.task_context, provider.consumed), unchanged)
+        self.assertEqual(probe.call_count, 2)
+        report = provider.dispatch_refresh
+        self.assertFalse(report['after']['admitted'])
+        self.assertEqual(report['after']['observation_failure']['failure_kind'], 'interrupted')
+        self.assertIsNone(memory._dispatch_scope.get())
+
+    def test_successful_warm_only_probe_uses_existing_digest_and_fresh_counters(self):
+        memory._remember(self.profile, self.sample)
+        binding = memory._cache_binding(self.sample)
+        fresh = copy.deepcopy(self.sample)
+        fresh['model'].update(hash_ms=0., digest_basis='verified_hash_reused_with_stat_and_instance')
+        fresh['gpu'].update(free_bytes=2 * GIB, used_bytes=22 * GIB)
+        def capture(_profile, script, **kwargs):
+            if '--query-gpu' in script:
+                return copy.deepcopy(fresh)
+            return {'version': 1, 'nonce': fresh['nonce'], 'binding': binding}
+        with patch('remote_control.ensure_tunnel'), patch('remote_control.run_ps', side_effect=capture) as remote, \
+                patch.object(memory, '_server', return_value=fresh['server']), \
+                patch.object(memory, 'verify_instance') as verify, \
+                patch.object(memory.secrets, 'token_hex', return_value='0' * 32):
+            observed = memory.probe(self.profile, warm_binding=binding)
+        self.assertEqual(remote.call_count, 2)
+        verify.assert_called_once()
+        self.assertEqual(observed['model']['digest_basis'], 'verified_hash_reused_with_stat_and_instance')
+        self.assertEqual(observed['model']['hash_ms'], 0.)
+        self.assertEqual(observed['gpu']['free_bytes'], 2 * GIB)
+        self.assertEqual(observed['verification_budget']['kind'], 'verified_identity_reuse')
+        self.assertTrue(memory.evaluate(self.profile, observed, 4096)['admitted'])
+
+    def test_warm_only_probe_never_hashes_without_checkpoint_or_after_preflight_change(self):
+        binding = memory._cache_binding(self.sample)
+        with patch('remote_control.ensure_tunnel') as tunnel, patch('remote_control.run_ps') as remote:
+            with self.assertRaisesRegex(InvalidUpdate, 'verified identity checkpoint'):
+                memory.probe(self.profile, warm_binding=binding)
+            tunnel.assert_not_called()
+            remote.assert_not_called()
+        memory._remember(self.profile, self.sample)
+        changed = dict(binding, mtime_ticks='639000000000000001')
+        with patch('remote_control.ensure_tunnel'), \
+                patch.object(memory.secrets, 'token_hex', return_value='0' * 32), \
+                patch('remote_control.run_ps', return_value={'version': 1, 'nonce': '0' * 32,
+                                                           'binding': changed}) as remote:
+            with self.assertRaisesRegex(InvalidUpdate, 'changed before the warm observation'):
+                memory.probe(self.profile, warm_binding=binding)
+            self.assertEqual(remote.call_count, 1)  # No GPU/hash probe was sent.
+
+    def test_warm_only_probe_timeout_has_no_second_observation_or_cold_fallback(self):
+        memory._remember(self.profile, self.sample)
+        binding = memory._cache_binding(self.sample)
+        error = TimeoutError('fixture timeout')
+        with patch('remote_control.ensure_tunnel') as tunnel, \
+                patch.object(memory.secrets, 'token_hex', return_value='0' * 32), \
+                patch('remote_control.run_ps', side_effect=[{'version': 1, 'nonce': '0' * 32,
+                    'binding': binding}, error]) as remote:
+            with self.assertRaises(TimeoutError):
+                memory.probe(self.profile, warm_binding=binding)
+            self.assertEqual(tunnel.call_count, 1)
+            self.assertEqual(remote.call_count, 2)
+
     def test_ram_checkpoint_reuse_requires_exact_instance_and_file_identity(self):
         sample = copy.deepcopy(self.sample)
         sample['model']['hash_ms'] = 0.

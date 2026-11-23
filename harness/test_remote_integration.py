@@ -42,11 +42,21 @@ class RemoteIntegrationTests(unittest.TestCase):
     def setUpClass(cls):
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
-                body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                raw = self.rfile.read(int(self.headers['Content-Length']))
+                if self.path == '/slots/0':
+                    cls.slot_checks.append((raw, self.headers.get('Authorization')))
+                    status, reply = cls.slot_response
+                    self.send_response(status)
+                    self.send_header('Content-Length', str(len(reply)))
+                    self.end_headers()
+                    self.wfile.write(reply)
+                    return
+                body = json.loads(raw)
                 request = {'body': body, 'path': self.path, 'authorization': self.headers.get('Authorization')}
                 if self.path == '/v1/chat/completions/input_tokens':
                     cls.count_requests.append(request)
-                    reply = json.dumps({'object': 'response.input_tokens', 'input_tokens': 91}).encode()
+                    reply = json.dumps({'object': 'response.input_tokens',
+                                        'input_tokens': cls.count_tokens(body)}).encode()
                     content_type = 'application/json'
                 else:
                     cls.requests.append(request)
@@ -103,6 +113,10 @@ class RemoteIntegrationTests(unittest.TestCase):
         self.local_measurements = []
         type(self).requests = []
         type(self).count_requests = []
+        type(self).count_tokens = staticmethod(lambda body: 91)
+        type(self).slot_checks = []
+        type(self).slot_response = (501, json.dumps({'error': {'code': 501, 'type': 'not_supported_error',
+            'message': 'This server does not support slots action. Start it with `--slot-save-path`'}}).encode())
         type(self).remote_reply = stream(json.dumps(HELLO), counts=(91, 34))
         self.meta = {}
         client = SimpleNamespace(activate=self.activate, generate=self.generate)
@@ -198,8 +212,10 @@ class RemoteIntegrationTests(unittest.TestCase):
             result = {'tool': {'kind': 'read', 'target': target, 'query': '', 'line': 1},
                       'summary': 'Read the next approved source file.', 'remaining': [],
                       'findings': [], 'completed': [], 'edges': []}
-            return stream(json.dumps(result), timings={'cache_n': 64 if hit else 0,
-                          'prompt_n': 27 if hit else 91, 'prompt_ms': 2., 'predicted_n': 34, 'predicted_ms': 4.})
+            count = type(self).count_tokens(body)
+            cached = 64 if hit else 0
+            return stream(json.dumps(result), counts=(count, 34), timings={'cache_n': cached,
+                          'prompt_n': count - cached, 'prompt_ms': 2., 'predicted_n': 34, 'predicted_ms': 4.})
 
         type(self).remote_reply = staticmethod(response)
         self.workspace = (self.root / 'repo').resolve()
@@ -545,6 +561,89 @@ class RemoteIntegrationTests(unittest.TestCase):
         self.reload()
         self.assertEqual(usage(self.ledger, session), charged)
         self.assertTrue(self.ledger.verify_invocations(session))
+
+    def test_expired_rtx_sample_refreshes_the_same_reserved_review_call(self):
+        import remote_memory
+
+        primary = self.enable_prefix_fixture()['rtx3090']
+        meta = self.new_prefix_review()
+        session = meta['active']
+        first, first_receipt = self.architect_records(self.architect(meta, primary))
+        before = usage(self.ledger, session)
+        contract = self.ledger.current_contract(session)
+        self.reload()
+
+        original_probe = remote_memory.probe
+        original_check = remote_memory.require_dispatch_fresh
+        refreshed = []
+
+        def probe(profile, *, warm_binding=None):
+            sample = original_probe(profile)
+            if warm_binding is not None:
+                refreshed.append(warm_binding)
+                sample['nonce'] = 'f' * 32
+                sample['model'].update(digest_basis='verified_hash_reused_with_stat_and_instance', hash_ms=0)
+            return sample
+
+        def delayed_check(provider):
+            stamp = provider.memory_plan['hardware']['sample']['wall_time']
+            with patch('remote_memory.time.time', return_value=stamp + remote_memory.MAX_SAMPLE_AGE + 1):
+                return original_check(provider)
+
+        with patch('remote_memory.probe', side_effect=probe), \
+                patch('remote_memory.require_dispatch_fresh', side_effect=delayed_check):
+            result = self.architect(meta, primary)
+        self.assertTrue(result['result']['admission']['admitted'])
+        second, settled = self.architect_records(result)
+        refresh = settled['remote_admission_refresh']
+        self.assertEqual(len(refreshed), 1)
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(refresh['before']['instance'], refresh['after']['instance'])
+        self.assertNotEqual(refresh['before']['hardware']['sample']['nonce'],
+                            refresh['after']['hardware']['sample']['nonce'])
+        self.assertEqual(second['physical_context']['prefix_reuse'], first['physical_context']['prefix_reuse'])
+        self.assertIn('def entry()', canonical(self.requests[-1]['body']['messages']))
+        self.assertNotIn('INACCESSIBLE_UNDER_REVIEW_SCOPE', canonical(self.requests[-1]['body']['messages']))
+        self.assertEqual(self.ledger.current_contract(session), contract)
+        self.assertEqual(settled['accounting_settlement']['used_tokens'], 91 + 34)
+        after = usage(self.ledger, session)
+        self.assertEqual(after['limits'], before['limits'])
+        self.assertEqual(after['used']['calls'], before['used']['calls'] + 1)
+        self.assertEqual(after['used']['tokens'], before['used']['tokens'] + 91 + 34)
+        self.assertEqual(json.loads(self.ledger.db.execute(
+            'SELECT record_json FROM invocation_receipts WHERE invocation_id=?', (first['id'],)).fetchone()[0]),
+            first_receipt)
+        self.assertTrue(self.ledger.verify_invocations(session))
+
+    def test_effective_slot_save_refusal_keeps_review_cache_off(self):
+        primary = self.enable_prefix_fixture()['rtx3090']
+        meta = self.new_prefix_review()
+        type(self).slot_response = (400, b'{"error":{"code":400,"type":"invalid_request_error","message":"Invalid action"}}')
+        result = self.architect(meta, primary)
+        self.assertTrue(result['result']['admission']['admitted'])
+        invocation, receipt = self.architect_records(result)
+        self.assertNotIn('prefix_reuse', invocation['physical_context'])
+        self.assertFalse(self.requests[-1]['body']['cache_prompt'])
+        self.assertEqual(self.slot_checks, [(b'', self.requests[-1]['authorization'])])
+        self.assertEqual(receipt['accounting_settlement']['used_tokens'], 125)
+
+    def test_committed_prefix_plan_records_the_final_rounded_context(self):
+        import orchestration
+
+        primary = self.enable_prefix_fixture()['rtx3090']
+        meta = self.new_prefix_review()
+        type(self).count_tokens = staticmethod(lambda body: 1785 if 'cache_reuse' in body else 1784)
+        result = self.architect(meta, primary)
+        self.assertTrue(result['result']['admission']['admitted'])
+        invocation, receipt = self.architect_records(result)
+        self.assertEqual(invocation['physical_context']['prompt_tokens'], 1785)
+        dispatch = next(event['data'] for event in orchestration.events(
+            self.ledger, invocation['orchestration']['node_id'])
+            if event['kind'] == 'DISPATCH' and event['data']['resource_id'] == invocation['id'])
+        memory = dispatch['resource']['runtime_memory']
+        self.assertEqual(memory['context_tokens'], 5120)
+        self.assertTrue(memory['prefix_isolation']['slot_saves_disabled'])
+        self.assertEqual(receipt['accounting_settlement']['used_tokens'], 1785 + 34)
 
     def test_remote_gpu_plan_does_not_become_a_local_runtime_memory_plan(self):
         import remote_memory

@@ -1,13 +1,19 @@
-Sutra 0.58.0 — Opt-in RTX prompt-prefix reuse
+Sutra 0.58.1 — RTX admission and prefix-cache verification
+
+When an otherwise admissible RTX telemetry sample expires before dispatch, Sutra
+can refresh it once against the same warm server process. It records the refresh
+and preserves task context, permissions, and spent and remaining allocations.
 
 Sutra can reuse prompt prefixes across architecture discovery calls for the
 same task on a verified RTX provider. To opt in, add the registered model
 reference to karma.remoteReviewPrefixReuseModels in User Settings. The remote
 runtime must use a single slot with --cache-ram 0 and disk slot saves disabled.
 
-Sutra ties reuse to the current task, permissions, model, template and server
-process. It verifies the exact rendered prompt and charges the full prompt
-count even when the server reuses part of it.
+Sutra ties reuse to the current task, permissions, calibration, model, template,
+and server process. It checks the server's effective slot-save setting before
+enabling reuse. If cache isolation cannot be verified, eligible calls proceed
+with prompt caching off. Sutra verifies the exact rendered prompt and charges
+its full token count even when the server reuses part of it.
 
 Sutra Auto can move a review to an eligible configured local model when a
 remote capacity check blocks dispatch. Chat shows the measured resource

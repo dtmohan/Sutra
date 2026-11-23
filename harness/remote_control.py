@@ -133,6 +133,39 @@ def request_json(profile, path, payload=None, timeout_seconds=5):
         connection.close()
 
 
+def slot_saves_disabled(profile):
+    """Attest the effective setting on the pinned, already awake llama.cpp server."""
+    # With no action, this fixed request cannot save, restore or erase a
+    # slot. b12600 rejects it before action handling when persistence is off.
+    expected = {'error': {'code': 501, 'type': 'not_supported_error',
+        'message': 'This server does not support slots action. Start it with `--slot-save-path`'}}
+
+    def unique_fields(items):
+        fields = dict(items)
+        if len(fields) != len(items):
+            raise ValueError('Duplicate slot capability response field')
+        return fields
+
+    connection = http.client.HTTPConnection('127.0.0.1', profile['port'], timeout=timeout(2))
+    response = None
+    try:
+        connection.request('POST', '/slots/0', body=b'', headers=headers(profile))
+        response = connection.getresponse()
+        if response.status != 501:
+            return False
+        raw = response.read(2049)
+        if len(raw) > 2048:
+            return False
+        result = json.loads(raw, object_pairs_hook=unique_fields)
+        return result == expected and type(result['error']['code']) is int
+    except (OSError, InvalidUpdate, ValueError, http.client.HTTPException):
+        return False
+    finally:
+        if response is not None:
+            response.close()
+        connection.close()
+
+
 def ps_literal(value):
     if not isinstance(value, str) or any(ord(character) < 32 for character in value):
         raise InvalidUpdate('Invalid trusted PowerShell literal')

@@ -14,6 +14,13 @@ import remote_profiles
 from test_remote_profiles import descriptor
 
 
+SLOT_SAVES_DISABLED = {'error': {
+    'code': 501,
+    'type': 'not_supported_error',
+    'message': 'This server does not support slots action. Start it with `--slot-save-path`',
+}}
+
+
 class RemoteControlTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -126,6 +133,70 @@ class RemoteControlTests(unittest.TestCase):
                 with self.assertRaises(InvalidUpdate):
                     control.request_json(self.profile, path, body)
             connect.assert_not_called()
+
+    def test_slot_save_attestation_uses_one_fixed_empty_request(self):
+        response = MagicMock(status=501)
+        response.read.return_value = json.dumps(SLOT_SAVES_DISABLED).encode()
+        connection = MagicMock()
+        connection.getresponse.return_value = response
+        with patch('remote_control.http.client.HTTPConnection', return_value=connection) as connect:
+            self.assertIs(control.slot_saves_disabled(self.profile), True)
+        connect.assert_called_once_with('127.0.0.1', self.profile['port'], timeout=2)
+        connection.request.assert_called_once_with('POST', '/slots/0', body=b'', headers={
+            'Content-Type': 'application/json', 'Authorization': 'Bearer unit-test-remote-credential',
+        })
+        response.read.assert_called_once_with(2049)
+        response.close.assert_called_once()
+        connection.close.assert_called_once()
+
+    def test_slot_save_attestation_rejects_enabled_or_other_http_status(self):
+        enabled = {'error': {'code': 400, 'type': 'invalid_request_error', 'message': 'Invalid action'}}
+        for status, body in ((400, enabled), (401, {}), (200, SLOT_SAVES_DISABLED), (302, {})):
+            with self.subTest(status=status):
+                response = MagicMock(status=status)
+                response.read.return_value = json.dumps(body).encode()
+                connection = MagicMock()
+                connection.getresponse.return_value = response
+                with patch('remote_control.http.client.HTTPConnection', return_value=connection):
+                    self.assertIs(control.slot_saves_disabled(self.profile), False)
+                response.read.assert_not_called()
+                response.close.assert_called_once()
+                connection.close.assert_called_once()
+
+    def test_slot_save_attestation_rejects_ambiguous_or_unbounded_501_bodies(self):
+        expected = SLOT_SAVES_DISABLED['error']
+        raw = json.dumps(SLOT_SAVES_DISABLED).encode()
+        cases = {
+            'wrong_message': json.dumps({'error': dict(expected, message='Unsupported endpoint')}).encode(),
+            'wrong_type': json.dumps({'error': dict(expected, type='invalid_request_error')}).encode(),
+            'wrong_code': json.dumps({'error': dict(expected, code=400)}).encode(),
+            'float_code': json.dumps({'error': dict(expected, code=501.0)}).encode(),
+            'string_code': json.dumps({'error': dict(expected, code='501')}).encode(),
+            'duplicate_key': raw.replace(b'"code": 501', b'"code": 501, "code": 501'),
+            'wrong_envelope': json.dumps(expected).encode(),
+            'malformed_json': b'{"error":',
+            'oversized_body': raw.ljust(2049, b' '),
+        }
+        for name, body in cases.items():
+            with self.subTest(case=name):
+                response = MagicMock(status=501)
+                response.read.return_value = body
+                connection = MagicMock()
+                connection.getresponse.return_value = response
+                with patch('remote_control.http.client.HTTPConnection', return_value=connection):
+                    self.assertIs(control.slot_saves_disabled(self.profile), False)
+                response.read.assert_called_once_with(2049)
+                response.close.assert_called_once()
+                connection.close.assert_called_once()
+
+    def test_slot_save_attestation_rejects_unavailable_transport(self):
+        for failure in (ConnectionRefusedError(), TimeoutError()):
+            with self.subTest(error=type(failure).__name__):
+                connection = MagicMock()
+                connection.getresponse.side_effect = failure
+                with patch('remote_control.http.client.HTTPConnection', return_value=connection):
+                    self.assertIs(control.slot_saves_disabled(self.profile), False)
+                connection.close.assert_called_once()
 
     def test_short_control_socket_survives_long_macos_tmpdir(self):
         with patch('remote_control.sys.platform', 'darwin'), \

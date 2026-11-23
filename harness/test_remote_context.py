@@ -113,6 +113,17 @@ class RemoteWindowTests(unittest.TestCase):
         self.assertEqual(caught.exception.physical_context['prompt_tokens'], 16000)
         self.assertEqual(self.budget.check('system', {}, {}), charge)
 
+    def test_runtime_context_uses_remote_proof_slack_at_a_rounding_boundary(self):
+        self.service.tokens = 3832  # 8192 after 4096 output, eight slack and 256 runtime headroom.
+        current = context_window.check(self.budget, 'system', {}, {})
+        self.assertEqual(context_window.runtime_context(self.budget, current), 8192)
+
+        with patch.object(remote_context, 'CONTEXT_SLACK', 17):
+            proof = context_window.check(self.budget, 'system', {}, {})
+            context_window.validate_proof(proof, self.budget, 'system', {}, {})
+            self.assertEqual(proof['context_slack_tokens'], 17)
+            self.assertEqual(context_window.runtime_context(self.budget, proof), 9216)
+
     def test_pre_source_probe_counts_with_legal_schema_but_cannot_authorize_dispatch(self):
         schema = {'type': 'object', 'properties': {'citations': {'type': 'array', 'minItems': 1,
             'items': {'type': 'integer', 'enum': []}}}, 'required': ['citations']}
@@ -216,10 +227,8 @@ class RemoteWindowTests(unittest.TestCase):
         with self.assertRaises(InvalidUpdate):
             context_window.validate_proof(first, budget, 'system', {}, {})
 
-    def test_prefix_proof_binds_wire_scope_and_replays_with_opt_in_disabled(self):
-        import architecture_role
+    def reviewed_prefix_budget(self):
         import remote_prefix
-        from test_discovery_selection import LEGACY_FIXTURE
 
         template = patch.object(remote_prefix, 'TEMPLATE_SHA256', sha(self.service.template))
         template.start()
@@ -230,6 +239,14 @@ class RemoteWindowTests(unittest.TestCase):
         window = remote_context.discover(profile)
         budget = Budget(16384, 4096, 256, context_profile=2,
                         reservation_limit=65536, context_window=window)
+        return profile, budget
+
+    def test_prefix_proof_binds_wire_scope_and_replays_with_opt_in_disabled(self):
+        import architecture_role
+        from test_discovery_selection import LEGACY_FIXTURE
+
+        profile, budget = self.reviewed_prefix_budget()
+        window = budget.context_window
         system = architecture_role.SYSTEM
         payload = copy.deepcopy(LEGACY_FIXTURE['payload'])
         spec = architecture_role.schema(payload)
@@ -259,6 +276,50 @@ class RemoteWindowTests(unittest.TestCase):
         # A model-facing payload cannot select an optional wire projection.
         body, _, _ = remote_context.wire_request(window, system, dict(payload, prefix_reuse=prefix), spec, 4096)
         self.assertEqual(body, legacy_body)
+
+    def test_direct_architect_calibration_rotates_scope_and_preserves_historical_proof(self):
+        import architecture_role
+        import calibration
+        import remote_prefix
+        from test_calibration import profile as fixture_calibration
+        from test_discovery_selection import LEGACY_FIXTURE
+        from vscode_bridge import handle
+
+        profile, budget = self.reviewed_prefix_budget()
+        window = budget.context_window
+        instance = {'pid': 724, 'boot_id': 'fixture-boot', 'started_at': 'fixture-start',
+                    'executable_sha256': window['executable_sha256'], 'model_sha256': window['model_sha256']}
+        workspace, storage = self.root / 'repo', self.root / 'store'
+        workspace.mkdir()
+        (workspace / 'source.py').write_text('def work():\n    return 724\n')
+        task = handle(storage, workspace, {'op': 'review_new', 'goal': 'Review the source.', 'roots': ['.']})
+        sid = task['session']
+        ledger = InvocationLedger(storage / 'state.sqlite')
+        self.addCleanup(ledger.close)
+        self.assertIsNone(machine.ACTIVE.get(), 'Direct architecture calls have no explicit active scope')
+        before = ledger.begin_run(sid, 'Review the source.', [], None)
+        first_scope = remote_prefix.binding(ledger, before, window, instance)
+
+        archived = copy.deepcopy(LEGACY_FIXTURE['payload'])
+        archived['contract'] = ledger.pinned(sid)
+        spec = architecture_role.schema(archived)
+        # Existing v1 proofs persist the opaque scope marker supplied by 0.58.0.
+        historical = context_window.check(budget, architecture_role.SYSTEM, archived, spec,
+            prefix={'version': 1, 'scope_sha256': 'a' * 64, 'cache_prompt': True})
+
+        ref = calibration.register(ledger, fixture_calibration())
+        calibration.bind(ledger, sid, [ref], calibration.EMPTY_HASH)
+        after = ledger.begin_run(sid, 'Review the source.', [], None)
+        past, current = (ledger.run(run)['config'] for run in (before, after))
+        for key in ('contract_hash', 'epoch', 'logic_hash', 'request_hash'):
+            self.assertEqual(past[key], current[key])
+        self.assertNotEqual(past['calibration_binding'], current['calibration_binding'])
+        self.assertEqual(remote_prefix.binding(ledger, before, window, instance), first_scope)
+        self.assertNotEqual(remote_prefix.binding(ledger, after, window, instance), first_scope)
+        with patch.object(remote_context, '_identity', side_effect=AssertionError('Historical proof replay must be offline')), \
+                patch.object(remote_prefix, 'binding', side_effect=AssertionError('Replay must use the stored scope')):
+            context_window.validate_proof(historical, budget, architecture_role.SYSTEM, archived, spec,
+                                          remote_profiles.identity(profile['name'], profile))
 
     def test_discovery_requires_pinned_runtime_and_unavailable_probe_stays_conservative(self):
         unpinned = dict(self.profile)

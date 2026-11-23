@@ -8,6 +8,7 @@ never claims about a verified inference peak.
 """
 from collections import OrderedDict
 from contextlib import contextmanager
+from contextvars import ContextVar
 import base64
 import copy
 import math
@@ -42,6 +43,7 @@ _GPU_UUID = re.compile(r'GPU-[a-fA-F0-9-]{16,64}')
 _verified = OrderedDict()
 _verified_lock = threading.Lock()
 MAX_VERIFIED_MODELS = 32
+_dispatch_scope = ContextVar('sutra_remote_dispatch_observation', default=None)
 _REMOTE_STEPS = frozenset(('listener', 'process', 'executable_hash', 'os_identity',
     'model_stat', 'model_hash', 'gpu_inventory', 'gpu_processes', 'ram',
     'instance_recheck', 'reply'))
@@ -153,9 +155,9 @@ $os=Get-CimInstance Win32_OperatingSystem
 Observation-Step 'instance_recheck'
 $again=Get-CimInstance Win32_Process -Filter ('ProcessId='+$listener.OwningProcess)
 if (!$again -or $again.CreationDate -ne $proc.CreationDate -or $again.ExecutablePath -ne $proc.ExecutablePath) { throw 'Listener instance changed during measurement' }
-$cacheArgs=[regex]::Matches($proc.CommandLine,'(?i)(?:^|\s)(?:--cache-ram|-cram)(?==|\s|$)')
-$prefixIsolated=($cacheArgs.Count -eq 1 -and (Read-Argument @('--cache-ram','-cram')) -ceq '0' -and
- $proc.CommandLine -notmatch '(?i)(?:^|\s)--slot-save-path(?==|\s|$)')
+$cacheArgs=[regex]::Matches($proc.CommandLine,'(?i)(?:^|\s)(?:--cache[-_]ram|-cram)(?==|\s|$)')
+$prefixIsolated=($cacheArgs.Count -eq 1 -and (Read-Argument @('--cache-ram','--cache_ram','-cram')) -ceq '0' -and
+ $proc.CommandLine -notmatch '(?i)(?:^|\s)--slot[-_]save[-_]path(?==|\s|$)')
 Observation-Step 'reply'
 @{
  version=1;nonce=NONCE;host_id=$env:COMPUTERNAME;boot_id=$os.LastBootUpTime.ToUniversalTime().ToString('o')
@@ -339,11 +341,14 @@ $file=Get-Item -LiteralPath MODEL_PATH -Force
     return current
 
 
-def probe(profile):
+def probe(profile, *, warm_binding=None):
     """Separate a bounded cold identity pass from fresh counter admission."""
     from lifecycle import remaining
     from remote_control import ensure_tunnel, run_ps
     cached = _cached(profile)
+    if warm_binding is not None and (not cached or cached['binding'] != warm_binding or
+                                     cached['sha256'] != profile['model_sha256']):
+        raise InvalidUpdate('Warm remote observation has no matching verified identity checkpoint')
     recovered_timeout = None
     while True:
         with _stage('ssh_tunnel', TUNNEL_READINESS_SECONDS):
@@ -355,6 +360,8 @@ def probe(profile):
             preflight = _preflight_binding(profile,
                 run_ps(profile, _preflight_script(profile, nonce), timeout_seconds=5, reuse_tunnel=True), nonce)
             reuse = cached is not None and cached['binding'] == preflight
+            if warm_binding is not None and (not reuse or preflight != warm_binding):
+                raise InvalidUpdate('Remote instance or model file changed before the warm observation')
             if recovered_timeout is not None and not reuse:
                 raise InvalidUpdate('Remote identity changed before the warm inspection retry')
         basis = 'verified_hash_reused_with_stat_and_instance' if reuse else 'fresh_full_hash'
@@ -371,7 +378,7 @@ def probe(profile):
             available = remaining()
             # Only a transient warm transport timeout earns a retry. All GPU
             # evidence must come from the new nonce-bound observation.
-            if (not reuse or recovered_timeout is not None or failure.get('failure_kind') != 'timeout'
+            if (warm_binding is not None or not reuse or recovered_timeout is not None or failure.get('failure_kind') != 'timeout'
                     or (available is not None and available < TUNNEL_READINESS_SECONDS + MAX_CAPTURE_SECONDS)):
                 if recovered_timeout is not None:
                     failure['prior_timeout'] = recovered_timeout
@@ -729,9 +736,12 @@ def snapshot(root, *, now=None):
         return missing
 
 
-def _observe(profile, context):
+def _observe(profile, context, *, warm_binding=None):
     try:
-        sample = probe(profile)
+        sample = probe(profile) if warm_binding is None else probe(profile, warm_binding=warm_binding)
+        if warm_binding is not None and (_cache_binding(sample) != warm_binding or
+                sample['model'].get('digest_basis') != 'verified_hash_reused_with_stat_and_instance'):
+            raise InvalidUpdate('Warm remote observation differs from its verified identity checkpoint')
     except (OSError, ValueError, InvalidUpdate, KeyError, TypeError, AttributeError, OverflowError) as error:
         # InvalidUpdate messages in this path are host-authored and sanitized by
         # remote_control. Preserve the observed cause, never a remote body/key.
@@ -782,21 +792,98 @@ def recover(root, model_name, audit=None):
     return result
 
 
+def _age_only_admission(provider, plan, sample, context, now, scope):
+    """Only expiry of an otherwise valid, admitted leased sample earns refresh."""
+    if (not scope or scope['provider'] is not provider or scope['refresh_attempted'] or
+            scope['thread_id'] != threading.get_ident() or
+            scope['profile'] != provider.profile or scope['instance'] != getattr(provider, 'remote_instance', None)
+            or plan.get('admitted') is not True or plan.get('available') is not True or
+            not isinstance(sample, dict)):
+        return None
+    stamp = sample.get('wall_time')
+    if type(stamp) not in (int, float) or not math.isfinite(stamp) or now - stamp <= MAX_SAMPLE_AGE:
+        return None
+    historical = evaluate(provider.profile, sample, context, now=stamp)
+    if not historical.get('admitted') or historical.get('instance') != scope['instance']:
+        return None
+    return historical
+
+
+def _retain_dispatch_refresh(provider, before, context, scope, fresh, began):
+    evidence = {'version': 1, 'reason': 'sample_age_only', 'attempt': 1, 'max_attempts': 1,
+                'warm_only': True, 'inference_started': False, 'context_tokens': context,
+                'elapsed_seconds': max(0., time.monotonic() - began),
+                'before': copy.deepcopy(before), 'after': copy.deepcopy(fresh)}
+    scope['refresh_evidence'] = evidence
+    provider.dispatch_refresh = copy.deepcopy(evidence)
+    fresh['dispatch_refresh'] = copy.deepcopy(evidence)
+    return fresh
+
+
+def _refresh_dispatch_observation(provider, before, context, scope):
+    """One warm metadata observation, never a repeated inference or reservation."""
+    from remote_profiles import load, require_assignment
+    scope['refresh_attempted'] = True
+    began = time.monotonic()
+    try:
+        require_assignment(provider.profile)
+        if load(provider.model)['profile_hash'] != scope['profile']['profile_hash']:
+            raise InvalidUpdate('Remote profile changed before the dispatch observation refresh')
+        binding = _cache_binding(before['hardware']['sample'])
+        fresh = _observe(provider.profile, context, warm_binding=binding)
+    except (OSError, ValueError, InvalidUpdate, KeyError, TypeError, AttributeError, OverflowError) as error:
+        fresh = _blocked('Warm remote dispatch observation unavailable.')
+        fresh['observation_failure'] = copy.deepcopy(getattr(error, 'remote_observation', None)) or {
+            'stage': 'dispatch_observation_refresh', 'error_type': type(error).__name__, 'failure_kind': 'rejected'}
+    except BaseException as error:
+        # Cancellation remains cancellation. Retain the attempted observation
+        # without swallowing the stop or changing the committed allocation.
+        interrupted = _blocked('Warm remote dispatch observation did not complete.', kind='runtime_uncertain')
+        interrupted['observation_failure'] = {'stage': 'dispatch_observation_refresh',
+            'error_type': type(error).__name__[:80],
+            'failure_kind': 'interrupted' if not isinstance(error, Exception) else 'rejected'}
+        _retain_dispatch_refresh(provider, before, context, scope, interrupted, began)
+        raise
+    if (fresh.get('admitted') and (fresh.get('instance') != scope['instance'] or
+            getattr(provider, 'remote_instance', None) != scope['instance'] or
+            provider.profile != scope['profile'] or provider.runtime_context_tokens != context)):
+        fresh = _blocked('Remote instance or context changed during the dispatch observation refresh.',
+                         kind='runtime_uncertain')
+    if fresh.get('admitted') and fresh['hardware']['sample']['nonce'] == before['hardware']['sample']['nonce']:
+        fresh = _blocked('Warm remote dispatch observation did not supply a new observation identity.')
+    fresh = _retain_dispatch_refresh(provider, before, context, scope, fresh, began)
+    if fresh.get('admitted'):
+        provider.memory_plan = fresh
+    return fresh
+
+
 def require_dispatch_fresh(provider):
     """Check the admitted measurement again immediately before HTTP POST.
 
-    No implicit retry, fresh hash scan, task allocation or reservation refund is
-    performed after the invocation has already been committed by the gateway.
+    One age-only failure can refresh counters under the existing dispatch lease,
+    retaining its exact instance and warm identity checkpoint. It cannot rehash
+    weights, repeat inference, change allocation or refund a reservation.
     """
     plan = getattr(provider, 'memory_plan', None) or {}
     hardware = plan.get('hardware') or {}
     sample = hardware.get('sample')
-    fresh = evaluate(provider.profile, sample, getattr(provider, 'runtime_context_tokens', 0))
+    context = getattr(provider, 'runtime_context_tokens', 0)
+    now = time.time()
+    fresh = evaluate(provider.profile, sample, context, now=now)
     instance = getattr(provider, 'remote_instance', None)
     if fresh.get('admitted') and instance != fresh.get('instance'):
         fresh = _blocked('Remote instance binding changed before HTTP dispatch.', kind='runtime_uncertain')
+    scope = _dispatch_scope.get()
+    if not fresh.get('admitted') and fresh.get('blocker') == 'measurement_unavailable':
+        before = _age_only_admission(provider, plan, sample, context, now, scope)
+        if before is not None:
+            fresh = _refresh_dispatch_observation(provider, before, context, scope)
+    if scope and scope['provider'] is provider and scope.get('refresh_evidence') and 'dispatch_refresh' not in fresh:
+        fresh['dispatch_refresh'] = copy.deepcopy(scope['refresh_evidence'])
     if not fresh.get('admitted'):
         state = dict(fresh.get('hardware', fresh))
+        if 'dispatch_refresh' in fresh:
+            state['dispatch_refresh'] = copy.deepcopy(fresh['dispatch_refresh'])
         state['runtime'] = {'kind': 'model_capacity', 'stage': 'remote_pre_transport',
                             'inference_started': False}
         raise ResourceWait(state)
@@ -810,6 +897,7 @@ def dispatch(provider, root, call_id, system, payload, schema):
     if not enabled():
         raise InvalidUpdate('Remote inference requires the shared Sutra runtime directory')
     with lease():
+        provider.dispatch_refresh = None
         require_assignment(provider.profile)
         if hasattr(provider, 'fresh_context_metadata'):
             provider.fresh_context_metadata()
@@ -830,4 +918,11 @@ def dispatch(provider, root, call_id, system, payload, schema):
             raise ResourceWait(state)
         provider.remote_instance = plan['instance']
         provider.memory_plan = plan
-        yield plan
+        scope = {'provider': provider, 'profile': copy.deepcopy(provider.profile),
+                 'instance': copy.deepcopy(plan['instance']), 'refresh_attempted': False,
+                 'refresh_evidence': None, 'thread_id': threading.get_ident()}
+        token = _dispatch_scope.set(scope)
+        try:
+            yield plan
+        finally:
+            _dispatch_scope.reset(token)

@@ -240,5 +240,5 @@ def validate_proof(proof, budget, system, payload, schema, model_identity=None):
 def runtime_context(budget, proof):
     if not exact(budget):
         return None
-    required = proof['prompt_tokens'] + budget.response_reserve + STRATA_CONTEXT_SLACK
+    required = proof['prompt_tokens'] + budget.response_reserve + proof['context_slack_tokens']
     return min(budget.context_limit, ((required + 256 + 1023) // 1024) * 1024)

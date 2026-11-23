@@ -43,6 +43,7 @@ def _enabled(model):
 
 def binding(ledger, run_id, window, instance):
     import orchestration
+    from calibration import EMPTY_HASH
     if (not isinstance(instance, dict) or type(instance.get('pid')) is not int or instance['pid'] <= 0
             or not instance.get('started_at') or not instance.get('boot_id')
             or instance.get('executable_sha256') != window['executable_sha256']
@@ -57,6 +58,7 @@ def binding(ledger, run_id, window, instance):
     return sha(canonical({
         'version': 1, 'store': str(Path(ledger.path).resolve()), 'session': session,
         'node': node_id, 'epoch': run['config']['epoch'], 'contract': run['config']['contract_hash'],
+        'calibration': run['config'].get('calibration_binding', {'hash': EMPTY_HASH})['hash'],
         'policy': run['config']['logic_hash'], 'permissions': orchestration.permissions(ledger, session),
         'node_permissions': node['permissions'] if node is not None else None,
         'window': window, 'instance': instance,
@@ -69,13 +71,27 @@ def plan(ledger, run_id, role, provider):
         return None
     memory = getattr(provider, 'memory_plan', None) or {}
     sample = memory.get('hardware', {}).get('sample') or {}
-    if not isolated(sample, window):
+    if memory.get('admitted') is not True or memory.get('resident') is not True or not isolated(sample, window):
         return None
-    return {'version': 1, 'scope_sha256': binding(ledger, run_id, window, memory.get('instance')),
+    from remote_control import slot_saves_disabled
+    if not slot_saves_disabled(provider.profile):
+        return None
+    instance = memory.get('instance')
+    memory['prefix_isolation'] = {'version': 1, 'slot_saves_disabled': True,
+                                  'instance_sha256': sha(canonical(instance))}
+    return {'version': 1, 'scope_sha256': binding(ledger, run_id, window, instance),
             'cache_prompt': True}
+
+
+def attested(memory, window):
+    sample = memory.get('hardware', {}).get('sample') or {}
+    return (memory.get('resident') is True and isolated(sample, window)
+            and memory.get('prefix_isolation') == {'version': 1, 'slot_saves_disabled': True,
+                                                   'instance_sha256': sha(canonical(memory.get('instance')))})
 
 
 def isolated(sample, window):
     return (sample.get('profile_hash') == window['profile_hash']
             and (sample.get('process') or {}).get('prefix_cache_isolated') is True
-            and (sample.get('server') or {}).get('total_slots') == 1)
+            and (sample.get('server') or {}).get('total_slots') == 1
+            and (sample.get('server') or {}).get('is_sleeping') is False)
