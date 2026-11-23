@@ -194,6 +194,15 @@ class InvocationLedger(GovernedContext):
                         request_check(self, session, payload)
                         if payload.get('evidence_discovery_version') == 4 and payload.get('memory_budget') != envelope['budget_profile']:
                             raise InvalidUpdate('Discovery context budget differs from provider')
+                        prefix = (context_measurement or {}).get('prefix_reuse')
+                        if prefix is not None:
+                            from remote_prefix import binding, isolated
+                            window = allocation.context_window
+                            memory = (resource or {}).get('runtime_memory') or {}
+                            sample = memory.get('hardware', {}).get('sample') or {}
+                            if (not isolated(sample, window)
+                                    or prefix['scope_sha256'] != binding(self, run_id, window, memory.get('instance'))):
+                                raise InvalidUpdate('Remote review prefix scope changed before dispatch')
                     else:
                         from review_role import check_request
                         check_request(self, session, payload)
@@ -797,15 +806,20 @@ class InvocationGateway:
             from model_packet import build, descriptor
             packet = build(system, payload, schema) if getattr(self.provider, 'model_interface', None) == 1 else None
             interface = descriptor(packet, self.provider.budget.template_reserve) if packet else None
-            from context_window import check as check_window, exact, validate_proof
+            from context_window import check as check_window, exact, runtime_context, validate_proof
             measurement = None
             if exact(self.provider.budget):
                 # A model can restart after its dispatch gate. Revalidate the
                 # live identity immediately before committing the invocation.
+                from remote_prefix import plan as prefix_plan
+                prefix = prefix_plan(ledger, self.run_id, role, self.provider)
+                options = {'prefix': prefix} if prefix is not None else {}
                 measurement = check_window(self.provider.budget, system, payload, schema,
-                                           thinking=getattr(self.provider, 'thinking', None))
+                                           thinking=getattr(self.provider, 'thinking', None), **options)
                 validate_proof(measurement, self.provider.budget, system, payload, schema, identity)
                 self.provider.context_measurement = measurement
+                if prefix is not None:
+                    self.provider.runtime_context_tokens = runtime_context(self.provider.budget, measurement)
             from invocation_timing import plan as timing_plan, require_headroom
             timing = timing_plan(self.provider, role, payload, ledger=ledger, run_id=self.run_id)
             require_headroom(timing)

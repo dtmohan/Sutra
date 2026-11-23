@@ -165,14 +165,16 @@ def exact(budget):
     return getattr(budget, 'context_profile', 1) == PROFILE
 
 
-def check(budget, system, payload, schema, *, thinking=_UNSET, planning=False):
+def check(budget, system, payload, schema, *, thinking=_UNSET, planning=False, prefix=None):
     """Measure physical fit; reservation accounting remains Budget.check()."""
     if not exact(budget):
         return None
     window = validate_window(budget.context_window)
     if window['provider'] == 'sutra_remote':
         from remote_context import check as check_remote
-        return check_remote(budget, system, payload, schema, planning=planning)
+        return check_remote(budget, system, payload, schema, planning=planning, prefix=prefix)
+    if prefix is not None:
+        raise InvalidUpdate('Remote review prefix scope requires a verified remote window')
     if budget.context_limit > window['context_tokens']:
         raise InvalidUpdate('Physical context allocation exceeds the verified server window')
     if thinking is _UNSET:

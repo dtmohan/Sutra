@@ -17,13 +17,14 @@ from test_remote_profiles import descriptor
 
 
 def stream(answer='{"answer":"done"}', *, finish='stop', usage=True, done=True,
-           tool=False, counts=(91, 34)):
+           tool=False, counts=(91, 34), timings=None):
     events = [dict(choices=[dict(delta={'reasoning_content': 'Observed evidence. '}, finish_reason=None)])]
     delta = {'tool_calls': [{'id': 'not-a-host-action'}]} if tool else {'content': answer}
     events.append(dict(choices=[dict(delta=delta, finish_reason=finish)]))
     if usage:
         events.append(dict(choices=[], usage={'prompt_tokens': counts[0], 'completion_tokens': counts[1]},
-                           timings={'prompt_n': counts[0], 'predicted_n': counts[1]}))
+                           timings=timings if timings is not None else {
+                               'prompt_n': counts[0], 'predicted_n': counts[1]}))
     data = b''.join(b'data: ' + json.dumps(event).encode() + b'\n\n' for event in events)
     return data + (b'data: [DONE]\n\n' if done else b'')
 
@@ -116,6 +117,7 @@ class RemoteTransportTests(unittest.TestCase):
         self.assertEqual(request['body']['response_format']['json_schema']['schema'], self.schema)
         self.assertEqual(request['body']['max_tokens'], 2048)
         self.assertEqual(request['body']['temperature'], 0.6)
+        self.assertIs(request['body']['cache_prompt'], False)
         self.assertNotIn('reasoning_budget_tokens', request['body'])
         self.assertNotIn('unit-test-remote-credential', json.dumps(record))
         trace = (self.root / 'calls/call.json').read_text()

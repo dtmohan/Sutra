@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.58.0
+
+- Add opt-in prompt-prefix reuse for architecture discovery on a verified RTX runtime with one slot, the RAM prompt store disabled, and disk slot saves off.
+- Put stable task context before changing evidence. Scope reuse to the current task, approved permissions, model, template, and verified server process.
+- Bind exact counting and generation to the same request. Charge full prompt and output counts and preserve offline verification of earlier receipts.
+
 ## 0.57.9
 
 - Route verified remote GPU or host RAM capacity stops in Auto to an eligible smaller configured local tier. Refit source and context under the original task and budget.

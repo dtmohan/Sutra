@@ -13,6 +13,18 @@ DERIVED_REVIEW_SUMMARY_VERSION = 3
 REFERENCE_VERSIONS = {CITATION_REFERENCE_VERSION, DERIVED_REVIEW_SUMMARY_VERSION}
 RETAINED_ARCHITECT_VERSION = 14
 REVIEW_JUDGMENT_VERSION = 15
+ARCHITECT_STABLE_FIRST = 'architect-stable-first-v1'
+# This is a transport projection only. Actual equality of rendered tokens,
+# rather than these field names, determines what a native server may reuse.
+ARCHITECT_STABLE_KEYS = ('request', 'task', 'task_commitment', 'mode', 'phase',
+                         'initial_excerpts', 'workspace_map')
+ARCHITECT_VOLATILE_KEYS = frozenset({
+    'evidence', 'pages', 'retained_context', 'source_page_view', 'source_page_toc',
+    'working_memory_unverified', 'discovery_notes_unverified', 'discovery_coverage',
+    'earlier_work_unverified', 'child_analysis_unverified', 'execution', 'repository',
+    'evidence_coverage', 'source_page_coverage', 'supplied_source_progress',
+    'host_feedback', 'repair',
+})
 DISCOVERY_NOTE_BYTES = 1600
 # Canonical compact note with empty summary, one empty gap, and empty host
 # findings/completed arrays is 120 bytes. One Unicode codepoint needs at most
@@ -335,8 +347,26 @@ def source_page_view(page):
     return view
 
 
-def build(system, payload, schema):
+def _architect_stable_body(body):
+    """Reorder one JSON object's fields without altering any nested value.
+
+    Canonical serialization still governs every value. Only the top-level
+    order differs, keeping common task/source context ahead of changing pages,
+    observations and tool counters. No field is dropped, summarized or renamed.
+    """
+    stable = [key for key in ARCHITECT_STABLE_KEYS if key in body]
+    middle = sorted(set(body) - set(stable) - ARCHITECT_VOLATILE_KEYS)
+    volatile = sorted(set(body) & ARCHITECT_VOLATILE_KEYS)
+    return '{' + ','.join(canonical(key) + ':' + canonical(body[key])
+                          for key in stable + middle + volatile) + '}'
+
+
+def build(system, payload, schema, *, packing=None):
     role = role_for(system)
+    # The caller supplies this trusted transport flag; payload fields cannot
+    # select a projection. Missing flags preserve historical wire bytes/hashes.
+    if packing is not None and (packing != ARCHITECT_STABLE_FIRST or role != 'architect'):
+        raise InvalidUpdate('Unsupported model packet transport packing')
     if role is None: return None
     use_references = citation_references(role, payload)
     version = DERIVED_REVIEW_SUMMARY_VERSION if use_references else VERSION
@@ -662,7 +692,8 @@ def build(system, payload, schema):
                     'evidence discovery, not final publication. Earlier notes are unverified.')
         if role == 'report_reviewer' and payload.get('review_protocol') != 2:
             wire_system = system.replace('Echo the task and constraints exactly. ', '') + ' Host task IDs and constraints are supplied separately; omit them from output.'
-        messages_out = [{'role': 'system', 'content': wire_system}, {'role': 'user', 'content': canonical(body)}]
+        content = _architect_stable_body(body) if packing == ARCHITECT_STABLE_FIRST else canonical(body)
+        messages_out = [{'role': 'system', 'content': wire_system}, {'role': 'user', 'content': content}]
     elif role == 'memory_probe':
         messages_out = [{'role': 'system', 'content': system}, {'role': 'user', 'content': canonical(select(payload, ('request', 'fixture')))}]
     else:
@@ -676,16 +707,24 @@ def build(system, payload, schema):
         for k in ('_request_nonce', 'derived_from', 'calibration_binding', 'memory_budget', 'reasoning'):
             p.pop(k, None)
         messages_out = [{'role': 'system', 'content': system}, {'role': 'user', 'content': canonical(p)}]
-    return {'version': version, 'role': role, 'messages': messages_out, 'schema': fmt}
+    packet = {'version': version, 'role': role, 'messages': messages_out, 'schema': fmt}
+    if packing is not None:
+        packet['packing'] = packing
+    return packet
 
 
 def descriptor(packet, template_reserve):
     prompt = len(canonical(packet['messages']).encode())
     grammar = len(canonical(packet['schema']).encode())
-    return {'version': packet['version'], 'role': packet['role'], 'packet_hash': sha(canonical(packet)),
+    value = {'version': packet['version'], 'role': packet['role'], 'packet_hash': sha(canonical(packet)),
             'prompt_utf8_bytes': prompt, 'schema_allowance': grammar,
             'template_allowance': template_reserve, 'input_reservation': prompt + grammar + template_reserve,
             'estimator': 'model_packet_utf8_upper_bound_v1'}
+    if 'packing' in packet:
+        if packet['packing'] != ARCHITECT_STABLE_FIRST or packet['role'] != 'architect':
+            raise InvalidUpdate('Unsupported model packet transport packing')
+        value['packing'] = packet['packing']
+    return value
 
 
 def bind_output(role, payload, schema, raw, version=VERSION):

@@ -180,7 +180,8 @@ class RemoteModel(LocalModel):
         from model_activity import ACTIVE
         from model_packet import build
         from reasoning_policy import check_provider
-        from remote_context import supports_parent_output_recovery, verify_parent_reasoning, wire_request
+        from remote_context import (supports_parent_output_recovery, verify_parent_reasoning,
+                                    verify_prefix_window, wire_request)
         from storage_policy import write_trace
 
         packet = build(system, payload, schema)
@@ -194,12 +195,13 @@ class RemoteModel(LocalModel):
         recovery = 'parent_draft_recovery' in payload
         if recovery and not supports_parent_output_recovery(self.budget):
             raise InvalidUpdate('Bounded remote reasoning requires an exact, verified physical context')
-        window = self.budget.context_window if recovery else self.profile
-        body, _, wire_schema = wire_request(window, system, payload, schema, self.budget.response_reserve)
         physical = getattr(self, 'context_measurement', None) if exact(self.budget) else None
         if exact(self.budget):
             validate_proof(physical, self.budget, system, payload, schema,
                            self.expected_identity if recovery else None)
+        prefix = physical.get('prefix_reuse') if physical is not None else None
+        window = self.budget.context_window if recovery or prefix is not None else self.profile
+        body, _, wire_schema = wire_request(window, system, payload, schema, self.budget.response_reserve, prefix=prefix)
         transport = {'version': 1, 'phase': 'connect', 'headers_received': False,
                      'frames_received': 0, 'content_bytes': 0, 'reasoning_bytes': 0}
         record = {'call_id': call_id, 'request': body, 'provider': 'sutra_remote',
@@ -230,6 +232,8 @@ class RemoteModel(LocalModel):
             observed = remote_control.verify_server(self.profile)
             if recovery:
                 verify_parent_reasoning(window, self.profile, observed['props'])
+            if prefix is not None:
+                verify_prefix_window(window, self.profile, observed['props'])
             from remote_memory import require_dispatch_fresh, verify_instance
             verify_instance(self.profile, self.remote_instance)
             if self.health:
@@ -239,7 +243,11 @@ class RemoteModel(LocalModel):
                 self.health.phase = call_id
             request_body = json.dumps(body)
             request_headers = remote_control.headers(self.profile)
-            require_dispatch_fresh(self)
+            admission = require_dispatch_fresh(self)
+            if prefix is not None:
+                from remote_prefix import isolated
+                if not isolated(admission['hardware']['sample'], window):
+                    raise InvalidUpdate('Remote review prefix slot configuration changed before generation')
             connection.request('POST', '/v1/chat/completions', request_body, request_headers)
             transport['phase'] = 'response_headers'
             transport_socket = connection.sock
@@ -264,6 +272,8 @@ class RemoteModel(LocalModel):
             observed = remote_control.verify_server(self.profile)
             if recovery:
                 verify_parent_reasoning(window, self.profile, observed['props'])
+            if prefix is not None:
+                verify_prefix_window(window, self.profile, observed['props'])
             verify_instance(self.profile, self.remote_instance)
             transport['phase'] = 'decode'
             try:

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from context_manager import ContextBudgetExceeded, InvalidUpdate, canonical
+from context_manager import ContextBudgetExceeded, InvalidUpdate, canonical, sha
 from invocation_gateway import InvocationLedger, consume_dispatch
 from model_packet import build, descriptor, host_fields
 from monitoring import ResourceWait
@@ -183,8 +183,15 @@ class RemoteWindowTests(unittest.TestCase):
     def test_proof_replays_offline_and_rejects_changed_route_reserve_or_payload(self):
         proof = context_window.check(self.budget, 'system', {}, {})
         identity = remote_profiles.identity(self.profile['name'], self.profile)
+        wire = self.service.calls[-1][1]
+        self.assertIs(wire['cache_prompt'], False)
+        self.assertEqual(proof['wire_sha256'], sha(canonical(wire)))
         with patch.object(remote_context, '_identity', side_effect=AssertionError('Offline replay made a network call')):
             context_window.validate_proof(proof, self.budget, 'system', {}, {}, identity)
+            unproved_cache_wire = dict(wire, cache_prompt=True)
+            changed = dict(proof, wire_sha256=sha(canonical(unproved_cache_wire)))
+            with self.assertRaisesRegex(InvalidUpdate, 'differs from its invocation'):
+                context_window.validate_proof(changed, self.budget, 'system', {}, {}, identity)
         for budget, system, payload, model in (
                 (self.budget.with_limits(response_reserve=2048), 'system', {}, identity),
                 (self.budget, 'changed system', {}, identity),
@@ -208,6 +215,50 @@ class RemoteWindowTests(unittest.TestCase):
         self.assertNotEqual(first['window'], second['window'])
         with self.assertRaises(InvalidUpdate):
             context_window.validate_proof(first, budget, 'system', {}, {})
+
+    def test_prefix_proof_binds_wire_scope_and_replays_with_opt_in_disabled(self):
+        import architecture_role
+        import remote_prefix
+        from test_discovery_selection import LEGACY_FIXTURE
+
+        template = patch.object(remote_prefix, 'TEMPLATE_SHA256', sha(self.service.template))
+        template.start()
+        self.addCleanup(template.stop)
+        profile = dict(self.profile, executable_sha256=remote_prefix.EXECUTABLE_SHA256)
+        profile.pop('profile_hash')
+        profile = remote_profiles.write({'test': profile}, self.registry)['test']
+        window = remote_context.discover(profile)
+        budget = Budget(16384, 4096, 256, context_profile=2,
+                        reservation_limit=65536, context_window=window)
+        system = architecture_role.SYSTEM
+        payload = copy.deepcopy(LEGACY_FIXTURE['payload'])
+        spec = architecture_role.schema(payload)
+        identity = remote_profiles.identity(profile['name'], profile)
+        prefix = {'version': 1, 'scope_sha256': 'a' * 64, 'cache_prompt': True}
+        legacy = context_window.check(budget, system, payload, spec)
+        legacy_body = self.service.calls[-1][1]
+        proof = context_window.check(budget, system, payload, spec, prefix=prefix)
+        cached_body = self.service.calls[-1][1]
+        self.assertIs(legacy_body['cache_prompt'], False)
+        self.assertNotIn('prefix_reuse', legacy)
+        self.assertEqual(proof['prefix_reuse'], prefix)
+        self.assertIs(cached_body['cache_prompt'], True)
+        self.assertEqual(proof['wire_sha256'], sha(canonical(cached_body)))
+        self.assertEqual(proof['prompt_tokens'], legacy['prompt_tokens'])
+        self.assertEqual(cached_body['response_format'], legacy_body['response_format'])
+        self.assertEqual(json.loads(cached_body['messages'][-1]['content']),
+                         json.loads(legacy_body['messages'][-1]['content']))
+        self.assertNotEqual(cached_body['messages'][0]['content'], legacy_body['messages'][0]['content'])
+        with patch.dict(os.environ, SUTRA_REMOTE_REVIEW_PREFIX_REUSE_MODELS='[]'), \
+                patch.object(remote_context, '_identity', side_effect=AssertionError('Proof replay must be offline')):
+            for stored in (legacy, proof):
+                context_window.validate_proof(stored, budget, system, payload, spec, identity)
+            for changed in (dict(prefix, scope_sha256='b' * 64), dict(prefix, cache_prompt=False)):
+                with self.subTest(prefix=changed), self.assertRaises(InvalidUpdate):
+                    context_window.validate_proof(dict(proof, prefix_reuse=changed), budget, system, payload, spec, identity)
+        # A model-facing payload cannot select an optional wire projection.
+        body, _, _ = remote_context.wire_request(window, system, dict(payload, prefix_reuse=prefix), spec, 4096)
+        self.assertEqual(body, legacy_body)
 
     def test_discovery_requires_pinned_runtime_and_unavailable_probe_stays_conservative(self):
         unpinned = dict(self.profile)

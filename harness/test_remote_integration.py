@@ -40,16 +40,20 @@ HELLO = {'page_requests': [], 'intent': 'conversation', 'escalation_reason': 'no
 class RemoteIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.requests = []
-
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-                cls.requests.append({'body': body, 'path': self.path,
-                                     'authorization': self.headers.get('Authorization')})
-                reply = stream(json.dumps(HELLO), counts=(91, 34))
+                request = {'body': body, 'path': self.path, 'authorization': self.headers.get('Authorization')}
+                if self.path == '/v1/chat/completions/input_tokens':
+                    cls.count_requests.append(request)
+                    reply = json.dumps({'object': 'response.input_tokens', 'input_tokens': 91}).encode()
+                    content_type = 'application/json'
+                else:
+                    cls.requests.append(request)
+                    reply = cls.remote_reply(body) if callable(cls.remote_reply) else cls.remote_reply
+                    content_type = 'text/event-stream'
                 self.send_response(200)
-                self.send_header('Content-Type', 'text/event-stream')
+                self.send_header('Content-Type', content_type)
                 self.send_header('Content-Length', str(len(reply)))
                 self.end_headers()
                 self.wfile.write(reply)
@@ -98,6 +102,8 @@ class RemoteIntegrationTests(unittest.TestCase):
         self.local_requests = []
         self.local_measurements = []
         type(self).requests = []
+        type(self).count_requests = []
+        type(self).remote_reply = stream(json.dumps(HELLO), counts=(91, 34))
         self.meta = {}
         client = SimpleNamespace(activate=self.activate, generate=self.generate)
         for target, kwargs in (
@@ -152,6 +158,230 @@ class RemoteIntegrationTests(unittest.TestCase):
     def reload(self):
         self.ledger.close()
         self.ledger = InvocationLedger(self.root / 'state.sqlite')
+
+    def enable_prefix_fixture(self):
+        import remote_prefix
+
+        fixture_template = 'Exact template from the fixture loopback server.'
+        profiles = remote_profiles.write({name: remote_descriptor(self.root, identifier=name,
+            port=self.server.server_port, model=f'fixture-{name}', model_sha256=digest * 64,
+            context_tokens=32768, executable_sha256=remote_prefix.EXECUTABLE_SHA256,
+            gpu_uuid='GPU-b90a1b75-3646-10a8-9987-8f6c6ccfdee0')
+            for name, digest in (('rtx3090', 'a'), ('alternate', 'b'))}, self.registry)
+        def native_server(profile):
+            return {'props': {'chat_template': fixture_template,
+                              'default_generation_settings': {'n_ctx': profile['context_tokens']}}}
+        self.isolated_cache = True
+        self.fixture_prefixes = []
+        def observed(profile):
+            sample = self.remote_hardware(profile)
+            sample['process']['executable_sha256'] = profile['executable_sha256']
+            sample['process']['prefix_cache_isolated'] = self.isolated_cache
+            return sample
+        for mocked in (patch.dict(os.environ, SUTRA_REMOTE_MODELS=canonical([p['name'] for p in profiles.values()]),
+                                  SUTRA_REMOTE_REVIEW_PREFIX_REUSE_MODELS=canonical([p['name'] for p in profiles.values()])),
+                       patch.object(remote_prefix, 'TEMPLATE_SHA256', sha(fixture_template)),
+                       patch('remote_control.verify_server', side_effect=native_server),
+                       patch('remote_memory.probe', side_effect=observed)):
+            mocked.start()
+            self.addCleanup(mocked.stop)
+
+        def response(body):
+            if set(body['response_format']['json_schema']['schema']['properties']) != {
+                    'tool', 'summary', 'remaining', 'findings', 'completed', 'edges'}:
+                raise AssertionError('Fixture requires an actual legacy architect decoder schema')
+            scopes = self.fixture_prefixes
+            prefix = body['messages'][0]['content'].splitlines()[0]
+            hit = bool(body['cache_prompt'] and scopes and scopes[-1] == prefix)
+            scopes.append(prefix if body['cache_prompt'] else None)
+            target = 'allowed/entry.py' if len(scopes) % 2 else 'allowed/worker.py'
+            result = {'tool': {'kind': 'read', 'target': target, 'query': '', 'line': 1},
+                      'summary': 'Read the next approved source file.', 'remaining': [],
+                      'findings': [], 'completed': [], 'edges': []}
+            return stream(json.dumps(result), timings={'cache_n': 64 if hit else 0,
+                          'prompt_n': 27 if hit else 91, 'prompt_ms': 2., 'predicted_n': 34, 'predicted_ms': 4.})
+
+        type(self).remote_reply = staticmethod(response)
+        self.workspace = (self.root / 'repo').resolve()
+        allowed = self.workspace / 'allowed'
+        allowed.mkdir(parents=True)
+        (allowed / 'entry.py').write_text('def entry():\n    return 7\n')
+        (allowed / 'worker.py').write_text('def worker():\n    return 24\n')
+        (self.workspace / 'outside.py').write_text('INACCESSIBLE_UNDER_REVIEW_SCOPE = 724\n')
+        return profiles
+
+    def new_prefix_review(self):
+        from vscode_bridge import handle
+
+        handle(self.root, self.workspace, {'op': 'auto_new', 'goal': 'Trace the actual project request flow.',
+                                         'roots': ['allowed']})
+        return json.loads((self.root / 'workspace.json').read_text())
+
+    def architect(self, meta, profile):
+        import architecture_runtime
+        import orchestration
+        from paging import Budget
+        import remote_context
+
+        provider = RemoteModel(self.root / 'calls', profile['name'], review=True)
+        window = remote_context.discover(profile)
+        self.assertIsNotNone(window)
+        provider.budget = Budget(32768, 2048, context_profile=2,
+                                 reservation_limit=200000, context_window=window)
+        provider.context_metadata['_sutra_context_window'] = window
+        node = orchestration.task(self.ledger, meta['active'])
+        self.ledger.db.commit()
+        with orchestration.scope(node['id']):
+            return architecture_runtime.dispatch(self.ledger, meta, self.workspace, self.root,
+                {'prompt': 'Read the approved source and trace the actual request flow.',
+                 'model': profile['name'], 'mode': 'explore'}, provider=provider)
+
+    def architect_records(self, out):
+        result = out['result']
+        self.assertTrue(result['admission']['admitted'], result)
+        row = self.ledger.db.execute('SELECT i.record_json,r.record_json FROM invocations i '
+            'JOIN invocation_receipts r ON r.invocation_id=i.id WHERE i.id=?', (result['invocation_id'],)).fetchone()
+        return tuple(json.loads(value) for value in row)
+
+    def test_certified_prefix_is_stable_within_scope_and_rotates_on_task_and_model_switch(self):
+        import repository_tools
+
+        profiles = self.enable_prefix_fixture()
+        primary, alternate = profiles['rtx3090'], profiles['alternate']
+        first_task = self.new_prefix_review()
+        sid = first_task['active']
+        original = usage(self.ledger, sid)
+        contract = self.ledger.pinned(sid)
+        first, first_receipt = self.architect_records(self.architect(first_task, primary))
+        self.reload()
+        warm, warm_receipt = self.architect_records(self.architect(first_task, primary))
+        switched, switched_receipt = self.architect_records(self.architect(first_task, alternate))
+        second_task = self.new_prefix_review()
+        other, _ = self.architect_records(self.architect(second_task, primary))
+        self.isolated_cache = False
+        unverified, _ = self.architect_records(self.architect(second_task, primary))
+
+        def prefix(envelope):
+            return envelope['physical_context']['prefix_reuse']
+
+        self.assertEqual(prefix(first), prefix(warm))
+        self.assertEqual(len({prefix(first)['scope_sha256'], prefix(switched)['scope_sha256'],
+                              prefix(other)['scope_sha256']}), 3)
+        self.assertNotEqual(sid, second_task['active'])
+        self.assertNotIn('prefix_reuse', unverified['physical_context'])
+        self.assertEqual(len(self.requests), 5)
+        for request, envelope in zip(self.requests, (first, warm, switched, other, unverified)):
+            body = request['body']
+            proof = envelope['physical_context']
+            self.assertEqual(proof['wire_sha256'], sha(canonical(body)))
+            self.assertIn(body, [item['body'] for item in self.count_requests],
+                          'The exact counter and generation must see the same committed body')
+            self.assertIs(body['cache_prompt'], 'prefix_reuse' in proof)
+            self.assertNotIn('INACCESSIBLE_UNDER_REVIEW_SCOPE', canonical(body['messages']))
+            if body['cache_prompt']:
+                self.assertEqual(body['cache_reuse'], 0)
+                self.assertTrue(body['messages'][0]['content'].startswith('[' + prefix(envelope)['scope_sha256'] + ']\n'))
+            self.assertEqual(envelope['role'], 'architect')
+            self.assertEqual(proof['prompt_tokens'], 91)
+        for receipt in (first_receipt, warm_receipt, switched_receipt):
+            self.assertEqual(receipt['token_usage']['input_tokens'], 91)
+            self.assertEqual(receipt['accounting_settlement']['used_tokens'], 125)
+        compact = json.loads((self.root / 'calls' / (warm['call_id'] + '.json')).read_text())
+        self.assertEqual(compact['response']['timings']['cache_n'], 64)
+        self.assertNotIn('messages', compact['response'])
+        charged = usage(self.ledger, sid)
+        self.assertEqual(charged['used']['tokens'], original['used']['tokens'] + 3 * 125)
+        self.assertEqual(charged['used']['calls'], original['used']['calls'] + 3)
+        self.assertEqual(charged['limits'], original['limits'])
+        self.assertEqual(self.ledger.pinned(sid), contract)
+        self.assertEqual(contract['constraints']['allowed_paths'], ['allowed'])
+        for permission in ('edits_allowed', 'tests_allowed', 'network_allowed', 'dependencies_allowed'):
+            self.assertFalse(contract['constraints'][permission])
+        self.assertEqual(repository_tools.catalog(self.ledger, sid), ['allowed/entry.py', 'allowed/worker.py'])
+        with patch.dict(os.environ, SUTRA_REMOTE_REVIEW_PREFIX_REUSE_MODELS='[]'), \
+                patch('remote_context._identity', side_effect=AssertionError('Offline verification must not call the server')):
+            self.reload()
+            self.assertTrue(self.ledger.verify_invocations(sid))
+            self.assertTrue(self.ledger.verify_invocations(second_task['active']))
+            self.assertEqual(usage(self.ledger, sid), charged)
+            self.assertTrue(self.ledger.audit_valid())
+
+    def test_prefix_bound_transport_fault_never_posts_or_refunds_and_rechecks_instance(self):
+        import remote_memory
+
+        primary = self.enable_prefix_fixture()['rtx3090']
+        meta = self.new_prefix_review()
+        sid = meta['active']
+        first, accepted = self.architect_records(self.architect(meta, primary))
+        before = usage(self.ledger, sid)
+        contract = self.ledger.pinned(sid)
+        failure = remote_memory._blocked('The exact remote admission expired before POST.')
+        failure['runtime'] = {'kind': 'remote_observation', 'stage': 'remote_pre_transport',
+                              'inference_started': False, 'model': primary['name']}
+        with patch('remote_memory.require_dispatch_fresh', side_effect=ResourceWait(failure)):
+            with self.assertRaises(ResourceWait):
+                self.architect(meta, primary)
+        self.assertEqual(len(self.requests), 1)
+        charged = usage(self.ledger, sid)
+        self.assertEqual(charged['used']['calls'], before['used']['calls'] + 1)
+        self.assertGreater(charged['used']['tokens'], before['used']['tokens'])
+        self.assertEqual(charged['limits'], before['limits'])
+        fault = json.loads(self.ledger.db.execute('SELECT record_json FROM invocation_receipts '
+            'WHERE session=? ORDER BY seq DESC LIMIT 1', (sid,)).fetchone()[0])
+        self.assertEqual(fault['status'], 'quarantined')
+        self.assertEqual(fault['accounting_settlement']['basis'], 'reserved_unmeasured')
+        self.reload()
+        self.assertEqual(usage(self.ledger, sid), charged)
+        self.assertEqual(self.ledger.pinned(sid), contract)
+        self.assertEqual(json.loads(self.ledger.db.execute('SELECT record_json FROM invocation_receipts '
+            'WHERE invocation_id=?', (first['id'],)).fetchone()[0]), accepted)
+        next_call, _ = self.architect_records(self.architect(meta, primary))
+        self.assertEqual(next_call['physical_context']['prefix_reuse'], first['physical_context']['prefix_reuse'])
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(usage(self.ledger, sid)['used']['tokens'], charged['used']['tokens'] + 125)
+        self.assertTrue(self.ledger.verify_invocations(sid))
+
+    def test_prefix_rejects_foreign_authority_and_changes_on_a_narrower_contract(self):
+        import orchestration
+        import remote_context
+        import remote_memory
+        import remote_prefix
+        from vscode_bridge import save_contract
+
+        primary = self.enable_prefix_fixture()['rtx3090']
+        first = self.new_prefix_review()['active']
+        second = self.new_prefix_review()['active']
+        window = remote_context.discover(primary)
+        sample = remote_memory.probe(primary)
+        instance = remote_memory.evaluate(primary, sample, 32768)['instance']
+        restarted = copy.deepcopy(sample)
+        replacement_pid = instance['pid'] + 1
+        restarted['process'].update(pid=replacement_pid, started_at='2026-11-20T12:10:00Z')
+        restarted['listener']['pid'] = replacement_pid
+        restarted['gpu']['process_pids'].append(replacement_pid)
+        replacement = remote_memory.evaluate(primary, restarted, 32768)['instance']
+        run = self.ledger.begin_run(first, 'Inspect approved source.', [], None, max_calls=1, max_repairs=0)
+        with orchestration.scope(orchestration.task(self.ledger, second)['id']):
+            with self.assertRaisesRegex(InvalidUpdate, 'different task'):
+                remote_prefix.binding(self.ledger, run, window, instance)
+        with orchestration.scope(orchestration.task(self.ledger, first)['id']):
+            previous = remote_prefix.binding(self.ledger, run, window, instance)
+            self.assertNotEqual(remote_prefix.binding(self.ledger, run, window, replacement), previous)
+
+        current = self.ledger.snapshot(first)
+        narrowed = dict(current['constraints'], allowed_paths=['allowed/entry.py'])
+        save_contract(self.ledger, first, {'goal': current['goal'], 'constraints': narrowed}, self.workspace)
+        later = self.ledger.begin_run(first, 'Inspect approved source.', [], None, max_calls=1, max_repairs=0)
+        with orchestration.scope(orchestration.task(self.ledger, first)['id']):
+            self.assertNotEqual(remote_prefix.binding(self.ledger, later, window, instance), previous)
+        self.assertEqual(orchestration.permissions(self.ledger, first)['read_paths'], ['allowed/entry.py'])
+        self.assertEqual(self.requests, [])
+
+        # An enabled profile must not turn a conversation into a cacheable review.
+        type(self).remote_reply = stream(json.dumps(HELLO))
+        asked = self.ask('mid')
+        self.assertTrue(asked['result']['admission']['admitted'], asked)
+        self.assertIs(self.requests[-1]['body']['cache_prompt'], False)
 
     def test_local_remote_local_reload_preserves_exact_context_authority_and_settled_spending(self):
         first = self.ask()

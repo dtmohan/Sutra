@@ -134,6 +134,7 @@ function activate(context) {
       SUTRA_REMOTE_MODELS:JSON.stringify(remoteNames),
       SUTRA_REMOTE_ONLY:remoteNames.length===FIXED_TIERS.length?'1':undefined,
       SUTRA_REMOTE_REGISTRY:modelSelection.remoteRegistryPath(config.inspect?.('remoteRegistry')?.globalValue,path.join(remoteBase,'models.json')),
+      SUTRA_REMOTE_REVIEW_PREFIX_REUSE_MODELS:JSON.stringify(config.inspect?.('remoteReviewPrefixReuseModels')?.globalValue??[]),
       SUTRA_EXPANDED_REVIEW_CONTEXT_MODELS:JSON.stringify(config.inspect?.('expandedReviewContextModels')?.globalValue??[]),
       SUTRA_CAPABILITIES_MODE: config.get('tools.mode', 'ask'),
       SUTRA_RUNTIME_DIR: path.join(context.globalStorageUri.fsPath, 'runtime-memory'),

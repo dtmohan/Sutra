@@ -94,13 +94,21 @@ def _reasoning_budget(window, system, payload, schema, response_reserve):
     return recovery['reasoning_budget_tokens']
 
 
-def wire_request(profile, system, payload, schema, response_reserve):
+def wire_request(profile, system, payload, schema, response_reserve, *, prefix=None):
     """One transport projection shared by counting and actual generation."""
     from decoder_schema import for_decoder
     from local_model import LocalModel
     from model_packet import build
     reasoning_budget = _reasoning_budget(profile, system, payload, schema, response_reserve)
-    packet = build(system, payload, schema)
+    if prefix is None:
+        packet = build(system, payload, schema)
+    else:
+        from model_packet import ARCHITECT_STABLE_FIRST
+        from remote_prefix import validate
+        validate(prefix, profile, system)
+        packet = build(system, payload, schema, packing=ARCHITECT_STABLE_FIRST)
+        first = packet['messages'][0]
+        first['content'] = '[' + prefix['scope_sha256'] + ']\n' + first['content']
     messages = packet['messages'] if packet else LocalModel.messages(None, system, payload)
     output = for_decoder(packet['schema'] if packet else schema, None)
     body = {'model': profile['model'], 'messages': messages,
@@ -112,6 +120,8 @@ def wire_request(profile, system, payload, schema, response_reserve):
                 'name': 'sutra_response', 'strict': True, 'schema': output}}}
     if reasoning_budget is not None:
         body['reasoning_budget_tokens'] = reasoning_budget
+    if prefix is not None:
+        body.update(cache_prompt=prefix['cache_prompt'], cache_reuse=0)
     return body, packet, output
 
 
@@ -160,6 +170,11 @@ def verify_parent_reasoning(window, profile, props):
     if (not _parent_reasoning_window(window) or _descriptor(profile, props) != window
             or '<think>' not in props['chat_template'] or '</think>' not in props['chat_template']):
         raise InvalidUpdate('Remote parent draft reasoning template changed or is unavailable')
+
+
+def verify_prefix_window(window, profile, props):
+    if _descriptor(profile, props) != window:
+        raise InvalidUpdate('Remote review prefix template or model changed after exact counting')
 
 
 def _identity(window, *, parent_reasoning=False):
@@ -230,7 +245,7 @@ def _empty_enum(value):
     return False
 
 
-def check(budget, system, payload, schema, *, planning=False):
+def check(budget, system, payload, schema, *, planning=False, prefix=None):
     window = validate_window(budget.context_window)
     if budget.context_limit > window['context_tokens']:
         raise InvalidUpdate('Physical context allocation exceeds the verified remote window')
@@ -238,7 +253,7 @@ def check(budget, system, payload, schema, *, planning=False):
     try:
         identity_kwargs = {'parent_reasoning': True} if reasoning_budget is not None else {}
         profile = _identity(window, **identity_kwargs)
-        wire, packet, _ = wire_request(window, system, payload, schema, budget.response_reserve)
+        wire, packet, _ = wire_request(window, system, payload, schema, budget.response_reserve, prefix=prefix)
         # Pre-source probes can have an impossible citation enum. The native
         # counter compiles the response grammar even though it never generates.
         # Count the same messages with a legal placeholder only for planning.
@@ -259,6 +274,8 @@ def check(budget, system, payload, schema, *, planning=False):
               'context_slack_tokens': CONTEXT_SLACK, 'context_tokens': budget.context_limit}
     if reasoning_budget is not None:
         result['reasoning_budget_tokens'] = reasoning_budget
+    if prefix is not None:
+        result['prefix_reuse'] = copy.deepcopy(prefix)
     frame = SmritiAdapter().context(tokens, budget.response_reserve + CONTEXT_SLACK, budget.context_limit)
     if tokens + budget.response_reserve + CONTEXT_SLACK > budget.context_limit or frame['decision'] != 'ALLOW':
         error = ContextBudgetExceeded('Exact remote prompt ' + str(tokens) + ' tokens + output reserve ' +
@@ -281,7 +298,10 @@ def validate_proof(proof, budget, system, payload, schema, model_identity=None):
             or proof['context_slack_tokens'] != CONTEXT_SLACK or proof.get('thinking') is not None
             or count(proof.get('prompt_tokens')) is None or not 1 <= proof['prompt_tokens'] <= MAX_COUNT):
         raise InvalidUpdate('Missing or invalid exact remote physical context proof')
-    wire, packet, _ = wire_request(window, system, payload, schema, budget.response_reserve)
+    prefix = proof.get('prefix_reuse')
+    if 'prefix_reuse' in proof and prefix is None:
+        raise InvalidUpdate('Missing remote review prefix scope')
+    wire, packet, _ = wire_request(window, system, payload, schema, budget.response_reserve, prefix=prefix)
     reasoning_budget = wire.get('reasoning_budget_tokens')
     if (reasoning_budget is None and 'reasoning_budget_tokens' in proof
             or reasoning_budget is not None and (type(proof.get('reasoning_budget_tokens')) is not int

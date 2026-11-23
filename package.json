@@ -2,7 +2,7 @@
   "name": "karma-local-harness",
   "displayName": "Sutra",
   "description": "Governed local AI chat, codebase reviews, and diagnostics in VS Code.",
-  "version": "0.57.9",
+  "version": "0.58.0",
   "publisher": "deepak-local",
   "engines": {
     "vscode": "^1.104.0"
@@ -515,6 +515,19 @@
           "scope": "application",
           "default": "",
           "description": "Absolute path to the user-owned remote provider registry. Empty uses Remote/models.json in Sutra's application support directory. User Settings only; repository settings and model output cannot choose an SSH target, endpoint or API key. Registered providers appear in tier choices without replacing saved selections."
+        },
+        "karma.remoteReviewPrefixReuseModels": {
+          "type": "array",
+          "scope": "application",
+          "default": [],
+          "uniqueItems": true,
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "description": "Remote model references allowed to reuse same-task architecture prompt prefixes. Requires Sutra to verify the native executable, chat template and one resident slot with the RAM prompt store disabled. Full prompt counts and task spending still apply. User Settings only."
         },
         "karma.expandedReviewContextModels": {
           "type": "array",

@@ -1,4 +1,13 @@
-Sutra 0.57.9 — Remote GPU recovery and chat progress
+Sutra 0.58.0 — Opt-in RTX prompt-prefix reuse
+
+Sutra can reuse prompt prefixes across architecture discovery calls for the
+same task on a verified RTX provider. To opt in, add the registered model
+reference to karma.remoteReviewPrefixReuseModels in User Settings. The remote
+runtime must use a single slot with --cache-ram 0 and disk slot saves disabled.
+
+Sutra ties reuse to the current task, permissions, model, template and server
+process. It verifies the exact rendered prompt and charges the full prompt
+count even when the server reuses part of it.
 
 Sutra Auto can move a review to an eligible configured local model when a
 remote capacity check blocks dispatch. Chat shows the measured resource

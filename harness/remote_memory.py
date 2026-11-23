@@ -153,13 +153,17 @@ $os=Get-CimInstance Win32_OperatingSystem
 Observation-Step 'instance_recheck'
 $again=Get-CimInstance Win32_Process -Filter ('ProcessId='+$listener.OwningProcess)
 if (!$again -or $again.CreationDate -ne $proc.CreationDate -or $again.ExecutablePath -ne $proc.ExecutablePath) { throw 'Listener instance changed during measurement' }
+$cacheArgs=[regex]::Matches($proc.CommandLine,'(?i)(?:^|\s)(?:--cache-ram|-cram)(?==|\s|$)')
+$prefixIsolated=($cacheArgs.Count -eq 1 -and (Read-Argument @('--cache-ram','-cram')) -ceq '0' -and
+ $proc.CommandLine -notmatch '(?i)(?:^|\s)--slot-save-path(?==|\s|$)')
 Observation-Step 'reply'
 @{
  version=1;nonce=NONCE;host_id=$env:COMPUTERNAME;boot_id=$os.LastBootUpTime.ToUniversalTime().ToString('o')
  listener=@{address=$listener.LocalAddress;port=[int]$listener.LocalPort;pid=[int]$listener.OwningProcess}
  process=@{pid=[int]$proc.ProcessId;started_at=$proc.CreationDate.ToUniversalTime().ToString('o');executable=$exe.FullName;executable_sha256=$exeHash;
    model_path=(Read-Argument @('--model','-m'));model=(Read-Argument @('--alias','-a'));context_tokens=(Read-Argument @('--ctx-size','-c'));
-   gpu_layers=(Read-Argument @('--n-gpu-layers','--gpu-layers','-ngl'));gpu_device=(Read-Argument @('--device','-dev'))}
+   gpu_layers=(Read-Argument @('--n-gpu-layers','--gpu-layers','-ngl'));gpu_device=(Read-Argument @('--device','-dev'));
+   prefix_cache_isolated=$prefixIsolated}
  model=@{path=$after.FullName;sha256=$modelHash;bytes=[long]$after.Length;mtime_ticks=$after.LastWriteTimeUtc.Ticks.ToString();creation_ticks=$after.CreationTimeUtc.Ticks.ToString();digest_basis=$digestBasis;hash_ms=$timer.Elapsed.TotalMilliseconds}
  gpu=@{index=[int]$gpu.index;uuid=$gpu.uuid.Trim();name=$gpu.name.Trim();driver=$gpu.driver.Trim();total_bytes=([long]$gpu.total_mib*1048576);
    free_bytes=([long]$gpu.free_mib*1048576);used_bytes=([long]$gpu.used_mib*1048576);process_pids=$gpuPids}
@@ -590,6 +594,8 @@ def _compact(sample):
               'server': ('models', 'model_path', 'context_tokens', 'total_slots', 'is_sleeping', 'slots')}
     for section, keys in fields.items():
         result[section] = {key: sample[section][key] for key in keys}
+    if 'prefix_cache_isolated' in sample['process']:
+        result['process']['prefix_cache_isolated'] = sample['process']['prefix_cache_isolated'] is True
     return result
 
 
