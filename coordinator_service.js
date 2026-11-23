@@ -216,6 +216,10 @@ class Coordinator {
       acknowledged:!!job.acknowledged, backend_completion_verified:job.backend_completion_verified === true,
       host_completion_received:job.host_completion_received === true};
     if (job.runner) Object.assign(value,{runner:job.runner,steps:job.steps || 0,workflow:job.workflow || null});
+    if (job.readiness && ['waiting','queued','running'].includes(job.state)) {
+      const {phase,message,since,checks}=job.readiness;
+      value.readiness={phase,message,since,checks,next_check_at:job.state==='waiting'?job.next_probe_at:null};
+    }
     if (job.stop_receipt_pending) value.stop_receipt_pending=true;
     if (job.stop_receipt) value.stop_receipt=job.stop_receipt;
     if (job.stop_kernel) value.stop_kernel=job.stop_kernel;
@@ -384,6 +388,7 @@ class Coordinator {
       setImmediate(() => this.runNext());
     },delay);
     timer.unref();this.waitTimers.set(job.id,timer);
+    return delay;
   }
   async advanceTask(job, item, response, worker, token) {
     if (!response.ok) {job.response=response;job.state='failed';return;}
@@ -412,12 +417,22 @@ class Coordinator {
     if (item.mode==='probe' && !['continue','wait'].includes(continuation.disposition)) job.response=response;
     job.continuation=continuation;
     job.workflow=taskRunner.checkpoint(data,continuation);
-    if (item.mode!=='probe' || continuation.disposition!=='wait') this.event(job,taskRunner.activity(data,continuation));
     if (token.isCancellationRequested) throw new Error('The task was stopped before its next stage');
+    const prior=job.readiness, checks=(prior?.checks||0)+Number(!!data.continuation_probe);
+    if (continuation.disposition==='wait') {
+      const wait=taskRunner.waitObservation(data,continuation);
+      job.readiness={...wait,phase:'waiting',since:prior?.since??Date.now(),checks};
+      const delay=this.waitForReadiness(job,continuation);
+      if (prior?.phase!=='waiting'||prior.condition!==wait.condition) this.event(job,taskRunner.activity(data,continuation,{wait,delay}));
+      return;
+    }
+    const activity=taskRunner.activity(data,continuation);
+    if (continuation.next_event==='resume') {
+      job.readiness={phase:'ready',message:activity.progress,since:prior?.since??Date.now(),checks};
+    } else delete job.readiness;
+    this.event(job,activity);
     if (continuation.disposition==='continue') {
       this.enqueue(job,taskRunner.nextRequest(job.initial_request,continuation));
-    } else if (continuation.disposition==='wait') {
-      this.waitForReadiness(job,continuation);
     } else {
       // A read-only summary collects complete usage once. It cannot infer or
       // acquire missing evidence, and never substitutes a stale final report.

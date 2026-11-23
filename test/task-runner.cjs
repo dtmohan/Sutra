@@ -109,8 +109,9 @@ function fixture() {
 async function start(subject, client, request = subject.seed.request, options = {}) {
   const allocated = await client.allocate(chatKey);
   const ticket = {id: allocated.id, chatKey, wholeTask: true};
-  const pending = outcome(client.send(request, environment,
-    {transport: ticket, authorization: subject.authorization, ...options}));
+  const {requestEnvironment = environment, ...transportOptions} = options;
+  const pending = outcome(client.send(request, requestEnvironment,
+    {transport: ticket, authorization: subject.authorization, ...transportOptions}));
   await until(async () => {
     try {return await subject.status(ticket);}
     catch (error) {if (error.code === 'COORDINATOR_REQUEST_MISSING') return null; throw error;}
@@ -301,6 +302,55 @@ async function hardwareWaitAndFreshRecovery() {
     assert(after.verified); assertPrefix(waited, after);
     assert.deepEqual(savedFlow(after, flow.id).usage.limits, original.usage.limits);
     checks.push('External waiting uses fresh readiness probes with no inference; recovery resumes the same contract and consumed budget');
+  } finally {await subject.close();}
+}
+
+async function busyWaitAndReasonChange() {
+  const subject = fixture();
+  try {
+    subject.control({busy_stage: 'subagent', runtime_busy: true});
+    const events = [], client = subject.client();
+    const {ticket, pending} = await start(subject, client, subject.seed.request, {
+      onActivity: event => events.push(event),
+      requestEnvironment: {...environment, SUTRA_RUNTIME_DIR: path.join(subject.storage, 'runtime'), SUTRA_ACTIVITY: '1'},
+    });
+    const waiting = await until(() => subject.status(ticket), row => row.readiness?.checks >= 1 && row.state === 'waiting',
+      'Busy runtime did not complete a readiness check');
+    const notices = () => events.filter(event => event.kind === 'workflow' && event.progress);
+    await until(notices, rows => rows.some(row => /inference slot is busy/.test(row.progress)), 'Busy notice was not replayed');
+    assert.match(waiting.readiness.message, /Child review is waiting.*local inference slot is busy/);
+    assert(waiting.readiness.next_check_at > waiting.readiness.since);
+    assert.equal(notices().filter(row => row.disposition === 'wait').length, 1);
+    assert.match(notices().find(row => row.disposition === 'wait').progress, /next readiness check is scheduled in about 1 s/);
+    assert(!events.some(row => row.kind === 'start'));
+
+    subject.control({busy_stage: 'subagent', runtime_busy: true, hardware_ready: false});
+    const pressure = await until(() => subject.status(ticket), row => /memory pressure is warning/.test(row.readiness?.message),
+      'A changed readiness blocker did not update its status');
+    await until(notices, rows => rows.filter(row => row.disposition === 'wait').length === 2, 'Changed blocker was not displayed');
+    assert.equal(pressure.readiness.since, waiting.readiness.since);
+    assert(pressure.readiness.checks > waiting.readiness.checks);
+    const waited = subject.observe(), flow = savedFlow(waited, subject.seed.flow.flow_id);
+    const original = savedFlow(subject.seed.observation, flow.id);
+    assert.deepEqual(flow.usage, original.usage);
+    assert.deepEqual(flow.contract, original.contract);
+    assert(!events.some(row => row.kind === 'start'));
+    assert(!subject.events().some(row => row.kind === 'model_started'));
+
+    subject.control({hardware_ready: true});
+    const result = await pending;
+    assert(!result.error, result.error?.message);
+    assert.equal(result.value.data.state, 'DONE');
+    assert.equal(notices().filter(row => row.disposition === 'wait').length, 2);
+    const ready = events.findIndex(row => row.kind === 'workflow' && /Readiness check passed.*resuming the saved task/.test(row.progress));
+    const firstCall = events.findIndex(row => row.kind === 'start');
+    assert(ready >= 0 && firstCall > ready, 'Present successful readiness before the next model call');
+    const receipts = await assertKernelChain(subject, ticket, result.value.data.continuation);
+    const permission = receipts.find(row => row.record.next_event === 'resume');
+    assert(permission?.record.readiness_hash, 'Successful readiness needs its bound proof in the existing chain');
+    assert.equal(permission.record.readiness.ready, true);
+    assertPrefix(waited, subject.observe());
+    checks.push('Busy runtime and changed hardware blocker appear once each. Readiness is announced before inference and retains spending, scope and chained proof');
   } finally {await subject.close();}
 }
 
@@ -510,7 +560,23 @@ async function interruptedWriterAndExplicitModelSwitch() {
   assert.equal(taskRunner.activity(checkpoint,plan).progress,'','Generic disposition text must not clutter chat');
   assert.equal(taskRunner.activity({...checkpoint,progress:'Reading files.'},plan).progress,'Reading files.');
   assert.match(taskRunner.activity(checkpoint,{...plan,disposition:'wait'}).progress,/fresh readiness check/);
-  const scenarios = [detachedCompletionAndReplay, stopQueued, hardwareWaitAndFreshRecovery,
+  const mib=1024**2, remote={profile:'remote-nvidia-v1',provider:'remote_llama',blocker:'model_admission',
+    gpu_allocation:{decision:'BRIDGE',available_bytes:1792*mib,system_reserve_bytes:1024*mib},
+    host_allocation:{decision:'ALLOW',available_bytes:20*1024*mib,system_reserve_bytes:1024*mib},
+    runtime:{plan:{estimated_increment_bytes:832*mib,estimated_host_increment_bytes:1024*mib}}};
+  const remoteWait={...checkpoint,state:'PAUSED',stop:{resume_phase:'SYNTHESIS',measurement:remote,
+    error:'Should not forward provider diagnostics <img src=x>'}};
+  const waitPlan={...plan,disposition:'wait',wait_kind:'model_capacity'};
+  const shortfall=taskRunner.activity(remoteWait,waitPlan,{delay:4000}).progress;
+  assert.match(shortfall,/Report synthesis is waiting.*Remote GPU memory is short by 64 MiB/);
+  assert.match(shortfall,/1\.75 GiB available, with 1\.81 GiB required including reserve.*in about 4 s/);
+  assert(!shortfall.includes('host RAM')&&!shortfall.includes('<img'));
+  const shifted={...remoteWait,continuation_probe:{observation:{blocking_measurement:{...remote,
+    gpu_allocation:{...remote.gpu_allocation,decision:'ALLOW'},
+    host_allocation:{...remote.host_allocation,decision:'BRIDGE',available_bytes:1536*mib}}}}};
+  assert.match(taskRunner.waitObservation(shifted,waitPlan).message,/Remote host RAM is short by 0\.50 GiB/);
+  assert.equal(taskRunner.waitObservation(shifted,waitPlan).condition,'remote-capacity:ram');
+  const scenarios = [detachedCompletionAndReplay, stopQueued, hardwareWaitAndFreshRecovery, busyWaitAndReasonChange,
     stopWhileWaiting, restartSettledWaitingTask, unknownOutcomeProbeReturnsStoppedCheckpoint, revocationBeforeNextStep,
     invalidContinuationDoesNotDispatchAgain, interruptedWriterAndExplicitModelSwitch];
   const selected = new Set(process.argv.slice(2));

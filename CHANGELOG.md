@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.57.9
+
+- Route verified remote GPU or host RAM capacity stops in Auto to an eligible smaller configured local tier. Refit source and context under the original task and budget.
+- Show the measured resource blocker and readiness transitions in chat. Show elapsed wait, completed checks, and the next scheduled check in Sutra Monitor.
+- Recover eligible read-only reviews paused before remote dispatch on 0.57.8. Verify their saved source and keep their execution, permissions, and spent budget.
+- Verify the canonical STP kernel hash in the packaged extension.
+
 ## 0.57.8
 
 - Resume saved reviews through workspace consent, initial catalog allocation and synthesis context recall. Keep the task identity, approved scope and recorded spending.

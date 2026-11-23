@@ -1,4 +1,4 @@
-"""An explicit release handoff for already joined read-only reviews."""
+"""Explicit release handoffs for eligible saved read-only reviews."""
 from contextlib import contextmanager
 import json
 from pathlib import Path
@@ -12,6 +12,7 @@ SUMMARY_REPAIR_PREDECESSOR = '1159af17874e347e75644c6d4583dcebb9db212cab69852e00
 SUMMARY_PROJECTION_PREDECESSOR = 'a0d9d8e3c9660ce67a34333c097795c398591e6ced9ffa1ad4083437aa94b306'
 CONTEXT_PROFILE_PREDECESSOR = '71f4db9dbce5d9152ab2800b402754b4b28cce34b871ac5b8a8c4c705b6eba8f'
 REVIEWER_ADMISSION_PREDECESSOR = 'dbcab6c395d6849875185d46ee1ac1366ee6b2ca200a7f9260bf01c35e4ed9c5'
+REMOTE_CAPACITY_PREDECESSOR = 'c35efdc63a1a8b188c67af4e6384fc7463c0ed7c5df4dea7624e240f4f6f7091'  # 0.57.8
 # Released policies with the original writer and evidence receipts needed to
 # recover a closed output-limit result. Other upgrade paths do not use these.
 PARENT_OUTPUT_LIMIT_PREDECESSORS = frozenset({
@@ -32,7 +33,7 @@ def release_pair(s):
     return value == {'version': 1, 'previous': PREDECESSOR, 'current': s.logic_hash}
 
 
-def _scope(s, fid, data, predecessor=PREDECESSOR, *, target=None):
+def _scope(s, fid, data, predecessor=PREDECESSOR, *, target=None, require_join=True):
     import orchestration as machine
     root = data.get('root_node')
     if not root or (predecessor != s.logic_hash and not release_pair(s)):
@@ -56,7 +57,10 @@ def _scope(s, fid, data, predecessor=PREDECESSOR, *, target=None):
             or owner['context'].get('request') != flow.get('prompt')):
         return None
     joined = next((event for event in reversed(machine.events(s, root)) if event['kind'] == 'JOIN'), None)
-    if not joined or not data.get('child_results') or joined['data']['invocations'] != data['child_results']:
+    if require_join:
+        if not joined or not data.get('child_results') or joined['data']['invocations'] != data['child_results']:
+            return None
+    elif joined or data.get('child_results') or data.get('children'):
         return None
     parent = machine.node(s, owner['parent_id'])
     if parent.get('kind') != 'task' or parent.get('binding') != old:
@@ -64,7 +68,7 @@ def _scope(s, fid, data, predecessor=PREDECESSOR, *, target=None):
     return {'version': 1, 'flow_id': fid, 'root': root, 'parent': parent['id'],
             'workspace': flow['workspace'], 'previous': old,
             'current': dict(current, logic_hash=target) if target else current,
-            'join_receipt': joined['receipt']}
+            'join_receipt': joined['receipt'] if joined else None}
 
 
 def parent_origin(s, fid, data, *, target=None):
@@ -239,10 +243,66 @@ def _reviewer_admission_scope(s, fid, data, *, stop_receipt=None):
     return dict(stamp, claim_wait_stop_receipt=stop['receipt'])
 
 
+def _remote_capacity_scope(s, fid, data, *, stop_receipt=None, source_receipt=None):
+    """Carry a pre-dispatch 0.57.8 review into a fresh provider check."""
+    import orchestration as machine
+    from remote_profiles import is_remote
+    stamp = _scope(s, fid, data, REMOTE_CAPACITY_PREDECESSOR, require_join=False)
+    if not stamp:
+        return None
+    stop = next((event for event in reversed(machine.events(s, fid))
+                 if (event['receipt'] == stop_receipt if stop_receipt else
+                     event['to'] == 'PAUSED' and event['from'] != 'PAUSED')), None)
+    if not stop or (stop['kind'], stop['from'], stop['to']) != ('RESOURCE_STOPPED', 'SYNTHESIS', 'PAUSED'):
+        return None
+    details = stop['data'].get('workflow_stop') or {}
+    state = details.get('measurement') or {}
+    runtime = state.get('runtime') or {}
+    plan = runtime.get('plan') or {}
+    if ((details.get('status'), details.get('resume_phase'), details.get('blocker')) !=
+            ('resource_wait', 'SYNTHESIS', 'model_admission')
+            or state.get('profile') != 'remote-nvidia-v1' or state.get('provider') != 'remote_llama'
+            or state.get('available') is not True or state.get('admitted') is not False
+            or state.get('decision') not in ('BRIDGE', 'FIN')
+            or runtime.get('kind') != 'model_capacity' or runtime.get('inference_started') is not False
+            or runtime.get('stage') not in ('remote_admission', 'remote_dispatch')
+            or not is_remote(runtime.get('model')) or plan.get('model') != runtime['model']
+            or not plan.get('instance') or plan.get('decision') != state['decision']):
+        return None
+    root = stamp['root']
+    if (s.db.execute('SELECT 1 FROM orchestration_nodes WHERE parent_id=? LIMIT 1', (root,)).fetchone()
+            or s.db.execute("SELECT 1 FROM invocations WHERE session=? "
+                "AND json_extract(record_json,'$.orchestration.node_id')=? "
+                "AND json_extract(record_json,'$.logic_hash')=? LIMIT 1",
+                (stamp['current']['session'], root, REMOTE_CAPACITY_PREDECESSOR)).fetchone()):
+        return None
+    result = dict(stamp, remote_capacity_stop_receipt=stop['receipt'])
+    if not data.get('git_provenance') or source_receipt:
+        # Some read-only routes did not take a Git snapshot. Their exact paid
+        # synthesis preparation supplies the source identity for this handoff.
+        node = machine.node(s, root)
+        prepared = next((event for event in reversed(machine.events(s, root))
+                         if event['kind'] == 'REVIEW_SOURCE_PREPARED' and event['at'] <= stop['at']
+                         and (source_receipt is None or event['receipt'] == source_receipt)), None)
+        proof = prepared['data'] if prepared else {}
+        binding = {'workspace': stamp['workspace'], 'owner': root, 'binding': stamp['previous'],
+                   'context_hash': node['context_hash'], 'purpose': 'workspace_synthesis'}
+        if any(proof.get(k) != v for k, v in binding.items()) or not proof.get('receipts'):
+            return None
+        result['remote_capacity_source_receipt'] = prepared['receipt']
+    return result
+
+
 def offer(s, fid, data):
     import orchestration as machine
     stop = data.get('workflow_stop') or {}
-    if machine.state(s, fid) != 'PAUSED' or not data.get('git_provenance'):
+    if machine.state(s, fid) != 'PAUSED':
+        return None
+    if stop.get('status') == 'resource_wait':
+        stamp = _remote_capacity_scope(s, fid, data)
+        if stamp:
+            return stamp
+    if not data.get('git_provenance'):
         return None
     if stop.get('status') in ('context_budget', 'memory_fault'):
         return _context_profile_scope(s, fid, data)
@@ -278,6 +338,9 @@ def recorded(s, fid, data=None):
         expected = _context_profile_scope(s, fid, data, stop_receipt=stamp['context_stop_receipt'])
     elif stamp.get('claim_wait_stop_receipt') and not predecessor:
         expected = _reviewer_admission_scope(s, fid, data, stop_receipt=stamp['claim_wait_stop_receipt'])
+    elif stamp.get('remote_capacity_stop_receipt') and not predecessor:
+        expected = _remote_capacity_scope(s, fid, data, stop_receipt=stamp['remote_capacity_stop_receipt'],
+                                          source_receipt=stamp.get('remote_capacity_source_receipt'))
     elif stamp.get('active_previous'):
         expected = _active_continuation(s, fid, data)
     else:
@@ -308,7 +371,7 @@ def conversation_policy(s, handoff):
     if not stamp:
         return None
     policy = stamp['previous']['logic_hash']
-    if not (stamp.get('context_stop_receipt') or stamp.get('claim_wait_stop_receipt')
+    if not (stamp.get('context_stop_receipt') or stamp.get('claim_wait_stop_receipt') or stamp.get('remote_capacity_stop_receipt')
             or policy in PARENT_OUTPUT_LIMIT_PREDECESSORS):
         return None
     import orchestration as machine
@@ -376,12 +439,19 @@ def confirm(s, stamp, data, *, closed=False):
     if not s.audit_valid(deep=True) or not s.verify_invocations(sid):
         raise InvalidUpdate('Saved review audit or invocation history failed verification')
     repository_tools.records(s, sid)
-    for iid in data['child_results']:
+    if stamp.get('remote_capacity_source_receipt'):
+        from static_runtime import load_partition
+        prepared = next(event['data'] for event in machine.events(s, stamp['root'])
+                        if event['receipt'] == stamp['remote_capacity_source_receipt'])
+        partition = load_partition(s, sid, Path(stamp['workspace']), prepared['receipts'], stamp['root'])
+        if set(partition['sources']) != set(prepared['page_plan']['selected']):
+            raise InvalidUpdate('Saved remote review source preparation changed')
+    for iid in data.get('child_results', ()):
         s.load_result(sid, iid)
     checkpoint = data.get('parent_checkpoint') or data.get('claim_review_retry')
     if checkpoint and checkpoint.get('candidate_id'):
         s.load_result(sid, checkpoint['candidate_id'])
-    if stamp.get('context_stop_receipt'):
+    if stamp.get('context_stop_receipt') or stamp.get('remote_capacity_stop_receipt'):
         origin = machine.node(s, stamp['root'])['context']
         if origin.get('conversation_id'):
             from conversation import workspace_handoff

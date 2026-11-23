@@ -43,6 +43,18 @@ constraints, permissions and completed child results remain authoritative. Each
 read and invocation consumes its normal allocation; fallback refunds nothing.
 If mandatory context does not fit, the task stops rather than dropping pins.
 
+A verified remote GPU or host-RAM capacity refusal can also select an eligible
+smaller configured local tier. The failed observation identifies the assigned
+remote profile and its pre-dispatch measurement. Candidate size and identity
+come from installed metadata or an approved native engine profile. The next
+step fits its packet again and checks the selected provider's actual capacity.
+
+The 64K remote server allocates its KV pool at startup. Reducing the client
+packet leaves that allocation and the configured GPU reserve in place. To use
+a smaller physical pool, select a tier bound to a separately configured server
+with that pool. The runner leaves remote processes and their profiles under
+operator control.
+
 Fallback does not handle OS thermal/memory pressure, busy slots, identity changes
 or interrupted calls. Those retain the existing pause/recovery path. Report
 reviewer independence remains enforced; an unavailable independent reviewer can
@@ -51,6 +63,9 @@ budget, not a promise of equal answer quality.
 
 Sutra Monitor shows cold estimate, resident weight credit, additional reservation
 and recorded fallback. These historical plans are checked again before dispatch.
+During a saved readiness wait, chat shows the measured blocker and reports when
+readiness returns. The Monitor shows elapsed wait, check count, and the next
+check. Unchanged readings update the Monitor without a new chat message.
 
 ## Validation
 

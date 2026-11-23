@@ -124,11 +124,29 @@ function renderRamMemory(memory){
   : '');
 }
 let runnerStopId,runnerJobsSignature;
+function runnerWaitDetail(readiness){
+ if(!readiness||typeof readiness.message!=='string'||readiness.message.length>500)return '';
+ const now=Date.now(),parts=[readiness.message];
+ if(Number.isSafeInteger(readiness.since)&&readiness.since<=now){
+  const seconds=Math.floor((now-readiness.since)/1000),minutes=Math.floor(seconds/60);
+  parts.push(`${minutes?minutes+'m ':''}${seconds%60}s waiting`);
+ }
+ if(Number.isSafeInteger(readiness.checks)&&readiness.checks>=0)parts.push(`${readiness.checks} ${readiness.checks===1?'check':'checks'}`);
+ if(Number.isSafeInteger(readiness.next_check_at)){
+  const seconds=Math.ceil((readiness.next_check_at-now)/1000);
+  parts.push(seconds>0?`next check in about ${seconds}s`:'next check due');
+ }
+ return parts.join(' · ');
+}
 function renderRunner(runner,fresh){
  const jobs=Array.isArray(runner?.jobs)?runner.jobs.slice(0,8):[];
  const active=jobs.find(job=>['running','cancelling'].includes(job.state))||jobs.find(job=>job.state==='queued')||jobs.find(job=>job.state==='waiting');
- setText('runner-state',runner?.error?'Connection unavailable':!fresh&&runner?'Status stale':active?active.state==='cancelling'?'Cancellation requested':active.state==='waiting'?'Waiting for readiness':'Working':runner?.instance_id?'Ready':'Not started');
- setText('runner-detail',runner?.error||(!fresh&&runner?'Refresh runner status. The displayed states are the last observation, not current execution status.':active?.state==='waiting'?'Checking the saved resource blocker without starting inference. Stop prevents further stages; context and spending stay saved.':'Authorized task stages continue across reloads. Send continue in the original chat to reconnect. Chat Stop or Stop runner request prevents further execution.'));
+ const readiness=active?.state==='cancelling'?null:active?.readiness;
+ const activeLabel=active?.state==='cancelling'?'Cancellation requested':readiness?.phase==='ready'?'Resuming saved task':
+  active?.state==='waiting'?'Waiting for readiness':readiness?.phase==='waiting'?'Checking readiness':'Working';
+ setText('runner-state',runner?.error?'Connection unavailable':!fresh&&runner?'Status stale':active?activeLabel:runner?.instance_id?'Ready':'Not started');
+ setText('runner-detail',runner?.error||(!fresh&&runner?'Refresh runner status. The displayed states are the last observation, not current execution status.':runnerWaitDetail(readiness)||
+  (active?.state==='waiting'?'Checking the saved resource blocker without starting inference. Stop prevents further stages. Context and spending stay saved.':'Authorized task stages continue across reloads. Send continue in the original chat to reconnect. Chat Stop or Stop runner request prevents further execution.')));
  const displayJobs=jobs.filter(job=>!job.acknowledged||job.stop_receipt_pending);
  const signature=JSON.stringify([fresh,displayJobs.map(job=>[job.id,job.operation,job.state,job.stop_receipt_pending,job.stop_audit_error])]);
  if(signature!==runnerJobsSignature){

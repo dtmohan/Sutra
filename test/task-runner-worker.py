@@ -121,6 +121,7 @@ def install_fixture(workspace, storage):
     original_handle = flow.handle
     original_bridge = bridge.handle
     original_pending = task_continuation._pending_call
+    original_model_ready = task_continuation._model_ready
 
     def pending(store, fid):
         # Controlled, read-only observation for the transport's unknown-outcome
@@ -142,6 +143,13 @@ def install_fixture(workspace, storage):
         return {'admitted': state['admitted'], 'after': state,
                 'action': 'controlled observation only', 'automatic_inference': False}
 
+    def model_ready(root, stop, state):
+        if stop.get('blocker') == 'runtime_busy':
+            ready = not controls(storage).get('runtime_busy')
+            return ready, {'provider': 'ollama', 'model': stop['measurement']['runtime']['model'],
+                           'slot_available': ready}
+        return original_model_ready(root, stop, state)
+
     def with_models(store, meta, ws, root, request, providers=None):
         def provider(stage):
             config = controls(storage)
@@ -150,6 +158,9 @@ def install_fixture(workspace, storage):
             models = request.get('models', MODELS)
             tier = request.get('tier', 'low')
             name = models[tier if tier in MODELS else 'low']
+            if config.get('busy_stage') == stage and config.get('runtime_busy'):
+                runtime_memory.denied('The fixture inference slot is busy.', kind='busy', stage=stage,
+                                      model=name, inference_started=False)
             if stage == 'conversation':
                 model = WireConversation(name, lambda value, packet: value.update(
                     intent='workspace', facts=[],
@@ -201,6 +212,7 @@ def install_fixture(workspace, storage):
     monitoring.resource_state = hardware
     runtime_memory.recover = recover
     task_continuation._pending_call = pending
+    task_continuation._model_ready = model_ready
 
 
 def seed(workspace, storage):

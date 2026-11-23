@@ -1,4 +1,8 @@
-Sutra 0.57.8 — Workflow recovery and permission integrity
+Sutra 0.57.9 — Remote GPU recovery and chat progress
+
+Sutra Auto can move a review to an eligible configured local model when a
+remote capacity check blocks dispatch. Chat shows the measured resource
+shortfall and when the saved review resumes.
 
 Saved reviews can continue through workspace consent, catalog setup and
 synthesis context recall with their approved scope and spent budgets.

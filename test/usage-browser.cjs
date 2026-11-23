@@ -72,6 +72,16 @@ function monitorHost(){
  assert.equal(await stopRunner.isEnabled(),true);
  await stopRunner.click();
  assert.deepEqual(await page.evaluate(()=>sent.at(-1)),{type:'stop_runner',id:runnerId});
+ const observedWait={phase:'waiting',message:'Remote GPU memory is short by 64 MiB.',
+  since:Date.now()-65000,checks:4,next_check_at:Date.now()+25000};
+ await send({snapshot:runnerSnapshot({...running,jobs:running.jobs.map(job=>({...job,state:'waiting',readiness:observedWait}))})});
+ assert.equal(await page.locator('#runner-state').textContent(),'Waiting for readiness');
+ assert.match(await page.locator('#runner-detail').textContent(),/Remote GPU memory is short by 64 MiB.*1m \d+s waiting.*4 checks.*next check in about \d+s/);
+ await send({snapshot:runnerSnapshot({...running,jobs:running.jobs.map(job=>({...job,state:'queued',readiness:{
+  ...observedWait,phase:'ready',message:'Readiness check passed. Sutra is rechecking admission and resuming the saved task.',checks:5,next_check_at:null}}))})});
+ assert.equal(await page.locator('#runner-state').textContent(),'Resuming saved task');
+ assert.match(await page.locator('#runner-detail').textContent(),/Readiness check passed.*5 checks/);
+ assert(!/next check/.test(await page.locator('#runner-detail').textContent()));
  await send({snapshot:runnerSnapshot(running)});
  await page.screenshot({path:path.join(out,'Persistent-runner-working.png'),fullPage:true});
  await send({snapshot:runnerSnapshot({...running,jobs:running.jobs.map(job=>({...job,state:'cancelling'}))})});

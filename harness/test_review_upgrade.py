@@ -252,6 +252,102 @@ class ReviewerAdmissionUpgradeTests(unittest.TestCase):
             self.assertTrue(self.s.verify_invocations(sid))
 
 
+class RemoteCapacityUpgradeTests(unittest.TestCase):
+    setUp = fixture.OrchestrationTests.setUp
+    tearDown = fixture.OrchestrationTests.tearDown
+    provider = fixture.OrchestrationTests.provider
+    step = fixture.OrchestrationTests.step
+    until = fixture.OrchestrationTests.until
+
+    def paused_review(self, *, inference_started=False, prepared_only=False):
+        self.ws = self.ws.resolve()
+        self.meta['workspace'] = str(self.ws)
+        for path in sorted(self.ws.glob('part*.py'))[1:]:
+            path.unlink()
+        self.prompt = 'Explain the project architecture with source references. ' + self.prompt
+        high = 'sutra:remote/fixture-64k'
+        self.s.close()
+        with patch('governance.policy_hash', return_value=upgrade.REMOTE_CAPACITY_PREDECESSOR):
+            self.s = InvocationLedger(self.root / 'state.sqlite')
+            handle(self.root, self.ws, {'op': 'auto_new', 'goal': self.prompt, 'roots': ['.']})
+            self.meta = json.loads((self.root / 'workspace.json').read_text())
+            sid = self.meta['active']
+            started = self.step(event='start_review', binding=flow.identity(self.s, sid))
+            ready = self.until('SYNTHESIS', started)
+            self.assertEqual(ready['children'], [])
+            if prepared_only:
+                from review_source_receipts import acquire
+                with machine.scope(ready['execution_id']):
+                    acquire(self.s, self.meta, self.ws, self.root,
+                            {'prompt': self.prompt, 'conversation_id': ready.get('conversation_id')},
+                            ['part0.py'], real=False)
+                flow.move(self.s, ready['flow_id'], 'SYNTHESIS', 'FIXTURE_SNAPSHOT_WITHOUT_GIT', git_provenance=None)
+                ready = flow.response(self.s, ready['flow_id'])
+            block = ResourceWait({'profile': 'remote-nvidia-v1', 'provider': 'remote_llama',
+                'available': True, 'admitted': False, 'decision': 'FIN', 'blocker': 'model_admission',
+                'runtime': {'kind': 'model_capacity', 'stage': 'remote_dispatch',
+                            'model': high, 'inference_started': inference_started,
+                            'plan': {'model': high, 'instance': {'pid': 42}, 'decision': 'FIN'}}})
+            with patch('chat_runtime.answer', side_effect=block), patch('provider_resources.recover', return_value=None):
+                stopped = self.step(ready, tier='high', models=dict(fixture.MODELS, high=high))
+            self.assertEqual(stopped['state'], 'PAUSED')
+            self.s.close()
+        self.s = InvocationLedger(self.root / 'state.sqlite')
+        return stopped, sid
+
+    def test_can_adopt_pre_dispatch_remote_stop_and_resume_same_saved_review(self):
+        stopped, sid = self.paused_review(prepared_only=True)
+        before = review_budget.usage(self.s, sid)
+        self.assertGreater(before['used']['operations'], 0)
+        self.assertEqual(before['used']['calls'], 0)
+        pins = self.s.pinned(sid)
+        receipts = self.s.db.execute('SELECT id,record_json FROM repository_receipts ORDER BY seq').fetchall()
+        fid, owner = stopped['flow_id'], stopped['execution_id']
+        with patch('review_upgrade.release_pair', return_value=True):
+            notice = flow.response(self.s, fid)
+            self.assertEqual(notice['recovery']['kind'], 'compatible_review_upgrade')
+            with self.assertRaisesRegex(InvalidUpdate, 'requires confirmation'):
+                self.step(notice, event='restart_review')
+            adopted = self.step(notice, event='restart_review', confirmed=True)
+            self.assertEqual(adopted['execution_id'], owner)
+            stamp = upgrade.recorded(self.s, fid)
+            self.assertTrue(stamp['remote_capacity_stop_receipt'])
+            self.assertTrue(stamp['remote_capacity_source_receipt'])
+            with patch('provider_resources.recover', return_value=None), patch('provider_resources.require_resources') as probe:
+                resumed = self.step(adopted, event='resume', tier='low')
+                self.assertEqual(probe.call_args.kwargs['model'], fixture.MODELS['low'])
+            self.assertEqual(review_budget.usage(self.s, sid), before)
+            done = self.until('DONE', resumed)
+            self.assertEqual(done['flow_id'], fid)
+            self.assertEqual(done['execution_id'], owner)
+            self.assertTrue(done['data']['report_markdown'])
+            self.assertEqual(self.s.pinned(sid), pins)
+            self.assertEqual(review_budget.usage(self.s, sid)['limits'], before['limits'])
+            self.assertGreater(review_budget.usage(self.s, sid)['used']['calls'], before['used']['calls'])
+            self.assertEqual(self.s.db.execute('SELECT id,record_json FROM repository_receipts ORDER BY seq')
+                             .fetchall()[:len(receipts)], receipts)
+            self.assertTrue(self.s.verify_invocations(sid))
+
+    def test_changed_prepared_source_refuses_upgrade_without_git_provenance(self):
+        stopped, sid = self.paused_review(prepared_only=True)
+        fid = stopped['flow_id']
+        before = review_budget.usage(self.s, sid)
+        (self.ws / 'part0.py').write_text('def part0():\n    return 7\n')
+        with patch('review_upgrade.release_pair', return_value=True):
+            notice = flow.response(self.s, fid)
+            self.assertEqual(notice['recovery']['kind'], 'compatible_review_upgrade')
+            with self.assertRaisesRegex(InvalidUpdate, 'Static snapshot source changed'):
+                self.step(notice, event='restart_review', confirmed=True)
+            self.assertIsNone(upgrade.recorded(self.s, fid))
+        self.assertEqual(review_budget.usage(self.s, sid), before)
+
+    def test_remote_stop_with_unresolved_inference_gets_no_upgrade(self):
+        stopped, _ = self.paused_review(inference_started=True)
+        fid = stopped['flow_id']
+        with patch('review_upgrade.release_pair', return_value=True):
+            self.assertIsNone(upgrade.offer(self.s, fid, flow.info(self.s, fid)[1]))
+
+
 class ClosedParentOutputUpgradeTests(unittest.TestCase):
     tearDown = fixture.OrchestrationTests.tearDown
     provider = fixture.OrchestrationTests.provider
