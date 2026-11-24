@@ -49,6 +49,9 @@ def expected_request(role, payload):
     if role == 'parser': return EXTRACTOR, PATCH_SCHEMA
     if role == 'selector': return SELECT_SYSTEM, schema_for(payload, SELECT_SCHEMA)
     if role == 'worker': return SYSTEM, worker_schema(payload)
+    from section_synthesis import ROLES as sections, schema, system
+    if role in sections:
+        return system(role), schema(role, payload)
     raise InvalidUpdate('Unsupported invocation role: ' + str(role))
 
 
@@ -148,6 +151,9 @@ def validate_result(store, session, role, payload, schema, proposal, delivery_id
     if role == 'reviewer':
         from review_role import validate
         return validate(store, session, payload, proposal)
+    from section_synthesis import ROLES as sections, validate as validate_section
+    if role in sections:
+        return validate_section(store, session, role, payload, proposal)
     if role == 'parser':
         ops = resolve_operations(payload['CURRENT_USER_MESSAGE'], proposal['operations'])
         validate_permission_ops(ops)

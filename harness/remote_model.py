@@ -180,7 +180,8 @@ class RemoteModel(LocalModel):
         from model_activity import ACTIVE
         from model_packet import build
         from reasoning_policy import check_provider
-        from remote_context import (supports_parent_output_recovery, verify_parent_reasoning,
+        from remote_context import (SECTION_REASONING_BUDGETS, require_section_reasoning,
+                                    supports_parent_output_recovery, verify_parent_reasoning,
                                     verify_prefix_window, wire_request)
         from storage_policy import write_trace
 
@@ -195,12 +196,15 @@ class RemoteModel(LocalModel):
         recovery = 'parent_draft_recovery' in payload
         if recovery and not supports_parent_output_recovery(self.budget):
             raise InvalidUpdate('Bounded remote reasoning requires an exact, verified physical context')
+        role = packet['role'] if packet is not None else None
+        require_section_reasoning(self.budget, role, self.model, payload)
+        bounded_reasoning = recovery or role in SECTION_REASONING_BUDGETS
         physical = getattr(self, 'context_measurement', None) if exact(self.budget) else None
         if exact(self.budget):
             validate_proof(physical, self.budget, system, payload, schema,
-                           self.expected_identity if recovery else None)
+                           self.expected_identity if bounded_reasoning else None)
         prefix = physical.get('prefix_reuse') if physical is not None else None
-        window = self.budget.context_window if recovery or prefix is not None else self.profile
+        window = self.budget.context_window if bounded_reasoning or prefix is not None else self.profile
         body, _, wire_schema = wire_request(window, system, payload, schema, self.budget.response_reserve, prefix=prefix)
         transport = {'version': 1, 'phase': 'connect', 'headers_received': False,
                      'frames_received': 0, 'content_bytes': 0, 'reasoning_bytes': 0}
@@ -214,7 +218,7 @@ class RemoteModel(LocalModel):
         if physical is not None:
             record['physical_context'] = physical
         reasoning_observation = {}
-        if recovery:
+        if bounded_reasoning:
             reasoning_observation['reasoning_budget_tokens'] = body['reasoning_budget_tokens']
             record['reasoning_control'].update(reasoning_observation)
         activity = ACTIVE.get()
@@ -230,7 +234,7 @@ class RemoteModel(LocalModel):
         try:
             remote_control.ensure_tunnel(self.profile)
             observed = remote_control.verify_server(self.profile)
-            if recovery:
+            if bounded_reasoning:
                 verify_parent_reasoning(window, self.profile, observed['props'])
             if prefix is not None:
                 verify_prefix_window(window, self.profile, observed['props'])
@@ -270,7 +274,7 @@ class RemoteModel(LocalModel):
                 raise RuntimeError('Remote usage exceeds the admitted context or output allocation')
             self.fresh_context_metadata()
             observed = remote_control.verify_server(self.profile)
-            if recovery:
+            if bounded_reasoning:
                 verify_parent_reasoning(window, self.profile, observed['props'])
             if prefix is not None:
                 verify_prefix_window(window, self.profile, observed['props'])

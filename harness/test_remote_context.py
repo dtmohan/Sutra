@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from context_manager import ContextBudgetExceeded, InvalidUpdate, canonical, sha
-from invocation_gateway import InvocationLedger, consume_dispatch
+from invocation_gateway import InvocationGateway, InvocationLedger, consume_dispatch
 from model_packet import build, descriptor, host_fields
 from monitoring import ResourceWait
 from paging import Budget
@@ -226,6 +226,76 @@ class RemoteWindowTests(unittest.TestCase):
         self.assertNotEqual(first['window'], second['window'])
         with self.assertRaises(InvalidUpdate):
             context_window.validate_proof(first, budget, 'system', {}, {})
+
+    def test_section_roles_bind_native_reasoning_caps_to_exact_count_and_proof(self):
+        from invocation_roles import expected_request
+
+        window = dict(self.window, **remote_context.PARENT_REASONING_IDENTITY)
+        for role, reserve, cap in (('section_writer', 2048, 768),
+                                   ('section_reviewer', 1024, 384),
+                                   ('section_reviewer', 512, 192)):
+            with self.subTest(role=role, reserve=reserve):
+                budget = Budget(16384, reserve, context_profile=2, reservation_limit=65536,
+                                context_window=window)
+                payload = {'request': 'Review the example.', 'section': 'Overview', 'section_role': role,
+                           'section_plan': 'a' * 64, 'attempt': 0, 'memory_budget': vars(budget),
+                           'evidence': {'a': {'path': 'example.py', 'text': 'def run(): return 1'}}}
+                claim = {'text': 'The function returns one.', 'sources': ['a']}
+                if reserve == 512:
+                    payload.update(section_version=2, claim_index=0, claim=claim)
+                elif role == 'section_reviewer':
+                    payload['claims'] = [claim]
+                system, spec = expected_request(role, payload)
+                remote_context.require_section_reasoning(budget, role, window['reference'], payload)
+                with patch.object(remote_context, '_identity', return_value=self.profile) as identity:
+                    proof = context_window.check(budget, system, payload, spec)
+                self.assertEqual(identity.call_count, 2)
+                identity.assert_called_with(window, parent_reasoning=True)
+                wire = self.service.calls[-1][1]
+                self.assertEqual((wire['reasoning_budget_tokens'], wire['max_tokens']), (cap, reserve))
+                self.assertEqual(proof['reasoning_budget_tokens'], cap)
+                self.assertEqual(proof['wire_sha256'], sha(canonical(wire)))
+                self.assertFalse({'section_plan', 'section_role', 'memory_budget', 'claim_index'} &
+                                 set(json.loads(wire['messages'][-1]['content'])))
+                with patch.object(remote_context, '_identity',
+                                  side_effect=AssertionError('Proof replay must be offline')):
+                    context_window.validate_proof(proof, budget, system, payload, spec)
+                    with self.assertRaises(InvalidUpdate):
+                        context_window.validate_proof(dict(proof, reasoning_budget_tokens=cap + 1),
+                                                      budget, system, payload, spec)
+                with self.assertRaises(InvalidUpdate):
+                    remote_context.wire_request(window, system, dict(payload, section_role=None), spec, reserve)
+                for incompatible, model in ((self.budget, window['reference']),
+                                            (budget.with_limits(response_reserve=cap), window['reference']),
+                                            (budget, 'sutra:remote/other')):
+                    with self.assertRaises(ResourceWait) as caught:
+                        remote_context.require_section_reasoning(incompatible, role, model, payload)
+                    self.assertIs(caught.exception.state['runtime']['inference_started'], False)
+
+    def test_gateway_uses_claim_reasoning_cap_at_both_admission_checks(self):
+        from invocation_roles import expected_request
+
+        window = dict(self.window, **remote_context.PARENT_REASONING_IDENTITY)
+        budget = Budget(16384, 512, context_profile=2, reservation_limit=65536,
+                        context_window=window)
+        role = 'section_reviewer'
+        payload = {'section_role': role, 'section_version': 2, 'claim_index': 0,
+                   'claim': {'text': 'The function returns one.', 'sources': ['a']},
+                   'evidence': {'a': {'path': 'example.py', 'text': 'def run(): return 1'}}}
+        system, spec = expected_request(role, payload)
+        provider = SimpleNamespace(budget=budget, model=window['reference'])
+        gateway = InvocationGateway('unused.sqlite', 'run', provider)
+
+        class ReachedNextCheck(Exception):
+            pass
+
+        with patch('reasoning_policy.check_provider', side_effect=ReachedNextCheck):
+            with self.assertRaises(ReachedNextCheck):
+                gateway.invoke(role, 'call', system, payload, spec, 'delivery')
+        with patch('invocation_timing.validate', side_effect=ReachedNextCheck):
+            with self.assertRaises(ReachedNextCheck):
+                InvocationLedger.register(None, 'run', 'call', role, payload, system, spec,
+                                          'delivery', provider.model, 1024, budget=vars(budget))
 
     def reviewed_prefix_budget(self):
         import remote_prefix

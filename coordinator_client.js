@@ -198,6 +198,7 @@ class CoordinatorClient {
       const replay=await rpc(endpoint,'events',{id,chat_key:chatKey,after:cursor});
       if(replay.dropped_before>cursor) {
         for(const event of replay.active_calls||[])try{onActivity(event);}catch{}
+        for(const event of replay.report_sections||[])try{onActivity(event);}catch{}
         cursor=replay.dropped_before;
       }
       for(const row of replay.events||[]) {

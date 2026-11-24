@@ -1,4 +1,11 @@
-# Sutra 0.58.1 — RTX admission and prefix-cache verification
+# Sutra 0.59.4 — Source-reviewed RTX report recovery
+
+When an eligible RTX architecture report reaches its output limit, Sutra can
+continue from the saved source evidence in bounded sections. Each section gets
+its own claim review and appears in chat once the host admits its cited claims.
+Reload or resume to recover saved sections and continue with the original
+permissions, evidence, and remaining allocation. The completed report assembles
+the sections in one preview.
 
 When an otherwise admissible RTX telemetry sample expires before dispatch, Sutra
 can refresh it once against the same warm server process. It records the refresh

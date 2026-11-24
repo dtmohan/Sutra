@@ -299,7 +299,7 @@ class Coordinator {
     job.events.push(row);job.event_bytes += Buffer.byteLength(canonical(row));
     while (job.event_bytes > MAX_EVENTS || job.events.length > 1024) {
       let index = job.events.findIndex(item => ['thinking','progress'].includes(item.event.kind));
-      if (index < 0) index = 0;
+      if (index < 0) index = Math.max(0,job.events.findIndex(item => item.event.kind!=='report_section'));
       const [removed] = job.events.splice(index, 1);
       job.event_bytes -= Buffer.byteLength(canonical(removed));job.dropped_before = Math.max(job.dropped_before,removed.seq);
     }
@@ -401,6 +401,8 @@ class Coordinator {
       for (const key of ['runner_usage','conversation']) {
         if (data[key]!==undefined) job.response.data[key]=data[key];
       }
+      const sections=taskRunner.reportSections(data);
+      if (sections.length) job.response.data.report_sections=sections;
       job.state='completed';return;
     }
     if (item.mode!=='probe') {
@@ -416,8 +418,15 @@ class Coordinator {
     }
     if (item.mode==='probe' && !['continue','wait'].includes(continuation.disposition)) job.response=response;
     job.continuation=continuation;
+    const sections=new Set(job.workflow?.report_section_ids||[]);
     job.workflow=taskRunner.checkpoint(data,continuation);
     if (token.isCancellationRequested) throw new Error('The task was stopped before its next stage');
+    for (const section of taskRunner.reportSections(data)) {
+      if (sections.has(section.receipt_id)) continue;
+      this.event(job,{kind:'report_section',version:1,flow_id:continuation.flow_id,section});
+      sections.add(section.receipt_id);
+    }
+    if (sections.size) job.workflow.report_section_ids=[...sections].slice(-64);
     const prior=job.readiness, checks=(prior?.checks||0)+Number(!!data.continuation_probe);
     if (continuation.disposition==='wait') {
       const wait=taskRunner.waitObservation(data,continuation);
@@ -545,6 +554,8 @@ class Coordinator {
       if (!Number.isSafeInteger(after) || after < 0 || after > job.last_event_seq) throw new Error('Invalid coordinator event cursor');
       return {id:job.id,events:job.events.filter(item => item.seq > after),last_event_seq:job.last_event_seq,
         dropped_before:job.dropped_before,state:job.state,
+        report_sections:job.dropped_before>after ? job.events.filter(item => item.seq<=job.dropped_before &&
+          item.event.kind==='report_section').map(item => item.event) : [],
         active_calls:job.events.filter(item => ['start','control'].includes(item.event.kind)).map(item => item.event)};
     }
     if (frame.op === 'cancel') return this.cancel(job);

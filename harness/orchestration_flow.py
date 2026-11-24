@@ -208,6 +208,8 @@ def pending_flows(s,workspace,exclude=None):
 
 def response(s,fid,*,_runner_poll=False,**extra):
     n,data=info(s,fid);history=m.events(s,fid)
+    if 'report_sections' in data:
+        extra.setdefault('report_sections', data['report_sections'])
     if m.state(s,fid)=='NEED_PERMISSION':
         extra.setdefault('bound_task',data.get('permission_binding'))
     if m.state(s,fid)=='NEED_TOOL_APPROVAL':
@@ -630,7 +632,7 @@ def run(s,meta,workspace,root,req,providers=None):
         from resource_routing import propose
         category=exc.category
         hardware_wait=category in ('hardware_pressure','model_admission')
-        fallback=propose(s,fid,data,req,exc.state,target) if hardware_wait and target not in ('WORKSPACE','NEED_TOOL_APPROVAL') else None
+        fallback=propose(s,fid,data,req,exc.state,target) if hardware_wait and not data.get('section_plan') and target not in ('WORKSPACE','NEED_TOOL_APPROVAL') else None
         if fallback:
             with s.db:
                 m.transition(s,fid,target,'RESOURCE_MODEL_FALLBACK',
@@ -1293,7 +1295,8 @@ def _handle(s,meta,workspace,root,req,providers=None):
             return response(s, fid, progress=summary(snapshot))
         if event!='resume':raise InvalidUpdate('Workflow paused. Choose Resume or Discard; allocations remain unchanged.')
         saved_phase_stops = ('RESOURCE_STOPPED', 'ROUTING_STOPPED', 'MEMORY_STOPPED',
-                             'CLAIM_REVIEW_STOPPED', 'REVIEWER_UNAVAILABLE', 'BRIDGE_INTERRUPTED', 'DOCUMENT_STAGE_STOPPED', 'CHILD_SLICE_STOPPED', 'CHILD_REVIEW_STOPPED')
+                             'CLAIM_REVIEW_STOPPED', 'REPORT_SECTION_STOPPED', 'REVIEWER_UNAVAILABLE',
+                             'BRIDGE_INTERRUPTED', 'DOCUMENT_STAGE_STOPPED', 'CHILD_SLICE_STOPPED', 'CHILD_REVIEW_STOPPED')
         stopped = [e for e in m.events(s, fid)
                    if e['kind'] in (*saved_phase_stops, 'MAPPING_STOPPED', 'CONTEXT_STOPPED')]
         if not stopped:raise InvalidUpdate('Paused workflow requires inspection before recovery')
@@ -1655,6 +1658,9 @@ def _handle(s,meta,workspace,root,req,providers=None):
                     if f.get('action_flow_id'):
                         request['native_action_continuation'] = True
                     out=turn(s,meta,workspace,root,request,provider=provider('coder'))
+                elif d.get('section_plan'):
+                    from section_synthesis import step
+                    out = step(s, sid, fid, root, d['section_plan'], provider=provider('synthesis'))
                 elif d.get('parent_summary_revalidation'):
                     from chat_runtime import resume_revalidated_parent
                     out = resume_revalidated_parent(s, meta, workspace, root, request,
@@ -1697,7 +1703,8 @@ def _handle(s,meta,workspace,root,req,providers=None):
             return response(s, fid, progress='Continuing the saved review in a fresh execution slice.',
                             claim_review_usage=workflow_usage(s, fid))
         except (StaticSourceChanged, FollowupSourceChanged) as exc:
-            if not claim_retry and (d.get('parent_generation') or {}).get('reason') != 'compact_output':
+            if (not claim_retry and not d.get('section_plan')
+                    and (d.get('parent_generation') or {}).get('reason') != 'compact_output'):
                 raise
             stop = {'status': 'provenance_changed', 'error': str(exc)}
             move(s, fid, 'PAUSED', 'GIT_SNAPSHOT_CHANGED', workflow_stop=stop)
@@ -1720,6 +1727,20 @@ def _handle(s,meta,workspace,root,req,providers=None):
         if phase == 'SYNTHESIS':
             if provenance_changed(s, workspace, fid, d):
                 return response(s, fid)
+            if section_stop := out.get('section_stop'):
+                move(s, fid, 'PAUSED', 'REPORT_SECTION_STOPPED',
+                     workflow_stop=dict(section_stop, resume_phase='SYNTHESIS', stage='SYNTHESIS'),
+                     report_sections=out['report_sections'])
+                save(root, meta)
+                return response(s, fid)
+            if out.get('section_pending'):
+                rows = out['report_sections']
+                move(s, fid, 'SYNTHESIS', 'REPORT_SECTION_CHECKPOINT', report_sections=rows)
+                save(root, meta)
+                progress = ('Published a source-reviewed section. Continuing the saved review.'
+                            if len(rows) > len(d.get('report_sections', [])) else
+                            'Report progress saved. Continuing the current section.')
+                return response(s, fid, progress=progress, claim_review_usage=workflow_usage(s, fid))
             if out.get('retained_context_pending'):
                 move(s, fid, 'SYNTHESIS', 'RETAINED_CONTEXT_REQUESTED',
                      context_recall=out['retained_context_pending'], parent_checkpoint=None, parent_output_retry=None)
@@ -1733,13 +1754,24 @@ def _handle(s,meta,workspace,root,req,providers=None):
                 return response(s, fid, progress='Gathering source evidence for the review.',
                                 claim_review_usage=workflow_usage(s, fid))
             if out.get('parent_generation_pending'):
+                compact = out['parent_generation_pending'].get('reason') == 'compact_output'
+                if compact:
+                    from section_synthesis import make_plan
+                    try:
+                        section_plan = make_plan(s, sid, out['parent_generation_pending']['invocation_id'])
+                    except InvalidUpdate:
+                        section_plan = None
+                    if section_plan:
+                        move(s, fid, 'SYNTHESIS', 'REPORT_SECTION_PLAN', section_plan=section_plan, report_sections=[])
+                        save(root, meta)
+                        return response(s, fid, progress='Report synthesis reached its output allowance. Continuing in bounded sections.',
+                                        claim_review_usage=workflow_usage(s, fid))
                 details = {}
                 if out.get('parent_output_retry'):
                     details['parent_output_retry'] = out['parent_output_retry']
                 move(s, fid, 'SYNTHESIS', 'PARENT_GENERATION_CHECKPOINT',
                      parent_generation=out['parent_generation_pending'], **details)
                 save(root, meta)
-                compact = out['parent_generation_pending'].get('reason') == 'compact_output'
                 progress = ('Report synthesis reached its output allowance. Using a remaining attempt for a compact report.'
                             if compact else 'Review attempt saved. Continuing its remaining repair allowance.')
                 return response(s, fid, progress=progress,
@@ -1776,6 +1808,7 @@ def _handle(s,meta,workspace,root,req,providers=None):
         action=(out['result'].get('accepted_output') or {}).get('action',{}).get('kind')
         awaiting=phase=='CODING' and action in ('edit','run_tests')
         move(s,fid,'AWAITING_ACTION' if awaiting else 'DONE','ACTION_PROPOSED' if awaiting else 'WORKFLOW_FINISHED',invocation_id=out['result']['invocation_id'],
-             observation_delivery='awaiting_action' if awaiting else 'admitted' if out['result']['admission']['admitted'] else 'withheld')
+             observation_delivery='awaiting_action' if awaiting else 'admitted' if out['result']['admission']['admitted'] else 'withheld',
+             **({'report_sections': out['report_sections']} if 'report_sections' in out else {}))
         return response(s,fid,data=out)
     raise InvalidUpdate('Workflow needs explicit recovery: '+phase)

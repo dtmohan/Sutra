@@ -756,9 +756,10 @@ def _finish(s, sid, p, key, accepted, receipts, reason, *, control=None):
             'token_usage': None}
 
 
-def load(s, sid, p):
+def checkpoint_receipts(s, sid, p):
+    """Resolve the repository effects of the admitted, completed discovery chain."""
     checkpoint = p.get('evidence_discovery')
-    if not checkpoint: return {}
+    if not checkpoint: return []
     _, key = scope(s, sid, p)
     records = history(s, sid, key)
     accepted = _accepted(s, sid, records)
@@ -774,7 +775,12 @@ def load(s, sid, p):
     if (p.get('discovery_notes_unverified') != _notes(accepted)
             or p.get('discovery_coverage') != _coverage(s, sid, p, accepted, receipts, checkpoint['stop_reason'])):
         raise InvalidUpdate('Evidence discovery notes or coverage changed')
-    return earned_sources(s, sid, p['workspace'], receipts)
+    return receipts
+
+
+def load(s, sid, p):
+    receipts = checkpoint_receipts(s, sid, p)
+    return earned_sources(s, sid, p['workspace'], receipts) if receipts else {}
 
 
 def earned_sources(s, sid, workspace, receipts):

@@ -86,7 +86,10 @@ class InvocationLedger(GovernedContext):
                     'model_identity': model_identity, 'charge': charge, 'budget_profile':budget or {'context_limit':8192,'response_reserve':1024,'template_reserve':256}, 'created_at': time.time()}
         from paging import Budget
         from context_window import exact, validate_proof
+        from remote_context import require_section_reasoning
+        from section_synthesis import ROLES as sections, request_check as check_section
         allocation = Budget(**envelope['budget_profile'])
+        require_section_reasoning(allocation, role, model, payload)
         from invocation_timing import validate as validate_timing
         call_seconds = validate_timing(transport_timing, role, payload, allocation.response_reserve)
         if transport_timing is not None: envelope['transport_timing'] = copy.deepcopy(transport_timing)
@@ -139,8 +142,12 @@ class InvocationLedger(GovernedContext):
             else:
                 if payload['contract']['contract_hash'] != config['contract_hash']:
                     raise Conflict('Invocation contract changed')
-                if role in ('memory_probe','reviewer','coder','architect','api_mapper','api_reviewer','static_explainer','chat_reviewer','review_reader','conversation','subagent','report_reviewer','document_extract','document_verdict_reviewer'):
-                    if role == 'document_extract':
+                if role in ('memory_probe','reviewer','coder','architect','api_mapper','api_reviewer','static_explainer','chat_reviewer','review_reader','conversation','subagent','report_reviewer','document_extract','document_verdict_reviewer') + sections:
+                    if role in sections:
+                        check_section(self, session, role, payload, model=model)
+                        if payload.get('memory_budget') != envelope['budget_profile']:
+                            raise InvalidUpdate('Section context budget differs from provider')
+                    elif role == 'document_extract':
                         from document_stages import request_check
                         request_check(self, session, payload)
                         if payload['model'] != model:
@@ -749,6 +756,8 @@ class InvocationGateway:
         from local_model import LocalModel
         from pathlib import Path
         from reasoning_policy import check_provider
+        from remote_context import require_section_reasoning
+        require_section_reasoning(self.provider.budget, role, getattr(self.provider, 'model', None), payload)
         check_provider(self.provider, payload, fresh=isinstance(self.provider, LocalModel))
         if isinstance(self.provider, LocalModel):
             from monitoring import ResourceWait

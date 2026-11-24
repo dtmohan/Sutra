@@ -5,6 +5,7 @@ const {NativeMemory,isCompaction}=require('./native_memory');
 const hostTokens=require('./host_tokens');
 const {profiles}=require('./workspace_authorization');
 const {chatActivity}=require('./model_activity');
+const {reportSection,reportSections}=require('./task_runner');
 const coherence=require('./media/coherence');
 const {ModelUnavailable,fallbackMessage}=require('./model_selection');
 const ACTION='karma_native_action';
@@ -24,6 +25,7 @@ const EXTENSION_ID=MANIFEST.publisher+'.'+MANIFEST.name;
 const RESUME_PROMPT=/^Resume saved Sutra request \[([a-f0-9]{32})\]$/;
 const classifying=flow=>flow?.state==='CLASSIFYING'||flow?.stop?.resume_phase==='CLASSIFYING';
 const evidencePause=flow=>flow?.state==='PAUSED'&&flow.stop?.status==='evidence_bridge';
+const workspaceSelectionPause=flow=>evidencePause(flow)&&flow.stop.evidence_bridge?.target_kind==='workspace';
 const documentFilePause=flow=>evidencePause(flow)&&flow.stop.evidence_bridge?.target_kind==='document'&&
   (flow.stop.evidence_bridge.required==='document_file'||/\.docx\b/i.test(flow.prompt||''));
 const DOCUMENT_EVIDENCE=/^\s*(?:document|r[eé]sum[eé]|cv|cover[ -]+letter)[ \t]+text:[ \t]*\r?\n\s*\S/i;
@@ -540,7 +542,8 @@ function install(vscode,context,deps){
       await context.workspaceState.update(pendingKey,terminal?undefined:{...flow,stop,resumeThinking,workspace:deps.workspace(),
         needsWorkspaceAccess:prior?.needsWorkspaceAccess,requestedAccessProfile:prior?.requestedAccessProfile,
         nativeChat:prior?.nativeChat||chatKey,resumeLink:prior?.resumeLink||crypto.randomBytes(16).toString('hex'),
-        conversation:undefined,routing_step:undefined,child:undefined,data:undefined,mapping:undefined,claim_review_usage:undefined,allocation_proposal:undefined,allocation_amendment:undefined});
+        conversation:undefined,routing_step:undefined,child:undefined,data:undefined,mapping:undefined,claim_review_usage:undefined,
+        allocation_proposal:undefined,allocation_amendment:undefined,report_sections:undefined});
     publish();
   }
   async function openTasks(){
@@ -1117,9 +1120,27 @@ function install(vscode,context,deps){
       const resumeFromLink=requestedResume&&(workspaceAccessPause(cached)||providerPause||evidencePause(cached)||restartableReview(cached));
       if(!stackChat&&cached?.workspace===deps.workspace()&&(resumeFromLink||evidenceReply(cached))&&hasFlowLink(cached))
         stackChat=cached.stackChat;
+      const identifiedChat=!!stackChat;
       const unidentifiedResume=!stackChat&&requestedResume&&!!context.workspaceState.get(pendingKey)?.stackChat;
       if(!stackChat&&!request.results)stackChat=crypto.randomBytes(32).toString('hex');
       const rememberMemory=id=>memory.remember(id,options,stackChat);
+      const shownSections=new Set(), priorSections=new Set(memory.reportSectionReceipts(stackChat));
+      const assistantHistory=priorSections.size?messages.filter(message=>message.role===vscode.LanguageModelChatMessageRole.Assistant)
+        .map(message=>message.content.filter(part=>part instanceof vscode.LanguageModelTextPart).map(part=>part.value).join('')).join('\n\n'):'';
+      function showReportSection(section){
+        if(shownSections.has(section.receipt_id)||!refreshAccess()||activeCancel.token.isCancellationRequested)return;
+        // A disconnected chat may lose streamed text. Only suppress a past
+        // display if this same chat still has the section in its transcript.
+        if(!priorSections.has(section.receipt_id)||!assistantHistory.includes(section.markdown))
+          progress.report(new vscode.LanguageModelTextPart(section.markdown+'\n\n'));
+        shownSections.add(section.receipt_id);
+        void memory.rememberReportSection(stackChat,section.receipt_id).catch(()=>{});
+      }
+      function showReportSections(flow){
+        const sections=reportSections(flow);
+        for(const section of sections)showReportSection(section);
+        return sections.length>0&&sections.every(section=>shownSections.has(section.receipt_id));
+      }
       let legacyResume=!!accessContinuation&&!accessContinuation.stackChat,managed=false;
       const reportModelFallbacks=rows=>{
         const observed=audit.modelFallbacks??=[];
@@ -1140,6 +1161,7 @@ function install(vscode,context,deps){
         recordCoherence(next.coherence_observation);
         if(next.claim_review_usage)recordUsage({token_usage:next.claim_review_usage});
         managed ||= !!next.task_stack;
+        if(!['inspect','pending','recoverable_review'].includes(event))showReportSections(next);
         return next;
       };
       function resumeUnavailable(message){
@@ -1154,6 +1176,25 @@ function install(vscode,context,deps){
         audit.message=flow.request_notice;
         progress.report(new vscode.LanguageModelTextPart(flow.request_notice));
         return true;
+      }
+      async function chooseWorkspaceScope(flow){
+        const workspace=deps.workspace();
+        const goal=String(flow.prompt||prompt).replace(/\s+/g,' ').trim().slice(0,240);
+        audit.stage='awaiting_workspace_selection';
+        audit.message='Waiting for you to choose whether to use the open workspace.';
+        publish();
+        const choice=await vscode.window.showWarningMessage('Use the open workspace for this request?',{
+          modal:true,detail:workspace+'\n\n'+goal
+        },{title:'Use this workspace'},{title:'Decline',isCloseAffordance:true});
+        assertCurrent(a,activeCancel.token);
+        if(deps.workspace()!==workspace)throw new Error('The open workspace changed before it could be selected.');
+        if(choice?.title==='Use this workspace')
+          return advance(flow,'supply_evidence',{evidence_text:'Use this workspace'});
+        audit.stage='paused';
+        audit.message='Workspace selection declined. Your request and remaining budget are saved.';
+        publish();
+        progress.report(new vscode.LanguageModelTextPart(audit.message+
+          ' Send **continue** to reopen the dialog, or list up to eight relative paths under `Workspace files:`.'));
       }
       async function readDocumentEvidence(flow){
         const workspace=deps.workspace();
@@ -1219,6 +1260,11 @@ function install(vscode,context,deps){
       let lastWorkflowProgress;
       activityProgress=e=>{
         if(!activityOpen||activityToken.isCancellationRequested)return;
+        if(e?.kind==='report_section'){
+          const section=e.version===1&&/^[a-f0-9]{32}$/.test(e.flow_id||'')&&reportSection(e.section);
+          if(section)showReportSection(section);
+          return;
+        }
         if(e?.kind==='workflow'){
           if(e.version!==1||typeof e.flow_id!=='string'||e.flow_id.length>128||typeof e.state!=='string'||e.state.length>80||
              typeof e.progress!=='string'||!e.progress.trim()||e.progress.length>500)return;
@@ -1288,7 +1334,7 @@ function install(vscode,context,deps){
                 return;
               }
               flow={...cachedFlow,task_stack:inspected.task_stack,focused_flow:inspected.focused_flow,
-                recovery:inspected.recovery};
+                recovery:inspected.recovery,report_sections:inspected.report_sections};
               await rememberFlow(flow,retained.thinkForTurn,chatKey,stackChat);
               if(!disposed&&!activeCancel.token.isCancellationRequested){await acknowledgeTransport(retained);currentRunnerTicket=undefined;}
               prompt=flow.prompt||retained.prompt||prompt;
@@ -1327,7 +1373,7 @@ function install(vscode,context,deps){
           }
           if(!flow){
           let pending=context.workspaceState.get(pendingKey);
-          const resumeId=prompt.trim().match(RESUME_PROMPT)?.[1];
+          const resumeId=resumeToken;
           let submission;
           if(resumeId){
             submission=resumeSubmission;
@@ -1338,18 +1384,22 @@ function install(vscode,context,deps){
               return;
             }
           }
-          const resumeRequested=!!resumeId||/^(continue|resume|please continue|please resume)[.! ]*$/i.test(prompt.trim());
-          if(resumeRequested&&!resumeId&&!accessContinuation&&stackChat&&
-              (!pending||((pending.binding||pending.bound_task)&&!classifying(pending)&&!evidencePause(pending)))){
+          // The host checks the latest ask in this exact chat. A cached pause
+          // can describe an older task parked before the withheld review.
+          let checkedChat=false;
+          if(requestedResume&&!resumeId&&!accessContinuation&&identifiedChat){
             const saved=await advance(null,'recoverable_review');
-            if(restartableReview(saved))pending={...saved,workspace:deps.workspace(),stackChat};
+            checkedChat=!!saved.task_stack||restartableReview(saved);
+            if(checkedChat)pending=saved.flow_id?{
+              ...(pending?.flow_id===saved.flow_id?pending:{}),...saved,workspace:deps.workspace(),stackChat
+            }:undefined;
           }
-          if(!pending||pending.stackChat&&pending.stackChat!==stackChat){
+          if(!checkedChat&&(!pending||pending.stackChat&&pending.stackChat!==stackChat)){
             const saved=await advance(null,'pending');
             pending=saved.flow_id?{...saved,workspace:deps.workspace(),stackChat:saved.task_stack?stackChat:undefined}:undefined;
           }
           const supply=pending?.workspace===deps.workspace()&&evidenceReply(pending)&&sameChat(pending,true);
-          if((resumeRequested||supply)&&pending?.workspace===deps.workspace()){
+          if((requestedResume||supply)&&pending?.workspace===deps.workspace()){
             if(!sameChat(pending,!!submission||supply)){
               resumeUnavailable('Open the originating Sutra chat and send **continue** there to resume this request.');
               return;
@@ -1366,7 +1416,7 @@ function install(vscode,context,deps){
               if(supply&&evidenceReply(old)){
                 flow=await advance(old,'supply_evidence',{evidence_text:prompt});
                 if(!evidencePause(flow))progress.report(new vscode.LanguageModelTextPart('Continuing the saved request with the supplied evidence.\n\n'));
-              }else if(documentFilePause(old)){
+              }else if(documentFilePause(old)||workspaceSelectionPause(old)){
                 flow=old;
               }else{
                 showPause(old,audit,progress);
@@ -1403,10 +1453,14 @@ function install(vscode,context,deps){
             resumeUnavailable('The previous runner request has no available response and no active workflow was recovered. Its receipts and spending remain retained. Open its conversation details or submit a new request.');
             return;
           }
+          if(!flow&&requestedResume){
+            resumeUnavailable('There is no unfinished Sutra request to resume in this chat. Send a new request, or choose a saved task in Open Sutra Tasks.');
+            return;
+          }
           if(!flow)flow=await advance(null,'start',{prompt,parent:request.parent,
             prior_prompt:!chatKey&&!request.parent?request.priorPrompt:undefined});
           }
-          if(resuming&&flow.state==='PAUSED'&&flow.stop?.resume_phase==='CLASSIFYING'){
+          if(resuming&&flow.state==='PAUSED'&&flow.stop?.resume_phase==='CLASSIFYING'&&!evidencePause(flow)){
             flow=await advance(flow,'resume');
           }
           if(flow.local_greeting){
@@ -1420,7 +1474,7 @@ function install(vscode,context,deps){
           }
           if(resuming&&flow.state==='CLASSIFYING')flow=await advance(flow,'step');
           let documentLookupAttempted=false;
-          while(flow.routing_step||flow.state==='CLASSIFYING'||(!documentLookupAttempted&&documentFilePause(flow))){
+          while(flow.routing_step||flow.state==='CLASSIFYING'||workspaceSelectionPause(flow)||(!documentLookupAttempted&&documentFilePause(flow))){
             assertCurrent(a,activeCancel.token);
             if(flow.document_stage_progress){
               progress.report(new vscode.LanguageModelTextPart(flow.document_stage_progress+'\n\n'));
@@ -1429,6 +1483,25 @@ function install(vscode,context,deps){
               const step=flow.routing_step;recordUsage(step.result);lastRoute=step.route.model;audit.model=lastRoute;
               audit.routingDecision=step.routing_followup;audit.stage='routing';publish();
               progress.report(new vscode.LanguageModelTextPart((step.routing_followup?.kind==='page_in'?'Loading the requested conversation context before choosing a model.':step.routing_followup?.kind==='reasoning'?'Checking a higher supported reasoning setting on the same model against the remaining budget.':step.routing_followup?.kind==='escalate'?'Checking the next model tier against the remaining budget and available memory.':flow.progress)+'\n\n'));
+            }
+            if(workspaceSelectionPause(flow)){
+              prompt=flow.prompt||prompt;
+              conversationId=flow.conversation_id;
+              if(flow.conversation){
+                const classified=recordConversation(flow.conversation);
+                if(!classified.admission.admitted){
+                  progress.report(new vscode.LanguageModelTextPart('Sutra withheld the routing response: '+classified.admission.errors.join('; ')));
+                  return;
+                }
+                footerId=classified.invocation_id;
+                footerSignature=await rememberMemory(footerId);
+                conversationId=footerId;
+              }
+              const selected=await chooseWorkspaceScope(flow);
+              if(!selected)return;
+              flow=selected;
+              if(workspaceSelectionPause(flow)){showPause(flow,audit,progress);return;}
+              continue;
             }
             if(!documentLookupAttempted&&documentFilePause(flow)){
               documentLookupAttempted=true;
@@ -1509,6 +1582,7 @@ function install(vscode,context,deps){
         if(!flow)flow=await advance(null,'start_existing',{prompt,conversation_id:conversationId,
           ...(actionScope?.flow_id?{action_flow_id:actionScope.flow_id}:{})});
         if(showRequestNotice(flow))return;
+        showReportSections(flow);
         if(flow.state==='PAUSED'){
           flow=await advance(flow,'resume');
           if(showRequestNotice(flow))return;
@@ -1588,7 +1662,9 @@ function install(vscode,context,deps){
         publish();
         const p=r.accepted_output;if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&!['edit','run_tests'].includes(p.action?.kind))throw new Error('No admitted action is available to satisfy required tool mode.');
         if(data.report_markdown){
-          progress.report(new vscode.LanguageModelTextPart(data.report_markdown+'\n\n'));
+          const completion=data.report_completion_markdown;
+          const markdown=showReportSections(flow)&&typeof completion==='string'&&completion.trim()?completion:data.report_markdown;
+          progress.report(new vscode.LanguageModelTextPart(markdown+'\n\n'));
           if(data.route?.reason==='governed resource fallback'&&data.route.mode==='resource-low'&&data.route.tier==='low')
             progress.report(new vscode.LanguageModelTextPart('This review used the configured Low tier after a model-capacity refusal.\n\n'));
           if(data.review_diagram){try{await deps.presentReview?.(data);progress.report(new vscode.LanguageModelTextPart(data.review_flow_diagram?'The preview has two views: the **request-flow explanation** and **local source dependencies**. Use its Diagram view selector to switch between them.\n\n':'The **source dependency diagram** is open beside this chat. Its arrows show local import candidates, not execution order.\n\n'));}catch(error){progress.report(new vscode.LanguageModelTextPart('Diagram preview unavailable: '+error.message+'\n\n'));}}
@@ -1604,7 +1680,7 @@ function install(vscode,context,deps){
         }
         if(['edit','run_tests'].includes(p.action?.kind)){
           await offerAction(flow,r.invocation_id,p.action.kind);
-        }else if(!p.report){progress.report(new vscode.LanguageModelTextPart('Remaining: '+(p.remaining?.join('; ')||'No further step proposed.')+'\n\nModel notes are not proof of correctness. Test receipts report process observations.'));}
+        }else if(!p.report&&!data.report_completion_markdown){progress.report(new vscode.LanguageModelTextPart('Remaining: '+(p.remaining?.join('; ')||'No further step proposed.')+'\n\nModel notes are not proof of correctness. Test receipts report process observations.'));}
       }finally{
         const stopped=activeCancel.token.isCancellationRequested;
         try{

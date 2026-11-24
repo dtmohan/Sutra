@@ -488,6 +488,48 @@ async function journalContentIntegrity() {
   } finally {await subject.close();}
 }
 
+async function reportSectionReplay() {
+  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sutra-section-events-')));
+  const config = {workspace: directory, storage: directory, extensionPath: root, python: 'python3',
+    runtimeHash: 'a'.repeat(64)};
+  const coordinator = new Coordinator(config, directory, crypto.randomBytes(16).toString('hex'));
+  const id = 'b'.repeat(32), flowId = 'c'.repeat(32), chat = 'd'.repeat(64);
+  const job = {id, chat_key: chat, state: 'running', initial_request: {op: 'orchestrate'}, environment: {},
+    steps: 0, events: [], event_bytes: 0, last_event_seq: 0, dropped_before: 0};
+  coordinator.state.jobs.push(job);
+  const first = {receipt_id: '1'.repeat(64), markdown: '## Checked section one'};
+  const second = {receipt_id: '2'.repeat(64), markdown: '## Checked section two'};
+  const step = async (ordinal, report_sections) => {
+    const cursor = String(ordinal).repeat(64), binding = null;
+    const continuation = {version: 1, disposition: 'continue', flow_id: flowId, cursor, binding,
+      fingerprint: cursor, reason: 'Next section', next_event: 'step', runner_request_id: id,
+      kernel: {adapter: 'karma', profile: 'task-continuation-v1', decision: 'ALLOW',
+        grants_permissions: false, replenishes_budget: false}, receipt: {version: 1, seq: ordinal, hash: cursor}};
+    await coordinator.advanceTask(job, {mode: 'flow'},
+      {ok: true, data: {flow_id: flowId, cursor, state: 'SYNTHESIS', binding, continuation, report_sections}},
+      null, {isCancellationRequested: false});
+  };
+  try {
+    await step(1, [first]);
+    await step(2, [first, second]);
+    const before = coordinator.rpc({op: 'events', id, chat_key: chat});
+    assert.deepEqual(before.events.filter(row => row.event.kind === 'report_section').map(row => row.event.section),
+      [first, second], 'A cumulative snapshot must emit each receipt once');
+    for (let i = 0; i < 32; i++) coordinator.event(job, {kind: 'thinking', text: 'x'.repeat(27000)});
+    const replay = coordinator.rpc({op: 'events', id, chat_key: chat, after: 0});
+    assert(replay.dropped_before > before.last_event_seq);
+    assert.deepEqual(replay.report_sections.map(event => event.section), [first, second],
+      'A gap in diagnostic activity must still replay retained report receipts');
+    checks.push('Cumulative report receipts are emitted once and replayed after bounded diagnostic-event eviction');
+  } finally {
+    // This fixture exercises settlement and replay without running its queue.
+    job.state = 'completed';
+    coordinator.queue.length = 0;
+    await coordinator.close();
+    fs.rmSync(directory, {recursive: true, force: true});
+  }
+}
+
 async function queuedAuthorization() {
   const subject = await fixture();
   try {
@@ -564,6 +606,7 @@ async function main() {
   await realLedgerContinuity();
   await journalWriteFailure();
   await journalContentIntegrity();
+  await reportSectionReplay();
   await queuedAuthorization();
   await privateRecords();
   console.log(JSON.stringify({passed: true, checks}, null, 2));

@@ -17,6 +17,8 @@ PROFILES = {
     'conversation': ('conversation_directory', 'Bound conversation memory, current user intent and pageable turn directory.'),
     'subagent': ('branch_checkpoint_context', 'Own branch checkpoints and parent request; no foreign task journal.'),
     'report_reviewer': ('independent_claim_sources', 'Independent claim pages and current source; writer notes are not verdict evidence.'),
+    'section_writer': ('saved_report_section', 'Original request and bound source receipts for the current report section.'),
+    'section_reviewer': ('saved_report_section_claims', 'One admitted claim and its exact cited excerpts for current report plans.'),
     'document_verdict_reviewer': ('independent_document_quotes', 'Bound answer/quotes; no inherited reasoning as evidence.'),
     'review_reader': ('source_navigation', 'Current source inventory and requested evidence; no permission authority from notes.'),
     'document_extract': ('bounded_document_section', 'Exact document section and offsets; other sections remain explicitly outside this call.'),
@@ -45,13 +47,26 @@ def strings(node, values):
     return set()
 
 
-def registered_roles(tree):
+def registered_roles(tree, harness):
     function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'expected_request')
+    values = {}
+    for node in ast.walk(function):
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        module = harness / (node.module + '.py')
+        if not module.is_file():
+            continue
+        exports = {alias.name: alias.asname or alias.name for alias in node.names}
+        for statement in ast.parse(module.read_text()).body:
+            if isinstance(statement, ast.Assign):
+                for target in statement.targets:
+                    if isinstance(target, ast.Name) and target.id in exports:
+                        values[exports[target.id]] = strings(statement.value, {})
     roles = set()
     for node in ast.walk(function):
         if isinstance(node, ast.Compare) and isinstance(node.left, ast.Name) and node.left.id == 'role':
             for other in node.comparators:
-                roles.update(strings(other, {}))
+                roles.update(strings(other, values))
     return roles
 
 
@@ -98,7 +113,7 @@ def origins(tree, path):
 
 def inventory(root):
     harness = Path(root) / 'harness'
-    registry = registered_roles(ast.parse((harness / 'invocation_roles.py').read_text()))
+    registry = registered_roles(ast.parse((harness / 'invocation_roles.py').read_text()), harness)
     rows = []
     for file in sorted(harness.glob('*.py')):
         if file.name.startswith('test_'): continue

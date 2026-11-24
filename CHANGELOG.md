@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.59.4
+
+- Open a dialog when a saved request needs the open workspace selected. Accept to continue the same request, or decline to keep it paused.
+- Use the originating chat’s saved focus for Resume and Continue. Explain when there is nothing to resume.
+
+## 0.59.3
+
+- Apply the per-claim reviewer’s output allowance at both gateway admission checks.
+- Continue a section draft saved before the reviewer could dispatch, preserving the original task and charges.
+
+## 0.59.2
+
+- Check the originating chat for an eligible saved review before resuming an older evidence request.
+
+## 0.59.1
+
+- Carry source-checked implementation reads from discovery into the relevant saved report sections.
+- Review each claim against its own cited passages. Let the report recommend next steps grounded in those passages.
+
+## 0.59.0
+
+- Continue eligible RTX architecture reports after an output limit with bounded native reasoning and a separate claim review for each section.
+- Show source-linked sections in chat as their reviews finish. Recover them across reloads and assemble the complete report in the preview.
+- Preserve the saved source evidence, permissions, and consumed allocation when continuing the same review.
+
 ## 0.58.1
 
 - Refresh an age-only RTX telemetry stop once before dispatch on the same warm server instance. Record the refresh and preserve the task's context, permissions, and allocation.

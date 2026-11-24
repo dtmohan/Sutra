@@ -18,20 +18,31 @@ def origin(s, flow, data):
         "SELECT i.record_json,r.record_json,json_extract(d.payload_json,'$.parent_output_policy_version') "
         "FROM invocations i JOIN invocation_receipts r ON r.invocation_id=i.id "
         "JOIN deliveries d ON d.id=i.delivery_id WHERE i.id=?", (iid,)).fetchone()
-    if not row or row[2] == 1:
-        # New workflows use their compact attempt in place.
+    if not row:
         return None
     envelope, receipt = map(json.loads, row[:2])
     if (envelope['role'] != 'chat_reviewer' or receipt['status'] != 'quarantined'
             or (envelope.get('orchestration') or {}).get('node_id') != data['root_node']):
         return None
-    from remote_profiles import is_remote
-    if not is_remote(envelope['model']):
-        return None
     if s.db.execute(
             "SELECT 1 FROM orchestration_nodes WHERE "
             "json_extract(record_json,'$.parent_synthesis_predecessor.flow_id')=? LIMIT 1",
             (flow['id'],)).fetchone():
+        return None
+    if row[2] == 1:
+        stamp = review_upgrade.section_origin(s, flow['id'], data)
+        if not stamp:
+            return None
+        from section_synthesis import make_plan
+        try:
+            with review_upgrade.use(s, stamp):
+                make_plan(s, stamp['current']['session'], iid,
+                          original_id=stamp['section_original_invocation'])
+        except InvalidUpdate:
+            return None
+        return stamp, iid, None, False, iid
+    from remote_profiles import is_remote
+    if not is_remote(envelope['model']):
         return None
     link = flow.get('parent_synthesis_predecessor')
     normalize = False
@@ -92,9 +103,12 @@ def offer(s, flow, data):
         if not latest or latest['id'] != flow['id']:
             return None
         info['stack_cursor'] = view(s, flow['workspace'], chat)['cursor']
+    section = bool(found[0].get('section_output_receipt'))
     return dict(info, kind='parent_output_recovery', restart_allowed=True, terminal_review=True,
                 message=('Review the saved draft after correcting its host-generated summary. All spending '
                          'and permission limits are retained.' if found[3] else
+                         'Continue the saved source-backed report in bounded sections, preserving its '
+                         'evidence, original permissions and consumed budget.' if section else
                          'Continue the saved source-backed report in a new execution with the original '
                          'permissions, remaining attempts and consumed budget.'))
 
@@ -112,7 +126,7 @@ def continue_saved(s, meta, workspace, root, flow, data, request):
     sid = stamp['current']['session']
     if meta.get('active') != sid or request.get('binding') != identity(s, sid):
         raise InvalidUpdate('The saved report task, permissions or calibration changed')
-    if not same_snapshot(data['git_provenance'], inspect(workspace)):
+    if data.get('git_provenance') and not same_snapshot(data['git_provenance'], inspect(workspace)):
         raise InvalidUpdate('The saved report source snapshot changed')
     chat = flow.get('chat_key')
     if chat:
@@ -123,10 +137,15 @@ def continue_saved(s, meta, workspace, root, flow, data, request):
 
     with review_upgrade.use(s, stamp):
         review_upgrade.confirm(s, stamp, data, closed=True)
-        original_request = {'prompt': flow['prompt'], 'child_results': data['child_results'],
+        original_request = {'prompt': flow['prompt'], 'child_results': data.get('child_results', []),
                             'conversation_id': data.get('conversation_id'),
                             'orchestration_parent': stamp['root']}
-        if normalize:
+        section = bool(stamp.get('section_output_receipt'))
+        if section:
+            from section_synthesis import make_plan
+            checkpoint = {'section_plan': make_plan(
+                s, sid, terminal_invocation, original_id=stamp['section_original_invocation'])}
+        elif normalize:
             checkpoint = {'parent_summary_revalidation':
                               parent_summary_revalidation(s, sid, original_failure, repair)}
         else:
@@ -135,6 +154,8 @@ def continue_saved(s, meta, workspace, root, flow, data, request):
                               parent_output_checkpoint(s, sid, original_failure, stamp['root'], original_request, **options)}
         link = {'flow_id': flow['id'], 'execution_id': data['root_node'],
                 'failed_invocation': terminal_invocation}
+        if section:
+            link['profile'] = 'section_synthesis_v1'
         with s.db:
             new = machine.create(s, 'flow', objective=flow['prompt'], workspace=str(workspace),
                                  prompt=flow['prompt'], conversation_parent=flow.get('conversation_parent'),
@@ -155,4 +176,6 @@ def continue_saved(s, meta, workspace, root, flow, data, request):
                 select(s, workspace, chat, fid, expected_cursor=approved['stack_cursor'], attach=True)
                 meta['_flow'] = fid
         save(root, meta)
-        return response(s, fid, progress='Continuing report synthesis from the saved evidence and remaining allocation.')
+        return response(s, fid, progress=('Continuing the report in bounded sections from saved evidence and remaining allocation.'
+                                         if section else
+                                         'Continuing report synthesis from the saved evidence and remaining allocation.'))

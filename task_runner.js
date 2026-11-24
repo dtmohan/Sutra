@@ -8,6 +8,8 @@ const START_EVENTS = new Set(['start','start_existing','start_review','step','re
   'grant','capability_grant','approve_document','supply_evidence','restart_review','continue_parent_report','accept_provenance']);
 const DISPOSITIONS = new Set(['continue','wait','approval','evidence','finished','stopped']);
 const MEMORY_REFUSALS = new Set(['BRIDGE','FIN','COMPOUND_FIN']);
+const SECTION_ID = /^(?:[a-f0-9]{32}|[a-f0-9]{64})$/;
+const MAX_REPORT_SECTIONS = 32;
 const GIB = 1024 ** 3;
 const RESUMING = 'Readiness check passed. Sutra is rechecking admission and resuming the saved task.';
 const BASE_FIELDS = ['models','tier','armed','chat_key','expected_authority',
@@ -70,6 +72,18 @@ function checkpoint(data, continuation) {
   return {flow_id:continuation.flow_id,cursor:continuation.cursor,binding:continuation.binding,
     state:String(data.state||''),disposition:continuation.disposition,reason:continuation.reason,
     kernel:continuation.kernel,receipt:continuation.receipt,runner_request_id:continuation.runner_request_id};
+}
+function reportSection(section) {
+  if (!section || typeof section.receipt_id!=='string' || !SECTION_ID.test(section.receipt_id) ||
+      typeof section.markdown!=='string' || !section.markdown.trim() || Buffer.byteLength(section.markdown)>32768) return;
+  return {receipt_id:section.receipt_id,markdown:section.markdown};
+}
+function reportSections(data) {
+  const sections=data?.report_sections;
+  if (!Array.isArray(sections) || sections.length>MAX_REPORT_SECTIONS) return [];
+  const validated=sections.map(reportSection);
+  if (validated.some(section=>!section) || new Set(validated.map(section=>section.receipt_id)).size!==validated.length) return [];
+  return validated;
 }
 function amount(bytes) {
   if (bytes > 0 && bytes < GIB / 10) return `${Math.max(1, Math.round(bytes / 1048576))} MiB`;
@@ -136,4 +150,4 @@ function activity(data, continuation, {wait, delay}={}) {
     progress:String(progress).slice(0,500)};
 }
 function digest(plan) {return crypto.createHash('sha256').update(canonical(plan)).digest('hex');}
-module.exports={runner,plan,nextRequest,checkpoint,waitObservation,activity,digest};
+module.exports={runner,plan,nextRequest,checkpoint,waitObservation,activity,reportSection,reportSections,digest};

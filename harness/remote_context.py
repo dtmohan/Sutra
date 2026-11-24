@@ -26,6 +26,8 @@ MAX_COUNT = 2 ** 21
 MAX_METADATA_BYTES = 65536
 CONTEXT_SLACK = 8
 PARENT_REASONING_BUDGET_TOKENS = 2048
+SECTION_REASONING_BUDGETS = {'section_writer': 768, 'section_reviewer': 384}
+CLAIM_REASONING_BUDGET_TOKENS = 192
 
 # llama.cpp b12600's OpenAI adapter enables the sampling budget only when
 # its parsed chat template supplies a reasoning end tag. Scope recovery to
@@ -70,13 +72,46 @@ def supports_parent_output_recovery(budget):
     return budget.context_profile == 2 and budget.response_reserve >= 2 * PARENT_REASONING_BUDGET_TOKENS
 
 
+def _section_reasoning_tokens(role, payload):
+    if role == 'section_reviewer' and payload is not None and 'claim_index' in payload:
+        return CLAIM_REASONING_BUDGET_TOKENS
+    return SECTION_REASONING_BUDGETS.get(role)
+
+
+def require_section_reasoning(budget, role, model, payload=None):
+    """Wait before dispatch if this section cannot use native bounded reasoning."""
+    tokens = _section_reasoning_tokens(role, payload)
+    if tokens is None:
+        return
+    window = budget.context_window
+    if (_parent_reasoning_window(window) and validate_window(window)['reference'] == model
+            and budget.context_profile == 2 and budget.response_reserve >= 2 * tokens):
+        return
+    from monitoring import ResourceWait
+    raise ResourceWait({'profile': 'physical-context-v1', 'provider': PROVIDER,
+        'model': model, 'available': False, 'admitted': False, 'decision': None,
+        'blocker': 'measurement_unavailable', 'observed_at': time.time(),
+        'runtime': {'model': model, 'kind': 'remote_observation',
+                    'stage': 'remote_section_reasoning', 'inference_started': False},
+        'reason': 'This report section requires the verified RTX native reasoning control and its reserved output. '
+                  'Resume with the supported model available.'})
+
+
 def _reasoning_budget(window, system, payload, schema, response_reserve):
+    from model_packet import role_for
+    role = role_for(system)
+    section_tokens = _section_reasoning_tokens(role, payload)
+    if section_tokens is not None:
+        if (payload.get('section_role') != role or 'parent_draft_recovery' in payload
+                or not _parent_reasoning_window(window) or response_reserve < 2 * section_tokens):
+            raise InvalidUpdate('Bounded section reasoning requires the verified RTX context and output reserve')
+        validate_window(window)
+        return section_tokens
     if 'parent_draft_recovery' not in payload:
         return None
-    from model_packet import role_for
     recovery = payload['parent_draft_recovery']
     if (not _parent_reasoning_window(window)
-            or role_for(system) != 'chat_reviewer' or 'report' not in schema.get('properties', {})
+            or role != 'chat_reviewer' or 'report' not in schema.get('properties', {})
             or not isinstance(payload.get('parent_repair'), dict)
             or type(payload.get('report_schema_version')) is not int or payload['report_schema_version'] != 2
             or not isinstance(recovery, dict)
@@ -169,7 +204,7 @@ def verify_parent_reasoning(window, profile, props):
     """Bind generation to the same live reasoning template used for counting."""
     if (not _parent_reasoning_window(window) or _descriptor(profile, props) != window
             or '<think>' not in props['chat_template'] or '</think>' not in props['chat_template']):
-        raise InvalidUpdate('Remote parent draft reasoning template changed or is unavailable')
+        raise InvalidUpdate('Remote bounded reasoning template changed or is unavailable')
 
 
 def verify_prefix_window(window, profile, props):

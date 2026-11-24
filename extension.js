@@ -306,7 +306,7 @@ function activate(context) {
         SUTRA_RAM_CACHE_MIB:String(ramMiB),
         SUTRA_CAPABILITY_AUTHORIZATION:capabilityExecution?JSON.stringify(toolController.evidence(message.authorization)):null};
       const authorization=!managementRead&&!localGreeting?nativeController?.permissionEvidence(transport?.authority):undefined;
-      const result=await worker.send(payload,environment,{token,transport,authorization,onActivity:event=>{if(event.kind!=='workflow')usage?.activity(event);onActivity?.(event);}});
+      const result=await worker.send(payload,environment,{token,transport,authorization,onActivity:event=>{if(event.kind!=='workflow'&&event.kind!=='report_section')usage?.activity(event);onActivity?.(event);}});
       output.appendLine(new Date().toISOString()+' '+message.op+' completed');
       const data=bridgeResult(result);
       if(data?.result?.token_usage)void refreshDashboard();
@@ -1012,7 +1012,7 @@ function activate(context) {
     workspaceAuthorization=require('./workspace_authorization').createStore(vscode,context);
     nativeController=nativeProvider.install(vscode,context,{authorization:workspaceAuthorization,request:(m,t,a,r)=>request(m,t,true,a,r),workspace,isBusy:()=>busy||sequence||strataChanging||strataSetupRunning||engineChanging,isDisconnecting:()=>disconnecting,
       allocateRequest:chatKey=>coordinator().allocate(chatKey),
-      async resumeRequest(ticket,token,onActivity){return bridgeResult(await coordinator().resume(ticket,{token,onActivity:event=>{if(event.kind!=='workflow')usage?.activity(event);onActivity?.(event);}}));},
+      async resumeRequest(ticket,token,onActivity){return bridgeResult(await coordinator().resume(ticket,{token,onActivity:event=>{if(event.kind!=='workflow'&&event.kind!=='report_section')usage?.activity(event);onActivity?.(event);}}));},
       ackRequest:ticket=>coordinator().ack(ticket),cancelRequest:ticket=>coordinator().cancel(ticket),
       cancelWorkspaceRequests:()=>coordinator().cancelAll(),
       approveCapability:(p,t)=>toolController.approve(p,t),capabilityReport:capabilityUI.report,

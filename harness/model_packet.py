@@ -52,7 +52,11 @@ def role_for(system):
         'worker': checked_protocol.SYSTEM, 'selector': protocol.SELECT_SYSTEM,
         'parser': legacy_model.EXTRACTOR, 'memory_probe': memory_probe.SYSTEM,
         'document_extract': document_stages.SYSTEM, 'document_verdict_reviewer': document_verdict_review.SYSTEM}
-    return next((role for role, text in systems.items() if system == text), None)
+    role = next((role for role, text in systems.items() if system == text), None)
+    if role is not None:
+        return role
+    from section_synthesis import ROLES as sections, system as section_system
+    return next((name for name in sections if system == section_system(name)), None)
 
 
 def requirements(contract):
@@ -362,6 +366,7 @@ def _architect_stable_body(body):
 
 
 def build(system, payload, schema, *, packing=None):
+    from section_synthesis import ROLES as sections, messages as section_messages
     role = role_for(system)
     # The caller supplies this trusted transport flag; payload fields cannot
     # select a projection. Missing flags preserve historical wire bytes/hashes.
@@ -390,6 +395,8 @@ def build(system, payload, schema, *, packing=None):
     elif role == 'document_verdict_reviewer':
         body = select(payload, ('request', 'quotes', 'answer', 'basis', 'citation_ids', 'repair'))
         messages_out = [{'role': 'system', 'content': system}, {'role': 'user', 'content': canonical(body)}]
+    elif role in sections:
+        messages_out = section_messages(role, payload)
     elif role in REVIEW_ROLES:
         body = {'request': payload.get('request', payload['contract']['goal']), 'task': {'goal': payload['contract']['goal'],
                 'requirements': requirements(payload['contract'])}}

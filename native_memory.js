@@ -34,6 +34,22 @@ class NativeMemory{
     const id=options?.modelOptions?._conversationId;
     return typeof id==='string'&&id.length>0&&id.length<=512?crypto.createHash('sha256').update(id).digest('hex'):undefined;
   }
+  reportSectionReceipts(axis){
+    if(!/^[a-f0-9]{64}$/.test(axis||''))return [];
+    const saved=this.data.reportSections?.[axis];
+    return Array.isArray(saved)?saved:[];
+  }
+  async rememberReportSection(axis,id){
+    if(!/^[a-f0-9]{64}$/.test(axis||''))return;
+    const receipts=this.reportSectionReceipts(axis);
+    if(receipts.includes(id))return;
+    this.data.reportSections??={};
+    delete this.data.reportSections[axis];
+    this.data.reportSections[axis]=[...receipts,id].slice(-128);
+    const axes=Object.keys(this.data.reportSections);
+    if(axes.length>32)delete this.data.reportSections[axes[0]];
+    await this.storage?.update(KEY,this.data);
+  }
   taskStack(parent){return parent&&this.data.taskStacks?.[parent];}
   signature(id,axis=this.taskStack(id)){
     const subject=axis?'karma-native-context-v2:'+axis+':'+id:'karma-native-context-v1:'+id;

@@ -3,7 +3,7 @@ from contextlib import contextmanager
 import json
 from pathlib import Path
 
-from context_manager import InvalidUpdate
+from context_manager import InvalidUpdate, canonical, sha
 
 PREDECESSOR = 'd58edf88efad29d2dfc1d81a9c2cb02260a6b6f22795efeb578f7cdaa2a41c9c'
 SYNTHESIS_PREDECESSOR = 'df19c45e777027c01f34d13dbd3c6e46d149bab6a3bbcfb735479f468480299f'
@@ -13,6 +13,8 @@ SUMMARY_PROJECTION_PREDECESSOR = 'a0d9d8e3c9660ce67a34333c097795c398591e6ced9ffa
 CONTEXT_PROFILE_PREDECESSOR = '71f4db9dbce5d9152ab2800b402754b4b28cce34b871ac5b8a8c4c705b6eba8f'
 REVIEWER_ADMISSION_PREDECESSOR = 'dbcab6c395d6849875185d46ee1ac1366ee6b2ca200a7f9260bf01c35e4ed9c5'
 REMOTE_CAPACITY_PREDECESSOR = 'c35efdc63a1a8b188c67af4e6384fc7463c0ed7c5df4dea7624e240f4f6f7091'  # 0.57.8
+SECTION_SYNTHESIS_PREDECESSOR = '414d200909aabe0c1b1debf9bea80649f15d2b247a6f0c745e96205839e105bb'  # 0.58.1
+SECTION_GATE_PREDECESSOR = '046ceb82feb422b203404bfc112da350df6c6814c54f1dfaf49c373b3ff195e3'  # 0.59.2
 # Released policies with the original writer and evidence receipts needed to
 # recover a closed output-limit result. Other upgrade paths do not use these.
 PARENT_OUTPUT_LIMIT_PREDECESSORS = frozenset({
@@ -110,6 +112,72 @@ def parent_origin(s, fid, data, *, target=None):
     return dict(stamp, artifact_policies=policies)
 
 
+def section_origin(s, fid, data, *, target=None):
+    """Identify a closed modern writer by its immutable output-limit receipts.
+
+    This handoff opens no allowance and admits no partial answer. The section
+    planner revalidates the retained source and creates an immutable plan under
+    this narrowly scoped policy authorization before continuation is recorded.
+    """
+    import orchestration as machine
+    from chat_runtime import _check_compact_output, _parent_output_receipt
+    root_id = data.get('root_node')
+    if (not root_id or machine.state(s, fid) != 'DONE'
+            or machine.state(s, root_id) != 'DONE'
+            or machine.node(s, fid).get('parent_synthesis_predecessor')):
+        return None
+    root = machine.node(s, root_id)
+    logic = root['binding']['logic_hash']
+    if logic not in {s.logic_hash, SECTION_SYNTHESIS_PREDECESSOR}:
+        return None
+    joined = bool(data.get('child_results'))
+    stamp = _scope(s, fid, data, logic, target=target, require_join=joined)
+    if not stamp:
+        return None
+    if joined:
+        try:
+            children = machine.fork_children(s, root_id)
+        except InvalidUpdate:
+            return None
+        if children != data.get('children') or any(machine.state(s, child) != 'DONE' for child in children):
+            return None
+    elif s.db.execute('SELECT 1 FROM orchestration_nodes WHERE parent_id=? LIMIT 1', (root_id,)).fetchone():
+        return None
+    ended = machine.events(s, fid)[-1]
+    if (ended['kind'] != 'WORKFLOW_FINISHED'
+            or ended['data'].get('observation_delivery') != 'withheld'):
+        return None
+    invocation_id = ended['data'].get('invocation_id')
+    try:
+        envelope, packet, receipt, receipt_id = _parent_output_receipt(
+            s, root['session'], invocation_id)
+        if (packet.get('parent_output_policy_version') != 1
+                or receipt.get('failure_kind') != 'output_limit' or receipt.get('proposal') is not None
+                or envelope['logic_hash'] != logic
+                or (envelope.get('orchestration') or {}).get('node_id') != root_id
+                or packet.get('request') != machine.node(s, fid)['prompt']
+                or packet.get('workspace') != stamp['workspace']
+                or (packet.get('parent_repair') or {}).get('owner') != root_id
+                or [item['invocation_id'] for item in packet.get('child_results', ())]
+                    != data.get('child_results', [])):
+            return None
+        original_id = packet.get('parent_output_compact')
+        original_receipt = None
+        if original_id:
+            _check_compact_output(s, root['session'], packet)
+            original_env, _, _, original_receipt = _parent_output_receipt(s, root['session'], original_id)
+            if original_env['logic_hash'] != logic:
+                return None
+        for iid in (invocation_id, original_id):
+            if iid and s.db.execute('SELECT 1 FROM invocation_quarantine WHERE invocation_id=?', (iid,)).fetchone():
+                return None
+    except (InvalidUpdate, KeyError, TypeError):
+        return None
+    return dict(stamp, artifact_policies=[logic], section_output_invocation=invocation_id,
+                section_output_receipt=receipt_id, section_original_invocation=original_id,
+                section_original_receipt=original_receipt)
+
+
 def prior_synthesis(s, fid, data):
     """Verify a single, closed continuation under its exact historical policy."""
     import orchestration as machine
@@ -130,7 +198,22 @@ def _continued(s, fid, data, link, *, target=None):
     import orchestration as machine
     from orchestration_flow import info
     old_flow, old_data = info(s, link['flow_id'])
-    if old_flow.get('parent_synthesis_predecessor'):
+    section = link.get('profile') == 'section_synthesis_v1'
+    if section:
+        origin = section_origin(s, old_flow['id'], old_data, target=target)
+        if (not origin or link.get('failed_invocation') != origin['section_output_invocation']):
+            return None
+        from section_synthesis import make_plan
+        try:
+            with use(s, origin):
+                expected_plan = make_plan(s, origin['current']['session'], origin['section_output_invocation'],
+                                          original_id=origin['section_original_invocation'],
+                                          version=(data.get('section_plan') or {}).get('version'))
+        except InvalidUpdate:
+            return None
+        if data.get('section_plan') != expected_plan:
+            return None
+    elif old_flow.get('parent_synthesis_predecessor'):
         prior = prior_synthesis(s, old_flow['id'], old_data) or closed_summary_repair(s, old_flow['id'], old_data)
         if not prior:
             return None
@@ -171,6 +254,69 @@ def _active_continuation(s, fid, data, *, target=None):
     current = machine.binding(s, active['session'])
     return dict(expected, active_previous=active['binding'],
                 current=dict(current, logic_hash=target) if target else current)
+
+
+def _section_gate_scope(s, fid, data, *, stop_receipt=None):
+    """Resume a linked report stopped before its claim-review reservation."""
+    import orchestration as machine
+    from section_synthesis import ROLES, _stage_rows
+    flow = machine.node(s, fid)
+    link = flow.get('parent_synthesis_predecessor') or {}
+    plan = data.get('section_plan') or {}
+    if (link.get('profile') != 'section_synthesis_v1' or plan.get('version') != 2
+            or not data.get('root_node') or not release_pair(s)):
+        return None
+    active = machine.node(s, data['root_node'])
+    if (active['binding']['logic_hash'] != SECTION_GATE_PREDECESSOR
+            or active.get('kind') != 'execution'
+            or (not stop_receipt and machine.state(s, active['id']) != 'READY')):
+        return None
+    history = machine.events(s, fid)
+    stop = next((event for event in reversed(history) if (
+        event['receipt'] == stop_receipt if stop_receipt else
+        event['to'] == 'PAUSED' and event['from'] != 'PAUSED')), None)
+    if not stop or (stop['kind'], stop['from'], stop['to']) != ('RESOURCE_STOPPED', 'SYNTHESIS', 'PAUSED'):
+        return None
+    details = stop['data'].get('workflow_stop') or {}
+    measurement = details.get('measurement') or {}
+    runtime = measurement.get('runtime') or {}
+    if ((details.get('status'), details.get('resume_phase'), details.get('blocker'))
+            != ('resource_wait', 'SYNTHESIS', 'measurement_unavailable')
+            or details.get('automatic_retry') is not False
+            or measurement.get('profile') != 'physical-context-v1'
+            or measurement.get('provider') != 'sutra_remote'
+            or measurement.get('admitted') is not False or measurement.get('available') is not False
+            or runtime.get('stage') != 'remote_section_reasoning' or runtime.get('inference_started') is not False
+            or runtime.get('kind') != 'remote_observation' or runtime.get('model') != plan.get('model')
+            or measurement.get('model') != plan.get('model')):
+        return None
+    original = next((event['data'].get('review_policy_upgrade') for event in history
+                     if event['kind'] == 'PARENT_REPORT_CONTINUATION' and event['at'] <= stop['at']), None)
+    expected = _continued(s, fid, data, link, target=SECTION_GATE_PREDECESSOR)
+    if (not expected or expected != original or flow['workspace'] != expected['workspace']
+            or flow['prompt'] != active['context']['request']
+            or flow.get('chat_key') != machine.node(s, link['flow_id']).get('chat_key')):
+        return None
+    sid = active['session']
+    eligible = {}
+    try:
+        entries = _stage_rows(s, sid, fid, plan)
+    except (InvalidUpdate, KeyError, TypeError):
+        return None
+    accepted_ids = {iid: receipt for stages in entries.values() for iid, receipt, status in stages
+                    if status == 'accepted'}
+    for iid, raw in s.db.execute(
+            "SELECT id,record_json FROM invocations WHERE session=? AND "
+            "json_extract(record_json,'$.orchestration.node_id')=? AND "
+            "json_extract(record_json,'$.logic_hash')=?", (sid, active['id'], SECTION_GATE_PREDECESSOR)):
+        env = json.loads(raw)
+        if (iid in accepted_ids and env.get('role') in ROLES and env['created_at'] <= stop['at']
+                and not s.db.execute('SELECT 1 FROM invocation_quarantine WHERE invocation_id=?', (iid,)).fetchone()):
+            eligible[iid] = accepted_ids[iid]
+    if not eligible:
+        return None
+    return dict(expected, active_previous=active['binding'], current=machine.binding(s, sid),
+                section_gate_stop_receipt=stop['receipt'], section_gate_results=eligible)
 
 
 def closed_summary_repair(s, fid, data):
@@ -299,7 +445,7 @@ def offer(s, fid, data):
     if machine.state(s, fid) != 'PAUSED':
         return None
     if stop.get('status') == 'resource_wait':
-        stamp = _remote_capacity_scope(s, fid, data)
+        stamp = _section_gate_scope(s, fid, data) or _remote_capacity_scope(s, fid, data)
         if stamp:
             return stamp
     if not data.get('git_provenance'):
@@ -341,6 +487,8 @@ def recorded(s, fid, data=None):
     elif stamp.get('remote_capacity_stop_receipt') and not predecessor:
         expected = _remote_capacity_scope(s, fid, data, stop_receipt=stamp['remote_capacity_stop_receipt'],
                                           source_receipt=stamp.get('remote_capacity_source_receipt'))
+    elif stamp.get('section_gate_stop_receipt') and predecessor:
+        expected = _section_gate_scope(s, fid, data, stop_receipt=stamp['section_gate_stop_receipt'])
     elif stamp.get('active_previous'):
         expected = _active_continuation(s, fid, data)
     else:
@@ -372,6 +520,7 @@ def conversation_policy(s, handoff):
         return None
     policy = stamp['previous']['logic_hash']
     if not (stamp.get('context_stop_receipt') or stamp.get('claim_wait_stop_receipt') or stamp.get('remote_capacity_stop_receipt')
+            or stamp.get('section_output_receipt')
             or policy in PARENT_OUTPUT_LIMIT_PREDECESSORS):
         return None
     import orchestration as machine
@@ -408,9 +557,17 @@ def result_policy(s, session, receipt, envelope):
     if logic == s.logic_hash:
         return True
     stamp = _active(s, session)
-    if not stamp or logic not in stamp.get('artifact_policies', [stamp['previous']['logic_hash']]) or envelope['role'] not in RESULT_ROLES:
+    if not stamp:
         return False
     owner = (envelope.get('orchestration') or {}).get('node_id')
+    if (stamp.get('section_gate_stop_receipt') and logic == stamp['active_previous']['logic_hash']
+            and owner == stamp['active_root']):
+        from section_synthesis import ROLES
+        return (envelope['role'] in ROLES and receipt.get('status') == 'accepted'
+                and stamp['section_gate_results'].get(envelope['id'])
+                    == sha('invocation-receipt-v1:' + canonical(receipt)))
+    if logic not in stamp.get('artifact_policies', [stamp['previous']['logic_hash']]) or envelope['role'] not in RESULT_ROLES:
+        return False
     if envelope['role'] == 'subagent':
         return owner not in (stamp['root'], stamp['parent']) and _owner(s, stamp, owner)
     return owner == stamp['root']
@@ -435,10 +592,21 @@ def confirm(s, stamp, data, *, closed=False):
     from execution_sessions import idle
     sid = stamp['current']['session']
     idle(s, stamp['root'])
+    if stamp.get('section_gate_stop_receipt'):
+        idle(s, stamp['active_root'])
+        if machine.state(s, stamp['active_root']) != 'READY':
+            raise InvalidUpdate('Saved report section execution is not ready to resume')
     check_admission(s)
     if not s.audit_valid(deep=True) or not s.verify_invocations(sid):
         raise InvalidUpdate('Saved review audit or invocation history failed verification')
     repository_tools.records(s, sid)
+    if stamp.get('section_output_receipt'):
+        from section_synthesis import make_plan, validate_plan
+        plan = (data['section_plan'] if stamp.get('section_gate_stop_receipt') else
+                make_plan(s, sid, stamp['section_output_invocation'], stamp['section_original_invocation']))
+        validate_plan(s, sid, plan)
+        for iid in stamp.get('section_gate_results', {}):
+            s.load_result(sid, iid)
     if stamp.get('remote_capacity_source_receipt'):
         from static_runtime import load_partition
         prepared = next(event['data'] for event in machine.events(s, stamp['root'])
@@ -451,7 +619,7 @@ def confirm(s, stamp, data, *, closed=False):
     checkpoint = data.get('parent_checkpoint') or data.get('claim_review_retry')
     if checkpoint and checkpoint.get('candidate_id'):
         s.load_result(sid, checkpoint['candidate_id'])
-    if stamp.get('context_stop_receipt') or stamp.get('remote_capacity_stop_receipt'):
+    if stamp.get('context_stop_receipt') or stamp.get('remote_capacity_stop_receipt') or stamp.get('section_output_receipt'):
         origin = machine.node(s, stamp['root'])['context']
         if origin.get('conversation_id'):
             from conversation import workspace_handoff

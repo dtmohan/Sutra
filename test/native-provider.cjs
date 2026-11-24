@@ -50,7 +50,8 @@ function setup(saved={}){
    const pending=[...flows.values()].reverse().find(f=>!['DONE','CANCELLED'].includes(f.state));
    if(pending&&m.event==='start_existing')throw Error('Saved workspace workflow exists');
    const c=m.event==='start'?await deps.backendRequest({...m,op:'conversation'},t):null;
-   f={flow_id:'flow-'+(++flowCount),cursor:'1',state:c?.result.accepted_output.intent==='conversation'?'DONE':'NEED_ARM',conversation_id:c?.result.invocation_id||m.conversation_id,children:[],prompt:m.prompt,permission:c?.result.accepted_output.workspace_request||[...flows.values()].find(old=>old.conversation_id===m.conversation_id)?.permission||{operation:'read',paths:[]}};flows.set(f.flow_id,f);
+   const number=++flowCount;
+   f={flow_id:deps.fixtureFlowId?.(number)||'flow-'+number,cursor:'1',state:c?.result.accepted_output.intent==='conversation'?'DONE':'NEED_ARM',conversation_id:c?.result.invocation_id||m.conversation_id,children:[],prompt:m.prompt,permission:c?.result.accepted_output.workspace_request||[...flows.values()].find(old=>old.conversation_id===m.conversation_id)?.permission||{operation:'read',paths:[]}};flows.set(f.flow_id,f);
    if(pending&&f.state==='NEED_ARM'){f.state='DONE';return reply({conversation:c,deferred_flow_id:pending.flow_id});}
    return reply(c?{conversation:c}:{});
   }
@@ -887,7 +888,7 @@ function setup(saved={}){
     assert.equal(m.chat_key,chatKey);
     traffic.push(structuredClone(m));
     if(m.event==='task_list')return response({});
-    if(m.event==='recoverable_review')return response({state:'DONE',flow_id:null});
+    if(m.event==='recoverable_review')return response(open.get(order.at(-1))||{state:'DONE',flow_id:null});
     if(m.event==='pending')return response(open.get(order.at(-1))||{state:'DONE',flow_id:null});
     if(m.event==='start'){
      const c=await fixture.deps.backendRequest({...m,op:'conversation'},t);
@@ -1075,6 +1076,7 @@ function setup(saved={}){
      return structuredClone({...value,...extra,task_stack:{focused:focus?.flow_id||null,open_tasks:focus?[focus]:[]},focused_flow:focus});
     };
     if(m.event==='pending')return reply({state:'DONE',flow_id:null});
+    if(m.event==='recoverable_review')return reply(flow?.state!=='DONE'&&key===m.chat_key?flow:{state:'DONE',flow_id:null});
     if(m.event==='start'){
      if(m.prompt!==goal){
       assert.notEqual(m.chat_key,key,'Pasted text in another chat must remain independent');
@@ -1114,7 +1116,7 @@ function setup(saved={}){
   const reloaded=setup(persisted);attach(reloaded);
   const beforeContinue=traffic.length;
   await reloaded.send('high',[...history,user('continue')],{});
-  assert.deepEqual(traffic.slice(beforeContinue).map(m=>m.event),['inspect']);
+  assert.deepEqual(traffic.slice(beforeContinue).map(m=>m.event),['recoverable_review','inspect']);
   await reloaded.send('high',[user(body)],{});
   assert.equal(reloaded.controller.status().pending.flow_id,flowId);
   const beforeSupply=traffic.length;
@@ -1149,6 +1151,10 @@ function setup(saved={}){
      return structuredClone({...value,...extra,task_stack:{focused:focused?.flow_id||null,open_tasks:focused?[focused]:[]},focused_flow:focused});
     };
     if(request.event==='pending')return reply({state:'DONE',flow_id:null});
+    if(request.event==='recoverable_review'){
+     assert.equal(request.chat_key,origin);
+     return reply(flow);
+    }
     if(request.event==='start'){
      assert.equal(request.prompt,goal);
      assert(!flow);
@@ -1206,7 +1212,8 @@ function setup(saved={}){
   const history=[user(goal),{role:2,content:pause}];
   approve=true;
   const reviewed=await reloaded.send('high',[...history,user('continue')],{});
-  assert.deepEqual(traffic.slice(beforeForeign).map(request=>request.event),providerWait?['inspect','resume','step','step']:['inspect','step']);
+  assert.deepEqual(traffic.slice(beforeForeign).map(request=>request.event),providerWait?
+   ['recoverable_review','inspect','resume','step','step']:['recoverable_review','inspect','step']);
   assert(reviewed.some(part=>part.value?.includes('Workspace access approved. Continuing your request.')));
   assert(!reviewed.some(part=>part.value?.includes('send **continue**')));
   assert(reviewed.some(part=>part.value?.includes('Source review completed.')));
@@ -1280,7 +1287,7 @@ function setup(saved={}){
   };
   fixture.deps.request=async request=>{
    traffic.push(request.event);
-   if(request.event==='pending')return {state:'DONE',flow_id:null};
+   if(['pending','recoverable_review'].includes(request.event))return {state:'DONE',flow_id:null};
    if(request.event==='start'){
     assert.equal(request.prompt,goal);
     flow={state:'PAUSED',cursor:'1',flow_id:'a'.repeat(32),prompt:goal,
@@ -1317,7 +1324,7 @@ function setup(saved={}){
   assert(pause.some(part=>part.value?.includes('try the file lookup again')));
   approve=true;
   const answer=await fixture.send('high',user('continue'),chat);
-  assert.deepEqual(traffic.slice(3),['inspect','locate_document','approve_document','step']);
+  assert.deepEqual(traffic.slice(3),['recoverable_review','inspect','locate_document','approve_document','step']);
   assert.equal(dialogs,2);
   assert(answer.some(part=>part.value?.includes('quantified validation')));
   assert.equal(fixture.controller.status().pending,null);
@@ -1390,60 +1397,127 @@ function setup(saved={}){
   assert(visible.includes('4 calls'));
   checks.push('document review prompts for one scoped read, shows review progress and a final basis beside the answer, and counts withheld drafts without displaying them');
  }
- {
-  const workspace=setup(),traffic=[],invocation='b'.repeat(32),flowId='c'.repeat(32);
-  const chat={modelOptions:{_conversationId:'workspace-evidence'}};
+ for(const scenario of ['initial approval','resume approval','explicit files','new request']){
+  const saved={},traffic=[],invocation='b'.repeat(32),flowId='c'.repeat(32);
+  const chat={modelOptions:{_conversationId:'workspace-evidence-'+scenario}};
   const user=value=>[{role:1,content:[new Text(value)]}];
-  let scopeConfirmed=false,permissionPrompts=0,flow;
-  workspace.v.window.showWarningMessage=async(_message,_options,...choices)=>{
-   permissionPrompts++;
-   assert(scopeConfirmed,'Workspace authorization can be requested after the target is selected');
-   return choices.find(choice=>choice==='Read only');
+  const goal='Can you review the project?', files='Workspace files:\nREADME.md';
+  const otherRequest='Explain what makes an animation loop expensive.';
+  const spent={calls:1,tokens:2382};
+  let allow=scenario==='initial approval',scopeConfirmed=false,scopePrompts=0,permissionPrompts=0,flow;
+  const attach=workspace=>{
+   workspace.v.window.showWarningMessage=async(message,options,...choices)=>{
+    assert.equal(options.modal,true);
+    if(choices.includes('Read only')){
+     permissionPrompts++;
+     assert(scopeConfirmed,'Workspace authorization follows target selection');
+     return 'Read only';
+    }
+    scopePrompts++;
+    assert(!scopeConfirmed);
+    assert(!workspace.controller.status().armed);
+    assert.equal(message,'Use the open workspace for this request?');
+    assert.deepEqual(choices,[{title:'Use this workspace'},{title:'Decline',isCloseAffordance:true}]);
+    return allow?choices[0]:scenario==='resume approval'?choices[1]:undefined;
+   };
+   const backend=workspace.deps.request;
+   const chatKey=require('node:crypto').createHash('sha256').update(chat.modelOptions._conversationId).digest('hex');
+   const projection=result=>{
+    const focused=flow&&flow.state!=='DONE'?flow:null;
+    return {...result,task_stack:{focused:focused?.flow_id||null,open_tasks:focused?[focused]:[]},focused_flow:focused};
+   };
+   workspace.deps.request=async(m,t)=>{
+    if(m.op!=='orchestrate')return backend(m,t);
+    traffic.push(structuredClone(m));
+    assert.equal(m.chat_key,chatKey);
+    if(['pending','recoverable_review'].includes(m.event))return projection(flow||{state:'DONE',flow_id:null});
+    if(m.event==='start'){
+     if(m.prompt===otherRequest){
+      assert.equal(scenario,'new request');
+      assert.equal(flow?.state,'PAUSED');
+      return projection({flow_id:'f'.repeat(32),cursor:'1',state:'DONE',prompt:otherRequest,
+       conversation:{route:{model:'model-a'},result:{invocation_id:'a'.repeat(32),admission:{admitted:true},
+        accepted_output:{intent:'conversation',answer:'Animation loops are expensive when each frame repeats costly work.'}}}});
+     }
+     assert.equal(m.prompt,goal);
+     assert.equal(traffic.filter(row=>row.event==='start').length,1,'No classifier replay on resume');
+     flow={flow_id:flowId,cursor:'1',state:'PAUSED',prompt:m.prompt,conversation_id:invocation,
+      stop:{status:'evidence_bridge',resume_phase:'CLASSIFYING',error:'Reply with Use this workspace to choose this project.',
+       evidence_bridge:{target_kind:'workspace',target:null,required:'scope',decision:'BRIDGE'},budget:{used:spent}}};
+     return projection({...flow,conversation:{route:{model:'model-a'},result:{
+      invocation_id:invocation,admission:{admitted:true},accepted_output:{intent:'workspace',answer:'Unpublished routing proposal'}
+     }}});
+    }
+    assert.equal(m.flow_id,flowId);
+    if(m.event==='inspect')return projection(flow);
+    assert.equal(m.cursor,flow.cursor);
+    if(m.event==='supply_evidence'){
+     if(scenario==='explicit files')assert.equal(m.evidence_text,files);
+     else assert.equal(m.evidence_text,'Use this workspace');
+     assert(!m.armed,'Scope approval does not grant workspace access');
+     assert.deepEqual(flow.stop.budget.used,spent);
+     scopeConfirmed=true;
+     flow={...flow,cursor:'2',state:'NEED_ARM',stop:undefined};
+     return projection(flow);
+    }
+    assert.equal(m.event,'step');
+    assert(m.armed);
+    assert.equal(permissionPrompts,1);
+    flow={...flow,cursor:'3',state:'DONE'};
+    return projection({...flow,data:{route:{model:'model-a'},result:{
+     invocation_id:'review',admission:{admitted:true},accepted_output:{answer:'Workspace review completed'}
+    }}});
+   };
   };
-  const backend=workspace.deps.request;
-  workspace.deps.request=async(m,t)=>{
-   if(m.op!=='orchestrate')return backend(m,t);
-   traffic.push(structuredClone(m));
-   if(m.event==='pending')return {state:'DONE',flow_id:null};
-   if(m.event==='start'){
-    flow={flow_id:flowId,cursor:'1',state:'PAUSED',prompt:m.prompt,conversation_id:invocation,
-     stop:{status:'evidence_bridge',resume_phase:'CLASSIFYING',error:'Reply with Use this workspace to choose this project.',
-      evidence_bridge:{target_kind:'workspace',target:null,required:'scope',decision:'BRIDGE'}}};
-    return {...flow,conversation:{route:{model:'model-a'},result:{
-     invocation_id:invocation,admission:{admitted:true},accepted_output:{intent:'workspace',answer:'Unpublished routing proposal'}
-    }}};
+  let workspace=setup(saved);
+  attach(workspace);
+  const first=await workspace.send('auto',user(goal),chat);
+  assert.equal(scopePrompts,1,'The first workspace evidence pause opens the dialog immediately');
+  assert(first.some(part=>part.value?.includes('/conversation/'+invocation)));
+  assert(!first.some(part=>part.value?.includes('Unpublished routing proposal')));
+  let reviewed=first;
+  if(!allow){
+   assert(!traffic.some(m=>['supply_evidence','step','cancel'].includes(m.event)));
+   assert.equal(permissionPrompts,0);
+   assert(first.some(part=>part.value?.includes('Workspace selection declined. Your request and remaining budget are saved.')));
+   assert(!workspace.controller.status().armed);
+   const checkpoint=workspace.controller.status().pending;
+   assert.equal(checkpoint.flow_id,flowId);
+   assert.equal(checkpoint.prompt,goal);
+   assert.equal(checkpoint.cursor,'1');
+   assert.deepEqual(checkpoint.stop.budget.used,spent);
+   if(scenario==='new request'){
+    const before=traffic.length;
+    const answer=await workspace.send('auto',user(otherRequest),chat);
+    assert.deepEqual(traffic.slice(before).map(m=>m.event),['start']);
+    assert.equal(scopePrompts,1,'A new prompt does not reopen the previous scope dialog');
+    assert.equal(permissionPrompts,0);
+    assert(answer.some(part=>part.value?.includes('repeats costly work')));
+    assert.deepEqual(workspace.controller.status().pending,checkpoint);
+    continue;
    }
-   assert.equal(m.flow_id,flowId);
-   if(m.event==='inspect')return flow;
-   assert.equal(m.cursor,flow.cursor);
-   if(m.event==='supply_evidence'){
-    assert.equal(m.evidence_text,'Use this workspace.');
-    assert(!m.armed);
-    scopeConfirmed=true;
-    flow={...flow,cursor:'2',state:'NEED_ARM',stop:undefined};
-    return flow;
+   if(scenario==='resume approval'){
+    saved['sutra.pendingOrchestration']={...checkpoint,flow_id:'e'.repeat(32),cursor:'older',
+     prompt:'Older workspace request'};
    }
-   assert.equal(m.event,'step');
-   assert(m.armed);
-   return {...flow,cursor:'3',state:'DONE',data:{route:{model:'model-a'},result:{
-    invocation_id:'review',admission:{admitted:true},accepted_output:{answer:'Workspace review completed'}
-   }}};
-  };
-  const pause=await workspace.send('auto',user('Can you review the project?'),chat);
-  assert(pause.some(part=>part.value?.includes('Use this workspace')));
-  assert(pause.some(part=>part.value?.includes('/conversation/'+invocation)));
-  assert(!pause.some(part=>part.value?.includes('Continuing this request through Sutra’s workspace workflow')));
-  assert.equal(permissionPrompts,0);
-  const before=traffic.length;
-  const reviewed=await workspace.send('auto',user('Use this workspace.'),chat);
-  assert.deepEqual(traffic.slice(before).map(m=>m.event),['inspect','supply_evidence','step']);
+   workspace=setup(saved);
+   attach(workspace);
+   allow=scenario==='resume approval';
+   const before=traffic.length;
+   reviewed=await workspace.send('auto',user(allow?'resume':files),chat);
+   const next=traffic.slice(before);
+   assert(!next.some(m=>m.event==='start'||m.event==='resume'||m.event==='cancel'));
+   assert.equal(scopePrompts,allow?2:1);
+  }
+  assert.deepEqual(traffic.filter(m=>['supply_evidence','step'].includes(m.event)).map(m=>m.event),
+                   ['supply_evidence','step']);
   assert(reviewed.some(part=>part.value?.includes('Workspace access needed')));
   assert.equal(permissionPrompts,1);
   assert(workspace.controller.status().armed);
   assert.equal(traffic.at(-1).tier,'auto');
   assert(reviewed.some(part=>part.value?.includes('Workspace review completed')));
-  checks.push('a missing workspace target requires scope before consent, then the review continues in the same response');
  }
+ checks.push('workspace scope pauses offer immediate consent, retain the request and budget on decline, and allow scoped resume, explicit files, and independent new chat requests');
  const routingFlow=setup();let routingStep=0;const routingEvents=[];
  const routingChat=(id,model,followup)=>({route:{model},routing_followup:followup,result:{invocation_id:id,admission:{admitted:true},accepted_output:{intent:'conversation',answer:followup?'UNPUBLISHED DRAFT':'Final routed answer'},token_usage:{calls:[{invocation_id:id,model,stage:'conversation',input_tokens:100,output_tokens:20}]}}});
  routingFlow.deps.request=async m=>{
@@ -2024,7 +2098,7 @@ function setup(saved={}){
  }
  checks.push('policy upgrade recovery is explicit before arming; decline preserves saved work and approval retains the original request in the same chat on another model');
  for(const recoveryKind of ['policy_changed','parent_output_recovery'])for(const approve of [false,true]){
-  const terminal=setup(),traffic=[],options={modelOptions:{_conversationId:'terminal-review-origin'}};
+  const cached={},terminal=setup(cached),traffic=[],options={modelOptions:{_conversationId:'terminal-review-origin'}};
   terminal.kind('report');
   const chatKey=require('node:crypto').createHash('sha256').update(options.modelOptions._conversationId).digest('hex');
   const linked=recoveryKind==='parent_output_recovery';
@@ -2034,6 +2108,8 @@ function setup(saved={}){
    parked_flow_id:'older-auto-restored',message:'Unpublished review from an older policy. Spending is retained; the older open task will remain saved.'};
   const older={flow_id:'older-auto-restored',state:'PAUSED',cursor:'older-pause',prompt:'An older request',
    restarted_from:'older-original',binding:{session:'older-task',contract_hash:'older-contract',calibration_hash:'cal-1'}};
+  cached['sutra.pendingOrchestration']={...older,workspace:'/project',stackChat:chatKey,
+   stop:{status:'evidence_bridge',evidence_bridge:{target_kind:'workspace'}}};
   const original={flow_id:'failed-paid-review',state:'DONE',cursor:'closed',prompt:'Review the original workspace architecture',
    conversation_id:'a'.repeat(32),binding:{session:'task-1',contract_hash:'contract-1',calibration_hash:'cal-1'},recovery,
    task_stack:{focused:older.flow_id,open_tasks:[older],cursor:'older-stack'},focused_flow:older};
@@ -2075,13 +2151,17 @@ function setup(saved={}){
   assert.deepEqual(original,frozen);assert(!traffic.some(m=>m.event==='cancel'));
  }
  for(const scenario of ['new ask','published','other chat']){
-  const terminal=setup(),traffic=[],options={modelOptions:{_conversationId:scenario==='other chat'?'foreign-chat':'same-chat'}};
+  const saved={},terminal=setup(saved),traffic=[],options={modelOptions:{_conversationId:scenario==='other chat'?'foreign-chat':'same-chat'}};
+  const chatKey=require('node:crypto').createHash('sha256').update('same-chat').digest('hex');
   terminal.kind('report');await terminal.arm();
+  saved['sutra.pendingOrchestration']={flow_id:'stale-evidence',workspace:'/project',stackChat:chatKey,nativeChat:chatKey,
+   state:'PAUSED',stop:{status:'evidence_bridge',evidence_bridge:{target_kind:'workspace'}}};
   const backend=terminal.deps.request;
   terminal.deps.request=async(m,t)=>{
    if(m.op==='orchestrate'){
     traffic.push(structuredClone(m));
-    if(m.event==='pending'||m.event==='recoverable_review')return {state:'DONE',flow_id:null};
+    if(m.event==='pending'||m.event==='recoverable_review')
+     return {state:'DONE',flow_id:null,task_stack:{focused:null,open_tasks:[]},focused_flow:null};
    }
    return backend(m,t);
   };
@@ -2089,11 +2169,18 @@ function setup(saved={}){
    if(labels.at(-1)==='Restart review')throw Error('Unrelated or published work cannot request a restart');
    return labels.at(-1);
   };
-  const prompt=scenario==='new ask'?'Review a different workspace question.':'continue';
-  await terminal.send('low',[{role:1,content:[new Text(prompt)]}],options);
+  const prompt=scenario==='new ask'?'Review a different workspace question.':scenario==='published'?'continue':'resume';
+  const reply=await terminal.send('low',[{role:1,content:[new Text(prompt)]}],options);
   assert.equal(traffic.some(m=>m.event==='recoverable_review'),scenario!=='new ask');
   assert(!traffic.some(m=>m.event==='restart_review'));
-  assert.equal(terminal.calls.find(m=>m.op==='native_work').prompt,prompt);
+  if(scenario==='new ask'){
+   assert.equal(terminal.calls.find(m=>m.op==='native_work').prompt,prompt);
+  }else{
+   assert(!traffic.some(m=>['start','start_existing','step','resume','supply_evidence','inspect'].includes(m.event)));
+   assert.equal(terminal.calls.length,0);
+   assert.equal(terminal.controller.status().routing.stage,'resume_unavailable');
+   assert(reply.some(part=>part.value?.includes('saved')));
+  }
  }
  checks.push('explicit Continue prioritizes the latest unpublished original ask over an auto-restored older successor; confirmed restart binds the intended task and stack cursor, parks older work, preserves old DONE, and cannot resurrect published, foreign-chat or newer requests');
  {const live=setup();
@@ -2164,7 +2251,11 @@ function setup(saved={}){
  {
   const saved={},host=setup(saved),original=host.deps.request;await host.arm();
   const options={modelOptions:{_conversationId:'durable-task-final-report'},tools:[]};
-  let submissions=0,allocations=0,acks=0;
+  let submissions=0,allocations=0,acks=0,preview;
+  host.deps.fixtureFlowId=n=>n.toString(16).padStart(32,'0');
+  host.deps.publishReview=data=>{preview=data.report_markdown;};
+  const first={receipt_id:'a'.repeat(64),markdown:'## Architecture\n\nThe Entry component passes work to the worker.'};
+  const second={receipt_id:'b'.repeat(64),markdown:'## Source evidence\n\n[Worker source](file:///project/worker.py#L8)'};
   host.deps.allocateRequest=async()=>({id:(++allocations).toString(16).padStart(32,'0')});
   host.deps.resumeRequest=async()=>{throw Error('Initial task must submit once');};
   host.deps.ackRequest=async()=>{acks++;};
@@ -2178,7 +2269,12 @@ function setup(saved={}){
     activity(event);activity(event);
     flow=await original({...m,event:'step',flow_id:flow.flow_id,cursor:flow.cursor,binding:flow.binding||flow.bound_task},t);
    }
-   flow.data.report_markdown='## Architecture\n\nThe Entry component passes work to the worker.';
+   const sectionEvent={kind:'report_section',version:1,flow_id:flow.flow_id,section:first};
+   activity(sectionEvent);activity(sectionEvent);
+   activity({...sectionEvent,section:{receipt_id:'invalid',markdown:'Unpublished draft'}});
+   flow.report_sections=[first,second];
+   flow.data.report_markdown=[first.markdown,second.markdown].join('\n\n');
+   flow.data.report_completion_markdown='Architecture review complete.';
    flow.data.result.accepted_output={answer:'Architecture summary',summary:'Architecture summary',report:{overview:'Architecture summary'}};
    const usage=(invocation_id,stage)=>({invocation_id,stage,model:'model-a',status:'accepted',input_tokens:100,output_tokens:20});
    const rows=[usage(conversation.result.invocation_id,'conversation'),usage(flow.data.result.invocation_id,'chat_reviewer')];
@@ -2186,7 +2282,11 @@ function setup(saved={}){
    return {...flow,conversation,runner_usage:{calls:rows}};
   };
   const parts=await host.send('auto',undefined,options),body=parts.map(part=>part.value||'').join('');
-  assert(body.includes('## Architecture'));assert(!body.includes('Conversational answer'));
+  assert.equal(body.split(first.markdown).length-1,1);
+  assert.equal(body.split(second.markdown).length-1,1,'A missed section event is restored from the declared workflow snapshot');
+  assert(body.includes('Architecture review complete.'));
+  assert(!body.includes('Unpublished draft'));assert(!body.includes('Conversational answer'));
+  assert.equal(preview,[first.markdown,second.markdown].join('\n\n'),'The report preview retains the assembled document');
   assert.equal(submissions,1);assert.equal(allocations,1);assert.equal(acks,1);
   assert(host.flowRequests.every(request=>request.tier==='auto'),'The accepted task keeps its selected routing mode');
   assert.equal((body.match(/Reading the approved project source\./g)||[]).length,2,
@@ -2199,7 +2299,9 @@ function setup(saved={}){
   assert(anchor,'The final report includes its authenticated conversation-memory anchor');
   assert.equal(saved['karma.nativeMemory.v1'].chats[key],anchor);
   assert.equal(saved['karma.nativeMemory.v1'].taskStacks[anchor],key);
-  checks.push('one durable task submission publishes its final report instead of classifier prose, streams deduplicated workflow progress and retains exact usage and conversation memory');
+  assert.deepEqual(saved['karma.nativeMemory.v1'].reportSections[key],[first.receipt_id,second.receipt_id]);
+  assert(!JSON.stringify(saved['karma.nativeMemory.v1']).includes(first.markdown),'UI checkpoint memory stores receipt IDs only');
+  checks.push('one durable task publishes each admitted report section once, recovers missed activity from the workflow, and preserves the complete preview and aggregate usage');
  }
  {
   for(const boundary of ['stop','dispose','extension-disconnect']){
@@ -2320,9 +2422,11 @@ function setup(saved={}){
 
   const foreign=setup(saved);let foreignReconnections=0;
   foreign.deps.resumeRequest=async()=>{foreignReconnections++;throw Error('Foreign chat cannot attach');};
-  foreign.deps.allocateRequest=async()=>{throw Error('No saved request for this other chat');};
-  await assert.rejects(foreign.send('high',[{role:1,content:[new Text('continue')]}],
-    {modelOptions:{_conversationId:'foreign-runner-chat'}}),/No saved request/);
+  foreign.deps.allocateRequest=async()=>{throw Error('A foreign chat cannot allocate a replacement request');};
+  const unavailable=await foreign.send('high',[{role:1,content:[new Text('continue')]}],
+    {modelOptions:{_conversationId:'foreign-runner-chat'}});
+  assert(unavailable.some(part=>part.value?.includes('no unfinished Sutra request')));
+  assert.equal(foreign.calls.length,0);
   assert.equal(foreignReconnections,0);assert.equal(saved[tickets][key].id,id);
 
   const reloaded=setup(saved);let reconnects=0,acknowledgements=0,inspections=0;
@@ -2353,6 +2457,68 @@ function setup(saved={}){
   assert.equal(reloaded.calls.length,0);
   assert.equal(reloaded.controller.status().pending,null);
   checks.push('runner request identity persists before initial start; UI disposal detaches, same-chat continue on another tier restores its result once, and another chat cannot attach or replay it');
+ }
+ {
+  const saved={},first=setup(saved),original=first.deps.request;
+  const options={modelOptions:{_conversationId:'review-section-resume'},tools:[]};
+  const flowId='d'.repeat(32),ticketId='e'.repeat(32);
+  const delivered={receipt_id:'a'.repeat(64),markdown:'## Reviewed component\n\nA grounded finding.'};
+  const restored={receipt_id:'b'.repeat(64),markdown:'## Reviewed flow\n\nA newly checked source link.'};
+  const stale={receipt_id:'c'.repeat(64),markdown:'Outdated cached section'};
+  const activity={kind:'report_section',version:1,flow_id:flowId,section:delivered};
+  let entered,rejectView,response,detachedSection;
+  const started=new Promise(resolve=>entered=resolve);
+  await first.arm();
+  first.deps.fixtureFlowId=()=>flowId;
+  first.deps.allocateRequest=async()=>({id:ticketId});
+  first.deps.resumeRequest=async()=>{throw Error('The initial view must submit');};
+  first.deps.request=async(m,t,emit,transport)=>{
+   if(!transport?.id)return original(m,t);
+   let flow=await original(m,t);
+   while(flow.state!=='DONE')flow=await original({...m,event:'step',flow_id:flowId,cursor:flow.cursor,binding:flow.binding},t);
+   flow.data.result.accepted_output={answer:'Architecture summary',report:{overview:'Architecture summary'}};
+   flow.data.report_markdown=[delivered.markdown,restored.markdown].join('\n\n');
+   flow.data.report_completion_markdown='Claim review complete.';
+   response={...flow,report_sections:[delivered,stale]};
+   emit(activity);
+   entered();
+   return new Promise((_resolve,reject)=>{rejectView=reject;});
+  };
+  const disconnected=first.provider.provideLanguageModelChatResponse({id:'karma-low'},
+   [{role:1,content:[new Text('Review workspace')]}],options,{report:part=>{
+    if(part.value?.includes(delivered.markdown))detachedSection=part.value;
+   }},first.token.token);
+  await started;
+  assert(detachedSection,'The first section reached chat before the workflow finished');
+  first.controller.dispose();
+  rejectView(Object.assign(new Error('UI detached; runner retained'),{code:'COORDINATOR_DETACHED'}));
+  await assert.rejects(disconnected,/UI detached/);
+
+  for(const transcriptRetained of [true,false]){
+   const reloaded=setup(structuredClone(saved));let inspections=0,acks=0;
+   reloaded.deps.allocateRequest=async()=>{throw Error('Resume must not allocate or submit another request');};
+   reloaded.deps.resumeRequest=async(ticket,_token,emit)=>{
+    assert.equal(ticket.id,ticketId);
+    emit(activity);
+    return structuredClone(response);
+   };
+   reloaded.deps.request=async m=>{
+    assert.equal(m.event,'inspect');assert.equal(m.flow_id,flowId);inspections++;
+    return {...response,report_sections:[delivered,restored],data:undefined};
+   };
+   reloaded.deps.ackRequest=async()=>{acks++;};
+   const transcript=transcriptRetained?[{role:2,content:[new Text(detachedSection)]}]:[];
+   const resumed=await reloaded.send('high',[...transcript,{role:1,content:[new Text('continue')]}],options);
+   const body=resumed.map(part=>part.value||'').join('');
+   assert.equal(body.split(delivered.markdown).length-1,transcriptRetained?0:1,
+    'Reload restores a previously displayed section only if the user-visible transcript was dropped');
+   assert(!body.includes(stale.markdown),'A cached section omitted by current inspection is withheld');
+   assert.equal(body.split(restored.markdown).length-1,1);
+   assert(body.includes('Claim review complete.'));
+   assert.equal(inspections,1);assert.equal(acks,1);
+   assert.equal(reloaded.calls.length,0);
+  }
+  checks.push('reloading and switching tier restore unseen verified sections from the current saved workflow without replaying calls or repeating displayed sections');
  }
  {
   const saved={},host=setup(saved),options={modelOptions:{_conversationId:'runner-policy-change'}};
