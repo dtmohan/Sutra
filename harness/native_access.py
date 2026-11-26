@@ -38,6 +38,7 @@ def _clear_previous_scope(meta):
 
 def grant(s, meta, workspace, request):
     from native_runtime import binding
+    from evidence_admission import explicit_project_patch
     from repository_tools import normalized, scoped
     from host_actions import source_path
     from vscode_bridge import save_contract
@@ -48,7 +49,7 @@ def grant(s, meta, workspace, request):
     roots = read_scope(s, sid)
     paths, tests = request.get('paths'), request.get('test_paths', [])
     operation = request.get('operation')
-    if (operation not in ('edit', 'test') or not isinstance(paths, list) or not 1 <= len(paths) <= 8
+    if (operation not in ('edit', 'test', 'project_patch') or not isinstance(paths, list) or not 1 <= len(paths) <= 8
             or any(not isinstance(name, str) for name in paths) or len(paths) != len(set(paths))):
         raise InvalidUpdate('Confirm exact Python file permissions for this request')
     if (not isinstance(tests, list) or any(not isinstance(name, str) for name in tests)
@@ -67,6 +68,12 @@ def grant(s, meta, workspace, request):
             raise InvalidUpdate('Requested Python file is outside the armed read scope')
         source_path(workspace, name)
     source = handoff_source(s, request.get('conversation_id'))
+    if operation == 'project_patch':
+        if (roots != ['.'] or explicit_project_patch(source['request']) !=
+                {'operation': operation, 'paths': paths} or tests):
+            raise InvalidUpdate('Project worktree access requires the named Python targets and whole-project read scope')
+        if c.get('edits_allowed') and paths != c['allowed_paths']:
+            raise InvalidUpdate('Start a separate task to prepare a patch on a new isolated scope')
     if source['workspace_context'] != conversation.workspace_context(s, {'active': sid}) and not has_binding(s, sid, request['conversation_id'], source):
         raise InvalidUpdate('Task changed while asking for permission')
     before = usage(s, sid)
@@ -83,6 +90,8 @@ def grant(s, meta, workspace, request):
              tests_allowed=c.get('tests_allowed', False) or bool(tests),
              test_paths=tests,
              test_timeout_ms=c.get('test_timeout_ms', 10000), max_actions=actions_left)
+    if operation == 'project_patch' or 'project_patch_allowed' in c:
+        c['project_patch_allowed'] = operation == 'project_patch'
     if not c['test_paths']:
         c.pop('test_paths')
     if c['network_allowed'] or c['dependencies_allowed']:
@@ -105,7 +114,7 @@ def settle_interrupted_grant(s, meta, previous, iid, operation):
     """Restore the handoff for an exact grant already committed to the contract."""
     from calibration import current as calibration_binding
     sid = meta.get('active')
-    if not iid or sid != previous['session'] or operation not in ('edit', 'test'):
+    if not iid or sid != previous['session'] or operation not in ('edit', 'test', 'project_patch'):
         return False
     origin = s.origin(sid)
     if (origin['previous_hash'] != previous['contract_hash']
@@ -113,9 +122,10 @@ def settle_interrupted_grant(s, meta, previous, iid, operation):
         return False
     state = s.snapshot(sid)
     constraints = state['constraints']
+    permission = {'edit': 'edits_allowed', 'test': 'tests_allowed', 'project_patch': 'project_patch_allowed'}[operation]
     if (not constraints.get('native_task') or constraints.get('network_allowed') is not False
             or constraints.get('dependencies_allowed') is not False
-            or constraints.get('edits_allowed' if operation == 'edit' else 'tests_allowed') is not True):
+            or constraints.get(permission) is not True):
         return False
     for raw, in s.db.execute(
             "SELECT payload_json FROM page_audit WHERE event='NATIVE_PERMISSION_INTENT' "

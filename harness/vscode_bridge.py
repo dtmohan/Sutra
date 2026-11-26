@@ -69,9 +69,11 @@ def save_contract(s, session, data, workspace):
         allocations(constraints)
         if constraints.get('review_only') or constraints.get('auto_review') or constraints['network_allowed'] or constraints['dependencies_allowed']:
             raise InvalidUpdate('Native coding scope forbids network, dependencies and review-mode flags')
-    for name in ('edits_allowed','tests_allowed'):
+    for name in ('edits_allowed','tests_allowed','project_patch_allowed'):
         if name in constraints and type(constraints[name]) is not bool:raise InvalidUpdate('Action permissions must be Boolean')
-    if constraints.get('edits_allowed') or constraints.get('tests_allowed'):
+    if constraints.get('project_patch_allowed') and (not constraints.get('native_task') or len(paths) < 2):
+        raise InvalidUpdate('Project patch access requires at least two named native coding paths')
+    if any(constraints.get(name) for name in ('edits_allowed', 'tests_allowed', 'project_patch_allowed')):
         if type(constraints.get('max_actions')) is not int or not 1<=constraints['max_actions']<=32:
             raise InvalidUpdate('Action budget must be 1..32')
     tests=constraints.get('test_paths',[])
@@ -79,7 +81,7 @@ def save_contract(s, session, data, workspace):
         if (not isinstance(tests,list) or not tests or any(not isinstance(p,str) or not p.endswith('.py') for p in tests)
                 or not set(tests)<=set(paths) or len(tests)!=len(set(tests))):
             raise InvalidUpdate('Test paths must be in-scope Python unittest files')
-    if constraints.get('tests_allowed'):
+    if constraints.get('tests_allowed') or constraints.get('project_patch_allowed'):
         if type(constraints.get('test_timeout_ms')) is not int or not 100<=constraints['test_timeout_ms']<=120000:
             raise InvalidUpdate('Test timeout must be 100..120000 ms')
     values={'task_id':session,'goal':goal,**constraints};ops=[];lines=[]
@@ -247,6 +249,8 @@ def dispatch(s,meta,workspace,root,request,provider=None):
         from host_actions import files_at
         system=CODER_SYSTEM;payload.update(mode=request.get('mode','review'),workspace=str(workspace),execution=st['execution'],
             source_versions={k:v['sha256'] for k,v in files_at(s,session,workspace).items()})
+        if payload['mode']=='project_patch':
+            payload['project_patch_version']=1
         if 'test_target' in request:
             payload['test_target'] = request['test_target']
         schema=coding_schema(payload)
@@ -323,7 +327,8 @@ def handle(root,workspace,request):
                     raise InvalidUpdate('Workflow belongs to another Sutra chat')
                 scoped=flow_metadata(root,ws,fid)
                 if request['op']=='state':
-                    return state(s,scoped,ws)
+                    from calibration import overview
+                    return dict(state(s,scoped,ws),calibration=overview(s,scoped.get('active')))
                 reconcile(s,ws)
                 assert_focused(s,ws,request['chat_key'],fid)
                 if orchestration_state.action_flow(s,request.get('invocation_id'))!=fid:
@@ -345,7 +350,7 @@ def handle(root,workspace,request):
                     return capabilities.preview(s,sid,workspace,root,request['capability'],request['action'],request.get('paths',[]))
                 return capabilities.execute(s,sid,workspace,root,request['proposal_id'],request.get('authorization'))
             if request.get('op')=='orchestrate':
-                from orchestration_flow import handle as orchestrate
+                from orchestration_flow import handle as orchestrate, recover_project_lookup
                 from task_continuation import check_request
                 if request.get('event') == 'runner_stop':
                     return orchestrate(s, {}, Path(workspace).resolve(), root, request)
@@ -358,6 +363,8 @@ def handle(root,workspace,request):
                 # Document evidence has its own scoped read and ledger reservation.
                 # A local greeting can only settle an exact provider-wait greeting.
                 event=request.get('event')
+                if event in ('inspect','recoverable_review'):
+                    recover_project_lookup(s,Path(workspace).resolve(),request)
                 greeting_resume=event=='resume' and request.get('local_greeting') is True
                 reconcile_workspace=not greeting_resume and event not in (
                     'start','task_list','pending','recoverable_review','inspect','supply_evidence','locate_document','approve_document',
@@ -497,7 +504,9 @@ def _handle(root,workspace,request,metadata=None,prepare_catalog=True):
             from native_runtime import binding
             sid=binding(s,meta,request)
             from host_actions import preview,execute
-            result=preview(s,sid,request['invocation_id'],workspace) if op=='native_preview' else {'action_receipt':execute(s,sid,request['invocation_id'],workspace,root),'state':state(s,meta,workspace)}
+            result=preview(s,sid,request['invocation_id'],workspace) if op=='native_preview' else {
+                'action_receipt':execute(s,sid,request['invocation_id'],workspace,root,plan_digest=request.get('plan_digest')),
+                'state':state(s,meta,workspace)}
         elif op=='auto_step':
             from auto_review import step
             result=step(s,meta,workspace,root,request);result['state']=state(s,meta,workspace)

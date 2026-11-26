@@ -12,6 +12,10 @@ MAX_FILES=128;MAX_FILE=64000
 
 class SourceReadLimitExceeded(InvalidUpdate):
  """A regular source file exceeds its current scoped byte allocation."""
+ def __init__(self,message,*,required_bytes=None,page_limit_bytes=None):
+  super().__init__(message)
+  self.required_bytes=required_bytes
+  self.page_limit_bytes=page_limit_bytes
 
 class RepositoryReceiptStale(InvalidUpdate):
  """An intact repository receipt was made under another contract or policy."""
@@ -325,7 +329,7 @@ def accepted_search_version(s,session,invocation_id):
  return 1
 
 
-def execute(s,session,workspace,root,kind,*,target='',query='',line=1,cursor=None,invocation_id=None,request_id=None,resource_check=True,read_profile=None):
+def execute(s,session,workspace,root,kind,*,target='',query='',line=1,cursor=None,invocation_id=None,request_id=None,resource_check=True,read_profile=None,host_discovery=None):
  from lifecycle import timeout
  timeout(20)
  initialize(s);contract_hash=s.origin(session)['contract_hash'];c=settings(s,session);automatic=c.get('auto_review',False)
@@ -333,7 +337,7 @@ def execute(s,session,workspace,root,kind,*,target='',query='',line=1,cursor=Non
  arguments=(kind,target,query,line)
  search_version=accepted_search_version(s,session,invocation_id) if kind=='search' else None
  replayed=_replay(s,session,request_id,arguments,cursor,invocation_id,automatic,read_profile,search_version)
- if replayed and read_profile is None:return replayed
+ if replayed and read_profile is None and host_discovery is None:return replayed
  request_check(s,session,kind,target,query,line,cursor,search_version=search_version)
  planned_read=False;discovery=False;request_payload=None;envelope=None
  if invocation_id:
@@ -354,7 +358,13 @@ def execute(s,session,workspace,root,kind,*,target='',query='',line=1,cursor=Non
   if discovery:
    from review_discovery import authorize_tool
    authorize_tool(s,session,request_payload)
- if read_profile is not None or (kind=='read' and request_payload and request_payload.get('discovery_selection_version') in (2,3)):
+ if host_discovery is not None:
+  if not automatic or kind!='read' or invocation_id or cursor is not None or query:
+   raise InvalidUpdate('Invalid targeted discovery operation')
+  from review_discovery import authorize_targeted_read
+  authorize_targeted_read(s,session,host_discovery,target,line,request_id,read_profile)
+  discovery=True
+ elif read_profile is not None or (kind=='read' and request_payload and request_payload.get('discovery_selection_version') in (2,3)):
   if (kind!='read' or not automatic or not discovery or type(request_payload.get('discovery_selection_version')) is not int
       or request_payload.get('discovery_selection_version') not in (2,3)
       or not isinstance(read_profile,dict) or set(read_profile)!={'version','max_bytes','max_lines'}
@@ -377,7 +387,9 @@ def execute(s,session,workspace,root,kind,*,target='',query='',line=1,cursor=Non
   source_limits={name:max(1,size) for name,size in zip(names,sizes)}
   source_charge=max(1,sum(sizes))
   if kind=='read' and sizes[0]>read_limit:
-   raise SourceReadLimitExceeded(f'Source {target} needs {sizes[0]} bytes; scoped source-page allocation is {read_limit} bytes')
+   raise SourceReadLimitExceeded(
+    f'Source {target} needs {sizes[0]} bytes; scoped source-page allocation is {read_limit} bytes',
+    required_bytes=sizes[0],page_limit_bytes=read_limit)
  from storage_policy import require_space
  require_space(root,max(16*1024**2,source_charge*32))
  cost={'operations':1,'source_bytes':source_charge,'seconds':20}

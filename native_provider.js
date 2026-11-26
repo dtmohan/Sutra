@@ -11,6 +11,8 @@ const {ModelUnavailable,fallbackMessage}=require('./model_selection');
 const ACTION='karma_native_action';
 const ACCESS='karma_workspace_access';
 const ACCESS_AGENT='karma_workspace_agent_access';
+const WORKTREE_PATCH='worktree_patch';
+const ACTION_KINDS=new Set(['edit','run_tests',WORKTREE_PATCH]);
 const THINK_NEXT='sutraThinkingForNextRequest';
 const HOST_READY_WAIT_MS=1500,HOST_READY_POLL_MS=50;
 const TASK_RUNNER_EVENTS=new Set(['start','start_existing','step','resume','grant','capability_grant',
@@ -28,9 +30,50 @@ const evidencePause=flow=>flow?.state==='PAUSED'&&flow.stop?.status==='evidence_
 const workspaceSelectionPause=flow=>evidencePause(flow)&&flow.stop.evidence_bridge?.target_kind==='workspace';
 const documentFilePause=flow=>evidencePause(flow)&&flow.stop.evidence_bridge?.target_kind==='document'&&
   (flow.stop.evidence_bridge.required==='document_file'||/\.docx\b/i.test(flow.prompt||''));
+const settledWorktree=flow=>flow?.state==='DONE'&&flow.action_receipt?.kind===WORKTREE_PATCH;
 const DOCUMENT_EVIDENCE=/^\s*(?:document|r[eé]sum[eé]|cv|cover[ -]+letter)[ \t]+text:[ \t]*\r?\n\s*\S/i;
 const WORKSPACE_EVIDENCE=/^(?:use this workspace[.!?]*|workspace files:[ \t]*\r?\n\s*\S[\s\S]*)$/i;
 const standaloneGreeting=prompt=>typeof prompt==='string'&&/^[ \t\r\n]*(?:hello(?: there)?|hi(?: there)?|hey)[.!?]*[ \t\r\n]*$/i.test(prompt);
+function checkWorktreePreview(preview){
+  const changes=preview?.changes;
+  if(preview?.kind!==WORKTREE_PATCH||!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(preview.base_commit||'')||
+    !/^[a-f0-9]{64}$/.test(preview.plan_digest||'')||preview.test_profile!=='python-unittest'||preview.test_target!=='tests'||
+    !Array.isArray(changes)||changes.length<2||changes.length>8||
+    changes.some(change=>typeof change?.target!=='string'||!change.target.endsWith('.py')||
+      /[\\\x00-\x1f\x7f]/.test(change.target)||change.target.split('/').some(part=>!part||part==='.'||part==='..')||
+      typeof change.before!=='string'||typeof change.after!=='string'||typeof change.diff!=='string')||
+    new Set(changes.map(change=>change.target)).size!==changes.length)
+    throw new Error('Sutra did not receive a complete worktree patch preview.');
+  return preview;
+}
+function worktreeConfirmation(preview){
+  return ['Base commit '+preview.base_commit, 'Patch files', ...preview.changes.map(change=>'  '+change.target),
+    'Run python -m unittest discover -s tests against the patched detached worktree.',
+    'The test process has read-only project access to the tracked snapshot. Network access is denied.'].join('\n');
+}
+function worktreeReceiptText(receipt){
+  const result=receipt.result||{};
+  const outputs={process_exited_zero:'The project test process exited with code 0.',
+    process_failed:Number.isInteger(result.returncode)?`The project test process exited with code ${result.returncode}.`:
+      'The project test process failed.',timeout:'The project tests reached their time limit.',
+    output_limit:'The project tests reached their output limit.',
+    scratch_limit:'The project tests reached their scratch storage limit.',
+    resource_wait:'Sutra stopped the project tests after a hardware readiness check.',
+    interrupted:'The worktree action was interrupted. Test completion is unknown. The prior attempt remains charged.',
+    interrupted_unknown:'The worktree action was interrupted. Test completion is unknown. The prior attempt remains charged.',
+    failed_or_uncertain:'Sutra could not establish that the worktree action completed.'};
+  const sections=[Object.hasOwn(outputs,result.status)?outputs[result.status]:'Sutra could not establish a project test outcome.'];
+  if(typeof result.worktree==='string'&&path.isAbsolute(result.worktree)&&!/[`\x00-\x1f\x7f]/.test(result.worktree))
+    sections.push('Detached worktree: `'+result.worktree+'`');
+  sections.push('The receipt records the process outcome. Test assertions remain unverified.');
+  const detail=result.status==='failed_or_uncertain'?result.error:result.output_tail;
+  if(typeof detail==='string'&&detail.trim()){
+    const output=detail.slice(-1200).replace(/[\x00-\x08\x0b-\x1f\x7f]/g,' ').trimEnd();
+    const fence='`'.repeat(1+Math.max(2,...Array.from(output.matchAll(/`+/g),match=>match[0].length)));
+    sections.push(fence+'text\n'+output+'\n'+fence);
+  }
+  return sections.join('\n\n');
+}
 function latestRequest(vscode,messages){
   const last=messages.at(-1);
   const results=last?.content?.filter(p=>p instanceof vscode.LanguageModelToolResultPart)||[];
@@ -368,21 +411,34 @@ function install(vscode,context,deps){
       stillValid();
       publish();
       recordAccess('requested');
-      const choices=agentOnly?[profiles.workspace_agent]:Object.values(profiles);
-      const choice=await vscode.window.showWarningMessage('Workspace access for Sutra',{modal:true,detail:
+      const review=!!owner?.prepareWorkspaceRead;
+      const reviewChoice={title:'Allow read-only review'};
+      const choices=review?[reviewChoice,{title:'Decline',isCloseAffordance:true}]:
+        agentOnly?[profiles.workspace_agent]:Object.values(profiles);
+      const choice=await vscode.window.showWarningMessage(review?'Allow Sutra to review this workspace?':'Workspace access for Sutra',{modal:true,detail:
         workspace+'\n\n'+(owner?.goal?'Request: '+owner.goal+'\n\n':'')+(previous?'Current access: '+profiles[previous.profile]+'\n':'')+
-        'Read only lets Sutra read the scoped project files. Workspace agent also enables scoped edits and sandboxed tests. Sutra requests action confirmation through VS Code and confirms actions separately for tool calls outside chat. Your choice is saved for this workspace. Optional tools keep their separate approval rules.'},...choices);
+        (review?'Sutra will use this workspace for the requested review. Read-only access is saved for this workspace.':
+          'Read only lets Sutra read the scoped project files. Workspace agent also enables scoped edits and sandboxed tests. Sutra requests action confirmation through VS Code and confirms actions separately for tool calls outside chat. Your choice is saved for this workspace. Optional tools keep their separate approval rules.')},...choices);
       stillValid();
-      const profile=Object.keys(profiles).find(key=>profiles[key]===choice);
-      if(!profile||!choices.includes(choice)){
+      const profile=review?(choice?.title===reviewChoice.title?'read_only':undefined):
+        Object.keys(profiles).find(key=>choices.includes(choice)&&profiles[key]===choice);
+      if(!profile){
         recordAccess('declined');
         return false;
+      }
+      if(review){
+        if(!await owner.prepareWorkspaceRead()){
+          recordAccess('cancelled');
+          return false;
+        }
+        stillValid();
       }
       if(previous?.profile!==profile){
         authorization.write({id:access.id,scope,profile});
         clearAccess('', false);
         refreshAccess();
       }
+      access.profile=profile;
       recordAccess('granted');
       return true;
     }catch(error){
@@ -396,16 +452,20 @@ function install(vscode,context,deps){
   }
   // UI effects only: the host state machine selects work, forks and joins.
   async function approvePermission(descriptor,token){
+    const project=descriptor.operation==='project_patch';
     let paths=descriptor.paths;
     if(!paths.length){
-      const chosen=await vscode.window.showOpenDialog({title:'Select Python files for '+descriptor.operation,defaultUri:vscode.Uri.file(deps.workspace()),canSelectMany:true,filters:{Python:['py']}});
+      const chosen=await vscode.window.showOpenDialog({title:project?'Select Python files for the worktree patch':'Select Python files for '+descriptor.operation,defaultUri:vscode.Uri.file(deps.workspace()),canSelectMany:true,filters:{Python:['py']}});
       if(!chosen?.length)return;
       paths=chosen.map(f=>path.relative(deps.workspace(),f.fsPath).split(path.sep).join('/'));
     }
-    if(descriptor.operation==='test'&&process.platform!=='darwin')throw new Error('Sandboxed test execution is currently available on macOS only. No test permission was granted.');
+    if((descriptor.operation==='test'||project)&&process.platform!=='darwin')throw new Error('Sandboxed test execution is currently available on macOS only. No test permission was granted.');
     const test_paths=descriptor.operation==='test'?(descriptor.test_paths||[...paths]):[];
-    const label=descriptor.operation==='edit'?'Allow scoped edits':'Allow scoped tests';
-    const yes=await vscode.window.showWarningMessage('Sutra needs permission for this request.',{modal:true,detail:'Files: '+paths.join(', ')+'\nTask: '+descriptor.goal+'\nNetwork and dependencies remain off. This file scope persists with the task across model switches. Workspace access can be revoked from Sutra settings. Every edit or test still has its own confirmation.'},label);
+    const label=project?'Allow patch proposal':descriptor.operation==='edit'?'Allow scoped edits':'Allow scoped tests';
+    const detail='Files: '+paths.join(', ')+'\nTask: '+descriptor.goal+'\n'+(project?
+      'Sutra can read these files, check the committed project snapshot and prepare a patch. Staging the patch and running project tests in a detached worktree requires separate confirmation.':
+      'Network and dependencies remain off. This file scope persists with the task across model switches. Workspace access can be revoked from Sutra settings. Every edit or test still has its own confirmation.');
+    const yes=await vscode.window.showWarningMessage('Sutra needs permission for this request.',{modal:true,detail},label);
     if(yes!==label||token.isCancellationRequested)return;
     return {operation:descriptor.operation,paths,test_paths};
   }
@@ -617,7 +677,9 @@ function install(vscode,context,deps){
       await rememberFlow(current,undefined,pending.nativeChat,pending.stackChat);
       if(['DONE','CANCELLED'].includes(current.state)&&!restartableReview(current)){
         resumeSubmission=undefined;
-        void vscode.window.showInformationMessage('This Sutra request has finished.');
+        void vscode.window.showInformationMessage(current.flow_id===pending.flow_id&&settledWorktree(current)
+          ?'The worktree receipt is saved. Send continue in the original Sutra chat to see the result.'
+          :'This Sutra request has finished.');
         return;
       }
       submission.cursor=current.cursor;
@@ -985,7 +1047,11 @@ function install(vscode,context,deps){
   }
   const tool={
     prepareInvocation(options){
-      const t=ticket(options.input);const md=new vscode.MarkdownString();md.appendText(t.kind==='edit'?'Apply this exact proposed edit to '+t.preview.target+'?':'Run the permitted Python test '+t.preview.target+' in a read-only snapshot with network denied?');if(t.preview.snapshot_files)md.appendText(' Snapshot files: '+t.preview.snapshot_files.join(', ')+'. '+t.preview.snapshot_note);if(t.preview.diff)md.appendCodeblock(t.preview.diff,'diff');md.isTrusted=false;
+      const t=ticket(options.input);
+      // VS Code's remembered tool approvals cannot replace exact worktree approval.
+      // The action uses one native confirmation dialog inside invoke instead.
+      if(t.kind===WORKTREE_PATCH)return {invocationMessage:'Reviewing the proposed worktree patch'};
+      const md=new vscode.MarkdownString();md.appendText(t.kind==='edit'?'Apply this exact proposed edit to '+t.preview.target+'?':'Run the permitted Python test '+t.preview.target+' in a read-only snapshot with network denied?');if(t.preview.snapshot_files)md.appendText(' Snapshot files: '+t.preview.snapshot_files.join(', ')+'. '+t.preview.snapshot_note);if(t.preview.diff)md.appendCodeblock(t.preview.diff,'diff');md.isTrusted=false;
       return {invocationMessage:t.kind==='edit'?'Applying governed edit':'Running governed test',confirmationMessages:{title:'Sutra: '+(t.kind==='edit'?'apply edit':'run test'),message:md}};},
     async invoke(options,token){
       if(running||deps.isBusy())throw new Error('A Sutra operation is already running.');
@@ -993,16 +1059,29 @@ function install(vscode,context,deps){
       const t=ticket(options.input);await check(t,token);if(ticket(options.input)!==t)throw new Error('Action revoked.');
       // VS Code may skip prepareInvocation confirmations for programmatic calls
       // without a chat token. Require a host dialog for that path as well.
-      if(!options.toolInvocationToken){
-        const label=t.kind==='edit'?'Apply edit':'Run test';
-        const confirmed=await vscode.window.showWarningMessage('Sutra: '+label+' · '+t.preview.target,{modal:true,detail:t.preview.diff||'Run the permitted Python unittest in a read-only snapshot with network denied. Exit status is a process observation; assertions remain unverified.'+(t.preview.snapshot_files?' Snapshot files: '+t.preview.snapshot_files.join(', ')+'. '+t.preview.snapshot_note:'')},label);
-        if(confirmed!==label)throw new Error('Sutra action not confirmed.');
+      if(t.kind===WORKTREE_PATCH||!options.toolInvocationToken){
+        const project=t.kind===WORKTREE_PATCH;
+        const label=project?'Stage patch and run tests':t.kind==='edit'?'Apply edit':'Run test';
+        const title=project?'Stage this patch and run project tests in a detached worktree?':'Sutra: '+label+' · '+t.preview.target;
+        const detail=project?worktreeConfirmation(t.preview):t.preview.diff||'Run the permitted Python unittest in a read-only snapshot with network denied. Exit status is a process observation; assertions remain unverified.'+(t.preview.snapshot_files?' Snapshot files: '+t.preview.snapshot_files.join(', ')+'. '+t.preview.snapshot_note:'');
+        const confirmed=await vscode.window.showWarningMessage(title,{modal:true,detail},label);
+        if(confirmed!==label){
+          if(!project||token.isCancellationRequested||ticket(options.input)!==t)throw new Error('Sutra action not confirmed.');
+          tickets.delete(t.id);
+          completed.set(t.callId,{kind:'worktree_patch_declined',generation:t.generation,nativeChat:t.nativeChat,flowScope:t.flowScope});
+          return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('Worktree patch approval declined.')]);
+        }
         await check(t,token);if(ticket(options.input)!==t)throw new Error('Action revoked.');
       }
       if(running||deps.isBusy())throw new Error('Another Sutra operation started.');
       if(token.isCancellationRequested)throw new Error('Sutra action cancelled.');
       tickets.delete(options.input.ticket);running=true;activeCancel=new vscode.CancellationTokenSource();const cancel=token.onCancellationRequested(()=>activeCancel?.cancel());publish();
-      try{const access=assertArmed();if(access.generation!==t.generation)throw new Error('Workspace permission changed before submitting this action.');const data=await deps.request({op:'native_execute',...t.binding,...t.flowScope,invocation_id:t.invocation_id},activeCancel.token,undefined,{authority:access});const result={...data.action_receipt,assertions_verified:false};assertCurrent(access,activeCancel.token);completed.set(t.callId,{prompt:t.prompt,conversationId:t.conversationId,result,generation:t.generation,binding:t.binding,thinkForTurn:t.thinkForTurn,flowScope:t.flowScope,nativeChat:t.nativeChat});if(data.task_stack)await rememberFlow(data,undefined,t.nativeChat,t.flowScope.chat_key);deps.publishReview(data);
+      try{const access=assertArmed();if(access.generation!==t.generation)throw new Error('Workspace permission changed before submitting this action.');
+        const request={op:'native_execute',...t.binding,...t.flowScope,invocation_id:t.invocation_id};
+        if(t.kind===WORKTREE_PATCH)request.plan_digest=t.preview.plan_digest;
+        const data=await deps.request(request,activeCancel.token,undefined,{authority:access});
+        const result={...data.action_receipt,assertions_verified:false};assertCurrent(access,activeCancel.token);completed.set(t.callId,{kind:t.kind,prompt:t.prompt,conversationId:t.conversationId,result,generation:t.generation,binding:t.binding,thinkForTurn:t.thinkForTurn,flowScope:t.flowScope,nativeChat:t.nativeChat});if(data.task_stack)await rememberFlow(data,undefined,t.nativeChat,t.flowScope.chat_key);deps.publishReview(data);
+        if(t.kind===WORKTREE_PATCH)return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(worktreeReceiptText(result))]);
         return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify({receipt:result.id,status:result.result.status,target:t.preview.target,returncode:result.result.returncode,assertions_verified:false,note:'A zero exit status is a process observation, not verified test assertions.'}))]);
       }finally{cancel.dispose();activeCancel.dispose();activeCancel=undefined;running=false;publish();}
     }
@@ -1056,6 +1135,16 @@ function install(vscode,context,deps){
         if(!known||known.generation!==armed.generation)throw new Error('Tool result lacks a current Sutra host receipt.');
         const owner=known.nativeChat||known.flowScope?.chat_key;
         if(chatKey&&owner&&owner!==chatKey)throw new Error('Tool result belongs to another Sutra chat.');
+        if(known.kind==='worktree_patch_declined'){
+          audit.stage='permission_declined';
+          progress.report(new vscode.LanguageModelTextPart('The patch proposal is saved. Send **continue** to review it again.'));
+          return;
+        }
+        if(known.kind===WORKTREE_PATCH){
+          audit.stage='tool_finished';
+          progress.report(new vscode.LanguageModelTextPart(worktreeReceiptText(known.result)));
+          return;
+        }
         if(!['applied','process_exited_zero','process_failed','workspace_access_granted'].includes(known.result.result.status)){
           progress.report(new vscode.LanguageModelTextPart('Sutra stopped after '+known.result.result.status+'. Inspect the host action receipt before continuing.'));
           return;
@@ -1177,19 +1266,57 @@ function install(vscode,context,deps){
         progress.report(new vscode.LanguageModelTextPart(flow.request_notice));
         return true;
       }
+      function showWorktreeOutcome(flow){
+        if(!settledWorktree(flow))return false;
+        if(assertArmed().profile!=='workspace_agent')
+          throw new Error('The saved worktree receipt requires Workspace agent access.');
+        assertCurrent(a,activeCancel.token);
+        audit.stage='tool_finished';
+        progress.report(new vscode.LanguageModelTextPart(worktreeReceiptText(flow.action_receipt)));
+        return true;
+      }
       async function chooseWorkspaceScope(flow){
         const workspace=deps.workspace();
         const goal=String(flow.prompt||prompt).replace(/\s+/g,' ').trim().slice(0,240);
+        const pending=context.workspaceState.get(pendingKey);
+        const ownerToken=activeCancel.token;
+        let cursor=flow.cursor;
+        const isCurrent=()=>{
+          const current=context.workspaceState.get(pendingKey);
+          return current?.flow_id===flow.flow_id&&current.cursor===cursor&&current.workspace===workspace&&
+            current.resumeLink===pending?.resumeLink&&current.nativeChat===pending?.nativeChat&&current.stackChat===pending?.stackChat;
+        };
+        const selectWorkspace=()=>advance(flow,'supply_evidence',{evidence_text:'Use this workspace'});
         audit.stage='awaiting_workspace_selection';
         audit.message='Waiting for you to choose whether to use the open workspace.';
         publish();
-        const choice=await vscode.window.showWarningMessage('Use the open workspace for this request?',{
-          modal:true,detail:workspace+'\n\n'+goal
-        },{title:'Use this workspace'},{title:'Decline',isCloseAffordance:true});
-        assertCurrent(a,activeCancel.token);
-        if(deps.workspace()!==workspace)throw new Error('The open workspace changed before it could be selected.');
-        if(choice?.title==='Use this workspace')
-          return advance(flow,'supply_evidence',{evidence_text:'Use this workspace'});
+        if(a){
+          const choice=await vscode.window.showWarningMessage('Use the open workspace for this request?',{
+            modal:true,detail:workspace+'\n\n'+goal
+          },{title:'Use this workspace'},{title:'Decline',isCloseAffordance:true});
+          assertCurrent(a,ownerToken);
+          if(deps.workspace()!==workspace||!isCurrent())throw new Error('The saved request or workspace changed during selection.');
+          if(choice?.title==='Use this workspace')return selectWorkspace();
+        }else{
+          let selected;
+          const granted=await beginArm({audit,token:ownerToken,isCurrent,goal,prepareWorkspaceRead:async()=>{
+            // Bind the read-only review at the host before persisting the grant.
+            // Supplying this scope cannot start a source read.
+            selected=await selectWorkspace();
+            assertCurrent(a,ownerToken);
+            if(selected.flow_id!==flow.flow_id||deps.workspace()!==workspace)
+              throw new Error('The saved request or workspace changed during approval.');
+            if(selected.request_notice)return false;
+            if(selected.state!=='NEED_ARM')throw new Error('The saved request did not accept the workspace scope.');
+            cursor=selected.cursor;
+            return true;
+          }});
+          if(granted){
+            a=assertArmed();
+            progress.report(new vscode.LanguageModelTextPart('Read-only workspace access approved. Continuing your review.\n\n'));
+          }
+          if(selected)return selected;
+        }
         audit.stage='paused';
         audit.message='Workspace selection declined. Your request and remaining budget are saved.';
         publish();
@@ -1230,12 +1357,16 @@ function install(vscode,context,deps){
         const scope=managed?{chat_key:stackChat,flow_id:flow.flow_id}:{};
         const preview=await deps.request({op:'native_preview',...binding,...scope,invocation_id:invocationId},activeCancel.token);
         assertCurrent(a,activeCancel.token);
+        const action=kind||preview.kind||(preview.runner?'run_tests':'edit');
+        if(!ACTION_KINDS.has(action)||(preview.kind===WORKTREE_PATCH&&action!==WORKTREE_PATCH))
+          throw new Error('The action preview does not match the saved proposal.');
+        if(action===WORKTREE_PATCH)await deps.showWorktreeDiff(checkWorktreePreview(preview).changes,invocationId);
+        else if(preview.diff)await deps.showDiff(preview,invocationId);
+        assertCurrent(a,activeCancel.token);
         const id=crypto.randomUUID(),callId=crypto.randomUUID();
         tickets.set(id,{id,binding,generation:a.generation,expires:Date.now()+300000,invocation_id:invocationId,
-          kind:kind||(preview.runner?'run_tests':'edit'),preview,prompt,conversationId:flow.conversation_id||conversationId,
+          kind:action,preview,prompt,conversationId:flow.conversation_id||conversationId,
           callId,thinkForTurn,flowScope:scope,nativeChat:chatKey});
-        if(preview.diff)await deps.showDiff(preview,invocationId);
-        try{assertCurrent(a,activeCancel.token);}catch(error){tickets.delete(id);throw error;}
         progress.report(new vscode.LanguageModelToolCallPart(callId,ACTION,{ticket:id}));
       }
       function sameChat(pending,explicit){
@@ -1330,11 +1461,12 @@ function install(vscode,context,deps){
               if(inspected.cursor!==flow.cursor||inspected.state!==flow.state){
                 await rememberFlow(inspected,retained.thinkForTurn,chatKey,stackChat);
                 if(!disposed&&!activeCancel.token.isCancellationRequested){await acknowledgeTransport(retained);currentRunnerTicket=undefined;}
+                if(showWorktreeOutcome(inspected))return;
                 resumeUnavailable('The saved workflow advanced after this runner step. Its current checkpoint is retained. Send continue to use that checkpoint; the older cached answer was not published.');
                 return;
               }
               flow={...cachedFlow,task_stack:inspected.task_stack,focused_flow:inspected.focused_flow,
-                recovery:inspected.recovery,report_sections:inspected.report_sections};
+                recovery:inspected.recovery,report_sections:inspected.report_sections,action_receipt:inspected.action_receipt};
               await rememberFlow(flow,retained.thinkForTurn,chatKey,stackChat);
               if(!disposed&&!activeCancel.token.isCancellationRequested){await acknowledgeTransport(retained);currentRunnerTicket=undefined;}
               prompt=flow.prompt||retained.prompt||prompt;
@@ -1407,11 +1539,12 @@ function install(vscode,context,deps){
             legacyResume=!pending.stackChat;
             const old=await deps.request({op:'orchestrate',event:'inspect',flow_id:pending.flow_id,...flowScope(pending)},activeCancel.token);
             managed ||= !!old.task_stack;
-            if(submission&&(old.cursor!==submission.cursor||(['DONE','CANCELLED'].includes(old.state)&&!restartableReview(old)))){
+            const completedWorktree=submission&&old.flow_id===submission.flowId&&settledWorktree(old);
+            if(submission&&!completedWorktree&&(old.cursor!==submission.cursor||(['DONE','CANCELLED'].includes(old.state)&&!restartableReview(old)))){
               resumeUnavailable('The saved Sutra request advanced. Choose Resume from the current pause in Sutra Monitor.');
               return;
             }
-            if(showRequestNotice(old))return;
+            if(showRequestNotice(old)||showWorktreeOutcome(old))return;
             if(evidencePause(old)){
               if(supply&&evidenceReply(old)){
                 flow=await advance(old,'supply_evidence',{evidence_text:prompt});
@@ -1558,7 +1691,7 @@ function install(vscode,context,deps){
               {canAuthorize,canAuthorizeAgent,chatKey,thinkForTurn,token:activeCancel.token});
             if(!granted)return;
             a=assertArmed();
-          }else{
+          }else if(audit.workspaceAccess?.state!=='granted'){
             audit.workspaceAccess={state:'reused',workspace:a.workspace,profile:a.profile};publish();
           }
 
@@ -1581,7 +1714,7 @@ function install(vscode,context,deps){
         }
         if(!flow)flow=await advance(null,'start_existing',{prompt,conversation_id:conversationId,
           ...(actionScope?.flow_id?{action_flow_id:actionScope.flow_id}:{})});
-        if(showRequestNotice(flow))return;
+        if(showRequestNotice(flow)||showWorktreeOutcome(flow))return;
         showReportSections(flow);
         if(flow.state==='PAUSED'){
           flow=await advance(flow,'resume');
@@ -1660,7 +1793,7 @@ function install(vscode,context,deps){
           publish();return;
         }
         publish();
-        const p=r.accepted_output;if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&!['edit','run_tests'].includes(p.action?.kind))throw new Error('No admitted action is available to satisfy required tool mode.');
+        const p=r.accepted_output;if(options.toolMode===vscode.LanguageModelChatToolMode.Required&&!ACTION_KINDS.has(p.action?.kind))throw new Error('No admitted action is available to satisfy required tool mode.');
         if(data.report_markdown){
           const completion=data.report_completion_markdown;
           const markdown=showReportSections(flow)&&typeof completion==='string'&&completion.trim()?completion:data.report_markdown;
@@ -1678,7 +1811,7 @@ function install(vscode,context,deps){
           const followups=Number.isInteger(followupCount)&&followupCount>0?`; governed follow-up reads from ${followupCount} files`:'';
           progress.report(new vscode.LanguageModelTextPart(`Evidence delivered: ${evidence.fresh_snapshot_files} freshly mapped files; source excerpts from ${evidence.excerpt_files.length} files; ${evidence.child_reports} child reports${followups}. This is a bounded review, not an exhaustive semantic audit.\n\n`));
         }
-        if(['edit','run_tests'].includes(p.action?.kind)){
+        if(ACTION_KINDS.has(p.action?.kind)){
           await offerAction(flow,r.invocation_id,p.action.kind);
         }else if(!p.report&&!data.report_completion_markdown){progress.report(new vscode.LanguageModelTextPart('Remaining: '+(p.remaining?.join('; ')||'No further step proposed.')+'\n\nModel notes are not proof of correctness. Test receipts report process observations.'));}
       }finally{

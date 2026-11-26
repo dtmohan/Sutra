@@ -8,7 +8,7 @@ def arr(items): return {'type':'array','items':items}
 S={'type':'string'}
 SCHEMA=obj({'action':{'type':'string','enum':['need_context','edit','run_tests','report','clarify']},
  'read_pages':arr(S),'browse':arr(obj({'group':S,'offset':{'type':'integer','minimum':0}})),
- 'task_id':S,'goal':S,'constraints':arr(obj({'key':{'type':'string','enum':sorted(CONSTRAINT_KEYS)},'value':S})),
+ 'task_id':S,'goal':S,'constraints':arr(obj({'key':{'type':'string','enum':sorted(CONSTRAINT_KEYS-{'project_patch_allowed'})},'value':S})),
  'selected_option':S,'target':S,'tests_status':{'type':'string','enum':['unverified','passed','failed','stale']},
  'complete':{'type':'boolean'},'facts':arr(obj({'key':S,'value':S,'page_id':S}))})
 

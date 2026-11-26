@@ -152,6 +152,28 @@ def proposed_edit(workspace, constraints, action, payload, *, read_scope=None):
             'diff':''.join(difflib.unified_diff(before.splitlines(True),after.splitlines(True),fromfile=name,tofile=name))}
 
 
+def project_changes(workspace, constraints, edits, payload, read_scope):
+    targets = [item['target'] for item in edits]
+    if (constraints.get('project_patch_allowed') is not True or read_scope != ['.']
+            or len(targets) < 2 or sorted(targets) != constraints['allowed_paths']
+            or constraints.get('network_allowed') is not False
+            or constraints.get('dependencies_allowed') is not False):
+        raise InvalidUpdate('Patch must change each approved Python target exactly once in an isolated worktree')
+    return [proposed_edit(workspace, dict(constraints, edits_allowed=True), edit,
+                          payload, read_scope=read_scope) for edit in sorted(edits, key=lambda item: item['target'])]
+
+
+def project_plan(workspace, constraints, action, payload, read_scope):
+    from project_worktree import plan
+    changes = project_changes(workspace, constraints, action['edits'], payload, read_scope)
+    result = plan(workspace, sorted(action['edits'], key=lambda item: item['target']))
+    def hashes(rows):
+        return [(item['target'], item['before_hash'], item['after_hash']) for item in rows]
+    if hashes(result['changes']) != hashes(changes):
+        raise InvalidUpdate('Worktree patch differs from the checked source versions')
+    return result
+
+
 def execution_context(s, session, workspace):
     if not s.db.execute("SELECT 1 FROM sqlite_master WHERE name='host_actions'").fetchone():return {'actions_used':0,'recent':[],'tests':'unverified'}
     origin=s.origin(session);recent=[]
@@ -175,6 +197,9 @@ def execution_context(s, session, workspace):
                   'model':action['model'],'before_hash':action.get('before_hash'),'after_hash':result.get('after_hash')}
             if action['kind']=='run_tests':item.update(returncode=result.get('returncode'),tests=result.get('tests'),
                     current=valid,assertions_verified=False,transition=(result.get('provenance') or {}).get('transition'),output_tail=result.get('output_tail','')[-700:] if not any(r['kind']=='run_tests' for r in recent) else '')
+            if action['kind']=='worktree_patch':
+                item.update(target=', '.join(action['targets']), returncode=result.get('returncode'),
+                            assertions_verified=False, output_tail=result.get('output_tail','')[-700:])
             recent.append(item)
     return {'authority':'host_process_observations','assertions_verified':False,'actions_used':used,'pending_actions':pending,'recent':list(reversed(recent)),'tests':tests}
 
@@ -253,6 +278,9 @@ def receipt(s, action, result):
         record={'action_id':action['id'],'session':action['session'],'seq':seq+1,'previous_hash':previous,
                 'action_hash':sha('action-v1:'+canonical(action)),'contract_hash':action['contract_hash'],
                 'logic_hash':action['logic_hash'],'result':result,'completed_at':time.time()}
+        if action['kind']=='worktree_patch':
+            record.update(kind=action['kind'], base_commit=action['base_commit'],
+                          targets=action['targets'], plan_digest=action['plan_digest'])
         digest=sha('action-receipt-v1:'+canonical(record))
         s.db.execute('INSERT INTO host_action_receipts VALUES(?,?,?,?,?)',(action['id'],action['session'],seq+1,digest,canonical(record)))
         s._audit('HOST_ACTION_RECEIPT',{'id':digest,'record':record})
@@ -264,6 +292,26 @@ def receipt(s, action, result):
             from execution_sessions import finish
             finish(s, action['workflow_id'])
     return dict(record,id=digest)
+
+
+def project_receipt(s, action_id, workflow=None, expected_receipt=None):
+    row = s.db.execute(
+        'SELECT a.record_json,a.digest,r.id,r.record_json FROM host_actions a '
+        'JOIN host_action_receipts r ON r.action_id=a.id AND r.session=a.session WHERE a.id=?',
+        (action_id,)).fetchone()
+    if not row:
+        return None
+    raw, action_digest, digest, record = row
+    action, result = json.loads(raw), json.loads(record)
+    if action['kind'] != 'worktree_patch':
+        return None
+    if (sha('action-v1:'+raw) != action_digest or result['action_hash'] != action_digest
+            or sha('action-receipt-v1:'+record) != digest
+            or (workflow is not None and action.get('workflow_id') != workflow)
+            or (expected_receipt is not None and digest != expected_receipt)
+            or not s.audit_valid()):
+        raise InvalidUpdate('Isolated worktree receipt no longer matches its action commitment')
+    return dict(result,id=digest)
 
 
 def verified_proposal(s,session,iid,workspace):
@@ -283,6 +331,17 @@ def preview(s,session,iid,workspace):
     if action['kind']=='edit':
         from native_access import read_scope
         return proposed_edit(workspace,constraints,action,payload,read_scope=read_scope(s,session))
+    if action['kind']=='worktree_patch':
+        from native_access import read_scope
+        from orchestration import action_flow
+        if not action_flow(s,iid):
+            raise InvalidUpdate('Project patches require their native action workflow')
+        plan = project_plan(workspace, constraints, action, payload, read_scope(s,session))
+        return dict(kind='worktree_patch', changes=plan['changes'], base_commit=plan['base_commit'],
+                    runner='Python unittest discovery', isolation='Detached Git worktree with network denied',
+                    test_profile='python-unittest', test_target=plan['test_target'], files=plan['files'],
+                    source_bytes=plan['source_bytes'], timeout_ms=constraints['test_timeout_ms'],
+                    plan_digest=sha(canonical(plan)))
     if action['kind']=='run_tests':return {'target':action['target'],'runner':'Python unittest','isolation':'scoped read-only snapshot; network denied',
                                          'snapshot_files':sorted(constraints['allowed_paths']),
                                          'snapshot_note':'Only these granted files are available. Include required project modules in the task grant before running tests.',
@@ -376,7 +435,7 @@ def run_tests_snapshot(directory,files,target,timeout_ms,root=None):
             'network_allowed':False,'project_writes_allowed':False,'command':command}
 
 
-def execute(s,session,iid,workspace,root,resource_check=True):
+def execute(s,session,iid,workspace,root,resource_check=True,*,plan_digest=None):
     from lifecycle import timeout
     from storage_policy import require_space
     timeout(120);require_space(root)
@@ -385,13 +444,19 @@ def execute(s,session,iid,workspace,root,resource_check=True):
     if prior:
         row=s.db.execute('SELECT id,record_json FROM host_action_receipts WHERE action_id=?',(prior[0],)).fetchone()
         if not row:raise InvalidUpdate('Action is pending or interrupted; it will not be replayed automatically')
+        result = project_receipt(s,prior[0])
+        if result:
+            if plan_digest!=result['plan_digest']:
+                raise InvalidUpdate('Worktree receipt belongs to another approval')
+            return dict(result,replayed_receipt=True)
         return dict(json.loads(row[1]),id=row[0],replayed_receipt=True)
     if s.db.execute('SELECT 1 FROM host_actions a LEFT JOIN host_action_receipts r ON a.id=r.action_id WHERE a.session=? AND r.action_id IS NULL',(session,)).fetchone():
         raise InvalidUpdate('An earlier action is pending; inspect it before executing another action')
     env,payload,output=verified_proposal(s,session,iid,workspace)
     action=output['action'];kind=action['kind'];constraints=s.snapshot(session)['constraints']
-    if kind not in ('edit','run_tests'):raise InvalidUpdate('No executable action in this proposal')
-    if kind=='run_tests' and sys.platform!='darwin':raise InvalidUpdate('Sandboxed test execution is currently supported only on macOS')
+    if kind not in ('edit','run_tests','worktree_patch'):raise InvalidUpdate('No executable action in this proposal')
+    if kind in ('run_tests','worktree_patch') and sys.platform!='darwin':
+        raise InvalidUpdate('Sandboxed test execution is currently supported only on macOS')
     if kind=='edit' and os.name=='nt':raise InvalidUpdate('Atomic code edits are currently supported only on macOS/Linux; Windows supports read-only reviews')
     hardware=require_resources(root) if resource_check else {'profile':'unit-test-fixture'}
     files=files_at(s,session,workspace);versions={k:v['sha256'] for k,v in files.items()}
@@ -400,6 +465,25 @@ def execute(s,session,iid,workspace,root,resource_check=True):
     change=proposed_edit(workspace,constraints,action,payload,read_scope=read_scope(s,session)) if kind=='edit' else None
     if kind=='run_tests' and (constraints.get('tests_allowed') is not True or action['target'] not in constraints.get('test_paths',[])):
         raise InvalidUpdate('Test execution is not permitted for this target')
+    from orchestration import admit,action_flow,transition,scope
+    workflow=action_flow(s,iid)
+    plan=None
+    if kind=='worktree_patch':
+        from project_worktree import MAX_SCRATCH_BYTES, STAGING_SECONDS
+        if not workflow or not isinstance(plan_digest,str):
+            raise InvalidUpdate('Approve the exact worktree patch and project test plan')
+        plan=project_plan(workspace,constraints,action,payload,read_scope(s,session))
+        if sha(canonical(plan))!=plan_digest:
+            raise InvalidUpdate('Worktree snapshot or patch changed after approval')
+        require_space(root,plan['source_bytes']*3+2*1024**2+MAX_SCRATCH_BYTES)
+        seconds=constraints['test_timeout_ms']/1000+STAGING_SECONDS
+        if timeout(seconds) < seconds:
+            raise InvalidUpdate('The bridge cannot complete the approved worktree action in its remaining time')
+    target=plan['test_target'] if plan else action['target']
+    paths=[item['target'] for item in plan['changes']] if plan else [target]
+    cost={'actions':1,'seconds':constraints.get('test_timeout_ms',10000)/1000 if kind=='run_tests' else 1}
+    if plan:
+        cost.update(operations=1,source_bytes=plan['source_bytes'],seconds=seconds)
     origin=s.current_contract(session);aid=uuid.uuid4().hex
     with s.db:
         s.db.execute('BEGIN IMMEDIATE')
@@ -408,32 +492,36 @@ def execute(s,session,iid,workspace,root,resource_check=True):
         if measured['decision']!='ALLOW':
             s._audit('ACTION_DENIED',{'session':session,'budget_kernel':measured});s.db.commit()
             raise InvalidUpdate('Action budget exhausted: '+measured['decision'])
-        commit={'id':aid,'session':session,'invocation_id':iid,'model':env['model'],'kind':kind,'target':action['target'],
+        commit={'id':aid,'session':session,'invocation_id':iid,'model':env['model'],'kind':kind,'target':target,
                 'contract_hash':origin['contract_hash'],'epoch':origin['epoch'],'logic_hash':s.logic_hash,
                 'budget_kernel':measured,'resource_kernel':hardware,'artifact_versions':versions,
                 'test_paths':sorted(constraints.get('test_paths',[])) if kind=='run_tests' else [],
                 'before_hash':change['before_hash'] if change else None,'proposed_after_hash':change['after_hash'] if change else None,
                 'proposal_hash':sha(canonical(output)),'started_at':time.time()}
-        from orchestration import admit,action_flow,transition
-        workflow=action_flow(s,iid)
+        if plan:
+            commit.update(base_commit=plan['base_commit'],project_sha256=plan['project_sha256'],
+                          plan_digest=plan_digest,targets=paths,task_cost=cost)
         if workflow:
             transition(s,workflow,'EXECUTING_ACTION','ACTION_DISPATCH',{'action_id':aid})
             commit['workflow_id']=workflow
-        from orchestration import scope
         owner=(env.get('orchestration') or {}).get('node_id')
         with scope(owner):
-            commit['orchestration']=admit(s,session,kind,aid,{'actions':1,'seconds':constraints.get('test_timeout_ms',10000)/1000 if kind=='run_tests' else 1},paths=[action['target']],resource=hardware)
+            commit['orchestration']=admit(s,session,kind,aid,cost,paths=paths,resource=hardware)
         raw=canonical(commit);s.db.execute('INSERT INTO host_actions VALUES(?,?,?,?,?)',(aid,session,iid,raw,sha('action-v1:'+raw)))
         s._audit('HOST_ACTION_DISPATCH',commit)
-    directory=Path(root)/'actions'/aid;directory.mkdir(parents=True)
-    execution=None
+    directory=Path(root)/'actions'/aid
+    execution=None;started=time.monotonic()
     try:
+        directory.mkdir(mode=0o700,parents=True)
         if kind=='edit':
             (directory/'before.py').write_bytes(change['before'].encode());(directory/'after.py').write_bytes(change['after'].encode());(directory/'change.diff').write_text(change['diff'])
             after=replace_file(workspace,change)
             if after!=change['after_hash']:raise InvalidUpdate('Edited file changed before receipt')
             s.observe_digest(session,'action-'+aid,action['target'],after,s.snapshot(session)['revision'])
             result={'status':'applied','after_hash':after,'backup':str(directory/'before.py')}
+        elif plan:
+            from project_worktree import run
+            result=run(workspace,directory,plan,constraints['test_timeout_ms'],resource_root=root if resource_check else None)
         else:
             execution=execution_identity(s,session,constraints)
             result=run_tests_snapshot(directory,files,action['target'],constraints['test_timeout_ms'],root if resource_check else None)
@@ -449,4 +537,6 @@ def execute(s,session,iid,workspace,root,resource_check=True):
     if kind=='run_tests':
         result['artifact_versions']=versions
         result['provenance']=run_provenance(action_history(s,session),action['target'],constraints.get('test_paths',[]),versions,result['status'],execution)
+    elif plan:
+        result.update(assertions_verified=False,elapsed_seconds=round(time.monotonic()-started,3))
     return receipt(s,commit,result)

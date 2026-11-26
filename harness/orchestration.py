@@ -117,10 +117,13 @@ def binding_matches(s, node):
 def permissions(s,sid):
     from native_access import read_scope
     c=s.snapshot(sid)['constraints'];paths=c.get('allowed_paths',['.'])
-    return {'read_paths':read_scope(s,sid) if 'allowed_paths' in c else ['.'],
+    result = {'read_paths':read_scope(s,sid) if 'allowed_paths' in c else ['.'],
             'write_paths':paths if c.get('edits_allowed') else [],
             'test_paths':c.get('test_paths',[]) if c.get('tests_allowed') else [],
             'network_allowed':c.get('network_allowed',False),'dependencies_allowed':c.get('dependencies_allowed',False)}
+    if c.get('project_patch_allowed') is True:
+        result['project_write_paths'] = paths
+    return result
 
 def task(s,sid):
     b=binding(s,sid)
@@ -269,6 +272,13 @@ def packet(n):
 def scope_check(n,kind,paths,role=None):
     from repository_tools import scoped
     if n['kind']=='branch' and kind=='model' and role not in n['roles']:raise InvalidUpdate('Child role is not permitted')
+    if kind=='worktree_patch':
+        if (n['kind']!='execution' or len(paths)<2 or
+                sorted(paths)!=n['permissions'].get('project_write_paths') or
+                n['permissions']['read_paths']!=['.'] or
+                n['permissions']['network_allowed'] or n['permissions']['dependencies_allowed']):
+            raise InvalidUpdate('Worktree patch exceeds the isolated project grant')
+        return
     key='write_paths' if kind=='edit' else 'test_paths' if kind=='run_tests' else 'read_paths'
     if kind in ('edit','run_tests') and not paths:raise InvalidUpdate('Action target required')
     if any(not scoped(p,n['permissions'][key]) for p in paths):raise InvalidUpdate('Operation exceeds orchestration '+key)

@@ -180,9 +180,10 @@ class RemoteModel(LocalModel):
         from model_activity import ACTIVE
         from model_packet import build
         from reasoning_policy import check_provider
-        from remote_context import (SECTION_REASONING_BUDGETS, require_section_reasoning,
+        from remote_context import (SECTION_REASONING_BUDGETS,
                                     supports_parent_output_recovery, verify_parent_reasoning,
                                     verify_prefix_window, wire_request)
+        from review_stage import applies as shared_stage, require as require_review_stage
         from storage_policy import write_trace
 
         packet = build(system, payload, schema)
@@ -197,8 +198,10 @@ class RemoteModel(LocalModel):
         if recovery and not supports_parent_output_recovery(self.budget):
             raise InvalidUpdate('Bounded remote reasoning requires an exact, verified physical context')
         role = packet['role'] if packet is not None else None
-        require_section_reasoning(self.budget, role, self.model, payload)
-        bounded_reasoning = recovery or role in SECTION_REASONING_BUDGETS
+        require_review_stage(self.budget, role, self.model, payload)
+        section_reasoning = (payload['review_stage']['native_reasoning_tokens'] is not None
+                             if shared_stage(role, payload) else role in SECTION_REASONING_BUDGETS)
+        bounded_reasoning = recovery or section_reasoning
         physical = getattr(self, 'context_measurement', None) if exact(self.budget) else None
         if exact(self.budget):
             validate_proof(physical, self.budget, system, payload, schema,

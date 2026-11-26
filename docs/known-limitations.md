@@ -72,8 +72,11 @@
   files, each at most 64,000 bytes. Required project modules must be included in
   that grant, otherwise imports fail. A broader read scope allows inspection and
   dependency recognition; it does not add files to an executable test snapshot.
-  Test confirmation lists the snapshot contents. This is not yet a whole-project
-  test runner.
+  Test confirmation lists the snapshot contents. The separate worktree profile
+  supports a clean Git checkout on macOS, up to 256 tracked regular files and
+  16 MiB of project data. It stages exact replacements in two to eight named
+  Python files and runs fixed unittest discovery under `tests/`. Network and
+  project writes are denied during the test process.
 - Audit verification still scans the full chain on reopening a ledger or after
   database changes. Repeated checks on the same unchanged connection reuse the
   verified result. There is no persisted trusted-prefix checkpoint.

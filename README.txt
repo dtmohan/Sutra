@@ -1,4 +1,19 @@
-Sutra 0.59.4 — Source-reviewed RTX report recovery
+Sutra 0.60.0 — Isolated project patches
+
+On macOS, name two or more Python files in a patch request and ask to run
+python3 -m unittest discover -s tests. Review and approve the native diff to
+stage the candidate and run tests in an isolated Git worktree. Use a clean
+checkout with a tracked tests directory. The source checkout stays unchanged.
+
+For eligible read-only reviews, Sutra gathers purpose, execution and validation
+evidence. It records oversized targets and continues to the next planned read.
+Claim checks reserve output based on the provider's reasoning controls. Saved
+shared reviews retain evidence, permissions and spending across model switches.
+
+Open Sutra Auto to start with any eligible installed local model. A workspace
+review can select the open folder and request read-only access in one dialog.
+Approval continues the request in the same chat. Advanced model and runtime
+settings contain tier choices and reasoning overrides.
 
 When an eligible RTX architecture report reaches its output limit, Sutra can
 continue from the saved source evidence in bounded sections. Each section gets

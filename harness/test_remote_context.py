@@ -232,6 +232,7 @@ class RemoteWindowTests(unittest.TestCase):
 
         window = dict(self.window, **remote_context.PARENT_REASONING_IDENTITY)
         for role, reserve, cap in (('section_writer', 2048, 768),
+                                   ('section_writer', 4096, 1024),
                                    ('section_reviewer', 1024, 384),
                                    ('section_reviewer', 512, 192)):
             with self.subTest(role=role, reserve=reserve):
@@ -243,6 +244,9 @@ class RemoteWindowTests(unittest.TestCase):
                 claim = {'text': 'The function returns one.', 'sources': ['a']}
                 if reserve == 512:
                     payload.update(section_version=2, claim_index=0, claim=claim)
+                elif reserve == 4096:
+                    payload.update(section_version=3, requirements={}, pinned=[],
+                                   section_sources=[['a'], ['a'], ['a']])
                 elif role == 'section_reviewer':
                     payload['claims'] = [claim]
                 system, spec = expected_request(role, payload)
@@ -296,6 +300,40 @@ class RemoteWindowTests(unittest.TestCase):
             with self.assertRaises(ReachedNextCheck):
                 InvocationLedger.register(None, 'run', 'call', role, payload, system, spec,
                                           'delivery', provider.model, 1024, budget=vars(budget))
+
+    def test_shared_review_count_replays_with_and_without_verified_native_reasoning(self):
+        from invocation_roles import expected_request
+        from review_stage import bind
+
+        role = 'section_writer'
+        verified = dict(self.window, **remote_context.PARENT_REASONING_IDENTITY)
+        for window, mode, reserve, cap in ((verified, 'full', 4096, 1024),
+                                           (self.window, 'sectioned', 2048, None)):
+            with self.subTest(mode=mode):
+                budget = Budget(16384, reserve, context_profile=2, reservation_limit=65536,
+                                context_window=window)
+                provider = SimpleNamespace(budget=budget, model=window['reference'], context_metadata={})
+                payload = {'request': 'Review the example.', 'section_index': 0, 'section_role': role,
+                           'section_version': 4, 'section_mode': mode, 'attempt': 0,
+                           'section_sources': [['a'], ['a'], ['a']], 'requirements': {}, 'pinned': [],
+                           'evidence': {'a': {'path': 'example.py', 'text': 'def run(): return 1'}}}
+                bind(provider, role, payload)
+                system, spec = expected_request(role, payload)
+                with patch.object(remote_context, '_identity', return_value=self.profile) as identity:
+                    proof = context_window.check(budget, system, payload, spec)
+                self.assertEqual(identity.call_count, 2)
+                if cap is None:
+                    identity.assert_called_with(window)
+                else:
+                    identity.assert_called_with(window, parent_reasoning=True)
+                wire = self.service.calls[-1][1]
+                self.assertEqual(wire.get('reasoning_budget_tokens'), cap)
+                self.assertEqual(proof.get('reasoning_budget_tokens'), cap)
+                self.assertFalse({'reasoning', 'review_stage', 'section_mode'} &
+                                 set(json.loads(wire['messages'][-1]['content'])))
+                with patch.object(remote_context, '_identity',
+                                  side_effect=AssertionError('Proof replay must be offline')):
+                    context_window.validate_proof(proof, budget, system, payload, spec)
 
     def reviewed_prefix_budget(self):
         import remote_prefix

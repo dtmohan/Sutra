@@ -232,6 +232,7 @@ function showSection(section){
  const view={models:'settings',reasoning:'settings',advanced:'tools',dashboard:'dashboard',chat:'chat'}[section];
  if(!view)return;
  showView(view);
+ if(view==='settings')el('advanced-settings').open=true;
  const target=el({models:'tier-config',reasoning:'reasoning-section',advanced:'advanced'}[section]||panels[view]);
  if(target.tagName==='DETAILS')target.open=true;
  target.scrollIntoView({block:'start'});

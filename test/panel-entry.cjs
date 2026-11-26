@@ -25,7 +25,8 @@ assert.equal(sent.length,before,'Draft defaults must not persist settings');asse
 assert.match(el('model-save-status').textContent,/Click Save/);
 el('save-model-tiers').onclick();assert.equal(sent.at(-1).op,'save_model_tiers');assert.equal(sent.at(-1).models.low,'small');
 receive({type:'models-saved'});assert.match(el('model-save-status').textContent,/saved/);
-receive({type:'show-section',section:'models'});assert(el('tier-config').open&&el('tier-config').scrolled);
+assert(!el('advanced-settings').open);
+receive({type:'show-section',section:'models'});assert(el('advanced-settings').open&&el('tier-config').open&&el('tier-config').scrolled);
 assert.equal(el('nav-settings').attributes['aria-selected'],'true');assert.equal(el('nav-dashboard').tabIndex,-1);assert(el('nav-settings').focused);
 receive({type:'show-section',section:'reasoning'});assert(el('reasoning-section').scrolled&&el('thinking-mode').focused);
 receive({type:'runtime-settings',settings:{storageLimitMiB:512,thinking:'adaptive',tierReasoning:{mid:'off',high:'on'}}});

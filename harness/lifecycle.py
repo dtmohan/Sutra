@@ -67,6 +67,30 @@ def deadline(seconds=450):
         for sig, handler in old.items():signal.signal(sig, handler)
         _deadline.reset(token)
 
+def _interrupted_project():
+    return {'status':'interrupted','assertions_verified':False,'replayed':False,
+            'interpretation':'The isolated patch or test was interrupted. The process outcome is unknown.'}
+
+
+def reconcile_project_action(s, flow_id):
+    """Settle only the requested worktree action while holding bridge.lock."""
+    from host_actions import receipt
+    import orchestration
+
+    if orchestration.state(s, flow_id) not in ('EXECUTING_ACTION', 'CANCELLING'):
+        return
+    row = s.db.execute(
+        "SELECT a.record_json,a.digest FROM host_actions a "
+        "LEFT JOIN host_action_receipts r ON r.action_id=a.id "
+        "WHERE r.action_id IS NULL AND json_extract(a.record_json,'$.kind')='worktree_patch' "
+        "AND json_extract(a.record_json,'$.workflow_id')=?", (flow_id,)).fetchone()
+    if row:
+        raw, digest = row
+        if sha('action-v1:'+raw) != digest or not s.audit_valid():
+            raise InvalidUpdate('Interrupted project action commitment corrupted')
+        receipt(s, json.loads(raw), _interrupted_project())
+
+
 def reconcile(s, workspace):
     """Caller MUST own bridge.lock. Never replay work or refund a reservation."""
     import repository_tools as repo
@@ -93,6 +117,8 @@ def reconcile(s, workspace):
                 result['status']='reconciled_after' if observed==action['proposed_after_hash'] else 'reconciled_before' if observed==action['before_hash'] else 'interrupted_unknown'
             except (OSError,ValueError,InvalidUpdate):result['status']='interrupted_unknown'
             result['interpretation']='Byte comparison only; no assertion about who changed the file'
+        elif action['kind']=='worktree_patch':
+            result=_interrupted_project()
         actions.receipt(s,action,result)
         if result['status']=='interrupted_unknown':
             s.quarantine_invocation(action['session'],action['invocation_id'],'Interrupted edit has unknown outcome; use fresh source for a new proposal')

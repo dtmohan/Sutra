@@ -86,10 +86,10 @@ class InvocationLedger(GovernedContext):
                     'model_identity': model_identity, 'charge': charge, 'budget_profile':budget or {'context_limit':8192,'response_reserve':1024,'template_reserve':256}, 'created_at': time.time()}
         from paging import Budget
         from context_window import exact, validate_proof
-        from remote_context import require_section_reasoning
+        from review_stage import require as require_review_stage
         from section_synthesis import ROLES as sections, request_check as check_section
         allocation = Budget(**envelope['budget_profile'])
-        require_section_reasoning(allocation, role, model, payload)
+        require_review_stage(allocation, role, model, payload)
         from invocation_timing import validate as validate_timing
         call_seconds = validate_timing(transport_timing, role, payload, allocation.response_reserve)
         if transport_timing is not None: envelope['transport_timing'] = copy.deepcopy(transport_timing)
@@ -509,6 +509,11 @@ class InvocationLedger(GovernedContext):
         if not payload_row or historical and not (sha(payload_row[0]) == env['payload_hash'] == receipt['payload_hash']):
             raise PageFault('Invocation result has missing or changed delivery')
         payload = json.loads(payload_row[0])
+        from review_stage import verify_committed
+        try:
+            verify_committed(env, receipt, payload_row[0], payload)
+        except (InvalidUpdate, KeyError, TypeError, ValueError) as exc:
+            raise PageFault(str(exc)) from None
         from invocation_timing import validate as validate_timing
         validate_timing(env.get('transport_timing'), env['role'], payload, env['budget_profile']['response_reserve'])
         if env.get('budget_profile', {}).get('context_profile') == 2:
@@ -578,6 +583,7 @@ class InvocationLedger(GovernedContext):
 
     def _verify_invocations(self, session, complete, stats):
         if not self.verify_protocol(session): return False
+        from review_stage import ROLES as review_roles, verify_committed
         previous = 'GENESIS'; seq = 0
         for n, iid, digest, raw in self.db.execute('SELECT seq,invocation_id,id,record_json FROM invocation_receipts WHERE session=? ORDER BY seq', (session,)):
             stats['receipt_rows'] += 1
@@ -585,23 +591,26 @@ class InvocationLedger(GovernedContext):
             env = self.db.execute('SELECT record_json,digest,delivery_id FROM invocations WHERE id=? AND session=?', (iid,session)).fetchone()
             if not env or sha('invocation-v1:' + env[0]) != env[1] or r['invocation_hash'] != env[1]: return False
             envelope = json.loads(env[0])
-            if envelope.get('transport_timing') is not None:
-                from invocation_timing import validate as validate_timing
-                delivered = json.loads(self.db.execute('SELECT payload_json FROM deliveries WHERE id=?', (env[2],)).fetchone()[0])
-                try:
+            timed = envelope.get('transport_timing') is not None
+            measured = envelope.get('budget_profile', {}).get('context_profile') == 2
+            if timed or measured or envelope['role'] in review_roles:
+                delivery = self.db.execute('SELECT payload_json FROM deliveries WHERE id=?', (env[2],)).fetchone()
+                if not delivery: return False
+                delivered = json.loads(delivery[0])
+            try:
+                if envelope['role'] in review_roles:
+                    verify_committed(envelope, r, delivery[0], delivered)
+                if timed:
+                    from invocation_timing import validate as validate_timing
                     validate_timing(envelope['transport_timing'], envelope['role'], delivered, envelope['budget_profile']['response_reserve'])
-                except (InvalidUpdate, KeyError, TypeError, ValueError):
-                    return False
-            if envelope.get('budget_profile', {}).get('context_profile') == 2:
-                from paging import Budget
-                from context_window import validate_proof
-                delivered = json.loads(self.db.execute('SELECT payload_json FROM deliveries WHERE id=?', (env[2],)).fetchone()[0])
-                try:
+                if measured:
+                    from paging import Budget
+                    from context_window import validate_proof
                     system, _ = expected_request(envelope['role'], delivered)
                     validate_proof(envelope.get('physical_context'), Budget(**envelope['budget_profile']), system,
                                    delivered, envelope['schema'], envelope.get('model_identity'))
-                except (InvalidUpdate, KeyError, TypeError, ValueError):
-                    return False
+            except (InvalidUpdate, KeyError, TypeError, ValueError):
+                return False
             if n != seq or r['previous_hash'] != previous or sha('invocation-receipt-v1:' + raw) != digest: return False
             if sha(canonical(r['proposal'])) != r['response_hash']: return False
             if 'model_response_hash' in r:
@@ -756,8 +765,8 @@ class InvocationGateway:
         from local_model import LocalModel
         from pathlib import Path
         from reasoning_policy import check_provider
-        from remote_context import require_section_reasoning
-        require_section_reasoning(self.provider.budget, role, getattr(self.provider, 'model', None), payload)
+        from review_stage import require as require_review_stage
+        require_review_stage(self.provider.budget, role, getattr(self.provider, 'model', None), payload)
         check_provider(self.provider, payload, fresh=isinstance(self.provider, LocalModel))
         if isinstance(self.provider, LocalModel):
             from monitoring import ResourceWait

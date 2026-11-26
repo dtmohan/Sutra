@@ -9,7 +9,7 @@ from review_targets import (
     DOCUMENT_TEXT_REQUIRED, document_file_target, document_input_notice, document_text, has_document_text,
     may_use_retained_document, refers_to_previous_review_target, refers_to_retained_document,
 )
-from evidence_admission import (explicit_workspace_review, explicit_workspace_test, measure as evidence_measure, record_document,
+from evidence_admission import (explicit_project_patch, explicit_workspace_review, explicit_workspace_test, measure as evidence_measure, record_document,
                                 workspace_roots, workspace_target)
 
 
@@ -77,6 +77,27 @@ def _latest_ask_flow(s, workspace, chat):
         turn = json.loads(raw)
         if _original_ask(s, turn) == original[0]: return turn
     return None
+
+
+def recover_project_lookup(s, workspace, request):
+    """Recover a same-chat project receipt on an explicit status lookup."""
+    chat = request.get('chat_key')
+    if not isinstance(chat, str) or not re.fullmatch('[a-f0-9]{64}', chat):
+        return
+    if request['event'] == 'recoverable_review':
+        latest = _latest_ask_flow(s, workspace, chat)
+        fid = latest['id'] if latest else None
+    else:
+        fid = request.get('flow_id')
+    if not fid:
+        return
+    from task_stack import owner
+    if owner(s, workspace, fid) != chat:
+        return
+    flow, data = info(s, fid)
+    if flow['workspace'] == str(workspace) and data.get('permission', {}).get('operation') == 'project_patch':
+        from lifecycle import reconcile_project_action
+        reconcile_project_action(s, fid)
 
 
 def referenced_document_notice(s,workspace,prompt,chat,parent,prior_prompt=None):
@@ -220,6 +241,12 @@ def response(s,fid,*,_runner_poll=False,**extra):
     if m.state(s,fid)=='DONE':
         for key in ('capability_result','request_notice','local_greeting'):
             if key in data:extra.setdefault(key,data[key])
+        last = history[-1]
+        if last['kind']=='ACTION_SETTLED' and data.get('permission', {}).get('operation')=='project_patch':
+            from host_actions import project_receipt
+            receipt = project_receipt(s,last['data']['action_id'],fid,last['data']['receipt'])
+            if receipt:
+                extra.setdefault('action_receipt',receipt)
     if m.state(s,fid)=='AWAITING_ACTION':
         extra.setdefault('pending_action',data.get('invocation_id'))
     from task_observations import summary
@@ -348,6 +375,28 @@ def identity(s,sid):
     return {k:v for k,v in m.binding(s,sid).items() if k!='logic_hash'}
 
 
+def checked_section_route(source, route):
+    """Replay a review-stage selection using the original source measurements."""
+    from karma_adapter import KarmaAdapter
+    if not isinstance(route, dict):
+        raise InvalidUpdate('Report section has no committed model selection')
+    signals = source['route']['record']['choice']['signals']
+    expected = KarmaAdapter().route(source['request'], route.get('models'), route.get('mode'), signals)
+    if expected != route:
+        raise InvalidUpdate('Report section model selection differs from its committed route')
+    return expected
+
+
+def section_route(s, fid, data, request):
+    from karma_adapter import KarmaAdapter
+    source = data['section_source']
+    signals = source['route']['record']['choice']['signals']
+    choice = KarmaAdapter().route(source['request'], request['models'], request['tier'], signals)
+    if choice != data.get('section_route'):
+        move(s, fid, 'SYNTHESIS', 'REPORT_SECTION_ROUTE', section_route=choice)
+    return choice
+
+
 def prepare_initial_catalog(s, fid, sid, workspace, root, data):
     """Keep catalog retries on the task which admitted or attempted the scan."""
     import repository_tools as repo
@@ -410,6 +459,13 @@ def permission(s,sid,requested):
     c=s.snapshot(sid)['constraints'];operation=requested.get('operation','read');paths=requested.get('paths',[])
     roots=read_scope(s,sid)
     if any(not scoped(p,roots) for p in paths):raise InvalidUpdate('Requested file is outside the armed read scope')
+    if operation == 'project_patch':
+        if roots != ['.']:
+            raise InvalidUpdate('Isolated project tests require whole-workspace read access')
+        if c.get('project_patch_allowed') is True and sorted(paths) == c['allowed_paths']:
+            return None
+        return {'operation': operation, 'paths': paths, 'read_scope': roots,
+                'goal': s.snapshot(sid)['goal'], 'test_profile': 'python-unittest'}
     test_paths = requested.get('test_paths', [])
     needed = ((operation == 'edit' and not c.get('edits_allowed'))
               or (operation == 'test' and (not c.get('tests_allowed')
@@ -485,7 +541,7 @@ def _handle_chat(s,meta,workspace,root,req,providers=None):
             latest = _latest_ask_flow(s, workspace, chat)
             if latest:
                 saved = response(s, latest['id'], prompt=latest['prompt'])
-                if (saved.get('recovery') or {}).get('terminal_review'):
+                if saved.get('action_receipt') or (saved.get('recovery') or {}).get('terminal_review'):
                     return dict(saved, **projection)
         return dict(projection['focused_flow'] or {'state':'DONE','flow_id':None},**projection)
     if fid:
@@ -630,16 +686,21 @@ def run(s,meta,workspace,root,req,providers=None):
         target=(data.get('workflow_stop') or {}).get('resume_phase') if phase=='PAUSED' else phase
         if target not in ('CLASSIFYING','MAPPING','CHILDREN','SYNTHESIS','CODING','WORKSPACE','NEED_TOOL_APPROVAL'):raise
         from resource_routing import propose
+        from section_synthesis import SHARED_PROSE_VERSIONS
         category=exc.category
         hardware_wait=category in ('hardware_pressure','model_admission')
-        fallback=propose(s,fid,data,req,exc.state,target) if hardware_wait and not data.get('section_plan') and target not in ('WORKSPACE','NEED_TOOL_APPROVAL') else None
+        section_plan = data.get('section_plan')
+        shared_report = bool(section_plan and section_plan['version'] in SHARED_PROSE_VERSIONS)
+        fallback=propose(s,fid,data,req,exc.state,target) if hardware_wait and (
+            not section_plan or shared_report) and target not in ('WORKSPACE','NEED_TOOL_APPROVAL') else None
         if fallback:
             with s.db:
                 m.transition(s,fid,target,'RESOURCE_MODEL_FALLBACK',
                              {'resource_fallback':fallback,'workflow_stop':None},fallback['bounded_switch'])
             save(root,meta)
             return response(s,fid,progress='Memory admission blocked '+fallback['from_model']+'. Auto will try '+
-                fallback['model']+' with fresh paging and the same task, permissions and remaining budget.')
+                fallback['model']+(' with the same saved source evidence, task, permissions and remaining budget.'
+                    if shared_report else ' with fresh paging and the same task, permissions and remaining budget.'))
         stop={'status':'resource_wait','stage':target,'resume_phase':target,'error':str(exc),
               'blocker':category,'measurement':exc.state,'automatic_retry':False}
         # Bounded host recovery never retries inference or changes task grants.
@@ -1439,7 +1500,8 @@ def _handle(s,meta,workspace,root,req,providers=None):
                          conversation_id=r['invocation_id'])
             return response(s,fid,conversation=chat)
         explicit_test = explicit_workspace_test(prompt)
-        if p['intent']!='workspace' and not explicit_test:
+        project_patch = explicit_project_patch(prompt)
+        if p['intent']!='workspace' and not (explicit_test or project_patch):
             move(s,fid,'DONE','CLASSIFIED',conversation_id=r['invocation_id'])
             return response(s,fid,conversation=chat)
         work,status,roots=workspace_target(work,prompt)
@@ -1462,7 +1524,7 @@ def _handle(s,meta,workspace,root,req,providers=None):
             # are made, and the existing task/allocations remain untouched.
             move(s,fid,'DONE','WORKSPACE_DEFERRED',kernel=frame,conversation_id=r['invocation_id'],saved_flow_id=other[0])
             return response(s,fid,conversation=chat,deferred_flow_id=other[0])
-        move(s,fid,target,'EXPLICIT_TEST_ROUTED' if explicit_test else 'CLASSIFIED',
+        move(s,fid,target,'PROJECT_PATCH_ROUTED' if project_patch else 'EXPLICIT_TEST_ROUTED' if explicit_test else 'CLASSIFIED',
              kernel=frame,conversation_id=r['invocation_id'],permission=work,source_roots=roots)
         return response(s,fid,conversation=chat)
     if phase in m.TERMINAL:return response(s,fid)
@@ -1483,10 +1545,12 @@ def _handle(s,meta,workspace,root,req,providers=None):
             roots=d.get('source_roots')
             if not roots:raise InvalidUpdate('A workspace review requires an admitted source target')
             work=d['permission']
-            catalog=not (work['operation']=='capability' and work.get('capability_action')=='install')
-            if catalog:
+            catalog=(work['operation'] != 'project_patch' and
+                     not (work['operation']=='capability' and work.get('capability_action')=='install'))
+            if catalog or work['operation'] == 'project_patch':
                 import repository_tools as repo
                 repo.initialize(s)
+            if catalog:
                 move(s, fid, 'BINDING', 'INITIAL_CATALOG_PENDING', initial_catalog_pending=True)
             try:
                 _handle(Path(root), Path(workspace), {'op':'auto_new','goal':prompt,'roots':roots,'conversation_id':d['conversation_id']},
@@ -1506,6 +1570,8 @@ def _handle(s,meta,workspace,root,req,providers=None):
             if event!='grant':raise InvalidUpdate('Explicit permission grant required')
             grant=req.get('grant') or {}
             if grant.get('operation')!=d['permission']['operation']:raise InvalidUpdate('Grant operation differs from pending request')
+            if wanted and wanted['operation']=='project_patch' and (grant.get('paths') != wanted['paths'] or grant.get('test_paths')):
+                raise InvalidUpdate('Project patch grant must match the exact named Python targets')
             if wanted and wanted.get('test_paths') and (grant.get('test_paths') != wanted['test_paths']
                     or not isinstance(grant.get('paths'), list)
                     or any(not isinstance(path, str) for path in grant['paths'])
@@ -1657,10 +1723,16 @@ def _handle(s,meta,workspace,root,req,providers=None):
                     from native_runtime import turn
                     if f.get('action_flow_id'):
                         request['native_action_continuation'] = True
+                    if d.get('permission', {}).get('operation') == 'project_patch':
+                        request['project_patch'] = True
                     out=turn(s,meta,workspace,root,request,provider=provider('coder'))
                 elif d.get('section_plan'):
-                    from section_synthesis import step
-                    out = step(s, sid, fid, root, d['section_plan'], provider=provider('synthesis'))
+                    from section_synthesis import SHARED_PROSE_VERSIONS, step
+                    section_plan = d['section_plan']
+                    shared = ({'model': section_route(s, fid, d, request)['model']}
+                              if section_plan['version'] in SHARED_PROSE_VERSIONS else {})
+                    out = step(s, sid, fid, root, section_plan, provider=provider('synthesis'),
+                               source=d.get('section_source'), **shared)
                 elif d.get('parent_summary_revalidation'):
                     from chat_runtime import resume_revalidated_parent
                     out = resume_revalidated_parent(s, meta, workspace, root, request,
@@ -1727,6 +1799,12 @@ def _handle(s,meta,workspace,root,req,providers=None):
         if phase == 'SYNTHESIS':
             if provenance_changed(s, workspace, fid, d):
                 return response(s, fid)
+            if section_plan := out.get('section_plan'):
+                move(s, fid, 'SYNTHESIS', 'REPORT_SECTION_PLAN', section_plan=section_plan,
+                     section_source=out['section_source'], report_sections=[])
+                save(root, meta)
+                return response(s, fid, progress='Writing the review from the selected source evidence.',
+                                claim_review_usage=workflow_usage(s, fid))
             if section_stop := out.get('section_stop'):
                 move(s, fid, 'PAUSED', 'REPORT_SECTION_STOPPED',
                      workflow_stop=dict(section_stop, resume_phase='SYNTHESIS', stage='SYNTHESIS'),
@@ -1806,7 +1884,7 @@ def _handle(s,meta,workspace,root,req,providers=None):
             out = with_provenance(out, d.get('git_provenance'))
         save(root,meta)
         action=(out['result'].get('accepted_output') or {}).get('action',{}).get('kind')
-        awaiting=phase=='CODING' and action in ('edit','run_tests')
+        awaiting=phase=='CODING' and action in ('edit','run_tests','worktree_patch')
         move(s,fid,'AWAITING_ACTION' if awaiting else 'DONE','ACTION_PROPOSED' if awaiting else 'WORKFLOW_FINISHED',invocation_id=out['result']['invocation_id'],
              observation_delivery='awaiting_action' if awaiting else 'admitted' if out['result']['admission']['admitted'] else 'withheld',
              **({'report_sections': out['report_sections']} if 'report_sections' in out else {}))

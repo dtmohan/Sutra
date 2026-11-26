@@ -127,7 +127,7 @@ function activate(context) {
       SUTRA_STRATA_MODELS:JSON.stringify(nativeNames),
       SUTRA_STRATA_ONLY:nativeNames.length===FIXED_TIERS.length?'1':undefined,
       SUTRA_ENGINE_MODELS:JSON.stringify(engineNames),
-      SUTRA_ENGINE_APPROVALS:JSON.stringify(modelSelection.engineApprovals(config.inspect?.('engine.approvals')?.globalValue||{})),
+      SUTRA_ENGINE_APPROVALS:JSON.stringify(engineApprovals(config)),
       SUTRA_ENGINE_ONLY:engineNames.length===FIXED_TIERS.length?'1':undefined,
       SUTRA_ENGINE_PYTHON:config.inspect?.('engine.pythonPath')?.globalValue||path.join(engineBase,'python','bin','python'),
       SUTRA_ENGINE_REGISTRY:config.inspect?.('engine.registryPath')?.globalValue||path.join(engineBase,'models.json'),
@@ -305,6 +305,11 @@ function activate(context) {
         KARMA_TYPESCRIPT:path.join(context.extensionPath,'vendor','typescript','typescript.js'),
         SUTRA_RAM_CACHE_MIB:String(ramMiB),
         SUTRA_CAPABILITY_AUTHORIZATION:capabilityExecution?JSON.stringify(toolController.evidence(message.authorization)):null};
+      if(fixedTier==='auto'&&payload.models){
+        // Reviewer discovery must use the same engine candidates as the Auto job.
+        const selected=new Set(FIXED_TIERS.map(tier=>payload.models[tier]));
+        environment.SUTRA_ENGINE_MODELS=JSON.stringify(JSON.parse(environment.SUTRA_ENGINE_MODELS).filter(name=>selected.has(name)));
+      }
       const authorization=!managementRead&&!localGreeting?nativeController?.permissionEvidence(transport?.authority):undefined;
       const result=await worker.send(payload,environment,{token,transport,authorization,onActivity:event=>{if(event.kind!=='workflow'&&event.kind!=='report_section')usage?.activity(event);onActivity?.(event);}});
       output.appendLine(new Date().toISOString()+' '+message.op+' completed');
@@ -540,15 +545,48 @@ function activate(context) {
   async function configureModels(force=true,token,internal=false,{tier='auto',onFallback}={}){
     if(force){await showPanelSection('models');return modelSettings();}
     const catalog=await discoverModels(token,internal);
-    if(tier==='auto'&&!catalog.models.some(m=>m.eligible))throw new Error('No chat models found. Open Model settings to check a local runtime or a registered remote provider.');
-    const {models,fallbacks}=modelSelection.forRequest(modelSettings(),catalog,tier);
-    await approveEngineProfiles(tier==='auto'?Object.values(models):[models[tier]],catalog);
-    if(fallbacks.length)onFallback?.(fallbacks);
+    let selected=modelSettings(),available=catalog;
+    const changes=[];
+    if(tier==='auto'){
+      if(!catalog.models.some(row=>row.eligible===true)){
+        const error=new modelSelection.ModelUnavailable('low',selected?.low,catalog);
+        error.message='Sutra Auto needs a chat model. Open Model settings to connect a local runtime or choose a configured provider.';
+        throw error;
+      }
+      const approved=engineApprovals();
+      const canRun=row=>!modelSelection.engineProfile(row.name)||
+        Object.hasOwn(approved,row.name)&&approved[row.name]===row.profile_hash;
+      const eligibleForLow=row=>row.eligible===true&&(!row.tier||row.tier==='low');
+      const low=catalog.models.find(row=>row.name===selected?.low&&eligibleForLow(row));
+      if(!low||!canRun(low)){
+        const candidates=[['mid',selected?.mid],['high',selected?.high],['low',catalog.suggested_tiers?.low]];
+        const replacement=candidates.find(([,name])=>!modelSelection.remoteProfile(name)&&
+          catalog.models.some(row=>row.name===name&&eligibleForLow(row)&&canRun(row)));
+        if(replacement){
+          const [availableTier,availableModel]=replacement;
+          changes.push({tier:'low',model:selected.low,availableTier,availableModel});
+          selected={...selected,low:availableModel};
+        }else if(low){
+          await approveEngineProfiles([low.name],catalog);
+          approved[low.name]=low.profile_hash;
+        }
+      }
+      // An Auto job can continue through several stages in the runner. Offer
+      // only candidates that already have approval for this profile identity.
+      available={...catalog,models:catalog.models.filter(canRun)};
+    }
+    const {models,fallbacks}=modelSelection.forRequest(selected,available,tier);
+    if(tier!=='auto')await approveEngineProfiles([models[tier]],catalog);
+    changes.push(...fallbacks);
+    if(changes.length)onFallback?.(changes);
     return models;
+  }
+  function engineApprovals(config=vscode.workspace.getConfiguration('karma')){
+    return modelSelection.engineApprovals(config.inspect?.('engine.approvals')?.globalValue||{});
   }
   async function approveEngineProfiles(names,catalog){
     const config=vscode.workspace.getConfiguration('karma');
-    const current=modelSelection.engineApprovals(config.inspect?.('engine.approvals')?.globalValue||{});
+    const current=engineApprovals(config);
     const pending=modelSelection.engineApprovalCandidates(names,catalog,current);
     if(!pending.length)return;
     const detail=pending.map(row=>[
@@ -1022,6 +1060,22 @@ function activate(context) {
       async presentReview(data){await diagrams.openReview(data);},
       async presentConversation(data){if(data.result.accepted_output.diagram)await diagrams.open(data);},
       async showDiff(change,iid){const before=vscode.Uri.parse('karma-preview:/'+iid+'/before.py'),after=vscode.Uri.parse('karma-preview:/'+iid+'/after.py');previewDocuments.set(before.toString(),change.before);previewDocuments.set(after.toString(),change.after);await vscode.commands.executeCommand('vscode.diff',before,after,'Sutra proposed edit: '+change.target);},
+      async showWorktreeDiff(changes,iid){
+        const resources=changes.map(change=>{
+          const target=change.target.split('/').map(encodeURIComponent).join('/');
+          const before=vscode.Uri.parse(`karma-preview:/${iid}/worktree/before/${target}`);
+          const after=vscode.Uri.parse(`karma-preview:/${iid}/worktree/after/${target}`);
+          previewDocuments.set(before.toString(),change.before);
+          previewDocuments.set(after.toString(),change.after);
+          return [vscode.Uri.file(path.join(workspace(),change.target)),before,after];
+        });
+        if((await vscode.commands.getCommands()).includes('vscode.changes'))
+          await vscode.commands.executeCommand('vscode.changes','Sutra proposed worktree patch',resources);
+        else for(let index=0;index<changes.length;index++){
+          const [,before,after]=resources[index];
+          await vscode.commands.executeCommand('vscode.diff',before,after,'Sutra proposed worktree patch for '+changes[index].target);
+        }
+      },
       onRoute(value){output.appendLine('KARMA_NATIVE_ROUTE '+JSON.stringify(value));},
       onStatus(value){
         status.name='Sutra controls';

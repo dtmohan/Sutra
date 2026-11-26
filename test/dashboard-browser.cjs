@@ -25,6 +25,9 @@ const dashboard={token_usage:{calls:usageRows,total_calls:4,limit:250},hardware:
  await page.keyboard.press('End');
  assert(await page.locator('#nav-tools').evaluate(e=>e===document.activeElement&&e.tabIndex===0));
  await page.keyboard.press('Home');
+ await page.click('#nav-settings');
+ assert(await page.locator('#native-use').isVisible());
+ assert(!(await page.locator('#tier-low').isVisible()));
  await send({type:'show-section',section:'models'});
  assert(await page.locator('#nav-settings').evaluate(e=>e.getAttribute('aria-selected')==='true'&&e.tabIndex===0));
  assert.equal(await page.locator('#nav-dashboard').getAttribute('tabindex'),'-1');

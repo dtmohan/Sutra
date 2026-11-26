@@ -26,7 +26,7 @@ def turn(s,meta,workspace,root,request,provider=None):
     constraints=s.snapshot(sid)['constraints']
     if not constraints.get('native_task'):raise InvalidUpdate('Arm a native coding task first')
     from vscode_bridge import state,dispatch
-    from evidence_admission import explicit_workspace_test
+    from evidence_admission import explicit_project_patch, explicit_workspace_test
     st=state(s,meta,workspace);prompt=request.get('prompt','')
     pages=[p for f in st['sources'] for p in f['pages']]
     requested=request.get('pages',[])
@@ -36,7 +36,15 @@ def turn(s,meta,workspace,root,request,provider=None):
         raise InvalidUpdate('Requested source pages are outside the current native scope')
     mode = 'auto'
     test_target = None
-    if explicit := explicit_workspace_test(prompt):
+    if request.get('project_patch') is True:
+        patch = explicit_project_patch(prompt)
+        if (not patch or constraints.get('project_patch_allowed') is not True or
+                patch['paths'] != constraints['allowed_paths']):
+            raise InvalidUpdate('Isolated project patch requires the approved named Python targets')
+        mode = 'project_patch'
+        # Each of the requested targets needs an exact editable preimage.
+        pages = [page for page in pages if page['path'] in patch['paths']]
+    elif explicit := explicit_workspace_test(prompt):
         test_target = explicit[0]['test_paths'][0]
         if not constraints.get('tests_allowed') or test_target not in constraints.get('test_paths', []):
             raise InvalidUpdate('Named test requires scoped test permission')

@@ -105,10 +105,9 @@ function host(fixture, buttons = {}) {
     isBusy: () => false, modelSettings: () => models, configureModels: async () => models,
     onStatus: noop, publishReview: noop, showDiff: async () => {},
     request: async request => {
-      // These fixtures seed the original workspace task slot before native chat opens.
-      // Use its bridge route so recovery exercises the exact preseeded contract.
-      // The read-only native-chat lookup keeps its actual chat scope; it must
-      // query the real host rather than reinterpret the legacy task slot.
+      // The fixtures seed a legacy workspace task before native chat opens.
+      // Exercise its original route, and leave identified chat recovery scoped
+      // so the host can reject a different chat's attempt to resume that task.
       const bridgeRequest = {...request};
       if (bridgeRequest.op === 'orchestrate' && bridgeRequest.event !== 'recoverable_review') delete bridgeRequest.chat_key;
       requests.push(structuredClone(request));
@@ -124,10 +123,12 @@ function host(fixture, buttons = {}) {
     },
   });
   const token = new Cancellation().token;
-  async function send(prompt, tier = 'low') {
+  async function send(prompt, tier = 'low', chatId) {
     const parts = [];
+    const options = {tools: [{name: action}]};
+    if (chatId) options.modelOptions = {_conversationId: chatId};
     await provider.provideLanguageModelChatResponse({id: 'karma-' + tier},
-      [{role: 1, content: [new Text(prompt)]}], {tools: [{name: action}], modelOptions: {_conversationId: 'review-chat'}},
+      [{role: 1, content: [new Text(prompt)]}], options,
       {report: part => parts.push(part)}, token);
     return parts;
   }
@@ -265,6 +266,14 @@ async function reviewJourney(base) {
     assert(h.controller.status().armed);
     assert.equal(h.requests.length, 0);
     assert.deepEqual(fixture.snapshot(), preflight);
+    const unrelatedChat = text(await h.send('continue', 'mid', 'unrelated-chat'));
+    assert.match(unrelatedChat, /no unfinished Sutra request to resume in this chat/i);
+    assert.deepEqual(h.requests.map(({event}) => event), ['recoverable_review']);
+    assert.deepEqual(fixture.snapshot(), preflight, 'A chat without ownership cannot resume the legacy task');
+
+    // Reload the originating legacy chat, whose request options have no chat ID.
+    h.close();
+    h = host(fixture);
     const attempt = text(await h.send('continue', 'mid'));
     assert.match(attempt, /Resuming the saved Sutra workflow/);
     assert.match(attempt, /paused/i);

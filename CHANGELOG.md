@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.60.0
+
+- Review and approve a multi-file Python patch in VS Code. Stage it in a detached worktree and run the project's tracked unittest suite in the macOS sandbox.
+- Bind the diff, Git snapshot, test profile and spending to one action receipt. Reconcile interrupted work without rerunning tests.
+
+## 0.59.7
+
+- Continue targeted discovery after a source file exceeds the per-file limit. Keep a receipt for each skipped target.
+- Share prose review across eligible providers. Size claim checks for the provider's reasoning controls and available context.
+- Reopen a saved shared review on another model with its source receipts, permissions and spending intact.
+
+## 0.59.6
+
+- Gather purpose, execution and validation evidence before drafting eligible RTX repository reviews.
+- Write one prose report, then check its factual statements and the source-backed reasons for recommendations before publication.
+
+## 0.59.5
+
+- Start Sutra Auto with an eligible installed local model. Approve an engine when a request needs it.
+- Select the open workspace and allow read-only access in one dialog. Continue in the same chat after approval.
+- Group model tiers, reasoning overrides, and runtime controls under Advanced settings.
+- Show the discovery model a complete tool request and leave report formatting to synthesis.
+
 ## 0.59.4
 
 - Open a dialog when a saved request needs the open workspace selected. Accept to continue the same request, or decline to keep it paused.

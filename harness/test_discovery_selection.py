@@ -80,6 +80,7 @@ class SelectionWireTests(unittest.TestCase):
         self.assertEqual(first['evidence'], [])
         self.assertTrue(first['initial_excerpts'])
         self.assertEqual(first['discovery_selection_version'], 3)
+        self.assertTrue(all(delivery['discovery_tool_prompt_version'] == 1 for delivery, _, _ in self.calls))
         self.assertEqual(set(raw), {'tool', 'summary', 'remaining'})
         self.assertNotIn('Quote exact', packet['messages'][0]['content'])
         self.assertNotIn('findings', packet['messages'][0]['content'])
@@ -118,10 +119,14 @@ class SelectionWireTests(unittest.TestCase):
         self.assertEqual(p['discovery_coverage']['tool_results'], 0)
 
     def test_unknown_cursor_remains_rejected_before_a_repository_effect(self):
+        self.actions = [{'kind': 'read', 'target': 'part0.py'}]
         self.fault = lambda raw, _: raw['tool'].update(cursor={'line': 1, 'column': 0, 'sha256': '0'*64})
         _, p = self.discover()
         self.assertEqual(p['discovery_coverage']['stop_reason'], 'proposal_rejected')
         self.assertEqual(p['discovery_coverage']['tool_results'], 0)
+        self.assertEqual(len(self.calls), 3)
+        for _, result in self.captured[:3]:
+            self.assertIn('Unknown read continuation', ' '.join(result['result']['admission']['errors']))
 
     def test_search_hits_and_initial_snapshot_do_not_certify_actual_read_readiness(self):
         self.actions = [{'kind': 'search', 'query': 'def '}, {'kind': 'report'}]

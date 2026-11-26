@@ -83,12 +83,58 @@ class DiscoveryNoteBudgetTests(unittest.TestCase):
         modern = payload(2)
         model_packet.build(role.SYSTEM, modern, role.schema(modern))
         self.assertEqual(packet, model_packet.build(role.SYSTEM, source, role.schema(source)))
-        # The new flag cannot alter either earlier selection protocol.
+        # New prompt and note profiles cannot alter either earlier selection protocol.
         for version in (1, 2):
             earlier = dict(source, discovery_selection_version=version)
-            flagged = dict(earlier, discovery_note_version=2)
+            flagged = dict(earlier, discovery_note_version=2, discovery_tool_prompt_version=1)
             self.assertEqual(model_packet.build(role.SYSTEM, earlier, role.schema(earlier)),
                              model_packet.build(role.SYSTEM, flagged, role.schema(flagged)))
+
+    def test_tool_prompt_examples_match_the_unchanged_transport_and_decoder_contract(self):
+        old = payload(2)
+        old['discovery_search_version'] = 1
+        cursor = {'line': 32, 'column': 6, 'sha256': 'a' * 64}
+        old['repository']['last_tool'] = {
+            'kind': 'read', 'target': 'a.py', 'status': 'ok', 'truncated': True, 'next_cursor': cursor,
+        }
+        source = dict(old, discovery_tool_prompt_version=1)
+        schema = role.schema(source)
+        self.assertEqual(schema, role.schema(old))
+        baseline = model_packet.build(role.SYSTEM, old, schema)
+        packet = model_packet.build(role.SYSTEM, source, schema)
+        self.assertEqual(packet['schema'], baseline['schema'])
+        self.assertEqual(packet['messages'][1:], baseline['messages'][1:])
+        decoder = profile({'details': {'runner': 'mlx'}}, '0.40.16')
+        self.assertEqual(for_decoder(packet['schema'], decoder), for_decoder(baseline['schema'], decoder))
+        system = packet['messages'][0]['content']
+        self.assertIn('repository.last_tool.next_cursor', system)
+        self.assertIn('tool.cursor', system)
+        self.assertIn('tool.line', system)
+        self.assertIn('Put all operation arguments inside tool', system)
+        self.assertRegex(system, r'(?m)^- search\b.*literal query.*line=1.*authorized repository file')
+        self.assertRegex(system, r'(?m)^- list: .*catalog offset in tool\.line, empty target and query')
+        unscoped = {key: value for key, value in source.items() if key != 'discovery_search_version'}
+        self.assertRegex(model_packet.build(role.SYSTEM, unscoped, schema)['messages'][0]['content'],
+                         r'(?m)^- search\b.*empty target and line=1')
+        self.assertNotIn('64 characters', system)
+        self.assertNotIn('1600', system)
+        example, = [json.loads(line) for line in system.splitlines() if line.lstrip().startswith('{"tool"')]
+        self.assertEqual(set(example), {'tool', 'summary', 'remaining'})
+        self.assertEqual(example['tool'], {'kind': 'read', 'target': 'src/main.py', 'line': 12, 'query': ''})
+        bound, _ = model_packet.bind_output('architect', source, schema, example)
+        self.assertEqual(bound['tool'], example['tool'])
+        self.assertFalse(bound['complete'])
+        body = json.loads(packet['messages'][1]['content'])
+        self.assertEqual(body['repository']['last_tool']['next_cursor'], cursor)
+        continued = reply()
+        continued['tool'].update(line=cursor['line'], cursor=cursor)
+        self.assertEqual(model_packet.bind_output('architect', source, schema, continued),
+                         model_packet.bind_output('architect', old, schema, continued))
+        flat = dict(example['tool'], summary=example['summary'], remaining=example['remaining'])
+        for invalid in (flat,
+                        dict(example, tool=dict(example['tool'], cursor=None))):
+            with self.assertRaises(InvalidUpdate):
+                model_packet.bind_output('architect', source, schema, invalid)
 
 
 class DiscoveryNoteGatewayTests(unittest.TestCase):

@@ -12,7 +12,8 @@ Do not claim a proposed edit or test has executed. Host receipts establish proce
 
 def coding_schema(payload):
     schema=review_schema(payload);fields=schema['properties'];fields.pop('next_action')
-    kinds={'edit':['edit','clarify'],'test':['run_tests','clarify'],'review':['report','clarify'],'auto':['edit','run_tests','report','clarify']}
+    kinds={'edit':['edit','clarify'],'test':['run_tests','clarify'],'review':['report','clarify'],
+           'auto':['edit','run_tests','report','clarify'],'project_patch':['worktree_patch','clarify']}
     mode=payload['mode']
     if mode not in kinds:raise InvalidUpdate('Unknown coding mode')
     targets = payload['contract']['constraints']['allowed_paths']
@@ -26,8 +27,20 @@ def coding_schema(payload):
                 or target not in constraints.get('test_paths', []) or target not in targets):
             raise InvalidUpdate('Test target differs from the authorized request')
         targets = [target]
-    fields['action']=obj({'kind':{'type':'string','enum':kinds[mode]},
-                         'target':{'type':'string','enum':['']+targets},'old':S,'new':S})
+    if mode == 'project_patch':
+        from evidence_admission import explicit_project_patch
+        if (type(payload.get('project_patch_version')) is not int or payload['project_patch_version'] != 1
+                or payload['contract']['constraints'].get('project_patch_allowed') is not True
+                or explicit_project_patch(payload['request']) != {'operation': 'project_patch', 'paths': targets}):
+            raise InvalidUpdate('Project patch differs from the approved request')
+        change = obj({'target': {'type': 'string', 'enum': targets},
+                      'old': {'type': 'string', 'minLength': 1, 'maxLength': 2400},
+                      'new': {'type': 'string', 'maxLength': 2400}})
+        fields['action'] = obj({'kind': {'type': 'string', 'enum': kinds[mode]},
+                                'edits': {'type': 'array', 'maxItems': len(targets), 'items': change}})
+    else:
+        fields['action']=obj({'kind':{'type':'string','enum':kinds[mode]},
+                             'target':{'type':'string','enum':['']+targets},'old':S,'new':S})
     fields['findings']['maxItems']=0
     fields['summary']={'type':'string','maxLength':600}
     for key in ('completed','remaining'):
@@ -51,7 +64,14 @@ def validate(store,session,payload,proposal):
     workspace=Path(payload['workspace']);current=execution_context(store,session,workspace)
     if payload['execution']!=current:raise InvalidUpdate('Host execution evidence changed')
     c=payload['contract']['constraints'];a=proposal['action'];kind=a['kind']
-    if kind=='edit':
+    if payload['mode']=='project_patch':
+        if kind=='worktree_patch':
+            from host_actions import project_changes
+            from native_access import read_scope
+            project_changes(workspace, c, a['edits'], payload, read_scope(store, session))
+        elif kind!='clarify' or a['edits']:
+            raise InvalidUpdate('Project clarification cannot contain edits')
+    elif kind=='edit':
         from native_access import read_scope
         proposed_edit(workspace,c,a,payload,read_scope=read_scope(store,session))
     else:

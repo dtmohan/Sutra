@@ -72,9 +72,17 @@ def supports_parent_output_recovery(budget):
     return budget.context_profile == 2 and budget.response_reserve >= 2 * PARENT_REASONING_BUDGET_TOKENS
 
 
+def supports_native_section_reasoning(budget, model):
+    window = budget.context_window
+    return (budget.context_profile == 2 and _parent_reasoning_window(window)
+            and validate_window(window)['reference'] == model)
+
+
 def _section_reasoning_tokens(role, payload):
     if role == 'section_reviewer' and payload is not None and 'claim_index' in payload:
         return CLAIM_REASONING_BUDGET_TOKENS
+    if role == 'section_writer' and payload is not None and payload.get('section_version') == 3:
+        return 1024
     return SECTION_REASONING_BUDGETS.get(role)
 
 
@@ -99,7 +107,17 @@ def require_section_reasoning(budget, role, model, payload=None):
 
 def _reasoning_budget(window, system, payload, schema, response_reserve):
     from model_packet import role_for
+    from review_stage import applies, native_tokens
     role = role_for(system)
+    if applies(role, payload):
+        stage = payload.get('review_stage') or {}
+        tokens = stage.get('native_reasoning_tokens')
+        if tokens is not None:
+            if (not _parent_reasoning_window(window) or type(tokens) is not int
+                    or tokens != native_tokens(role, payload['section_mode'], response_reserve)):
+                raise InvalidUpdate('Shared review native reasoning differs from the verified transport')
+            validate_window(window)
+        return tokens
     section_tokens = _section_reasoning_tokens(role, payload)
     if section_tokens is not None:
         if (payload.get('section_role') != role or 'parent_draft_recovery' in payload

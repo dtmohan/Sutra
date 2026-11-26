@@ -1,4 +1,18 @@
-# Sutra 0.59.4 — Source-reviewed RTX report recovery
+# Sutra 0.60.0 — Isolated project patches
+
+In Sutra Auto on macOS, name two or more Python files in a patch request and
+ask to run `python3 -m unittest discover -s tests`. Sutra shows the full diff
+and asks for approval before staging the patch and running the tracked tests.
+The detached Git worktree retains the candidate and the source checkout stays
+unchanged. Start from a clean Git checkout with a tracked `tests/` directory.
+The receipt records the base commit, changed files and observed process exit.
+
+For eligible read-only reviews, Sutra gathers excerpts for the project's
+purpose, execution and validation. If a file exceeds the per-file limit,
+Sutra records the skip and continues to the next planned target. Claim checks
+use the cited excerpts and reserve output based on the provider's reasoning
+controls. A saved shared review can resume on another eligible model with its
+evidence, permissions and spent budget intact.
 
 When an eligible RTX architecture report reaches its output limit, Sutra can
 continue from the saved source evidence in bounded sections. Each section gets
@@ -850,17 +864,12 @@ experimental local tool, not a guarantee that model answers are correct.
 ## Use it
 
 1. Install the VSIX in VS Code using **Extensions: Install from VSIX**, then reload.
-2. Start Ollama and install the local models you want to use. Python 3.9+ is
-   required for the harness.
-3. Run **Sutra: Open Chat (Sutra Auto)**. This saves the compatible Local
-   chat and model selection for new chats. Existing chats retain their selection.
-4. Chat normally. The first request that needs project files offers **Read only** or **Workspace agent** permissions and continues in the same chat after approval. Sutra remembers the choice for this trusted workspace across reloads, updates and model changes. Workspace agent access lets Sutra request file scopes for edits and local tests, then confirm each exact action. Manage or revoke access from **Sutra: Workspace Access…** or the dashboard.
+2. Open **Sutra: Open Chat (Sutra Auto)**. One eligible installed local model is enough to start. Sutra discovers models automatically and offers setup if it needs a model. The harness requires Python 3.9 or newer.
+3. Ask a question or request a project review. When Sutra needs access, approve the workspace in the dialog and the request continues in the same chat. Sutra remembers access for the trusted workspace across reloads and model switches. Use **Sutra: Workspace Access…** to manage or revoke the grant. Workspace agent access and confirmation of the exact action are required for edits and local tests.
 
-Sutra discovers installed models and fills empty tiers. Use **Sutra: Configure
-Local Models** to change those choices. **Sutra Low**, **Sutra Mid** and
-**Sutra High** are explicit overrides in the native model picker. Open **Sutra
-Monitor** for recovery and diagnostics, or the dashboard's **Tools** for
-advanced review and calibration controls.
+A signed-out VS Code 1.147 profile can show the host’s Copilot setup dialog before it sends a Local chat prompt to Sutra. Local model discovery and inference are separate from that host setup.
+
+Open **Sutra Monitor** for progress and diagnostics. Model tier choices, providers, and reasoning overrides are in **Settings → Advanced model and runtime settings**. The native model picker still offers **Sutra Low**, **Sutra Mid**, and **Sutra High** for fixed-tier requests.
 
 ### Governed orchestration
 

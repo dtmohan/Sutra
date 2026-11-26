@@ -14,10 +14,11 @@ const runtimeSettings=new Map();
 const inputValues=[],openedDocuments=[];
 const repoAllocation={source_bytes:1024000000};
 let userAllocation,provider,panel,holdDashboard=false,pendingDashboard,bridgeCount=0,dashboardSpawns=0,requestSpawns=0;
-let nativeRequest,nativeStatus,architectureDispatch,fixtureCatalog,allowModelSave=false,warningChoice;
+let nativeRequest,nativeStatus,nativeConfigureModels,architectureDispatch,fixtureCatalog,allowModelSave=false,warningChoice;
 const nativeProvider={install(_vscode,_context,deps){
  nativeRequest=deps.request;
  nativeStatus=deps.onStatus;
+ nativeConfigureModels=deps.configureModels;
  return {status:()=>({working:false}),permissionEvidence:()=>undefined,publish(){},dispose(){}};
 }};
 let state={contract:{contract_hash:'fixture-contract',contract:{constraints:{}}},calibration:{binding:{hash:'fixture-calibration'}},session:'fixture',model:'fixture-model',report:'architecture v1',api:{report:'API v1'}};
@@ -78,7 +79,7 @@ const vscode={
  EventEmitter:Emitter,Uri:{file:uri,parse:uri},StatusBarAlignment:{Right:1},ViewColumn:{One:1},
  env:{appRoot:'/must/not/load/internal/typescript'},
  MarkdownString:class{constructor(value){this.value=value;}},ConfigurationTarget:{Global:1},chat:{createChatParticipant(id,handler){participants.set(id,handler);return disposable();}},
- workspace:{onDidChangeConfiguration:()=>disposable(),isTrusted:true,workspaceFolders:[{uri:uri(tmp)}],textDocuments:[],getConfiguration(){return {get(k,d){return k==='models'?tierModels:k==='workspaceAllocation'?repoAllocation:runtimeSettings.get(k)??d;},inspect(k){return k==='workspaceAllocation'?{globalValue:userAllocation,workspaceValue:repoAllocation}:k==='models'?{globalValue:userModels,workspaceValue:{low:'strata:profile/unapproved'}}:k==='remoteRegistry'?{globalValue:userRemoteRegistry,workspaceValue:path.join(tmp,'repo-controlled-remote.json')}:k==='engine.approvals'?{globalValue:userEngineApprovals,workspaceValue:{'sutra:engine/unapproved':'f'.repeat(64)}}:undefined;},async update(k,v,target){if(k==='models'){if(!allowModelSave)throw Error('Existing model choices must not be overwritten by discovery');userModels=v;return;}if(k==='engine.approvals'){assert.equal(target,vscode.ConfigurationTarget.Global);userEngineApprovals=v;}runtimeSettings.set(k,v);runtimeUpdates.push([k,v]);}};},
+ workspace:{onDidChangeConfiguration:()=>disposable(),isTrusted:true,workspaceFolders:[{uri:uri(tmp)}],textDocuments:[],getConfiguration(){return {get(k,d){return k==='models'?(userModels??tierModels):k==='workspaceAllocation'?repoAllocation:runtimeSettings.get(k)??d;},inspect(k){return k==='workspaceAllocation'?{globalValue:userAllocation,workspaceValue:repoAllocation}:k==='models'?{globalValue:userModels,workspaceValue:{low:'strata:profile/unapproved'}}:k==='remoteRegistry'?{globalValue:userRemoteRegistry,workspaceValue:path.join(tmp,'repo-controlled-remote.json')}:k==='engine.approvals'?{globalValue:userEngineApprovals,workspaceValue:{'sutra:engine/unapproved':'f'.repeat(64)}}:undefined;},async update(k,v,target){if(k==='models'){if(!allowModelSave)throw Error('Existing model choices must not be overwritten by discovery');userModels=v;return;}if(k==='engine.approvals'){assert.equal(target,vscode.ConfigurationTarget.Global);userEngineApprovals=v;}runtimeSettings.set(k,v);runtimeUpdates.push([k,v]);}};},
   registerTextDocumentContentProvider(s,p){provider=p;return disposable();},async openTextDocument(u){return {uri:u};},fs:{writeFile:async()=>{}}},
  commands:{registerCommand(n,f){commands.set(n,f);return disposable();},async executeCommand(n,...a){return commands.get(n)?.(...a);}},
  window:{createOutputChannel(){return {appendLine(){},dispose(){}};},registerWebviewViewProvider(id,provider){views.set(id,provider);return disposable();},createStatusBarItem(){const item={show(){},dispose(){}};statusItems.push(item);return item;},
@@ -353,5 +354,56 @@ const subscriptions=[];
  await panel.webview.receive({op:'save_model_tiers',models:engineSelection});
  assert.equal(prompts.length,promptsAfterApproval+1,'Changed engine identity requires approval again');
  assert.equal(userEngineApprovals[ref],'a'.repeat(64),'Dismissal preserves the prior approval instead of widening it');
+ const ordinary={name:tierModels.low,eligible:true};
+ const discovered={low:ordinary.name,mid:ordinary.name,high:ordinary.name};
+ const blank={low:'',mid:'',high:''};
+ userModels=blank;
+ fixtureCatalog={models:[],suggested_tiers:{}};
+ await assert.rejects(nativeConfigureModels(false,null,{tier:'auto'}),{
+  name:'Error',message:'Sutra Auto needs a chat model. Open Model settings to connect a local runtime or choose a configured provider.'
+ });
+ assert.equal(userModels,blank);
+ fixtureCatalog={models:[ordinary],suggested_tiers:discovered};
+ const beforeSingle=prompts.length;
+ assert.deepEqual(structuredClone(await nativeConfigureModels(false,null,{tier:'auto'})),discovered);
+ assert.deepEqual(userModels,discovered);
+ assert.equal(prompts.length,beforeSingle,'A single installed local chat model needs no setup prompt');
+ const absent={low:'missing-low',mid:'missing-mid',high:'missing-high'};
+ userModels=absent;
+ assert.deepEqual(structuredClone(await nativeConfigureModels(false,null,{tier:'auto'})),discovered);
+ assert.equal(userModels,absent,'An offline saved model can temporarily fall back without replacing choices');
+
+ const pending={...engineRow,profile_hash:'d'.repeat(64)};
+ fixtureCatalog={models:[ordinary,pending],suggested_tiers:discovered};
+ userModels={...discovered,high:ref};
+ let fallbackRows=[];
+ const autoModels=await nativeConfigureModels(false,null,{tier:'auto',onFallback:rows=>fallbackRows=rows});
+ assert.deepEqual(structuredClone(autoModels),discovered);
+ assert.deepEqual(structuredClone(fallbackRows).map(row=>[row.tier,row.model]),[['high',ref]]);
+ assert.equal(prompts.length,beforeSingle,'Auto must defer unused engine approval');
+ assert.equal(userModels.high,ref,'A per-run fallback does not edit saved preferences');
+ await nativeRequest({op:'orchestrate',event:'step',tier:'auto',models:autoModels});
+ assert.deepEqual(JSON.parse(engineAssignments.at(-1).models),[],'Reviewer discovery cannot choose the pending High engine');
+ await assert.rejects(nativeConfigureModels(false,null,{tier:'high'}),/Engine execution was not approved/);
+ assert.equal(prompts.length,beforeSingle+1,'A fixed tier still requests approval for its selected executable');
+ assert.equal(userEngineApprovals[ref],'a'.repeat(64),'Declining a changed fingerprint leaves the previous approval intact');
+
+ userModels={...discovered,low:ref};
+ fallbackRows=[];
+ assert.deepEqual(structuredClone(await nativeConfigureModels(false,null,{tier:'auto',onFallback:rows=>fallbackRows=rows})),discovered);
+ assert.deepEqual(structuredClone(fallbackRows).map(row=>[row.tier,row.model,row.availableModel]),[['low',ref,ordinary.name]]);
+ assert.equal(prompts.length,beforeSingle+1,'Auto can start on a local alternative when Low needs approval');
+ assert.equal(userModels.low,ref);
+
+ const optional={...pending,name:'sutra:engine/optional'};
+ fixtureCatalog={models:[pending,optional],suggested_tiers:{}};
+ userModels={low:ref,mid:optional.name,high:optional.name};
+ warningChoice='Approve engine profiles';
+ const required=await nativeConfigureModels(false,null,{tier:'auto'});
+ assert.deepEqual(structuredClone(required),engineSelection);
+ assert(prompts.at(-1).detail.includes(ref)&&!prompts.at(-1).detail.includes(optional.name));
+ assert.deepEqual(userEngineApprovals,{[ref]:pending.profile_hash},'Auto can approve the one engine it needs without approving optional profiles');
+ await nativeRequest({op:'orchestrate',event:'step',tier:'auto',models:required});
+ assert.deepEqual(JSON.parse(engineAssignments.at(-1).models),[ref]);
  console.log(JSON.stringify({passed:true,checks:['runtime settings validate before saving and never dispatch or change the task','greeting with legacy task requires no model or state mutation','legacy task yields actionable guidance without duplicate error or model discovery','explicit /new creates a separate review and dispatches','new-review command arguments cannot bypass user goal entry','first-open model picker waits for webview readiness','status renders measured CPU/GPU Celsius','real errors render once','restricted public API','command arguments cannot bypass user input','calibration commands require user selection','no agent calibration mutation tools','agent tool boundary','native @sutra uses private bridge and configured models, never VS Code inference or transcript replay','cancelled native chat never dispatches','one-request reasoning boosts orchestration while delegated children keep configured preferences','fixed tiers keep distinct saved reasoning without affecting Auto','model discovery preserves configured choices; command arguments cannot replace them','live report refresh and invalidation','persistent single-flight dashboard','Darwin reclaimable-memory parser','report and calibration commands declared']},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(async()=>{for(const d of subscriptions)d.dispose?.();for(const owner of coordinatorOwners.values())owner.worker.dispose();await new Promise(setImmediate);fs.rmSync(tmp,{recursive:true,force:true});});

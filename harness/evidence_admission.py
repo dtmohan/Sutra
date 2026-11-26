@@ -85,6 +85,32 @@ def explicit_workspace_test(prompt):
     return {'operation': 'test', 'paths': paths, 'test_paths': [target]}, paths
 
 
+def explicit_project_patch(prompt):
+    """Find named edit targets and the supported project test request in user text."""
+    command = r'(?:^|[.!?]\s+|,\s*|\band\s+)(?:run|execute)\s+(?:the\s+)?(?:(?:project\s+)?tests?\s+(?:using|with)\s+)?'
+    command += r'[`"]?python3?\s+-m\s+unittest\s+discover\s+-s\s+tests(?:[`"]|(?=\s|[.!?]|$))'
+    isolated = (re.search(r'\b(?:in|using)\s+an?\s+isolated\s+(?:git\s+)?worktree\b', prompt, re.I)
+                and re.search(r'(?:^|[.!?]\s+|,\s*|\band\s+)(?:run|execute)\s+(?:the\s+)?project\s+tests\b', prompt, re.I))
+    if not (isolated or re.search(command, prompt, re.I)):
+        return None
+    if not re.match(r'\s*(?:please\s+)?(?:fix|patch|edit|modify|update|refactor)\b', prompt, re.I):
+        return None
+    named = re.search(rf'\b(?:fix|patch|edit|modify|update|refactor|across|in)\s+'
+                      rf'(?:(?:both|these|the following)\s+)?(?:files?\s+)?'
+                      rf'(?P<paths>{_TEST_SUPPORT})(?=[\s,.!?]|$)', prompt, re.I)
+    if not named:
+        return None
+    from repository_tools import normalized
+    try:
+        paths = sorted({normalized(match.group().strip("`'\"")) for match in re.finditer(
+            _TEST_PATH, named['paths'])})
+    except InvalidUpdate:
+        return None
+    if not 2 <= len(paths) <= 8:
+        return None
+    return {'operation': 'project_patch', 'paths': paths}
+
+
 def measure(store, session, target, evidence, recoverable):
     budget = usage(store, session) if session else None
     adapter = KarmaAdapter()
@@ -122,6 +148,8 @@ def workspace_target(proposal, prompt):
     Named paths still require an exact current-prompt reference; this helper
     never searches source or grants access.
     """
+    if patch := explicit_project_patch(prompt):
+        return patch, 'resolved', ['.']
     if test := explicit_workspace_test(prompt):
         work, roots = test
         return work, 'resolved', roots

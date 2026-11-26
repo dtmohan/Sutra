@@ -14,7 +14,7 @@ class InvalidUpdate(Exception): pass
 class ContextBudgetExceeded(Exception): pass
 class IncompleteContext(Exception): pass
 
-BOOL_KEYS = {'network_allowed', 'dependencies_allowed', 'edits_allowed', 'tests_allowed', 'review_only', 'auto_review', 'native_task', 'conversation_only'}
+BOOL_KEYS = {'network_allowed', 'dependencies_allowed', 'edits_allowed', 'tests_allowed', 'review_only', 'auto_review', 'native_task', 'conversation_only', 'project_patch_allowed'}
 INT_KEYS = {'timeout_ms', 'max_attempts', 'max_rows', 'test_timeout_ms', 'max_actions', 'max_tools', 'review_calls', 'review_tokens', 'review_source_kib', 'review_seconds', 'review_page_kib'}
 CONSTRAINT_KEYS = BOOL_KEYS | INT_KEYS | {'allowed_paths', 'test_paths', 'output_format'}
 USER_KEYS = CONSTRAINT_KEYS | {'task_id', 'goal', 'selected_option'}

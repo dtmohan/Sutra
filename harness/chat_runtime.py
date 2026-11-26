@@ -333,17 +333,24 @@ def facts(graph,sites):
                 'meaning':'No call sites were found in this snapshot. Declarations are a bounded sample; source excerpts support explanation, not runtime proof.'}
     return analysis.compact(graph,sites)
 
-def conversation_pages(s,p,budget,materialize=False,mandatory_only=False):
+def conversation_pages(s,p,budget,materialize=False,mandatory_only=False,*,prose_source=False):
     iid=(p.get('conversation_handoff') or {}).get('invocation_id')
     if not iid:return None
     import conversation_memory as cm
     row=s.db.execute('SELECT session FROM invocations WHERE id=?',(iid,)).fetchone()
     if not row:raise InvalidUpdate('Missing parent conversation receipt')
     if materialize:cm.materialize(s,row[0],cm.history(s,row[0],iid))
-    base={k:v for k,v in p.items() if k not in ('memory','repair')}
     extra = (p.get('parent_memory_extra_bytes', budget.context_limit//16)
              if p.get('parent_source_funding_version') == 1 else budget.context_limit//16)
     from retained_context import conversation_view
+    if prose_source:
+        from section_synthesis import PROSE_WRITER_SYSTEM
+        # The source plan stays in the ledger. Paid stages fit and charge their
+        # own evidence and schema after the mandatory conversation pages are bound.
+        base = {key: p[key] for key in ('contract', 'workspace', 'request', 'conversation_handoff',
+                                       'requested_memory_pages') if key in p}
+        return conversation_view(s, base, budget, system=PROSE_WRITER_SYSTEM, schema_for=lambda _: {},
+                                 materialize=materialize, extra_bytes=0)
     return conversation_view(s, p, budget, system=SYSTEM, schema_for=schema,
                              materialize=materialize, extra_bytes=0 if mandatory_only else extra)
 
@@ -427,7 +434,7 @@ def _mark_expanded_recall(p, provider):
         p['expanded_context_recall_bytes'] = limit
 
 
-def request_check(s,sid,p):
+def request_check(s,sid,p,*,prose_source=False):
     from review_reasoning import check
     check(p, synthesis=True)
     if 'review_intent_version' in p:
@@ -467,7 +474,7 @@ def request_check(s,sid,p):
         check_retained(s, sid, p)
     memory_packet = _check_parent_draft_recovery(s, sid, p) if 'parent_draft_recovery' in p else p
     if memory_packet.get('memory_budget') and p.get('memory') != conversation_pages(
-            s, memory_packet, Budget(**memory_packet['memory_budget'])):
+            s, memory_packet, Budget(**memory_packet['memory_budget']), prose_source=prose_source):
         raise InvalidUpdate('Parent synthesis memory changed')
     if p['contract']!=s.validation_contract(sid) or p['constraint_echo']!=constraint_rows(p['contract']):raise InvalidUpdate('Chat task or constraints changed')
     if not re.fullmatch('[a-f0-9]{32}',p['_request_nonce']):raise InvalidUpdate('Missing fresh chat identity')
@@ -751,6 +758,15 @@ def mapped_candidates(s, meta, workspace):
     return available, sum(Path(path).suffix in auto.CODE for path in inventory)
 
 
+def prose_review_supported(packet):
+    rights = packet['contract']['constraints']
+    intent = report.brief(packet)
+    return (intent['structured'] and not intent.get('diagram_requested')
+            and rights.get('review_only') is True and not rights.get('require_distinct_reviewer')
+            and all(rights.get(key) is False for key in ('edits_allowed', 'tests_allowed',
+                                                        'network_allowed', 'dependencies_allowed')))
+
+
 def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
     sid=meta['active'];prompt=request.get('prompt','');models=request.get('models');mode=request.get('tier','auto')
     if not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= 1800:
@@ -904,10 +920,13 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
     followup_usage = None
     reader = provider if real else getattr(provider, 'reader_provider', None)
     discoverer = provider if real else getattr(provider, 'discovery_provider', None)
+    prose_review = (parent_step and real and not repair_state and not request.get('context_recall')
+                    and prose_review_supported(p))
     if parent_step and discoverer and report.requested(p):
         from review_discovery import advance
         p['evidence_discovery_version'] = 4
-        discovery = advance(s, sid, p, data, root, discoverer, real, writer_provider=provider)
+        discovery = advance(s, sid, p, data, root, discoverer, real, writer_provider=provider,
+                            targeted=prose_review)
         if not discovery['complete'] or (discovery.get('token_usage') or {}).get('total_calls', 0):
             # A final architect decision still ends this bridge unit. The next
             # step loads its committed completion before drafting the report.
@@ -928,6 +947,18 @@ def answer(s,meta,workspace,root,request,provider=None,review_provider=None):
         # Publication and reviewer checks use the original fresh candidate packet.
         # Accepted draft and reviewer pages are not replayed.
         _, _, p = report_review.candidate(s, sid, checkpoint)
+    elif prose_review:
+        from section_synthesis import make_prose_plan
+        from review_stage import full_draft_supported
+        p['excerpts'] = packet_excerpts(p, data)
+        context.evidence(p, data)
+        p['facts'] = facts(data['graph'], p['sites'])
+        p['memory_budget'] = vars(provider.budget).copy()
+        p['memory'] = conversation_pages(s, p, provider.budget, materialize=True, prose_source=True)
+        draft_mode = 'full' if full_draft_supported(provider) else 'sectioned'
+        plan = make_prose_plan(s, sid, p, provider.model, draft_mode=draft_mode)
+        return {'section_plan': plan, 'section_source': p, 'route': choice,
+                'token_usage': followup_usage}
     else:
         from review_reasoning import bind, repair
         if parent_step and report.requested(p) and (

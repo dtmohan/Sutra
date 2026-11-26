@@ -30,6 +30,15 @@ def usage(s,session):
    op=json.loads(raw)
    if op['contract_hash']!=digest:continue
    used['operations']+=1;cost=op.get('task_cost',{});used['source_bytes']+=cost.get('source_bytes',0);used['seconds']+=elapsed if elapsed is not None else cost.get('seconds',20)
+ if c.get('native_task') and s.db.execute("SELECT 1 FROM sqlite_master WHERE name='host_actions'").fetchone():
+  for raw, elapsed in s.db.execute(
+      "SELECT a.record_json,json_extract(r.record_json,'$.result.elapsed_seconds') "
+      "FROM host_actions a LEFT JOIN host_action_receipts r ON r.action_id=a.id "
+      "WHERE a.session=? AND json_extract(a.record_json,'$.contract_hash')=? "
+      "AND json_extract(a.record_json,'$.kind')='worktree_patch'", (session,digest)):
+   cost=json.loads(raw)['task_cost']
+   used['operations']+=cost['operations'];used['source_bytes']+=cost['source_bytes']
+   used['seconds']+=elapsed if elapsed is not None else cost['seconds']
  for raw,receipt_raw,payload in s.db.execute("SELECT i.record_json,r.record_json,d.payload_json FROM invocations i LEFT JOIN invocation_receipts r ON r.invocation_id=i.id JOIN deliveries d ON d.id=i.delivery_id WHERE i.session=?",(session,)):
   inv=json.loads(raw)
   if inv['contract_hash']!=digest:continue

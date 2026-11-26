@@ -23,6 +23,7 @@ MEMORY_VERSION = 1
 REASONING_VERSION = 1
 SOURCE_RECALL_VERSION = 1
 GOVERNOR_VERSION = 1
+TARGET_PLAN_VERSION = 2
 
 
 def _lineage(s, owner):
@@ -117,6 +118,161 @@ def _tool_receipts(s, sid, accepted):
             raise InvalidUpdate('Evidence discovery tool belongs to another execution')
         receipts.append(record)
     return receipts
+
+
+def _target_plan(s, sid, key):
+    row = s.db.execute("SELECT seq,event,payload_json,previous_hash,event_hash FROM page_audit "
+                       "WHERE event='PARENT_DISCOVERY_TARGETS' "
+                       "AND json_extract(payload_json,'$.session')=? AND json_extract(payload_json,'$.key')=?",
+                       (sid, key)).fetchone()
+    if not row:
+        return None
+    if row[4] != sha(canonical(list(row[:4]))):
+        raise InvalidUpdate('Targeted discovery plan receipt changed')
+    plan = json.loads(row[2])
+    if type(plan.get('version')) is not int or plan['version'] not in (1, 2):
+        raise InvalidUpdate('Unsupported targeted discovery plan version')
+    return plan
+
+
+def _target_request_id(key, index):
+    return sha(canonical(['parent-discovery-target-v1', key, index]))
+
+
+def _skip_binding(plan, index):
+    read = plan['reads'][index]
+    return {'version': 1, 'session': plan['session'], 'key': plan['key'], 'owner': plan['owner'],
+            'index': index, 'request_id': _target_request_id(plan['key'], index),
+            'path': read['path'], 'line': read['line'], 'reason': 'source_page_limit'}
+
+
+def _source_page_limit(s, sid, record):
+    required = record.get('required_bytes')
+    limit = record.get('page_limit_bytes')
+    return (type(required) is int and type(limit) is int
+            and limit == repo.settings(s, sid)['review_page_kib'] * 1024 and required > limit)
+
+
+def _skipped_target(s, sid, plan, index):
+    if plan['version'] == 1:
+        return None
+    expected = _skip_binding(plan, index)
+    rows = s.db.execute("SELECT seq,event,payload_json,previous_hash,event_hash FROM page_audit "
+                        "WHERE event='PARENT_DISCOVERY_TARGET_SKIPPED' "
+                        "AND json_extract(payload_json,'$.session')=? "
+                        "AND json_extract(payload_json,'$.request_id')=?",
+                        (sid, expected['request_id'])).fetchall()
+    if not rows:
+        return None
+    row = rows[0]
+    if len(rows) != 1 or row[4] != sha(canonical(list(row[:4]))):
+        raise InvalidUpdate('Targeted discovery skip receipt changed')
+    record = json.loads(row[2])
+    if (not _source_page_limit(s, sid, record) or
+            record != dict(expected, required_bytes=record['required_bytes'],
+                           page_limit_bytes=record['page_limit_bytes'])):
+        raise InvalidUpdate('Targeted discovery skip differs from its host plan')
+    return dict(record, receipt=row[4])
+
+
+def authorize_targeted_read(s, sid, plan_key, target, line, request_id, read_profile):
+    plan = _target_plan(s, sid, plan_key)
+    active = machine.checked(s, machine.ACTIVE.get())
+    if (not plan or active['session'] != sid or active['kind'] != 'execution'
+            or plan['owner'] not in {n['id'] for n in _lineage(s, active)}):
+        raise InvalidUpdate('Targeted discovery read differs from its host plan')
+    for index, read in enumerate(plan['reads']):
+        if (target, line, request_id, read_profile) == (read['path'], read['line'],
+                _target_request_id(plan_key, index), read['profile']):
+            if _skipped_target(s, sid, plan, index):
+                raise InvalidUpdate('Targeted discovery read was already skipped')
+            return
+    raise InvalidUpdate('Targeted discovery read differs from its host plan')
+
+
+def _target_progress(s, sid, owner, plan):
+    if not plan:
+        return [], [], None
+    lineage = {n['id'] for n in _lineage(s, owner)}
+    if plan['owner'] not in lineage:
+        raise InvalidUpdate('Targeted discovery plan belongs to another execution')
+    receipts, skipped = [], []
+    for index, read in enumerate(plan['reads']):
+        row = s.db.execute('SELECT r.id FROM repository_ops o LEFT JOIN repository_receipts r '
+                           'ON r.operation_id=o.id WHERE o.session=? AND o.request_id=?',
+                           (sid, _target_request_id(plan['key'], index))).fetchone()
+        skip = _skipped_target(s, sid, plan, index)
+        if skip:
+            if row:
+                raise InvalidUpdate('Targeted discovery read was both skipped and issued')
+            skipped.append(skip)
+            continue
+        if not row or not row[0]:
+            return receipts, skipped, index
+        record = repo.record_by_id(s, sid, row[0])
+        op = record['operation']
+        if ((op['kind'], op['target'], op['line'], op.get('cursor'), op.get('invocation_id'),
+             op.get('read_profile'), op['actor']) !=
+                ('read', read['path'], read['line'], None, None, read['profile'], 'host_tool')
+                or op['orchestration']['node_id'] not in lineage):
+            raise InvalidUpdate('Targeted discovery receipt differs from its host plan')
+        receipts.append(record)
+    return receipts, skipped, None
+
+
+def _target_receipts(s, sid, owner, key):
+    receipts, _, _ = _target_progress(s, sid, owner, _target_plan(s, sid, key))
+    return receipts
+
+
+def _target_reason(skipped):
+    return 'targeted_sources_with_skips' if skipped else 'targeted_sources_ready'
+
+
+def _completed_target_reads(s, sid, owner, key, reason):
+    plan = _target_plan(s, sid, key)
+    receipts, skipped, remaining = _target_progress(s, sid, owner, plan)
+    if plan and plan['version'] >= 2 and (remaining is not None or reason != _target_reason(skipped)):
+        raise InvalidUpdate('Completed targeted discovery lost its read or skip receipts')
+    return receipts, skipped
+
+
+def _advance_targets(s, sid, p, key, owner, data, root, real, accepted, model_receipts):
+    plan = _target_plan(s, sid, key)
+    if plan is None:
+        from review_source_targets import select
+        plan = {'version': TARGET_PLAN_VERSION, 'session': sid, 'key': key, 'owner': owner['id'],
+                'reads': select(data, repo.catalog(s, sid), p['request'])}
+        with s.db:
+            s._audit('PARENT_DISCOVERY_TARGETS', plan)
+    receipts, skipped, index = _target_progress(s, sid, owner, plan)
+    if index is None:
+        return _finish(s, sid, p, key, accepted, receipts + model_receipts, _target_reason(skipped),
+                       skipped_targets=skipped)
+    read = plan['reads'][index]
+    try:
+        receipt = repo.execute(s, sid, p['workspace'], root, 'read', target=read['path'], line=read['line'],
+                               request_id=_target_request_id(key, index), resource_check=real,
+                               read_profile=read['profile'], host_discovery=key)
+    except repo.SourceReadLimitExceeded as exc:
+        if plan['version'] == 1:
+            return _finish(s, sid, p, key, accepted, receipts + model_receipts, 'targeted_source_limit')
+        skip = dict(_skip_binding(plan, index), required_bytes=exc.required_bytes,
+                    page_limit_bytes=exc.page_limit_bytes)
+        if not _source_page_limit(s, sid, skip):
+            raise
+        # The scoped size check stops before opening content or reserving a read.
+        with s.db:
+            s._audit('PARENT_DISCOVERY_TARGET_SKIPPED', skip)
+        skipped.append(_skipped_target(s, sid, plan, index))
+    else:
+        receipts.append(receipt)
+    if index + 1 == len(plan['reads']):
+        return _finish(s, sid, p, key, accepted, receipts + model_receipts, _target_reason(skipped),
+                       skipped_targets=skipped)
+    return {'complete': False, 'checkpoint': _state(key, accepted, receipts + model_receipts,
+                                                   skipped_targets=skipped),
+            'token_usage': None, 'result': None}
 
 
 def _notes(accepted):
@@ -253,11 +409,13 @@ def _fund_active_source(s, sid, owner, budget, packet, schema, provider, *, plan
     return True
 
 
-def _state(key, accepted, receipts, *, complete=False, reason=None, control=None):
+def _state(key, accepted, receipts, *, complete=False, reason=None, control=None, skipped_targets=()):
     result = {'version': VERSION, 'key': key, 'invocations': [iid for iid, _, _ in accepted],
               'receipts': [r['id'] for r in receipts], 'complete': complete, 'stop_reason': reason}
     if control is not None:
         result['governor_stop'] = copy.deepcopy(control)
+    if skipped_targets:
+        result['skipped_targets'] = copy.deepcopy(list(skipped_targets))
     return result
 
 
@@ -720,11 +878,15 @@ def _shrink_optional(packet, data, request, latest, active, prefix, pages, progr
 def read_paths(s, sid, p):
     # Readiness uses successful, current read receipts. Search hits and model
     # notes cannot become inspected-file coverage.
-    _, key = scope(s, sid, p)
+    owner, key = scope(s, sid, p)
     accepted = _accepted(s, sid, history(s, sid, key))
-    receipts = [record for record in _tool_receipts(s, sid, accepted)
-                if record['operation']['kind'] == 'read' and record['result']['status'] == 'ok']
-    return sorted({entry['path'] for entry in _entries(s, sid, p['workspace'], receipts)
+    return _read_paths(s, sid, p, _target_receipts(s, sid, owner, key) + _tool_receipts(s, sid, accepted))
+
+
+def _read_paths(s, sid, p, receipts):
+    reads = [record for record in receipts if record['operation']['kind'] == 'read'
+             and record['result']['status'] == 'ok']
+    return sorted({entry['path'] for entry in _entries(s, sid, p['workspace'], reads)
                    if entry['text'].strip()})
 
 
@@ -732,7 +894,11 @@ def _coverage(s, sid, p, accepted, receipts, reason):
     result = {'stop_reason': reason, 'model_steps': len(accepted),
               'tool_results': len(receipts), 'exhaustive_semantic_review': False}
     if p.get('discovery_selection_version') in (1, 2, 3):
-        result['read_files'] = read_paths(s, sid, p)
+        result['read_files'] = _read_paths(s, sid, p, receipts)
+    if skipped := p.get('evidence_discovery', {}).get('skipped_targets'):
+        result['skipped_targets'] = [{key: item[key] for key in (
+            'path', 'line', 'reason', 'required_bytes', 'page_limit_bytes')} for item in skipped]
+        result['partial_source_sample'] = True
     if reason and reason.startswith('governor_'):
         from discovery_control import observe
         result['governor'] = observe(sid, p, p['evidence_discovery']['key'], receipts, len(repo.catalog(s, sid)))
@@ -741,8 +907,9 @@ def _coverage(s, sid, p, accepted, receipts, reason):
     return result
 
 
-def _finish(s, sid, p, key, accepted, receipts, reason, *, control=None):
-    checkpoint = _state(key, accepted, receipts, complete=True, reason=reason, control=control)
+def _finish(s, sid, p, key, accepted, receipts, reason, *, control=None, skipped_targets=()):
+    checkpoint = _state(key, accepted, receipts, complete=True, reason=reason, control=control,
+                        skipped_targets=skipped_targets)
     p['evidence_discovery'] = checkpoint
     p['discovery_notes_unverified'] = _notes(accepted)
     p['discovery_coverage'] = _coverage(s, sid, p, accepted, receipts, reason)
@@ -760,12 +927,14 @@ def checkpoint_receipts(s, sid, p):
     """Resolve the repository effects of the admitted, completed discovery chain."""
     checkpoint = p.get('evidence_discovery')
     if not checkpoint: return []
-    _, key = scope(s, sid, p)
+    owner, key = scope(s, sid, p)
     records = history(s, sid, key)
     accepted = _accepted(s, sid, records)
-    receipts = _tool_receipts(s, sid, accepted)
+    targeted, skipped = _completed_target_reads(s, sid, owner, key, checkpoint.get('stop_reason'))
+    receipts = targeted + _tool_receipts(s, sid, accepted)
     expected = _state(key, accepted, receipts, complete=checkpoint.get('complete'),
-                      reason=checkpoint.get('stop_reason'), control=checkpoint.get('governor_stop'))
+                      reason=checkpoint.get('stop_reason'), control=checkpoint.get('governor_stop'),
+                      skipped_targets=skipped)
     if checkpoint != expected or not checkpoint['complete']:
         raise InvalidUpdate('Evidence discovery checkpoint changed')
     audit = s.db.execute("SELECT 1 FROM page_audit WHERE event='PARENT_DISCOVERY_CHECKPOINT' "
@@ -776,6 +945,16 @@ def checkpoint_receipts(s, sid, p):
             or p.get('discovery_coverage') != _coverage(s, sid, p, accepted, receipts, checkpoint['stop_reason'])):
         raise InvalidUpdate('Evidence discovery notes or coverage changed')
     return receipts
+
+
+def checkpoint_target_roles(s, sid, p):
+    """Label already checked receipts using the host's committed read addresses."""
+    if not p.get('evidence_discovery'):
+        return {}
+    _, key = scope(s, sid, p)
+    plan = _target_plan(s, sid, key)
+    return {_target_request_id(key, i): row['role']
+            for i, row in enumerate(plan['reads'])} if plan else {}
 
 
 def load(s, sid, p):
@@ -887,10 +1066,11 @@ def check_request(s, sid, p):
         raise InvalidUpdate('Discovery source index changed')
     selection_version = p.get('discovery_selection_version')
     for marker, expected in (('discovery_note_version', 2), ('discovery_progress_version', 1),
-                             ('discovery_search_version', 1), ('discovery_reasoning_version', 1)):
+                             ('discovery_search_version', 1), ('discovery_reasoning_version', 1),
+                             ('discovery_tool_prompt_version', 1)):
         if marker in p and (type(p[marker]) is not int or p[marker] != expected
                             or type(selection_version) is not int or selection_version != 3):
-            raise InvalidUpdate('Unsupported discovery note or progress profile')
+            raise InvalidUpdate('Unsupported discovery note, progress or tool prompt profile')
     if p.get('discovery_progress_version') == 1:
         progress_bytes = p.get('discovery_progress_bytes')
         if type(progress_bytes) is not int or not 512 <= progress_bytes <= 2048:
@@ -952,7 +1132,7 @@ def check_request(s, sid, p):
         raise InvalidUpdate('Discovery pinned conversation context changed')
 
 
-def advance(s, sid, p, data, root, provider, real, *, writer_provider=None):
+def advance(s, sid, p, data, root, provider, real, *, writer_provider=None, targeted=False):
     p['discovery_owner'] = machine.ACTIVE.get()
     p['discovery_selection_version'] = SELECTION_VERSION
     machine.checked(s, p['discovery_owner'])
@@ -965,11 +1145,13 @@ def advance(s, sid, p, data, root, provider, real, *, writer_provider=None):
         "AND json_extract(payload_json,'$.checkpoint.key')=? ORDER BY seq DESC LIMIT 1", (key,)).fetchone()
     if terminal:
         checkpoint = json.loads(terminal[0])['checkpoint']
+        targeted_reads, skipped = _completed_target_reads(s, sid, owner, key, checkpoint['stop_reason'])
+        receipts = targeted_reads + receipts
         if checkpoint != _state(key, accepted, receipts, complete=True, reason=checkpoint['stop_reason'],
-                                control=checkpoint.get('governor_stop')):
+                                control=checkpoint.get('governor_stop'), skipped_targets=skipped):
             raise InvalidUpdate('Completed discovery history changed')
         return _finish(s, sid, p, key, accepted, receipts, checkpoint['stop_reason'],
-                       control=checkpoint.get('governor_stop'))
+                       control=checkpoint.get('governor_stop'), skipped_targets=skipped)
     # Recover the accepted-decision -> repository-effect gap before any new call.
     missing = [(iid, packet, proposal) for iid, packet, proposal in accepted
                if proposal['tool']['kind'] in ('read', 'search', 'list')
@@ -995,6 +1177,8 @@ def advance(s, sid, p, data, root, provider, real, *, writer_provider=None):
     if accepted and accepted[-1][2]['tool']['kind'] in ('report', 'clarify'):
         return _finish(s, sid, p, key, accepted, receipts,
                        'evidence_complete' if accepted[-1][2]['tool']['kind'] == 'report' else 'clarification')
+    if (targeted and not records) or _target_plan(s, sid, key):
+        return _advance_targets(s, sid, p, key, owner, data, root, real, accepted, receipts)
     previous = accepted[-1][0] if accepted else None
     failed = [r for r in history(s, sid, key) if r[2]['status'] != 'accepted'
               and r[1].get('discovery_previous') == previous]
@@ -1039,7 +1223,7 @@ def advance(s, sid, p, data, root, provider, real, *, writer_provider=None):
             evidence=_entries(s, sid, p['workspace'], receipts), discovery_notes_unverified=_notes(accepted),
             discovery_notes_start=0)
         if SELECTION_VERSION == 3:
-            packet.update(discovery_note_version=2, discovery_progress_version=1,
+            packet.update(discovery_note_version=2, discovery_tool_prompt_version=1, discovery_progress_version=1,
                           discovery_progress_bytes=1024)
             if MEMORY_VERSION == 1:
                 packet['discovery_memory_version'] = 1
