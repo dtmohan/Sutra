@@ -162,6 +162,11 @@ def supplied_document(p):
     )
 
 
+def browser_probe_schema(inquiry):
+    return obj({'entry': {'type': 'string', 'enum': [inquiry['entry']]},
+                'working_question': {'type': 'string', 'minLength': 8, 'maxLength': 160}})
+
+
 def schema(p):
     if p.get('document_stage_flow'):
         ids = [item['id'] for item in p['document_synthesis']['evidence']]
@@ -179,6 +184,18 @@ def schema(p):
         if p.get('document_review_version') == 2:
             fmt['properties']['basis'] = {'type': 'string', 'maxLength': 700}
             fmt['required'].append('basis')
+        return fmt
+    inquiry = p.get('browser_inquiry')
+    if inquiry and inquiry['version'] == 2:
+        fmt = obj({'answer': {'type': 'string', 'minLength': 1, 'maxLength': 2400},
+                   'summary': {'type': 'string', 'minLength': 1, 'maxLength': p['memory_allocation']['summary_max_chars']},
+                   'browser_probe': browser_probe_schema(inquiry),
+                   'intent': {'type': 'string', 'enum': ['conversation', 'workspace']},
+                   'context_binding': {'type': 'string', 'enum': [p['context_binding']]},
+                   'escalation_reason': {'type': 'string', 'enum': ['none']},
+                   'page_requests': {'type': 'array', 'maxItems': 0, 'items': {'type': 'string'}},
+                   'diagram': {'type': 'null'}})
+        fmt['required'].remove('browser_probe')
         return fmt
     available = [r['id'] for r in (p.get('memory') or {}).get('toc', [])]
     quotations = list(dict.fromkeys(q for q in re.split(r'(?<=[.!?])\s+|\n+', p['request']) if q.strip()))
@@ -208,6 +225,8 @@ def schema(p):
         fmt['properties'] = {'document_request': selection, **fmt['properties']}
         fmt['required'].insert(0, 'document_request')
     fmt['properties']['workspace_request']['required']=['operation','paths']
+    if inquiry:
+        fmt['properties']['browser_probe'] = browser_probe_schema(inquiry)
     from task_observations import add_schema
     return add_schema(fmt, 'commitment')
 
@@ -295,10 +314,36 @@ def memory(s, sid, iid):
 def binding(p):
     fields = [p['contract'], p['workspace_context'], p['routing_capabilities']]
     for key in ('document_evidence', 'document_offer', 'conversation_axis', 'document_stage_flow',
-                'document_synthesis', 'document_review_version'):
+                'document_synthesis', 'document_review_version', 'browser_inquiry'):
         if key in p:
             fields.append(p[key])
     return sha(canonical(fields))
+
+
+def check_browser_inquiry(s, sid, p):
+    inquiry = p['browser_inquiry']
+    if (not isinstance(inquiry, dict) or set(inquiry) != {'version', 'flow_id', 'entry'}
+            or type(inquiry['version']) is not int or inquiry['version'] not in (1, 2)
+            or not isinstance(inquiry['flow_id'], str) or not re.fullmatch('[a-f0-9]{32}', inquiry['flow_id'])
+            or not isinstance(inquiry['entry'], str) or not inquiry['entry'].lower().endswith(('.html', '.htm'))
+            or any(key in p for key in ('document_evidence', 'document_offer', 'document_stage_flow'))):
+        raise InvalidUpdate('Invalid scoped conversation browser inquiry')
+    from repository_tools import normalized
+    if normalized(inquiry['entry']) != inquiry['entry']:
+        raise InvalidUpdate('Invalid scoped conversation browser entry')
+
+    import orchestration
+    flow = orchestration.node(s, inquiry['flow_id'])
+    if (flow['kind'] != 'flow' or not flow.get('chat_key') or flow.get('prompt') != p['request']
+            or flow.get('conversation_parent') != p['routing_state']['parent']
+            or chat_axis(flow['workspace'], flow['chat_key']) != p.get('conversation_axis')):
+        raise InvalidUpdate('Browser inquiry belongs to another conversation or request')
+    events = orchestration.events(s, inquiry['flow_id'])
+    offers = [event['data'].get('browser_inquiry') for event in events
+              if event['kind'] == 'BROWSER_INQUIRY_OFFERED' and event['from'] == event['to'] == 'CLASSIFYING']
+    sessions = {event['data'].get('conversation_session') for event in events if event['kind'] == 'CONVERSATION_BOUND'}
+    if offers != [inquiry] or sessions != {sid}:
+        raise InvalidUpdate('Browser inquiry differs from its host offer')
 
 
 def workspace_handoff(s, sid, iid, prompt):
@@ -343,6 +388,8 @@ def request_check(s, sid, p):
     require_chat_axis(s, sid, cm.history(s, sid, p['routing_state']['parent']), p.get('conversation_axis'))
     if not isinstance(p['request'], str) or not 1 <= len(p['request']) <= 1800 or not p['request'].strip():
         raise InvalidUpdate('Conversation prompt must be 1..1800 characters')
+    if 'browser_inquiry' in p:
+        check_browser_inquiry(s, sid, p)
     if 'document_offer' in p:
         from document_routing import offer_for_request
         offer = p['document_offer']
@@ -436,6 +483,17 @@ def check_delivery(p, proposal):
     if (proposal.get('workspace_request', {}).get('operation') in ('edit', 'test', 'capability')
             and proposal['intent'] != 'workspace'):
         raise InvalidUpdate('An edit/test workspace_request needs intent=workspace for host handoff; omit it for conversation.')
+    if 'browser_probe' in proposal:
+        inquiry = p.get('browser_inquiry')
+        probe = proposal['browser_probe']
+        question = probe['working_question'].strip()
+        if not inquiry or probe['entry'] != inquiry['entry']:
+            raise InvalidUpdate('Use the exact offered browser entry for an observation proposal.')
+        if (proposal['intent'] != 'workspace' or 'workspace_request' in proposal or pages
+                or proposal.get('context_question') or proposal['escalation_reason'] != 'none' or proposal['diagram']):
+            raise InvalidUpdate('Request a browser observation on its own using workspace intent.')
+        if not 8 <= len(question) <= 160 or re.search(r'[\x00-\x1f\x7f]', question) or question.count('?') > 1:
+            raise InvalidUpdate('Give one short browser question on a single line.')
     if len(pages) != len(set(pages)):
         raise InvalidUpdate('Request each memory page only once.')
     question = proposal.get('context_question', '').strip()
@@ -514,6 +572,8 @@ def answer(s,meta,root,request,provider=None,*,axis=None,orchestrated=False):
     request=dict(request)
     if request.get('document_stage_flow') and not orchestrated:
         raise InvalidUpdate('Staged document synthesis requires the workflow')
+    if 'browser_inquiry' in request and not orchestrated:
+        raise InvalidUpdate('A browser inquiry requires an offer from the workspace workflow')
     request['conversation_session']=session_for(s,request,axis=axis)
     calls=[]
     while True:
@@ -541,6 +601,8 @@ def _answer_step(s,meta,root,request,provider,axis):
          'requested_memory_pages':routing_state['requested_pages']}
     if axis:
         p['conversation_axis'] = axis
+    if 'browser_inquiry' in request:
+        p['browser_inquiry'] = request['browser_inquiry']
     p['diagram_reference'] = visuals.reference(s, sid, parent, prompt)
     from capabilities import context as tool_context
     p['tool_evidence']=tool_context(s,meta.get('active'))
@@ -557,6 +619,8 @@ def _answer_step(s,meta,root,request,provider,axis):
     elif 'document_offer_flow' in request:
         from document_routing import offer_for_request
         p['document_offer'] = offer_for_request(s, sid, request['document_offer_flow'], prompt, parent)
+    if 'browser_inquiry' in p:
+        check_browser_inquiry(s, sid, p)
     p['context_binding'] = binding(p)
     real = provider is None
     if real:

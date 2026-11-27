@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.61.1
+
+- Use the HTML file already identified in the chat for requests such as “render it in a browser.” Sutra asks which file to use when several could match.
+- Ask one focused question when a browser check would help. The approval dialog shows what Sutra wants to measure.
+- Carry measured browser behavior and source references into the critique. Follow-up questions can reuse the same file’s observations after a reload when its contents still match.
+
+## 0.61.0
+
+- Ask in VS Code before running a browser review of a specific HTML file. Approval is tied to the exact source and saved task.
+- Show browser observations in chat before synthesis. The critique links observations to source excerpts, and an interrupted run retains its receipt and charges without replay.
+
 ## 0.60.0
 
 - Review and approve a multi-file Python patch in VS Code. Stage it in a detached worktree and run the project's tracked unittest suite in the macOS sandbox.

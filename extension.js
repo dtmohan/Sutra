@@ -269,7 +269,7 @@ function activate(context) {
   }
   async function request(message, token, internal=false, onActivity, transport) {
     if(token?.isCancellationRequested)throw new Error("Sutra request cancelled before dispatch.");
-    const {think_for_turn:thinkForTurn,conversation_step:conversationStep,...payload}=message||{};
+    const {think_for_turn:thinkForTurn,conversation_step:conversationStep,browser_approval:browserApproval,...payload}=message||{};
     if(thinkForTurn!==undefined&&(thinkForTurn!==true||!internal||message.op!=='orchestrate'||!['start','step'].includes(message.event)))throw new Error('Invalid Sutra reasoning override.');
     if(conversationStep!==undefined&&(conversationStep!==true||!internal||message.op!=='orchestrate'||message.event!=='step'))throw new Error('Invalid Sutra conversation step.');
     const localGreeting=message?.local_greeting;
@@ -278,6 +278,9 @@ function activate(context) {
     if(documentEvidence&&!internal)throw new Error('Document access must be requested in Sutra chat.');
     const capabilityExecution=message?.op==='capability_execute'||(message?.op==='orchestrate'&&message.event==='capability_grant');
     if(capabilityExecution&&!internal)throw new Error('Sutra tool execution requires workspace host approval.');
+    const browserExecution=message?.op==='orchestrate'&&message.event==='browser_grant';
+    if((browserExecution&&(!internal||!browserApproval))||(!browserExecution&&browserApproval!==undefined))
+      throw new Error('Browser execution requires the current Sutra chat confirmation.');
     const diagnostic=message?.op==='dashboard';
     if(diagnostic)return requestDashboard();
     const managementRead=['state','models','conversation_read','capability_list','calibration_list'].includes(message?.op);
@@ -304,7 +307,8 @@ function activate(context) {
         SUTRA_ACTIVITY:'1',SUTRA_THINKING:thinking,SUTRA_CHILD_THINKING:thinkForTurn?baseThinking:null,KARMA_NODE:process.execPath,
         KARMA_TYPESCRIPT:path.join(context.extensionPath,'vendor','typescript','typescript.js'),
         SUTRA_RAM_CACHE_MIB:String(ramMiB),
-        SUTRA_CAPABILITY_AUTHORIZATION:capabilityExecution?JSON.stringify(toolController.evidence(message.authorization)):null};
+        SUTRA_CAPABILITY_AUTHORIZATION:capabilityExecution?JSON.stringify(toolController.evidence(message.authorization)):null,
+        SUTRA_BROWSER_AUTHORIZATION:browserExecution?JSON.stringify(nativeController.browserEvidence(message,transport?.authority)):null};
       if(fixedTier==='auto'&&payload.models){
         // Reviewer discovery must use the same engine candidates as the Auto job.
         const selected=new Set(FIXED_TIERS.map(tier=>payload.models[tier]));

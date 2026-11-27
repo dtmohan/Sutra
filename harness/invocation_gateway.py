@@ -142,7 +142,10 @@ class InvocationLedger(GovernedContext):
             else:
                 if payload['contract']['contract_hash'] != config['contract_hash']:
                     raise Conflict('Invocation contract changed')
-                if role in ('memory_probe','reviewer','coder','architect','api_mapper','api_reviewer','static_explainer','chat_reviewer','review_reader','conversation','subagent','report_reviewer','document_extract','document_verdict_reviewer') + sections:
+                if role=='browser_reviewer':
+                    from browser_review import request_check
+                    request_check(self,session,payload,model)
+                elif role in ('memory_probe','reviewer','coder','architect','api_mapper','api_reviewer','static_explainer','chat_reviewer','review_reader','conversation','subagent','report_reviewer','document_extract','document_verdict_reviewer') + sections:
                     if role in sections:
                         check_section(self, session, role, payload, model=model)
                         if payload.get('memory_budget') != envelope['budget_profile']:
@@ -538,6 +541,9 @@ class InvocationLedger(GovernedContext):
         if env['role']=='static_explainer':
             from static_role import request_check
             request_check(self,session,payload)
+        if env['role']=='browser_reviewer':
+            from browser_review import request_check
+            request_check(self,session,payload,env['model'])
         if env['role']=='conversation' and payload.get('memory'):
             from conversation_memory import history
             history(self,session,payload['memory']['invocation_id'])

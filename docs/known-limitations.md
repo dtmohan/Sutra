@@ -162,12 +162,19 @@ The first live 0.29.1 run completed but manual review found unsupported claims t
 
 ## Optional tool capabilities (0.33.0)
 
-- The initial registry contains Ruff and Pyright only. There is no arbitrary shell, package manager, MCP server, browser runner or general dependency installer.
+- The installable registry contains Ruff and Pyright only. There is no arbitrary shell, package manager, MCP server or general dependency installer.
 - Actual execution requires the macOS sandbox. Package mappings exist for macOS/Linux/Windows architectures, but Linux/Windows execution is blocked and has not been validated on native hosts.
 - Diagnostics cover only the approved Python snapshot, bounded by the task source allocation and page size. Missing project modules or disabled project configuration can affect results. Pyright uses bundled stubs and a fixed Python 3.9 analysis target; no workspace interpreter or plugins are loaded. This is not a substitute for the project's configured CI.
 - Installation approval authorizes only the pinned registry download into Sutra storage. It does not enable task-wide networking, dependency changes or network access by the installed tool.
 - Historical diagnostics retain source hashes and are labelled as historical when passed to another model. They are not silently treated as fresh after source changes. A new check rereads and revalidates source.
 - Tool output is capped at 64 KiB, checks at 30 seconds and installations reserve 120 seconds. Observed elapsed time is charged; a killed operation retains its full reservation. Interrupted installation copies are quarantined on explicit repair and count toward storage usage.
+
+## Browser reviews (0.61.0)
+
+- The browser profile runs one standalone UTF-8 HTML file up to 256 KiB using an installed Chrome on macOS. Sutra asks for separate approval for the exact entry and source version after workspace access is granted.
+- A follow-up such as “render it in a browser” uses one recorded HTML entry from the current chat. If the target is unclear, reply with its workspace-relative path. The conversation can propose one focused browser check for an open-ended question about a known entry.
+- Execution uses Chrome's sandbox, a temporary profile and browser-level offline controls. Only the approved HTML bytes enter the page. Web servers, linked files and other project assets fall outside this profile.
+- Built-in probes sample startup, selected controls, page errors and layout. The model selects a priority from the supported findings. Sutra renders the measured facts, linked source and bounded next checks. A feedback follow-up can reuse a receipt after verifying the source digest. A request to rerun or a changed source version requires fresh browser approval.
 
 ## 0.34.0 execution and paging limits
 

@@ -21,7 +21,7 @@ POLICY_FILES = ('remote_profiles.py','remote_control.py','remote_model.py','remo
                 'protocol.py', 'dag_protocol.py', 'kernel.py', 'invocation_gateway.py', 'invocation_timing.py',
                 'invocation_roles.py', 'section_synthesis.py', 'review_stage.py', 'runtime.py', 'local_model.py', 'strata_model.py', 'context_window.py', 'legacy_model.py',
                 'kernel_adapter.py', 'kernel_boundary.py', 'smriti_adapter.py', 'karma_adapter.py', 'calibration.py', 'stp_canonical/kernel.py', 'stp_canonical/__init__.py',
-                'review_role.py', 'child_checkpoint_progress.py', 'review_upgrade.py', 'parent_synthesis.py', 'expanded_review_context.py', 'vscode_bridge.py', 'coding_role.py', 'host_actions.py', 'project_worktree.py',
+                'review_role.py', 'child_checkpoint_progress.py', 'review_upgrade.py', 'parent_synthesis.py', 'expanded_review_context.py', 'vscode_bridge.py', 'coding_role.py', 'host_actions.py', 'project_worktree.py', 'browser_review.py', 'browser_runner.py',
                 'monitoring.py', 'unittest_entry.py', 'telemetry.m', 'lifecycle.py', 'storage_policy.py',
                 'repository_tools.py', 'architecture_role.py', 'architecture_runtime.py','api_extract.py','api_extract.js','api_facts.py','api_roles.py','api_runtime.py',
                 'static_typescript.js','static_analysis.py','static_role.py','static_runtime.py','platform_support.py','telemetry_portable.js','review_budget.py','accounting_batches.py','accounting_metrics.py','accounting_audit.py','ledger_sqlite.py','auto_review.py',

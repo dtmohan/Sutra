@@ -9,8 +9,9 @@ from review_targets import (
     DOCUMENT_TEXT_REQUIRED, document_file_target, document_input_notice, document_text, has_document_text,
     may_use_retained_document, refers_to_previous_review_target, refers_to_retained_document,
 )
-from evidence_admission import (explicit_project_patch, explicit_workspace_review, explicit_workspace_test, measure as evidence_measure, record_document,
-                                workspace_roots, workspace_target)
+from evidence_admission import (browser_entry, browser_feedback_intent, explicit_project_patch, explicit_workspace_review,
+                                explicit_workspace_test, measure as evidence_measure, record_document,
+                                resolve_browser_target, workspace_roots, workspace_target)
 
 
 def standalone_greeting(req, prompt):
@@ -47,6 +48,80 @@ def latest_chat_flow(s,workspace,chat):
     return info(s,previous[0]) if previous else None
 
 
+def previous_browser_context(s, workspace, current):
+    """Resolve a continuation using recorded context, before any new source read."""
+    chat = current.get('chat_key')
+    if not chat:
+        return (), None
+    row = s.db.execute("""SELECT id FROM orchestration_nodes WHERE rowid <
+        (SELECT rowid FROM orchestration_nodes WHERE id=?)
+        AND json_extract(record_json,'$.kind')='flow'
+        AND json_extract(record_json,'$.chat_key')=? AND json_extract(record_json,'$.workspace')=?
+        AND json_extract(record_json,'$.local_greeting') IS NOT 1
+        ORDER BY rowid DESC LIMIT 1""", (current['id'],chat,str(workspace))).fetchone()
+    if not row:
+        return (), None
+    from task_stack import owner
+    if owner(s,workspace,row[0]) != chat:
+        return (), None
+    previous,data = info(s,row[0])
+    if m.state(s,previous['id']) != 'DONE':
+        return (), None
+    receipt = browser_receipt_for(s,previous['id'],data)
+    if receipt and receipt['evidence']['status']=='observed':
+        return (receipt['evidence']['entry'],), {
+            'flow_id':receipt['flow_id'],'receipt_id':receipt['id'],
+            'source_sha256':receipt['source_sha256']}
+    if inquiry := data.get('browser_inquiry'):
+        if entry := browser_entry(inquiry.get('entry')):
+            return (entry,), None
+    sid = (data.get('binding') or {}).get('session')
+    if not sid or data.get('permission',{}).get('operation')!='read':
+        return (), None
+    from repository_tools import catalog_snapshot, scoped
+    from native_access import read_scope
+    try:
+        roots = read_scope(s,sid)
+        files = catalog_snapshot(s,sid)['files']
+    except InvalidUpdate:
+        return (), None
+    return tuple(path for path in files if browser_entry(path) and scoped(path,roots)), None
+
+
+def browser_receipt_for(s, fid, data):
+    """Resolve only a verified receipt retained for this exact chat and entry."""
+    from browser_review import checked_receipt
+    if data.get('browser_receipt'):
+        return checked_receipt(s,fid,data)
+    ref = data.get('browser_reused')
+    if not ref:
+        return None
+    from task_stack import owner
+    flow, prior = m.node(s,fid), m.node(s,ref['flow_id'])
+    chat,workspace = flow.get('chat_key'),flow['workspace']
+    if (not chat or flow['id']==prior['id'] or prior.get('chat_key')!=chat or prior.get('workspace')!=workspace
+            or owner(s,workspace,prior['id'])!=chat):
+        raise InvalidUpdate('Saved browser evidence belongs to another chat or workspace')
+    _,old = info(s,prior['id'])
+    receipt = checked_receipt(s,prior['id'],old)
+    if (not receipt or receipt['id']!=ref['receipt_id'] or receipt['source_sha256']!=ref['source_sha256']
+            or receipt['evidence']['status']!='observed'
+            or data.get('permission',{}).get('paths')!=[receipt['evidence']['entry']]):
+        raise InvalidUpdate('Saved browser evidence changed or does not cover this request')
+    return receipt
+
+
+def route_browser(s, fid, session, work, *, conversation_id=None, working_question=None, retained=None, chat=None):
+    """Record a single proposed check. Actual execution still needs the exact permit."""
+    frame,_ = evidence_measure(s,session,'resolved','available',False)
+    if frame['decision']!='ALLOW':
+        move(s,fid,'DONE','EVIDENCE_FIN',kernel=frame,request_notice='The task budget is exhausted.')
+    else:
+        move(s,fid,'NEED_ARM','BROWSER_REVIEW_REQUESTED',kernel=frame,conversation_id=conversation_id,
+             permission=work,source_roots=work['paths'],working_question=working_question,browser_retained=retained)
+    return response(s,fid,**({'conversation':chat} if chat else {}))
+
+
 def _original_ask(s, turn):
     """A restart's creation time does not make its original ask newer."""
     current = turn; seen = set()
@@ -79,8 +154,8 @@ def _latest_ask_flow(s, workspace, chat):
     return None
 
 
-def recover_project_lookup(s, workspace, request):
-    """Recover a same-chat project receipt on an explicit status lookup."""
+def recover_action_lookup(s, workspace, request):
+    """Recover a same-chat execution receipt on an explicit status lookup."""
     chat = request.get('chat_key')
     if not isinstance(chat, str) or not re.fullmatch('[a-f0-9]{64}', chat):
         return
@@ -95,9 +170,15 @@ def recover_project_lookup(s, workspace, request):
     if owner(s, workspace, fid) != chat:
         return
     flow, data = info(s, fid)
-    if flow['workspace'] == str(workspace) and data.get('permission', {}).get('operation') == 'project_patch':
+    if flow['workspace'] != str(workspace):
+        return
+    operation = data.get('permission', {}).get('operation')
+    if operation == 'project_patch':
         from lifecycle import reconcile_project_action
         reconcile_project_action(s, fid)
+    elif operation == 'browser_review':
+        from browser_review import recover
+        recover(s,fid)
 
 
 def referenced_document_notice(s,workspace,prompt,chat,parent,prior_prompt=None):
@@ -234,12 +315,20 @@ def response(s,fid,*,_runner_poll=False,**extra):
     if m.state(s,fid)=='NEED_PERMISSION':
         extra.setdefault('bound_task',data.get('permission_binding'))
     if m.state(s,fid)=='NEED_TOOL_APPROVAL':
-        import capabilities
-        p=data.get('capability_proposal')
-        extra.setdefault('capability_proposal',p)
-        extra['capability_settled']=bool(p and capabilities.completed(s,p['id']))
+        if data.get('browser_proposal'):
+            extra.setdefault('browser_proposal',data['browser_proposal'])
+            if data.get('working_question'):
+                extra.setdefault('browser_question',data['working_question'])
+        else:
+            import capabilities
+            p=data.get('capability_proposal')
+            extra.setdefault('capability_proposal',p)
+            extra['capability_settled']=bool(p and capabilities.completed(s,p['id']))
+    if receipt := browser_receipt_for(s,fid,data):
+        extra.setdefault('browser_observation',dict(receipt['evidence'],receipt_id=receipt['id'],
+                                                    reused=bool(data.get('browser_reused'))))
     if m.state(s,fid)=='DONE':
-        for key in ('capability_result','request_notice','local_greeting'):
+        for key in ('capability_result','request_notice','local_greeting','browser_result'):
             if key in data:extra.setdefault(key,data[key])
         last = history[-1]
         if last['kind']=='ACTION_SETTLED' and data.get('permission', {}).get('operation')=='project_patch':
@@ -541,7 +630,8 @@ def _handle_chat(s,meta,workspace,root,req,providers=None):
             latest = _latest_ask_flow(s, workspace, chat)
             if latest:
                 saved = response(s, latest['id'], prompt=latest['prompt'])
-                if saved.get('action_receipt') or (saved.get('recovery') or {}).get('terminal_review'):
+                if (saved.get('action_receipt') or saved.get('browser_result')
+                        or (saved.get('recovery') or {}).get('terminal_review')):
                     return dict(saved, **projection)
         return dict(projection['focused_flow'] or {'state':'DONE','flow_id':None},**projection)
     if fid:
@@ -612,7 +702,7 @@ def run(s,meta,workspace,root,req,providers=None):
         return _handle(s,meta,workspace,root,req,providers)
     except Interrupted as exc:
         fid = req.get('_created_flow_id') or req.get('flow_id')
-        if not fid or m.state(s, fid) in m.TERMINAL:
+        if not fid or m.state(s, fid) in (m.TERMINAL | {'EXECUTING_ACTION'}):
             raise
         # The bridge owns the workspace lock here. Settle durable commitments
         # before returning normal saved-pause guidance; never replay or refund.
@@ -845,8 +935,9 @@ def evidence_gap(s,f,session,kind,notice,*,recoverable=True,target_status=None,c
         message='The task budget is exhausted.' if frame['budget_exhausted'] else notice
         move(s,fid,'DONE','EVIDENCE_FIN',kernel=frame,request_notice=message,**data)
         return
-    target='Requested document' if kind=='document' else 'Workspace scope'
-    required='document_text' if kind=='document' else 'workspace_selection'
+    target,required = {'document':('Requested document','document_text'),
+                       'browser':('HTML entry','browser_entry'),
+                       'workspace':('Workspace scope','workspace_selection')}[kind]
     file_target=document_file_target(f['prompt'], classified=bool(conversation_id)) if kind=='document' else None
     if file_target:
         target,required=file_target,'document_file'
@@ -873,6 +964,13 @@ def supply_evidence(s,f,d,req):
         ref=record_document(s,session,f,text)
         move(s,f['id'],'CLASSIFYING','EVIDENCE_SUPPLIED',kernel=frame,workflow_stop=None,
              document_evidence=ref,routing_continuation=None)
+    elif bridge['target_kind']=='browser':
+        entry = browser_entry(supplied.strip().strip('`\"\''))
+        if not entry:
+            raise InvalidUpdate('Reply with one workspace-relative HTML file')
+        move(s,f['id'],'NEED_ARM','EVIDENCE_SUPPLIED',kernel=frame,workflow_stop=None,
+             permission={'operation':'browser_review','paths':[entry]},source_roots=[entry],
+             conversation_id=d.get('conversation_id'))
     else:
         if re.fullmatch(r'use this workspace[.!?]*',supplied.strip(),re.IGNORECASE):
             work={'operation':'read','scope':'workspace','paths':[]}
@@ -1192,11 +1290,14 @@ def _handle(s,meta,workspace,root,req,providers=None):
                     and (d.get('document_verification') or {}).get('verdict') == 'supported'):
                 from conversation import read
                 extra['conversation'] = read(s, d['conversation_id'])
-            if m.state(s,fid)=='NEED_TOOL_APPROVAL':extra['capability_proposal']=d.get('capability_proposal')
+            if m.state(s,fid)=='NEED_TOOL_APPROVAL' and not d.get('browser_proposal'):
+                extra['capability_proposal']=d.get('capability_proposal')
             if m.state(s,fid)=='NEED_PERMISSION' and not recovery(s,fid):extra.update(permission=permission(s,meta['active'],d['permission']),bound_task=identity(s,meta['active']))
             return response(s,fid,**extra)
         if req.get('cursor')!=response(s,fid,_runner_poll=event=='continuation_probe')['cursor']:raise InvalidUpdate('Workflow event is stale or replayed')
     f,d=info(s,fid);phase=m.state(s,fid);prompt=f['prompt']
+    if event=='browser_grant' and (phase!='NEED_TOOL_APPROVAL' or not d.get('browser_proposal')):
+        raise InvalidUpdate('There is no browser plan awaiting this approval')
     if event=='resume' and standalone_greeting(req, prompt):
         stop=d.get('workflow_stop') or {}
         if (phase!='PAUSED' or stop.get('status')!='provider_wait' or stop.get('resume_phase')!='CLASSIFYING'
@@ -1419,6 +1520,27 @@ def _handle(s,meta,workspace,root,req,providers=None):
         request['conversation_session']=session_for(s,request,axis=axis)
         if not d.get('conversation_session'):
             move(s,fid,'CLASSIFYING','CONVERSATION_BOUND',conversation_session=request['conversation_session'])
+        inquiry = d.get('browser_inquiry')
+        if not any(request.get(key) for key in ('routing_continuation','document_evidence','document_offer_flow')):
+            explicit = resolve_browser_target(prompt)
+            feedback = browser_feedback_intent(prompt)
+            if explicit or feedback:
+                candidates, retained = previous_browser_context(s,workspace,f)
+                sid = request['conversation_session']
+                if explicit:
+                    work = resolve_browser_target(prompt,candidates)
+                    if work['paths']:
+                        return route_browser(s,fid,sid,work)
+                    evidence_gap(s,f,sid,'browser','Which HTML file should I run? Reply with its workspace-relative path.')
+                    return response(s,fid)
+                if len(candidates)==1 and retained:
+                    work = {'operation':'browser_review','paths':list(candidates)}
+                    return route_browser(s,fid,sid,work,retained=retained)
+                if len(candidates)==1 and not inquiry:
+                    inquiry = {'version':2,'flow_id':fid,'entry':candidates[0]}
+                    move(s,fid,'CLASSIFYING','BROWSER_INQUIRY_OFFERED',browser_inquiry=inquiry)
+        if inquiry:
+            request['browser_inquiry'] = inquiry
         if f.get('chat_key') and not any(request.get(key) for key in
                                         ('parent', 'routing_continuation', 'document_evidence', 'document_offer_flow')):
             direct = explicit_workspace_review(prompt)
@@ -1480,6 +1602,10 @@ def _handle(s,meta,workspace,root,req,providers=None):
                 move(s,fid,'PAUSED','ROUTING_STOPPED',workflow_stop=stop)
             return response(s,fid,routing_step=chat,progress=next_step['reason'])
         p=r['accepted_output']
+        if probe := p.get('browser_probe'):
+            work = {'operation':'browser_review','paths':[probe['entry']]}
+            return route_browser(s,fid,request['conversation_session'],work,
+                                 working_question=probe['working_question'],conversation_id=r['invocation_id'],chat=chat)
         work=p.get('workspace_request') or {'operation':'read','paths':[]}
         # A catalog review cannot read DOCX contents. Route an admitted read
         # of exactly the document named by the user through scoped approval.
@@ -1545,9 +1671,9 @@ def _handle(s,meta,workspace,root,req,providers=None):
             roots=d.get('source_roots')
             if not roots:raise InvalidUpdate('A workspace review requires an admitted source target')
             work=d['permission']
-            catalog=(work['operation'] != 'project_patch' and
+            catalog=(work['operation'] not in ('project_patch','browser_review') and
                      not (work['operation']=='capability' and work.get('capability_action')=='install'))
-            if catalog or work['operation'] == 'project_patch':
+            if catalog or work['operation'] in ('project_patch','browser_review'):
                 import repository_tools as repo
                 repo.initialize(s)
             if catalog:
@@ -1597,6 +1723,16 @@ def _handle(s,meta,workspace,root,req,providers=None):
     if d.get('binding')!=identity(s,meta.get('active')) or req.get('binding')!=d['binding']:raise InvalidUpdate('Workflow task, calibration or permissions changed')
     parent=m.checked(s,d['root_node']);sid=parent['session']
     if phase=='NEED_TOOL_APPROVAL':
+        if proposal := d.get('browser_proposal'):
+            if event!='browser_grant':
+                raise InvalidUpdate('The browser check requires explicit approval')
+            from browser_review import execute
+            with m.scope(parent['id']):
+                changed = execute(s,sid,fid,workspace,root,req,proposal)
+            if changed:
+                move(s,fid,'NEED_TOOL_APPROVAL','BROWSER_PLAN_CHANGED',browser_proposal=changed)
+                return response(s,fid,progress='The HTML entry changed. Approve the updated browser plan to run it.')
+            return response(s,fid)
         import capabilities
         p=d['capability_proposal']
         receipt=capabilities.completed(s,p['id'])
@@ -1612,6 +1748,26 @@ def _handle(s,meta,workspace,root,req,providers=None):
         move(s,fid,'DONE','CAPABILITY_FINISHED',capability_result=receipt)
         return response(s,fid,capability_result=receipt)
     if phase=='WORKSPACE':
+        if d['permission'].get('operation')=='browser_review':
+            from browser_review import plan as browser_plan, validate_entry
+            try:
+                entry = d['permission']['paths'][0]
+                retained = d.get('browser_retained')
+                if retained and validate_entry(s,sid,workspace,entry)['source_sha256']==retained['source_sha256']:
+                    browser_receipt_for(s,fid,dict(d,browser_reused=retained))
+                    move(s,fid,'SYNTHESIS','BROWSER_RECEIPT_REUSED',browser_reused=retained)
+                    return response(s,fid)
+                proposal,_ = browser_plan(s,sid,fid,workspace,d['permission']['paths'][0])
+            except BudgetStop:
+                raise
+            except InvalidUpdate as exc:
+                from review_report import prose
+                move(s,fid,'DONE','BROWSER_PLAN_UNAVAILABLE',browser_result={'markdown':
+                     'The offline browser check could not be prepared. '+prose(str(exc))})
+                return response(s,fid)
+            move(s,fid,'NEED_TOOL_APPROVAL','BROWSER_PROPOSED',browser_proposal=proposal)
+            return response(s,fid,**({'progress':'The HTML changed since the saved browser run. Approve a new check to review this version.'}
+                                      if retained else {}))
         if d['permission'].get('operation')=='capability':
             import capabilities
             wanted=d['permission'];name=wanted['capability'];action=wanted['capability_action']
@@ -1714,6 +1870,19 @@ def _handle(s,meta,workspace,root,req,providers=None):
         if phase == 'SYNTHESIS' and provenance_changed(s, workspace, fid, d):
             return response(s, fid)
         request={'prompt':prompt,'models':models,'tier':effective(d,models,tier),'conversation_id':d['conversation_id'],**d['binding'],'child_results':d.get('child_results',[]),'orchestration_parent':d.get('result_parent',parent['id']), '_parent_step': phase == 'SYNTHESIS'}
+        if phase=='SYNTHESIS' and (d.get('browser_receipt') or d.get('browser_reused')):
+            from browser_review import critique
+            try:
+                with m.scope(parent['id']):
+                    result,report = critique(s,sid,fid,workspace,root,request,d,provider('synthesis'))
+            except (BudgetStop,m.OrchestrationStop) as exc:
+                stop = {'status':'task_budget','stage':phase,'resume_phase':phase,
+                        'error':str(exc),'frame':exc.frame,'automatic_retry':False}
+                return budget_pause(s,meta,root,req,fid,phase,stop)
+            move(s,fid,'DONE','BROWSER_CRITIQUE_COMPLETED',browser_result=report,
+                 invocation_id=result['invocation_id'],
+                 observation_delivery='admitted' if result['admission']['admitted'] else 'withheld')
+            return response(s,fid,claim_review_usage=result.get('token_usage'))
         if phase == 'SYNTHESIS' and d.get('context_recall'):
             request['context_recall'] = d['context_recall']
         claim_retry = d.get('claim_review_retry') if phase == 'SYNTHESIS' else None

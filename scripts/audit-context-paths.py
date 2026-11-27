@@ -22,6 +22,7 @@ PROFILES = {
     'document_verdict_reviewer': ('independent_document_quotes', 'Bound answer/quotes; no inherited reasoning as evidence.'),
     'review_reader': ('source_navigation', 'Current source inventory and requested evidence; no permission authority from notes.'),
     'document_extract': ('bounded_document_section', 'Exact document section and offsets; other sections remain explicitly outside this call.'),
+    'browser_reviewer': ('approved_browser_receipt', 'Exact launched source version with recorded browser observations and bounded source excerpts.'),
     'static_explainer': ('bounded_static_source', 'Fresh static graph/source slice; inventory is not runtime behavior.'),
     'api_mapper': ('bounded_api_source', 'Fresh indexed API source; earlier model output is unverified.'),
     'api_reviewer': ('independent_api_sources', 'Bound candidate and source facts; mapper claims alone are not evidence.'),

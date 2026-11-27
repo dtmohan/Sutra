@@ -26,15 +26,15 @@ EDGES = {
  'NEED_ARM': {'BINDING','CANCELLED','PAUSED'},
  'BINDING': {'NEED_PERMISSION','WORKSPACE','PAUSED','CANCELLED'},
  'NEED_PERMISSION': {'BINDING','CANCELLED','PAUSED'},
- 'WORKSPACE': {'MAPPING','BRANCHING','CODING','NEED_TOOL_APPROVAL','PAUSED','CANCELLED'},
- 'NEED_TOOL_APPROVAL': {'WORKSPACE','DONE','PAUSED','CANCELLED'},
+ 'WORKSPACE': {'MAPPING','BRANCHING','SYNTHESIS','CODING','NEED_TOOL_APPROVAL','PAUSED','CANCELLED'},
+ 'NEED_TOOL_APPROVAL': {'WORKSPACE','EXECUTING_ACTION','DONE','PAUSED','CANCELLED'},
  'MAPPING': {'WORKSPACE','PAUSED','CANCELLED'},
  'BRANCHING': {'CHILDREN','SYNTHESIS','PAUSED','CANCELLED'},
  'CHILDREN': {'CHILDREN','SYNTHESIS','PAUSED','CANCELLED'},
  'SYNTHESIS': {'DONE','PAUSED','CANCELLED'},
  'CODING': {'DONE','AWAITING_ACTION','PAUSED','CANCELLED'},
  'AWAITING_ACTION': {'EXECUTING_ACTION','CANCELLED'},
- 'EXECUTING_ACTION': {'DONE','CANCELLING'},
+ 'EXECUTING_ACTION': {'SYNTHESIS','DONE','CANCELLING'},
  'CANCELLING': {'DONE'},
 }
 
@@ -46,6 +46,8 @@ def initialize(s):
       CREATE TABLE IF NOT EXISTS orchestration_events(node_id TEXT,seq INTEGER,record_json TEXT,digest TEXT,PRIMARY KEY(node_id,seq));
       CREATE TABLE IF NOT EXISTS orchestration_charges(id TEXT PRIMARY KEY,node_id TEXT,kind TEXT,resource_id TEXT UNIQUE,cost_json TEXT);
       CREATE TABLE IF NOT EXISTS orchestration_settlements(charge_id TEXT PRIMARY KEY,record_json TEXT,digest TEXT);
+      CREATE INDEX IF NOT EXISTS browser_charges_by_node
+        ON orchestration_charges(node_id) WHERE kind='browser';
       CREATE INDEX IF NOT EXISTS review_policy_upgrades_by_session
         ON orchestration_events(json_extract(record_json,'$.data.review_policy_upgrade.current.session'))
         WHERE json_extract(record_json,'$.kind')='REVIEW_POLICY_UPGRADED';
@@ -272,6 +274,11 @@ def packet(n):
 def scope_check(n,kind,paths,role=None):
     from repository_tools import scoped
     if n['kind']=='branch' and kind=='model' and role not in n['roles']:raise InvalidUpdate('Child role is not permitted')
+    if kind == 'browser':
+        if (n['kind'] != 'execution' or len(paths) != 1 or paths != n['permissions']['read_paths']
+                or n['permissions']['network_allowed'] or n['permissions']['dependencies_allowed']):
+            raise InvalidUpdate('Browser execution exceeds its exact offline entry grant')
+        return
     if kind=='worktree_patch':
         if (n['kind']!='execution' or len(paths)<2 or
                 sorted(paths)!=n['permissions'].get('project_write_paths') or

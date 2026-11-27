@@ -1,5 +1,6 @@
 'use strict';
 const crypto=require('node:crypto'),path=require('node:path');
+const {isDeepStrictEqual}=require('node:util');
 const tokens=require('./media/token_usage');
 const {NativeMemory,isCompaction}=require('./native_memory');
 const hostTokens=require('./host_tokens');
@@ -31,9 +32,40 @@ const workspaceSelectionPause=flow=>evidencePause(flow)&&flow.stop.evidence_brid
 const documentFilePause=flow=>evidencePause(flow)&&flow.stop.evidence_bridge?.target_kind==='document'&&
   (flow.stop.evidence_bridge.required==='document_file'||/\.docx\b/i.test(flow.prompt||''));
 const settledWorktree=flow=>flow?.state==='DONE'&&flow.action_receipt?.kind===WORKTREE_PATCH;
+const settledBrowser=flow=>flow?.state==='DONE'&&typeof flow.browser_result?.markdown==='string'&&!!flow.browser_result.markdown.trim();
+const browserApprovalPause=flow=>flow?.state==='NEED_TOOL_APPROVAL'&&!!flow.browser_proposal;
 const DOCUMENT_EVIDENCE=/^\s*(?:document|r[eé]sum[eé]|cv|cover[ -]+letter)[ \t]+text:[ \t]*\r?\n\s*\S/i;
 const WORKSPACE_EVIDENCE=/^(?:use this workspace[.!?]*|workspace files:[ \t]*\r?\n\s*\S[\s\S]*)$/i;
+const BROWSER_ENTRY_EVIDENCE=/^[\x60'"]?(?:[\p{L}\p{N}_.-]+\/)*[\p{L}\p{N}_.-]+\.html?[\x60'"]?$/iu;
 const standaloneGreeting=prompt=>typeof prompt==='string'&&/^[ \t\r\n]*(?:hello(?: there)?|hi(?: there)?|hey)[.!?]*[ \t\r\n]*$/i.test(prompt);
+function browserProposal(flow){
+  const proposal=flow.browser_proposal;
+  if(proposal?.version!==1||proposal.browser!=='Chrome'||proposal.profile!=='standalone-html'||proposal.network_allowed!==false||
+      typeof proposal.entry!=='string'||proposal.entry.length>400||!/\.html?$/i.test(proposal.entry)||
+      /[\\\x00-\x1f\x7f\p{Cf}]/u.test(proposal.entry)||proposal.entry.split('/').some(part=>!part||part==='.'||part==='..')||
+      !/^[a-f0-9]{64}$/.test(proposal.source_sha256||'')||!/^[a-f0-9]{64}$/.test(proposal.plan_digest||'')||
+      !Number.isSafeInteger(proposal.source_bytes)||proposal.source_bytes<1||
+      !Number.isSafeInteger(proposal.timeout_ms)||proposal.timeout_ms<1||
+      typeof flow.flow_id!=='string'||typeof flow.cursor!=='string'||!flow.binding)
+    throw new Error('Sutra did not receive a complete browser check proposal.');
+  return proposal;
+}
+function browserObservationText(observation){
+  const literal=(value,limit)=>String(value).slice(0,limit).replace(/\s+/g,' ')
+    .replace(/[\x00-\x1f\x7f\p{Cf}]/gu,' ').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'})[c])
+    .replace(/[\\`*_{}\[\]()#+!|~-]/g,'\\$&');
+  if(observation.reused)return `Using saved browser observations for ${literal(observation.entry,400)}.\n\n`;
+  const details=[`**Browser observations** for ${literal(observation.entry,400)}`,
+    `Run status ${literal(observation.status,80)} · Receipt \`${observation.receipt_id}\``+
+      (Number.isFinite(observation.elapsed_seconds)&&observation.elapsed_seconds>=0?` · ${observation.elapsed_seconds.toFixed(2)} s`:'')];
+  if(typeof observation.diagnostic==='string'&&observation.diagnostic.trim())
+    details.push(literal(observation.diagnostic,600));
+  const rows=Array.isArray(observation.observations)?observation.observations.slice(0,16):[];
+  const items=rows.filter(row=>typeof row?.id==='string'&&typeof row.text==='string'&&row.text.trim())
+    .map(row=>`- ${literal(row.id,32)} · ${literal(row.text,550)}`);
+  if(items.length)details.push(items.join('\n'));
+  return details.join('\n\n')+'\n\n';
+}
 function checkWorktreePreview(preview){
   const changes=preview?.changes;
   if(preview?.kind!==WORKTREE_PATCH||!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(preview.base_commit||'')||
@@ -169,6 +201,7 @@ function install(vscode,context,deps){
   let armPromise,accessEpoch=0,armingStep='',armed,activeCancel,activeNativeChat,arming=false,running=false,selecting=false,lastRoute='',routing,reason='Open Sutra chat to talk. Choose workspace access on first use.';
   const memory=new NativeMemory(context);let lastCompaction;
   const tickets=new Map(),accessTickets=new Map(),completed=new Map(),changed=new vscode.EventEmitter();
+  const browserApprovals=new WeakMap();
   const enabled=()=>vscode.workspace.getConfiguration('karma').get('nativeEnabled',true);
   const authorization=deps.authorization;
   function modelInformation(){
@@ -369,6 +402,23 @@ function install(vscode,context,deps){
     if(nativeSetting)throw new Error('Sutra chat controls are updating. Wait for the change to finish.');
     if(refreshAccess()!==access || !enabled() || token?.isCancellationRequested)
       throw new Error('Sutra request cancelled or workspace permission changed.');
+  }
+  async function approveBrowser(flow,access,token){
+    assertCurrent(access,token);
+    if(assertArmed()!==access)throw new Error('Workspace permission changed before browser approval.');
+    const proposal=browserProposal(flow);
+    const proof={version:1,plan_digest:proposal.plan_digest,flow_id:flow.flow_id,cursor:flow.cursor,
+      binding:structuredClone(flow.binding)};
+    const question=typeof flow.browser_question==='string'?flow.browser_question.replace(/\s+/g,' ').trim().slice(0,220):'';
+    const detail=['Sutra will open this exact HTML snapshot in an isolated, temporary Chrome profile with network access blocked.',
+      ...(question?[`Question for this check: ${question}`]:[]),
+      `Time limit ${proposal.timeout_ms/1000} seconds`, `Source SHA-256 ${proposal.source_sha256}`].join('\n\n');
+    const choice=await vscode.window.showWarningMessage(`Run browser checks for ${proposal.entry}?`,{modal:true,detail},'Run browser checks');
+    assertCurrent(access,token);
+    if(choice!=='Run browser checks')return undefined;
+    const approval=Object.freeze({});
+    browserApprovals.set(approval,{proof,access,token});
+    return {plan_digest:proof.plan_digest,browser_approval:approval};
   }
   async function check(t,token){
     const st=await deps.request({op:'state',...t.flowScope},token);
@@ -603,7 +653,8 @@ function install(vscode,context,deps){
         needsWorkspaceAccess:prior?.needsWorkspaceAccess,requestedAccessProfile:prior?.requestedAccessProfile,
         nativeChat:prior?.nativeChat||chatKey,resumeLink:prior?.resumeLink||crypto.randomBytes(16).toString('hex'),
         conversation:undefined,routing_step:undefined,child:undefined,data:undefined,mapping:undefined,claim_review_usage:undefined,
-        allocation_proposal:undefined,allocation_amendment:undefined,report_sections:undefined});
+        allocation_proposal:undefined,allocation_amendment:undefined,report_sections:undefined,
+        browser_observation:undefined,browser_result:undefined});
     publish();
   }
   async function openTasks(){
@@ -679,6 +730,8 @@ function install(vscode,context,deps){
         resumeSubmission=undefined;
         void vscode.window.showInformationMessage(current.flow_id===pending.flow_id&&settledWorktree(current)
           ?'The worktree receipt is saved. Send continue in the original Sutra chat to see the result.'
+          :current.flow_id===pending.flow_id&&settledBrowser(current)
+          ?'The browser receipt is saved. Send continue in the original Sutra chat to see the result.'
           :'This Sutra request has finished.');
         return;
       }
@@ -736,9 +789,9 @@ function install(vscode,context,deps){
   async function flowEvent(flow,event,tier,token,extra,thinkForTurn,chatKey,stackChat,onFallback,onTicket){
     if(disposed)throw Object.assign(new Error('Sutra chat disconnected. The runner retains its request for reconnection.'),{code:'COORDINATOR_DETACHED'});
     const access=extra?.local_greeting?undefined:refreshAccess();
-    const models=extra?.local_greeting||['inspect','pending','recoverable_review','cancel','locate_document'].includes(event)?undefined:
+    const models=extra?.local_greeting||['inspect','pending','recoverable_review','cancel','locate_document','browser_grant'].includes(event)?undefined:
       await deps.configureModels(false,token,{tier,onFallback});
-    const workspaceStep=['step','resume','grant','capability_grant','restart_review','continue_parent_report','accept_provenance'].includes(event) && !classifying(flow);
+    const workspaceStep=['step','resume','grant','capability_grant','browser_grant','restart_review','continue_parent_report','accept_provenance'].includes(event) && !classifying(flow);
     if(workspaceStep){
       assertCurrent(access,token);
       assertArmed();
@@ -1181,7 +1234,7 @@ function install(vscode,context,deps){
         stopPromise=new Promise(resolve=>setImmediate(resolve)).then(async()=>{
           if(disposed||deps.isDisconnecting?.())return;
           const ticket=currentRunnerTicket||interrupted;
-          if(!ticket?.wholeTask||typeof deps.cancelRequest!=='function')return;
+          if(!(ticket?.wholeTask||ticket?.event==='browser_grant')||typeof deps.cancelRequest!=='function')return;
           stopAttempted=true;
           try{await deps.cancelRequest(ticket);}
           catch(error){stopError=error.message;audit.stopError=stopError;publish();}
@@ -1192,7 +1245,8 @@ function install(vscode,context,deps){
       let savedClassifierThinking;
       const resumeToken=prompt.trim().match(RESUME_PROMPT)?.[1];
       const requestedResume=/^(continue|resume|please continue|please resume)[.! ]*$/i.test(prompt.trim())||!!resumeToken;
-      const suppliedKind=!request.results&&(DOCUMENT_EVIDENCE.test(prompt)?'document':WORKSPACE_EVIDENCE.test(prompt.trim())?'workspace':null);
+      const suppliedKind=!request.results&&(DOCUMENT_EVIDENCE.test(prompt)?'document':WORKSPACE_EVIDENCE.test(prompt.trim())?'workspace':
+        BROWSER_ENTRY_EVIDENCE.test(prompt.trim())?'browser':null);
       const evidenceReply=flow=>evidencePause(flow)&&suppliedKind===flow.stop.evidence_bridge?.target_kind;
       const workspaceAccessPause=flow=>flow?.needsWorkspaceAccess===true||flow?.state==='NEED_ARM';
       const hasFlowLink=flow=>{
@@ -1206,7 +1260,8 @@ function install(vscode,context,deps){
       if(!stackChat&&resumeToken&&resumeSubmission?.id===resumeToken)stackChat=resumeSubmission.stackChat;
       const cached=context.workspaceState.get(pendingKey);
       const providerPause=cached?.state==='PAUSED'&&cached.stop?.status==='provider_wait'&&classifying(cached);
-      const resumeFromLink=requestedResume&&(workspaceAccessPause(cached)||providerPause||evidencePause(cached)||restartableReview(cached));
+      const resumeFromLink=requestedResume&&(workspaceAccessPause(cached)||providerPause||evidencePause(cached)||
+        browserApprovalPause(cached)||restartableReview(cached));
       if(!stackChat&&cached?.workspace===deps.workspace()&&(resumeFromLink||evidenceReply(cached))&&hasFlowLink(cached))
         stackChat=cached.stackChat;
       const identifiedChat=!!stackChat;
@@ -1214,6 +1269,7 @@ function install(vscode,context,deps){
       if(!stackChat&&!request.results)stackChat=crypto.randomBytes(32).toString('hex');
       const rememberMemory=id=>memory.remember(id,options,stackChat);
       const shownSections=new Set(), priorSections=new Set(memory.reportSectionReceipts(stackChat));
+      const shownBrowserObservations=new Set();
       const assistantHistory=priorSections.size?messages.filter(message=>message.role===vscode.LanguageModelChatMessageRole.Assistant)
         .map(message=>message.content.filter(part=>part instanceof vscode.LanguageModelTextPart).map(part=>part.value).join('')).join('\n\n'):'';
       function showReportSection(section){
@@ -1273,6 +1329,28 @@ function install(vscode,context,deps){
         assertCurrent(a,activeCancel.token);
         audit.stage='tool_finished';
         progress.report(new vscode.LanguageModelTextPart(worktreeReceiptText(flow.action_receipt)));
+        return true;
+      }
+      function showBrowserObservation(flow){
+        const observation=flow.browser_observation;
+        if(!/^(?:[a-f0-9]{32}|[a-f0-9]{64})$/.test(observation?.receipt_id||'')||
+            shownBrowserObservations.has(observation.receipt_id))return;
+        assertCurrent(a,activeCancel.token);
+        assertArmed();
+        progress.report(new vscode.LanguageModelTextPart(browserObservationText(observation)));
+        shownBrowserObservations.add(observation.receipt_id);
+      }
+      function showBrowserOutcome(flow){
+        if(!settledBrowser(flow))return false;
+        assertCurrent(a,activeCancel.token);
+        assertArmed();
+        showBrowserObservation(flow);
+        const result=flow.data?.result;
+        lastRoute=flow.browser_result.model||flow.data?.route?.model||result?.model||'';
+        recordUsage(result);
+        Object.assign(audit,{stage:'browser_review_finished',model:lastRoute,invocationId:result?.invocation_id});
+        publish();
+        progress.report(new vscode.LanguageModelTextPart(flow.browser_result.markdown+'\n\n'));
         return true;
       }
       async function chooseWorkspaceScope(flow){
@@ -1461,12 +1539,13 @@ function install(vscode,context,deps){
               if(inspected.cursor!==flow.cursor||inspected.state!==flow.state){
                 await rememberFlow(inspected,retained.thinkForTurn,chatKey,stackChat);
                 if(!disposed&&!activeCancel.token.isCancellationRequested){await acknowledgeTransport(retained);currentRunnerTicket=undefined;}
-                if(showWorktreeOutcome(inspected))return;
+                if(showWorktreeOutcome(inspected)||showBrowserOutcome(inspected))return;
                 resumeUnavailable('The saved workflow advanced after this runner step. Its current checkpoint is retained. Send continue to use that checkpoint; the older cached answer was not published.');
                 return;
               }
               flow={...cachedFlow,task_stack:inspected.task_stack,focused_flow:inspected.focused_flow,
-                recovery:inspected.recovery,report_sections:inspected.report_sections,action_receipt:inspected.action_receipt};
+                recovery:inspected.recovery,report_sections:inspected.report_sections,action_receipt:inspected.action_receipt,
+                browser_observation:inspected.browser_observation,browser_result:inspected.browser_result};
               await rememberFlow(flow,retained.thinkForTurn,chatKey,stackChat);
               if(!disposed&&!activeCancel.token.isCancellationRequested){await acknowledgeTransport(retained);currentRunnerTicket=undefined;}
               prompt=flow.prompt||retained.prompt||prompt;
@@ -1539,12 +1618,12 @@ function install(vscode,context,deps){
             legacyResume=!pending.stackChat;
             const old=await deps.request({op:'orchestrate',event:'inspect',flow_id:pending.flow_id,...flowScope(pending)},activeCancel.token);
             managed ||= !!old.task_stack;
-            const completedWorktree=submission&&old.flow_id===submission.flowId&&settledWorktree(old);
-            if(submission&&!completedWorktree&&(old.cursor!==submission.cursor||(['DONE','CANCELLED'].includes(old.state)&&!restartableReview(old)))){
+            const completedAction=submission&&old.flow_id===submission.flowId&&(settledWorktree(old)||settledBrowser(old));
+            if(submission&&!completedAction&&(old.cursor!==submission.cursor||(['DONE','CANCELLED'].includes(old.state)&&!restartableReview(old)))){
               resumeUnavailable('The saved Sutra request advanced. Choose Resume from the current pause in Sutra Monitor.');
               return;
             }
-            if(showRequestNotice(old)||showWorktreeOutcome(old))return;
+            if(showRequestNotice(old)||showWorktreeOutcome(old)||showBrowserOutcome(old))return;
             if(evidencePause(old)){
               if(supply&&evidenceReply(old)){
                 flow=await advance(old,'supply_evidence',{evidence_text:prompt});
@@ -1677,7 +1756,7 @@ function install(vscode,context,deps){
           }
           // Routing prose is not an authority on host capabilities or permissions.
           // Present a host-owned transition; publish model prose for conversation.
-          const conversationDone=flow.state==='DONE'&&!flow.data&&!flow.capability_result;
+          const conversationDone=flow.state==='DONE'&&!flow.data&&!flow.capability_result&&!settledBrowser(flow);
           if(conversationDone||flow.state!=='DONE')
             progress.report(new vscode.LanguageModelTextPart((conversationDone?conversationMarkdown(p):'Continuing this request through Sutra’s workspace workflow.')+'\n\n'));
           if(p.diagram){try{await deps.presentConversation?.(chat);progress.report(new vscode.LanguageModelTextPart('Diagram opened beside the chat. Use **Sutra: Open Last Diagram** to reopen it.\n\n'));}catch(error){progress.report(new vscode.LanguageModelTextPart('Diagram preview could not open: '+error.message+'\n\n'));}}
@@ -1714,11 +1793,13 @@ function install(vscode,context,deps){
         }
         if(!flow)flow=await advance(null,'start_existing',{prompt,conversation_id:conversationId,
           ...(actionScope?.flow_id?{action_flow_id:actionScope.flow_id}:{})});
-        if(showRequestNotice(flow)||showWorktreeOutcome(flow))return;
+        if(showRequestNotice(flow)||showWorktreeOutcome(flow)||showBrowserOutcome(flow))return;
+        showBrowserObservation(flow);
         showReportSections(flow);
         if(flow.state==='PAUSED'){
           flow=await advance(flow,'resume');
           if(showRequestNotice(flow))return;
+          showBrowserObservation(flow);
           showHostProgress(flow,progress);
         }
         while(!['DONE','AWAITING_ACTION'].includes(flow.state)){
@@ -1742,7 +1823,16 @@ function install(vscode,context,deps){
           }
           if(['QUARANTINED','CANCELLING','EXECUTING_ACTION'].includes(flow.state))throw new Error('Sutra workflow '+flow.state+'. Saved request retained. Inspect Sutra Monitor, then choose Resume or Discard.');
           let event='step',extra={};
-          if(flow.state==='NEED_TOOL_APPROVAL'&&!flow.capability_settled){
+          if(browserApprovalPause(flow)){
+            const approval=await approveBrowser(flow,a,activeCancel.token);
+            if(!approval){
+              audit.stage='permission_declined';
+              progress.report(new vscode.LanguageModelTextPart('Browser checks were declined. Your request is saved.\n\n'+resumeAction(flow)));
+              return;
+            }
+            event='browser_grant';extra=approval;
+            progress.report(new vscode.LanguageModelTextPart('Running approved browser checks in isolated Chrome.\n\n'));
+          }else if(flow.state==='NEED_TOOL_APPROVAL'&&!flow.capability_settled){
             const authorization=await deps.approveCapability(flow.capability_proposal,activeCancel.token);
             assertCurrent(a,activeCancel.token);
             if(!authorization){audit.stage='permission_declined';progress.report(new vscode.LanguageModelTextPart('Tool permission was not granted.\n\n'+resumeAction(flow)));return;}
@@ -1759,6 +1849,7 @@ function install(vscode,context,deps){
           }
           flow=await advance(flow,event,extra);
           if(showRequestNotice(flow))return;
+          showBrowserObservation(flow);
           const bound=flow.binding||flow.bound_task;
           if(bound)audit.session=bound.session;
           audit.orchestration={flowId:flow.flow_id,state:flow.state,children:flow.children};publish();
@@ -1766,6 +1857,7 @@ function install(vscode,context,deps){
           if(flow.child)recordUsage(flow.child.result);
         }
         assertCurrent(a,activeCancel.token);
+        if(showBrowserOutcome(flow))return;
         if(flow.capability_result){audit.stage='tool_finished';progress.report(new vscode.LanguageModelTextPart(deps.capabilityReport(flow.capability_result)));return;}
         data=flow.data;
         if(!data&&flow.state==='AWAITING_ACTION'&&flow.pending_action){
@@ -1903,6 +1995,16 @@ function install(vscode,context,deps){
   ].filter(Boolean);
   publish();
   return {status,publish,modelCatalogChanged,withWorkspaceAccess,requestWorkspaceAccess:()=>chooseWorkspaceAccess(),
+    browserEvidence(message,expectedAccess){
+      const approval=browserApprovals.get(message?.browser_approval);
+      if(!approval||message.op!=='orchestrate'||message.event!=='browser_grant'||approval.access!==expectedAccess||
+          !isDeepStrictEqual(approval.proof,{version:1,plan_digest:message.plan_digest,flow_id:message.flow_id,
+            cursor:message.cursor,binding:message.binding}))
+        throw new Error('Browser execution requires the current Sutra chat confirmation.');
+      assertCurrent(approval.access,approval.token);
+      browserApprovals.delete(message.browser_approval);
+      return approval.proof;
+    },
     permissionEvidence(expected){
       const access=refreshAccess();
       if(expected&&(!access||expected.generation!==access.generation||expected.scope!==access.scope||

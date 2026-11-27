@@ -19,6 +19,14 @@ def usage(s,session):
  used.update(carry_usage(s,session,digest))
  from capabilities import usage as capability_usage
  for key,value in capability_usage(s,session,digest).items():used[key]+=value
+ for raw, settlement in s.db.execute(
+     "SELECT c.cost_json, s.record_json FROM orchestration_charges c "
+     "JOIN orchestration_nodes n ON n.id=c.node_id "
+     "LEFT JOIN orchestration_settlements s ON s.charge_id=c.id "
+     "WHERE c.kind='browser' AND n.session=? AND json_extract(n.record_json,'$.binding.contract_hash')=?",
+     (session,digest)):
+  cost=json.loads(settlement)['used'] if settlement else json.loads(raw)
+  for key in ('operations','source_bytes','seconds'):used[key]+=cost[key]
  if c.get('conversation_only'):
   from document_review import READ_SECONDS, RESERVED
   count,total=s.db.execute(

@@ -350,7 +350,7 @@ def handle(root,workspace,request):
                     return capabilities.preview(s,sid,workspace,root,request['capability'],request['action'],request.get('paths',[]))
                 return capabilities.execute(s,sid,workspace,root,request['proposal_id'],request.get('authorization'))
             if request.get('op')=='orchestrate':
-                from orchestration_flow import handle as orchestrate, recover_project_lookup
+                from orchestration_flow import handle as orchestrate, recover_action_lookup
                 from task_continuation import check_request
                 if request.get('event') == 'runner_stop':
                     return orchestrate(s, {}, Path(workspace).resolve(), root, request)
@@ -364,7 +364,7 @@ def handle(root,workspace,request):
                 # A local greeting can only settle an exact provider-wait greeting.
                 event=request.get('event')
                 if event in ('inspect','recoverable_review'):
-                    recover_project_lookup(s,Path(workspace).resolve(),request)
+                    recover_action_lookup(s,Path(workspace).resolve(),request)
                 greeting_resume=event=='resume' and request.get('local_greeting') is True
                 reconcile_workspace=not greeting_resume and event not in (
                     'start','task_list','pending','recoverable_review','inspect','supply_evidence','locate_document','approve_document',
@@ -571,7 +571,7 @@ REQUEST_ENVIRONMENT = frozenset((
     'SUTRA_ENGINE_MODELS', 'SUTRA_ENGINE_ONLY', 'SUTRA_ENGINE_PYTHON', 'SUTRA_ENGINE_REGISTRY', 'SUTRA_ENGINE_APPROVALS',
     'SUTRA_ENGINE_CONTEXT',
     'SUTRA_STRATA_PORT', 'SUTRA_STRATA_MODEL', 'SUTRA_STRATA_MODELS', 'SUTRA_STRATA_ONLY', 'SUTRA_CAPABILITIES_MODE',
-    'SUTRA_CAPABILITY_AUTHORIZATION',
+    'SUTRA_CAPABILITY_AUTHORIZATION', 'SUTRA_BROWSER_AUTHORIZATION',
     'SUTRA_RUNTIME_DIR', 'SUTRA_MEMORY_OWNERSHIP', 'SUTRA_WORKSPACE_ALLOCATION',
     'KARMA_STORAGE_LIMIT_MIB', 'SUTRA_LOGIT_SENSOR', 'SUTRA_ACTIVITY',
     'SUTRA_THINKING', 'SUTRA_CHILD_THINKING', 'KARMA_NODE', 'KARMA_TYPESCRIPT', 'SUTRA_RAM_CACHE_MIB',

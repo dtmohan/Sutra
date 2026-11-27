@@ -46,6 +46,9 @@ def role_for(system):
     import chat_runtime, subagent_runtime, report_review, conversation
     import review_role, coding_role, architecture_role, api_roles, static_role
     import checked_protocol, protocol, legacy_model, memory_probe, review_followup, document_stages, document_verdict_review
+    from browser_review import JUDGMENT_SYSTEM, SYSTEM as BROWSER_SYSTEM
+    if system in (BROWSER_SYSTEM,JUDGMENT_SYSTEM):
+        return 'browser_reviewer'
     systems = {'review_reader': review_followup.SYSTEM, 'chat_reviewer': chat_runtime.SYSTEM, 'subagent': subagent_runtime.SYSTEM,
         'report_reviewer': report_review.SYSTEM, 'conversation': conversation.SYSTEM,
         'reviewer': review_role.SYSTEM, 'coder': coding_role.SYSTEM,
@@ -195,7 +198,11 @@ def model_schema(role, payload, schema, version=None):
 
 def host_fields(role, payload, schema, version=VERSION, proposal=None):
     if role == 'conversation' and payload.get('response_contract') == 2:
-        return {'context_binding': payload['context_binding']}
+        fields = {'context_binding': payload['context_binding']}
+        if (payload.get('browser_inquiry') or {}).get('version') == 2:
+            fields.update(intent='workspace' if proposal and 'browser_probe' in proposal else 'conversation',
+                          escalation_reason='none', page_requests=[], diagram=None)
+        return fields
     if role not in REVIEW_ROLES or role == 'review_reader': return {}
     from review_role import constraint_rows
     bindings = {'task_id': payload['contract']['task_id'],
@@ -413,6 +420,10 @@ def build(system, payload, schema, *, packing=None):
     elif role == 'document_verdict_reviewer':
         body = select(payload, ('request', 'quotes', 'answer', 'basis', 'citation_ids', 'repair'))
         messages_out = [{'role': 'system', 'content': system}, {'role': 'user', 'content': canonical(body)}]
+    elif role == 'browser_reviewer':
+        body = select(payload, ('request','entry','observations','source_excerpts','working_question',
+                                'browser_phase','judgment_choices'))
+        messages_out = [{'role':'system','content':system},{'role':'user','content':canonical(body)}]
     elif role in sections:
         messages_out = section_messages(role, payload)
     elif role in REVIEW_ROLES:

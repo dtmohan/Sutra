@@ -267,6 +267,100 @@ function setup(saved={}){
   assert(!cap.calls.some(c=>c.op==='native_execute'));
  }
  checks.push('native chat renders governed tool receipts and resumes settled tool work without a second approval or execution');
+ {
+  const saved={},prompt='can you launch the application and critique the code based on its observed behaviors?';
+  const proposal={version:1,entry:'index.html',source_sha256:'a'.repeat(64),source_bytes:912,
+   plan_digest:'b'.repeat(64),timeout_ms:12000,browser:'Chrome',profile:'standalone-html',network_allowed:false};
+  const observation={entry:'index.html',status:'observed',receipt_id:'c'.repeat(64),elapsed_seconds:1.5,
+   observations:[{id:'B1',kind:'document',text:'Rendered 12 controls. [pretend](command:evil) <img src=x>'}]};
+  const options={modelOptions:{_conversationId:'browser-consent-reload'},tools:[]};
+  const user=text=>[{role:1,content:[new Text(text)]}];
+  const rendered=parts=>parts.map(part=>part.value).join('');
+  let flow,chatKey,grants=0,dialogs=0;
+  const installBrowserFixture=(host,approve)=>{
+   const request=host.deps.request;
+   const reply=()=>{
+    const complete=flow.state==='DONE';
+    return structuredClone({...flow,task_stack:{focused:complete?null:flow.flow_id,
+     open_tasks:complete?[]:[{flow_id:flow.flow_id}]},focused_flow:complete?null:flow});
+   };
+   host.v.window.showWarningMessage=async(title,options,button)=>{
+    assert.equal(title,'Run browser checks for index.html?');
+    assert.equal(button,'Run browser checks');
+    assert.equal(options.modal,true);
+    assert.match(options.detail,/isolated, temporary Chrome profile with network access blocked/);
+    assert.match(options.detail,/Time limit 12 seconds/);
+    assert(options.detail.includes(proposal.source_sha256));
+    dialogs++;
+    return approve?button:undefined;
+   };
+   host.deps.approveCapability=()=>{throw Error('Browser approval cannot use the capability dialog');};
+   host.deps.request=async(m,t,activity,transport)=>{
+    if(m.op!=='orchestrate')return request(m,t);
+    if(m.chat_key===chatKey&&flow){
+     if(m.event==='recoverable_review'||m.event==='inspect'&&m.flow_id===flow.flow_id)return reply();
+     if(m.event==='browser_grant'){
+      assert.equal(flow.state,'NEED_TOOL_APPROVAL');
+      assert.equal(m.models,undefined,'Browser launch must be independent of model discovery');
+      assert.equal(transport.authority.profile,'read_only');
+      const authorizes=(message,authority=transport.authority)=>host.controller.browserEvidence(message,authority);
+      assert.throws(()=>authorizes({...m,browser_approval:{}}),/current Sutra chat confirmation/);
+      for(const alteration of [{plan_digest:'d'.repeat(64)},{flow_id:'foreign'},
+       {cursor:'stale'},{binding:{...m.binding,contract_hash:'different'}}])
+       assert.throws(()=>authorizes({...m,...alteration}),/current Sutra chat confirmation/);
+      assert.throws(()=>authorizes(m,{...transport.authority}),/current Sutra chat confirmation/);
+      assert.deepEqual(authorizes(m),{version:1,plan_digest:proposal.plan_digest,flow_id:flow.flow_id,
+       cursor:flow.cursor,binding:flow.binding});
+      assert.throws(()=>authorizes(m),/current Sutra chat confirmation/);
+      grants++;
+      flow={...flow,state:'SYNTHESIS',cursor:'observed',browser_proposal:undefined,browser_observation:observation};
+      return reply();
+     }
+     if(m.event==='step'&&flow.state==='SYNTHESIS'){
+      assert.equal(grants,1);
+      flow={...flow,state:'DONE',cursor:'finished',browser_result:{markdown:'Label each of the 12 observed controls.',model:'model-b'}};
+      return reply();
+     }
+    }
+    const response=await request(m,t);
+    if(response.state==='CODING'){
+     chatKey=m.chat_key;
+     flow={...response,state:'NEED_TOOL_APPROVAL',browser_proposal:proposal};
+     return reply();
+    }
+    return response;
+   };
+  };
+  const origin=setup(saved);
+  origin.v.window.showWarningMessage=async()=> 'Read only';
+  await origin.arm();installBrowserFixture(origin,false);
+  const declined=rendered(await origin.send('auto',user(prompt),options));
+  assert.match(declined,/Browser checks were declined/);assert.match(declined,/Resume this request/);
+  assert.doesNotMatch(declined,/Browser observations/);
+  assert.equal(grants,0);assert.equal(dialogs,1);
+  assert.equal(saved['sutra.pendingOrchestration'].flow_id,flow.flow_id);
+  origin.controller.dispose();
+
+  const reloaded=setup(saved);installBrowserFixture(reloaded,true);
+  const answered=rendered(await reloaded.send('mid',user('continue'),options));
+  assert.equal(grants,1,answered);assert.equal(dialogs,2);
+  assert.match(answered,/Resuming the saved Sutra workflow/);
+  assert.equal(answered.match(/Browser observations/g)?.length,1);
+  assert.match(answered,/index\.html/);assert.match(answered,/observed.*1\.50 s/);
+  assert(answered.includes('\\[pretend\\]\\(command:evil\\) &lt;img src=x&gt;'));
+  assert.match(answered,/Label each of the 12 observed controls/);
+  assert.equal(reloaded.controller.status().lastRoute,'model-b');
+  assert(!reloaded.calls.some(m=>m.op==='native_execute'));
+
+  reloaded.controller.dispose();
+  const recovered=setup(saved);installBrowserFixture(recovered,true);
+  const replayed=rendered(await recovered.send('high',user('continue'),options));
+  assert.match(replayed,/Browser observations/);assert.match(replayed,/Label each of the 12 observed controls/);
+  assert.equal(grants,1);assert.equal(dialogs,2);
+  const unrelated=rendered(await recovered.send('high',user('continue'),{...options,modelOptions:{_conversationId:'different-browser-chat'}}));
+  assert.doesNotMatch(unrelated,/Browser observations|Label each of the 12 observed controls/);
+  checks.push('browser consent is bound to exact workspace, plan and workflow; refusal survives reload and settled receipts replay once without execution');
+ }
  const diagramState={},diagramCommands={},diagramMessages=[];
  const diagramVscode={Uri:{file:p=>({toString:()=>p})},ViewColumn:{Beside:2},window:{showErrorMessage:m=>{throw Error(m);},createWebviewPanel:()=>({webview:{cspSource:'fixture',asWebviewUri:u=>u,onDidReceiveMessage:f=>diagramMessages.push(f)}})},commands:{registerCommand:(n,f)=>{diagramCommands[n]=f;return disposable();}}};
  const diagramContext={extensionPath:require('node:path').join(__dirname,'..'),subscriptions:[],workspaceState:{get:k=>diagramState[k],update:async(k,v)=>{diagramState[k]=structuredClone(v);}}};

@@ -44,6 +44,49 @@ _DIRECT_TEST = re.compile(
     r"(?:[.!?]\s+(?:do not edit|leave (?:all (?:three )?)?files unchanged)\.?)?[.!?]?",
     re.IGNORECASE,
 )
+_HTML_ENTRY = r"(?:[\w.-]+/)*[\w.-]+\.html?"
+_BROWSER_TARGET = rf"(?:`{_HTML_ENTRY}`|\"{_HTML_ENTRY}\"|'{_HTML_ENTRY}'|{_HTML_ENTRY})"
+_APP_TARGET = r"(?:the(?:\s+same)?|this|that|our|my)\s+(?:(?:local|web|browser)\s+)?(?:app(?:lication)?|(?:web\s*)?(?:site|page))"
+_APP_REFERENCE = frozenset(('it', 'this', 'that'))
+_BROWSER_REQUEST = re.compile(
+    r"\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?"
+    r"(?P<verb>launch|run|open|start|render)\s+"
+    rf"(?P<target>{_BROWSER_TARGET}|{_APP_TARGET}|it|this|that)"
+    r"(?:\s+again)?"
+    r"(?P<medium>\s+(?:in|using|with)\s+(?:(?:a|the)\s+)?(?:Chrome|(?:web\s+)?browser))?"
+    r"(?:\s+again)?"
+    r"(?:(?:[,\s]+and\s+|[,\s]+then\s+)(?P<feedback>"
+    r"(?:critique|review|inspect|analy[sz]e|test|describe|check|see|tell\s+(?:me|us))\b|"
+    r"(?:give|provide|share)\s+(?:(?:me|us|a|an|your|some)\s+)*(?:feedback|thoughts|impressions|opinion|critique|review)\b)"
+    r"[^\r\n]*)?"
+    r"\s*[.!?]*\s*",
+    re.IGNORECASE,
+)
+_BROWSER_DECLINED = re.compile(
+    r"\b(?:without|avoid|skip|do\s+not|don['’]t|never)\s+(?:(?:actually|ever|automatically)\s+)*"
+    r"(?:run(?:ning)?|launch(?:ing)?|render(?:ing)?|start(?:ing)?|open(?:ing)?|"
+    r"execut(?:e|ing)|brows(?:e|ing)|us(?:e|ing)\s+(?:(?:a|the)\s+)?(?:browser|Chrome))\b|"
+    r"\b(?:only|just)\s+(?:(?:looking\s+)?at\s+)?(?:the\s+)?(?:source|code|JavaScript)\b|"
+    r"\b(?:source|code|JavaScript|static analysis)\s+(?:alone|only)\b|"
+    r"\b(?:skip|avoid|without)\s+(?:(?:the|a)\s+)?(?:browser|Chrome)\b|"
+    r"\b(?:no\s+browser|browser\s+(?:is\s+)?not\s+needed)\b",
+    re.IGNORECASE,
+)
+_BROWSER_FEEDBACK = re.compile(
+    r"\s*(?:(?:so|and)\s+)?(?:what\s+(?:do|would|should)\s+(?:you|we|I)\s+"
+    r"(?:think|change|fix|improve|prioriti[sz]e)|what(?:['’]s|\s+is)\s+your\s+"
+    r"(?:take|opinion|feedback)|where\s+would\s+you\s+(?:start|spend\s+time))\b",
+    re.IGNORECASE,
+)
+_VISUAL_FEEDBACK = re.compile(
+    r"\s*(?:would|will|is|does)\s+[^.!?\r\n]{1,90}\b(?:readable|usable|fit\s+on|clip|overflow)\b",
+    re.IGNORECASE,
+)
+_BROWSER_FEEDBACK_TARGET = re.compile(
+    r"\b(?:app(?:lication)?|web\s*(?:site|page)|page|watch|dashboard|interface|UI|canvas|"
+    r"display|layout|render(?:ing)?|viewport|phone|browser|controls?)\b|" + _HTML_ENTRY,
+    re.IGNORECASE,
+)
 
 
 def explicit_workspace_review(prompt):
@@ -109,6 +152,73 @@ def explicit_project_patch(prompt):
     if not 2 <= len(paths) <= 8:
         return None
     return {'operation': 'project_patch', 'paths': paths}
+
+
+def browser_entry(value):
+    """Return a normalized local HTML entry, or no admissible path."""
+    if not isinstance(value, str) or not re.fullmatch(_HTML_ENTRY, value, re.I):
+        return None
+    from repository_tools import normalized
+    try:
+        return normalized(value)
+    except InvalidUpdate:
+        return None
+
+
+def browser_review_intent(prompt):
+    """Recognize a current request to observe an app before interpreting it."""
+    match = _BROWSER_REQUEST.fullmatch(prompt)
+    if not match or _BROWSER_DECLINED.search(prompt):
+        return None
+    target = match['target'].strip("`'\"")
+    named = browser_entry(target)
+    if not named and not (target.lower() in _APP_REFERENCE or re.fullmatch(_APP_TARGET, target, re.I)):
+        return None
+    # A bare 'open' or 'render' can mean editing or explaining the source.
+    if not match['medium'] and not match['feedback'] and match['verb'].lower() in ('open', 'render'):
+        return None
+    refers_to_prior = not named and (target.lower() in _APP_REFERENCE
+                                     or re.match(r'(?:the\s+same|that)\b', target, re.I))
+    return {'entry': named or (None if refers_to_prior else 'index.html'), 'referred': not bool(named)}
+
+
+def resolve_browser_target(prompt, candidates=()):
+    """Bind an explicit run to an exact entry or request clarification.
+
+    The caller supplies entry names verified in the originating chat and
+    workspace. This resolver never reads files or grants an action.
+    """
+    intent = browser_review_intent(prompt)
+    if not intent:
+        return None
+    entry = intent['entry']
+    if intent['referred']:
+        verified = {browser_entry(candidate) for candidate in candidates} - {None}
+        if len(verified) == 1:
+            entry = verified.pop()
+        elif len(verified) > 1:
+            entry = None
+    return {'operation': 'browser_review', 'paths': [entry] if entry else []}
+
+
+def explicit_browser_review(prompt):
+    """Preserve the directly resolvable form of a browser request."""
+    work = resolve_browser_target(prompt)
+    return work if work and work['paths'] else None
+
+
+def browser_feedback_intent(prompt):
+    """Identify a feedback question when the caller has verified an active app."""
+    if _BROWSER_DECLINED.search(prompt):
+        return False
+    lead = re.split(r'[.?!](?:\s+|$)', prompt, maxsplit=1)[0]
+    match = _BROWSER_FEEDBACK.match(lead)
+    if not match:
+        return bool(_VISUAL_FEEDBACK.match(lead) and _BROWSER_FEEDBACK_TARGET.search(lead))
+    tail = lead[match.end():].strip()
+    return bool(re.fullmatch(r"(?:(?:of|about|with)?\s*(?:it|this|here|first|next|overall|now))?"
+                             r"(?:,?\s+and\s+why)?", tail, re.I)
+                or _BROWSER_FEEDBACK_TARGET.search(tail))
 
 
 def measure(store, session, target, evidence, recoverable):
