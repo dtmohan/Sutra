@@ -2,6 +2,7 @@
 import unittest
 
 from evidence_admission import browser_entry, browser_feedback_intent, browser_review_intent
+from evidence_admission import browser_feedback_goal, browser_goal_matches
 from evidence_admission import explicit_browser_review, resolve_browser_target
 
 
@@ -59,6 +60,26 @@ class BrowserIntentTests(unittest.TestCase):
         self.assertFalse(browser_feedback_intent('Explain how a browser renders CSS.'))
         self.assertFalse(browser_feedback_intent('What do you think of my résumé?'))
         self.assertFalse(browser_feedback_intent('What would you fix in the tax return first?'))
+
+    def test_goal_preface_requires_a_bound_subject_and_a_priority_question(self):
+        evidence = {'entry':'calculator.html','observations':[
+            {'kind':'interaction','text':'The same synthetic birth date and time produced identical visible results.'}]}
+        question = 'What would you fix first for that, and why?'
+        for preface in ('Before release, I need people entering birth times to trust the result.',
+                        'This app needs to be ready for customers.',
+                        'I want calculator.html to be easier to use.'):
+            with self.subTest(preface=preface):
+                goal = browser_feedback_goal(f'{preface} {question}')
+                self.assertTrue(browser_goal_matches(goal,evidence))
+        unrelated = browser_feedback_goal(f'I am doing my tax return. {question}')
+        self.assertFalse(browser_goal_matches(unrelated,evidence))
+        for prompt in (f'A new app handles birth times too. {question}',
+                       f'I need this app to be ready. {question} Source only, please.',
+                       f'I need this app to be ready. {question} Do not run it.',
+                       f'Install the app on the test computer. {question}',
+                       'I need the time controls to work. What would you fix in my tax return?'):
+            with self.subTest(prompt=prompt):
+                self.assertIsNone(browser_feedback_goal(prompt))
 
     def test_entry_validates_repository_path(self):
         self.assertEqual(browser_entry('web/App.HTML'), 'web/App.HTML')

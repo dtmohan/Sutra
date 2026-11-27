@@ -1,4 +1,4 @@
-Sutra 0.61.1 — Local AI for VS Code
+Sutra 0.61.2 — Local AI for VS Code
 
 Use Sutra for local-model chat, source-linked codebase reviews and approved
 workspace actions such as Python tests or browser checks.

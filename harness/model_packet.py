@@ -46,8 +46,8 @@ def role_for(system):
     import chat_runtime, subagent_runtime, report_review, conversation
     import review_role, coding_role, architecture_role, api_roles, static_role
     import checked_protocol, protocol, legacy_model, memory_probe, review_followup, document_stages, document_verdict_review
-    from browser_review import JUDGMENT_SYSTEM, SYSTEM as BROWSER_SYSTEM
-    if system in (BROWSER_SYSTEM,JUDGMENT_SYSTEM):
+    from browser_review import FOLLOWUP_JUDGMENT_SYSTEM, GOAL_JUDGMENT_SYSTEM, JUDGMENT_SYSTEM, SYSTEM as BROWSER_SYSTEM
+    if system in (BROWSER_SYSTEM,JUDGMENT_SYSTEM,GOAL_JUDGMENT_SYSTEM,FOLLOWUP_JUDGMENT_SYSTEM):
         return 'browser_reviewer'
     systems = {'review_reader': review_followup.SYSTEM, 'chat_reviewer': chat_runtime.SYSTEM, 'subagent': subagent_runtime.SYSTEM,
         'report_reviewer': report_review.SYSTEM, 'conversation': conversation.SYSTEM,
@@ -421,9 +421,29 @@ def build(system, payload, schema, *, packing=None):
         body = select(payload, ('request', 'quotes', 'answer', 'basis', 'citation_ids', 'repair'))
         messages_out = [{'role': 'system', 'content': system}, {'role': 'user', 'content': canonical(body)}]
     elif role == 'browser_reviewer':
-        body = select(payload, ('request','entry','observations','source_excerpts','working_question',
-                                'browser_phase','judgment_choices'))
-        messages_out = [{'role':'system','content':system},{'role':'user','content':canonical(body)}]
+        if payload.get('judgment_version') == 3:
+            from browser_review import goal_options
+            choices = goal_options(payload)
+            body = {'checked_alternatives':[{'action':row['action'],'measurement':row['measurement'],
+                                            'possible_change':row['possible_change']} for row in choices],
+                    'working_controls':[r['text'] for r in payload['observations'] if not r.get('measurement')]}
+            prior = payload.get('prior_browser_judgment')
+            if prior:
+                action = next(row['action'] for row in choices if row['id']==prior['priority'])
+                body['previous_recommendation'] = {'action':action,'request':prior['request'].strip()}
+            original = payload.get('original_browser_request') or (prior or {}).get('original_request')
+            if original:
+                body['original_user_request'] = original.strip()
+            if payload.get('working_question'):
+                body['initial_working_question'] = payload['working_question']
+            body['current_user_request'] = payload['request'].strip()
+            # Preserve receipt order and place the current ask after prior context on every backend.
+            content = json.dumps(body,ensure_ascii=False,separators=(',',':'))
+        else:
+            body = select(payload, ('request','entry','observations','source_excerpts','working_question',
+                                    'browser_phase','judgment_choices'))
+            content = canonical(body)
+        messages_out = [{'role':'system','content':system},{'role':'user','content':content}]
     elif role in sections:
         messages_out = section_messages(role, payload)
     elif role in REVIEW_ROLES:

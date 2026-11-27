@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.61.2
+
+- Browser reviews explain how the first recommended fix serves the user's goal. When a follow-up changes the priority, the model weighs it against the previous recommendation using the saved browser observations.
+
 ## 0.61.1
 
 - Use the HTML file already identified in the chat for requests such as “render it in a browser.” Sutra asks which file to use when several could match.

@@ -33,6 +33,137 @@ def evidence(*measurements):
 
 
 class BrowserJudgmentTests(unittest.TestCase):
+    def test_semantic_actions_follow_checked_receipt_order_and_disambiguate_repeated_probes(self):
+        saved = evidence({'probe':'visible_placeholder'},LAYOUT,OFFSET,
+                         {'probe':'script_exception'},LAYOUT,dict(OFFSET,outputs='different'))
+        rows = saved['evidence']['observations']
+        for index,row in enumerate(rows):
+            row['text'] = f'Checked observation {index+1}.'
+        payload = dict(review.judgment_packet(saved,{}),observations=rows)
+        options = review.goal_options(payload)
+        self.assertEqual([option['id'] for option in options],[row['id'] for row in rows])
+        self.assertEqual([option['measurement'] for option in options],[row['text'] for row in rows])
+        self.assertEqual([option['action'] for option in options],
+                         ['remove_visible_markup','fit_canvas_to_viewport_O2','check_utc_offset_calculation_O3',
+                          'investigate_script_exception','fit_canvas_to_viewport_O5','add_utc_offset_regression_check_O6'])
+        unsupported = {'id':'O7','kind':'control','text':'A button displayed a name.'}
+        self.assertEqual(review.goal_options(dict(payload,observations=[*rows,unsupported])),options)
+        proposed = {'goal':'Read the page on a phone.','next_action':'fit_canvas_to_viewport_O5',
+                    'reason':'Phone users need to see the full display.','comparison':'That now takes priority.'}
+        self.assertEqual(review.goal_proposal(payload,proposed),
+                         {'priority':'O5','why_first':proposed['reason'],'comparison':proposed['comparison']})
+        with self.assertRaisesRegex(InvalidUpdate,'not supported'):
+            review.goal_proposal(payload,dict(proposed,next_action='fit_canvas_to_viewport'))
+
+    def test_semantic_options_preserve_the_sample_scope_and_changed_offset_case(self):
+        saved = evidence(dict(OFFSET,outputs='different'))
+        payload = dict(review.judgment_packet(saved,{}),observations=saved['evidence']['observations'])
+        options = review.goal_options(payload)
+        self.assertEqual(len(options),1)
+        self.assertEqual(options[0]['action'],'add_utc_offset_regression_check')
+
+        saved = evidence()
+        payload = dict(review.judgment_packet(saved,{}),observations=saved['evidence']['observations'])
+        options = review.goal_options(payload)
+        self.assertEqual(len(options),1)
+        self.assertEqual((options[0]['id'],options[0]['action']),('scope','check_primary_user_flow'))
+        self.assertIn('sampled',options[0]['measurement'])
+        result = review.goal_proposal(payload,{'goal':'Check usability.','next_action':'check_primary_user_flow',
+                                                'reason':'A known expected result makes the check interpretable.'})
+        self.assertEqual(result,{'priority':'scope','why_first':'A known expected result makes the check interpretable.'})
+
+    def goal_payload(self):
+        saved = evidence(OFFSET,LAYOUT)
+        saved['evidence']['observations'][0]['text'] = 'The two offsets gave identical results.'
+        saved['evidence']['observations'][1]['text'] = 'The 560 px canvas overflowed the 390 px viewport.'
+        return dict(review.judgment_packet(saved,{'browser_judgment_version':3}),
+                    request='What should we fix for the phone demo?',entry=ENTRY,
+                    prior_browser_judgment={'request':'Review the app','priority':'O1',
+                                           'why_first':'An unnoticed time error could mislead someone.'},
+                    observations=saved['evidence']['observations'],source_excerpts=saved['source_excerpts'])
+
+    def test_goal_packet_carries_prior_opinion_without_supplying_an_answer_to_copy(self):
+        import json
+        payload = self.goal_payload()
+        payload['observations'].append({'id':'O3','kind':'control','text':'The selector changed its label.'})
+        system,fmt = expected_request(review.ROLE,payload)
+        wire = json.loads(build(system,payload,fmt)['messages'][1]['content'])
+        self.assertEqual(wire['previous_recommendation'],
+                         {'action':'check_utc_offset_calculation','request':'Review the app'})
+        self.assertNotIn(payload['prior_browser_judgment']['why_first'],json.dumps(wire))
+        self.assertEqual(wire['current_user_request'],payload['request'])
+        alternatives = {row['action']:row for row in wire['checked_alternatives']}
+        self.assertEqual(set(alternatives),{'fit_canvas_to_viewport','check_utc_offset_calculation'})
+        self.assertIn('outside the layout bounds',alternatives['fit_canvas_to_viewport']['measurement'])
+        self.assertNotIn('560',alternatives['fit_canvas_to_viewport']['measurement'])
+        self.assertIn('identical visible results',alternatives['check_utc_offset_calculation']['measurement'])
+        self.assertIn('560 px',payload['observations'][1]['text'])
+        for alternative in alternatives.values():
+            self.assertEqual(set(alternative),{'action','measurement','possible_change'})
+            self.assertTrue(alternative['possible_change'])
+        self.assertEqual(wire['working_controls'],['The selector changed its label.'])
+        self.assertNotIn('judgment_choices',wire)
+        self.assertEqual(set(fmt['required']),{'goal','next_action','reason','comparison'})
+
+    def test_semantic_action_and_reason_bind_to_a_measured_priority(self):
+        payload = self.goal_payload()
+        proposal = {'goal':'Make the face readable for a phone demo.',
+                    'next_action':'fit_canvas_to_viewport',
+                    'reason':'The demo audience needs to see the whole face.',
+                    'comparison':'For this demo the clipped face matters more than the offset check.'}
+        fmt = review.schema(payload)
+        validate_shape(proposal,fmt)
+        normalized = review.goal_proposal(payload,proposal)
+        self.assertEqual(normalized['priority'],'O2')
+        self.assertEqual(normalized['why_first'],proposal['reason'])
+        self.assertEqual(normalized['comparison'],proposal['comparison'])
+        for action in ('O2','add_unmeasured_analytics'):
+            with self.subTest(action=action), self.assertRaises(InvalidUpdate):
+                validate_shape(dict(proposal,next_action=action),fmt)
+            with self.subTest(action=action), self.assertRaises(InvalidUpdate):
+                review.goal_proposal(payload,dict(proposal,next_action=action))
+        with self.assertRaises(InvalidUpdate):
+            validate_shape({k:v for k,v in proposal.items() if k!='comparison'},fmt)
+
+    def test_changed_and_retained_choices_publish_opinion_apart_from_the_receipt(self):
+        payload = self.goal_payload()
+        choice = {'priority':'O2','why_first':'The demo audience needs to see the whole face.',
+                  'comparison':'For a phone demo I would trade some calculation confidence for legibility.'}
+        review._check_explanation(payload,choice)
+        changed = review._goal_markdown(payload,choice,Path('/tmp'))
+        opinion,facts = changed.split('**Browser evidence**')
+        self.assertIn(choice['why_first'],opinion)
+        self.assertIn('Why I changed my priority',opinion)
+        self.assertIn(choice['comparison'],opinion)
+        self.assertNotIn('demo audience',facts)
+        self.assertIn('560 px canvas overflowed',facts)
+        self.assertIn('two offsets gave identical results',facts)
+        same = review._goal_markdown(payload,dict(choice,priority='O1',
+                 comparison='A misleading time would also undermine the demonstration.'),Path('/tmp'))
+        self.assertIn('Why I’d keep this first',same)
+        self.assertNotIn('Why I changed',same)
+
+    def test_judgment_cannot_supply_new_quantities_observation_ids_or_links(self):
+        payload = self.goal_payload()
+        output = {'priority':'O2','why_first':'The narrow layout could hide the information a visitor needs.',
+                  'comparison':'Legibility is the immediate concern for a phone demo.'}
+        for addition in (' It dropped 80% of visits.', ' See O99.', ' See https://example.org/.'):
+            with self.subTest(addition=addition), self.assertRaises(InvalidUpdate):
+                review._check_explanation(payload,dict(output,why_first=output['why_first']+addition))
+        review._check_explanation(payload,dict(output,why_first='At 390px, a visitor could miss part of the dial.'))
+
+    def test_scope_choice_keeps_observed_controls_visible_without_diagnosing_a_defect(self):
+        saved = evidence()
+        saved['evidence']['observations'] = [{'id':'O1','kind':'control','text':'Clicking the selector changed its label.'}]
+        payload = dict(review.judgment_packet(saved,{'browser_judgment_version':3}),entry=ENTRY,
+                       observations=saved['evidence']['observations'],source_excerpts=saved['source_excerpts'])
+        for output in (None,{'priority':'scope','why_first':'A known expected outcome would help us decide whether the main interaction works.'}):
+            with self.subTest(output=output):
+                rendered = review._goal_markdown(payload,output,Path('/tmp'))
+                self.assertIn('**Browser evidence**',rendered)
+                self.assertIn('Clicking the selector changed its label.',rendered)
+                self.assertIn('[index.html:34]',rendered)
+
     def test_offset_control_and_handler_take_priority_over_routine_buttons(self):
         declarations = [f'<button id="control{i}"></button>' for i in range(14)]
         source = '\n\n\n\n'.join([*declarations, '<input id="utcOffset">',
@@ -128,7 +259,7 @@ class BrowserJudgmentWorkflowTests(unittest.TestCase):
 
     def call(self, cid, system, payload, schema):
         consume_dispatch(cid,self.model,system,payload,schema)
-        self.assertEqual(system,review.JUDGMENT_SYSTEM)
+        self.assertEqual(system,review.GOAL_JUDGMENT_SYSTEM)
         self.calls.append(payload)
         return self.result,{'call_id':cid,'ok':True,'answer':self.result}
 
@@ -152,15 +283,19 @@ class BrowserJudgmentWorkflowTests(unittest.TestCase):
         return finished['browser_result']['markdown']
 
     def test_paid_priority_renders_the_trusted_observation(self):
-        rendered = self.run_review({'priority':'O2'})
+        why = 'A convincing result for the wrong instant could quietly mislead the user.'
+        rendered = self.run_review({'goal':'Help visitors trust the displayed birth time.',
+                                    'next_action':'check_utc_offset_calculation','reason':why})
         self.assertTrue(rendered.startswith('I’d look at why the UTC offset'))
-        self.assertIn('already has a UTC-offset field',rendered)
+        self.assertIn(why,rendered)
+        self.assertIn('Offset field outputs were identical.',rendered)
 
     def test_quarantined_priority_still_shows_measured_results(self):
-        rendered = self.run_review({'priority':'O2','answer':'The browser found nothing.'})
+        rendered = self.run_review({'goal':'Help visitors trust the displayed birth time.',
+                                    'next_action':'add_unmeasured_analytics','reason':'The browser found nothing.'})
         self.assertTrue(rendered.startswith('The browser run finished.'))
         self.assertNotIn('found nothing',rendered)
-        self.assertIn('identical visible results',rendered)
+        self.assertIn('Offset field outputs were identical.',rendered)
 
 
 if __name__=='__main__':

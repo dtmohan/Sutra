@@ -9,7 +9,8 @@ from review_targets import (
     DOCUMENT_TEXT_REQUIRED, document_file_target, document_input_notice, document_text, has_document_text,
     may_use_retained_document, refers_to_previous_review_target, refers_to_retained_document,
 )
-from evidence_admission import (browser_entry, browser_feedback_intent, explicit_project_patch, explicit_workspace_review,
+from evidence_admission import (browser_entry, browser_feedback_goal, browser_feedback_intent, browser_goal_matches,
+                                explicit_project_patch, explicit_workspace_review,
                                 explicit_workspace_test, measure as evidence_measure, record_document,
                                 resolve_browser_target, workspace_roots, workspace_target)
 
@@ -48,7 +49,7 @@ def latest_chat_flow(s,workspace,chat):
     return info(s,previous[0]) if previous else None
 
 
-def previous_browser_context(s, workspace, current):
+def previous_browser_context(s, workspace, current, *, goal_preface=None):
     """Resolve a continuation using recorded context, before any new source read."""
     chat = current.get('chat_key')
     if not chat:
@@ -69,9 +70,13 @@ def previous_browser_context(s, workspace, current):
         return (), None
     receipt = browser_receipt_for(s,previous['id'],data)
     if receipt and receipt['evidence']['status']=='observed':
+        if goal_preface and not browser_goal_matches(goal_preface,receipt['evidence']):
+            return (), None
         return (receipt['evidence']['entry'],), {
             'flow_id':receipt['flow_id'],'receipt_id':receipt['id'],
-            'source_sha256':receipt['source_sha256']}
+            'source_sha256':receipt['source_sha256'],'judgment_flow_id':previous['id']}
+    if goal_preface:
+        return (), None
     if inquiry := data.get('browser_inquiry'):
         if entry := browser_entry(inquiry.get('entry')):
             return (entry,), None
@@ -111,14 +116,102 @@ def browser_receipt_for(s, fid, data):
     return receipt
 
 
-def route_browser(s, fid, session, work, *, conversation_id=None, working_question=None, retained=None, chat=None):
+def _published_browser_judgment(s, fid, data):
+    ref = data.get('browser_reused')
+    prior_id = (ref or {}).get('judgment_flow_id')
+    if data.get('browser_judgment_version') != 3 or not prior_id or prior_id == fid:
+        return None
+    receipt = browser_receipt_for(s,fid,data)
+    current = m.node(s,fid)
+    prior = m.node(s,prior_id)
+    from task_stack import owner
+    chat, workspace = current.get('chat_key'), current['workspace']
+    if (not chat or prior['kind'] != 'flow' or prior.get('chat_key') != chat or prior.get('workspace') != workspace
+            or owner(s,workspace,prior_id) != chat):
+        return None
+    events = m.events(s,prior_id)
+    if not events or events[-1]['to'] != 'DONE' or events[-1]['kind'] != 'BROWSER_CRITIQUE_COMPLETED':
+        return None
+    terminal = events[-1]['data']
+    if terminal.get('observation_delivery') != 'admitted':
+        return None
+    previous = {key:value for event in events for key,value in event['data'].items()}
+    prior_receipt = browser_receipt_for(s,prior_id,previous)
+    if not prior_receipt or prior_receipt['id'] != receipt['id']:
+        return None
+    iid = terminal.get('invocation_id')
+    sid = (previous.get('binding') or {}).get('session')
+    row = s.db.execute(
+        """SELECT i.record_json,i.digest,r.record_json,r.id,d.payload_json,d.payload_hash
+           FROM invocations i JOIN invocation_receipts r ON r.invocation_id=i.id AND r.session=i.session
+           JOIN deliveries d ON d.id=i.delivery_id AND d.session=i.session
+           WHERE i.id=? AND i.session=?
+           AND NOT EXISTS (SELECT 1 FROM invocation_quarantine q WHERE q.invocation_id=i.id)""",
+        (iid,sid)).fetchone()
+    if not row:
+        return None
+    envelope_raw,envelope_hash,result_raw,result_hash,payload_raw,payload_hash = row
+    if (sha('invocation-v1:'+envelope_raw) != envelope_hash
+            or sha('invocation-receipt-v1:'+result_raw) != result_hash
+            or sha(payload_raw) != payload_hash):
+        return None
+    envelope,result,payload = (json.loads(raw) for raw in (envelope_raw,result_raw,payload_raw))
+    from conversation_memory import LEGACY_POLICIES
+    if (envelope['role'] != 'browser_reviewer' or result['role'] != envelope['role']
+            or envelope['id'] != iid or result['invocation_id'] != iid
+            or result['status'] != 'accepted' or not result['admission']['admitted']
+            or result['invocation_hash'] != envelope_hash
+            or result['payload_hash'] != payload_hash or envelope['payload_hash'] != payload_hash
+            or result['logic_hash'] != envelope['logic_hash']
+            or (result['logic_hash'] != s.logic_hash and result['logic_hash'] not in LEGACY_POLICIES)
+            or payload['flow_id'] != prior_id or payload['receipt_id'] != receipt['id']
+            or payload['entry'] != receipt['evidence']['entry'] or payload['request'] != prior['prompt']):
+        return None
+    outcome = terminal['browser_result']
+    proposal = result['proposal']
+    if (not isinstance(proposal,dict) or sha(canonical(proposal)) != result['response_hash']
+            or not outcome.get('markdown') or outcome.get('model') != envelope['model']):
+        return None
+    version = payload.get('judgment_version')
+    if version == 3:
+        from browser_review import goal_proposal
+        proposal = goal_proposal(payload,proposal)
+    priority = proposal.get('priority')
+    if version not in (2,3) or priority not in {item['id'] for item in payload['judgment_choices']}:
+        return None
+    judgment = {'priority':priority,'request':prior['prompt']}
+    if receipt['flow_id'] != prior_id:
+        original_request = m.node(s,receipt['flow_id'])['prompt']
+        if original_request != judgment['request']:
+            judgment['original_request'] = original_request
+    if version == 3:
+        published = outcome.get('judgment') or {}
+        why = proposal.get('why_first')
+        if not isinstance(why,str) or not why.strip() or published != {'priority':priority,'why_first':why}:
+            return None
+        judgment['why_first'] = why
+    return judgment
+
+
+def browser_prior_judgment(s, fid, data):
+    """Check the immediate prior publication for this reused browser receipt."""
+    judgment = _published_browser_judgment(s,fid,data)
+    if 'prior_browser_judgment' in data and data['prior_browser_judgment'] != judgment:
+        raise InvalidUpdate('Saved browser judgment differs from the prior admitted report')
+    return judgment
+
+
+def route_browser(s, fid, session, work, *, conversation_id=None, working_question=None, retained=None, chat=None,
+                  reuse_only=False):
     """Record a single proposed check. Actual execution still needs the exact permit."""
     frame,_ = evidence_measure(s,session,'resolved','available',False)
     if frame['decision']!='ALLOW':
         move(s,fid,'DONE','EVIDENCE_FIN',kernel=frame,request_notice='The task budget is exhausted.')
     else:
         move(s,fid,'NEED_ARM','BROWSER_REVIEW_REQUESTED',kernel=frame,conversation_id=conversation_id,
-             permission=work,source_roots=work['paths'],working_question=working_question,browser_retained=retained)
+             permission=work,source_roots=work['paths'],working_question=working_question,
+             browser_retained=retained,browser_judgment_version=3,
+             **({'browser_reuse_only':True} if reuse_only else {}))
     return response(s,fid,**({'conversation':chat} if chat else {}))
 
 
@@ -1524,8 +1617,9 @@ def _handle(s,meta,workspace,root,req,providers=None):
         if not any(request.get(key) for key in ('routing_continuation','document_evidence','document_offer_flow')):
             explicit = resolve_browser_target(prompt)
             feedback = browser_feedback_intent(prompt)
-            if explicit or feedback:
-                candidates, retained = previous_browser_context(s,workspace,f)
+            goal = browser_feedback_goal(prompt) if req.get('armed') and not (explicit or feedback) else None
+            if explicit or feedback or goal:
+                candidates, retained = previous_browser_context(s,workspace,f,goal_preface=goal)
                 sid = request['conversation_session']
                 if explicit:
                     work = resolve_browser_target(prompt,candidates)
@@ -1535,8 +1629,8 @@ def _handle(s,meta,workspace,root,req,providers=None):
                     return response(s,fid)
                 if len(candidates)==1 and retained:
                     work = {'operation':'browser_review','paths':list(candidates)}
-                    return route_browser(s,fid,sid,work,retained=retained)
-                if len(candidates)==1 and not inquiry:
+                    return route_browser(s,fid,sid,work,retained=retained,reuse_only=bool(goal))
+                if len(candidates)==1 and not goal and not inquiry:
                     inquiry = {'version':2,'flow_id':fid,'entry':candidates[0]}
                     move(s,fid,'CLASSIFYING','BROWSER_INQUIRY_OFFERED',browser_inquiry=inquiry)
         if inquiry:
@@ -1754,8 +1848,16 @@ def _handle(s,meta,workspace,root,req,providers=None):
                 entry = d['permission']['paths'][0]
                 retained = d.get('browser_retained')
                 if retained and validate_entry(s,sid,workspace,entry)['source_sha256']==retained['source_sha256']:
-                    browser_receipt_for(s,fid,dict(d,browser_reused=retained))
-                    move(s,fid,'SYNTHESIS','BROWSER_RECEIPT_REUSED',browser_reused=retained)
+                    reused = dict(d,browser_reused=retained)
+                    browser_receipt_for(s,fid,reused)
+                    judgment = browser_prior_judgment(s,fid,reused)
+                    move(s,fid,'SYNTHESIS','BROWSER_RECEIPT_REUSED',browser_reused=retained,
+                         **({'prior_browser_judgment':judgment} if judgment else {}))
+                    return response(s,fid)
+                if d.get('browser_reuse_only'):
+                    move(s,fid,'DONE','BROWSER_REUSE_UNAVAILABLE',
+                         request_notice=('The saved browser observations are for an earlier source version. '
+                                         f'Ask Sutra to run `{entry}` in the browser to review the current version.'))
                     return response(s,fid)
                 proposal,_ = browser_plan(s,sid,fid,workspace,d['permission']['paths'][0])
             except BudgetStop:

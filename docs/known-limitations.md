@@ -174,7 +174,8 @@ The first live 0.29.1 run completed but manual review found unsupported claims t
 - The browser profile runs one standalone UTF-8 HTML file up to 256 KiB using an installed Chrome on macOS. Sutra asks for separate approval for the exact entry and source version after workspace access is granted.
 - A follow-up such as “render it in a browser” uses one recorded HTML entry from the current chat. If the target is unclear, reply with its workspace-relative path. The conversation can propose one focused browser check for an open-ended question about a known entry.
 - Execution uses Chrome's sandbox, a temporary profile and browser-level offline controls. Only the approved HTML bytes enter the page. Web servers, linked files and other project assets fall outside this profile.
-- Built-in probes sample startup, selected controls, page errors and layout. The model selects a priority from the supported findings. Sutra renders the measured facts, linked source and bounded next checks. A feedback follow-up can reuse a receipt after verifying the source digest. A request to rerun or a changed source version requires fresh browser approval.
+- Built-in probes sample startup, selected controls, page errors and layout. The model explains why its first fix serves the user’s goal. Sutra presents that judgment alongside the measured facts and their source links.
+- A follow-up can reuse the observations and compare priorities after Sutra verifies the source digest. A new browser run or a changed file requires fresh approval.
 
 ## 0.34.0 execution and paging limits
 

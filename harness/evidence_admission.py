@@ -87,6 +87,33 @@ _BROWSER_FEEDBACK_TARGET = re.compile(
     r"display|layout|render(?:ing)?|viewport|phone|browser|controls?)\b|" + _HTML_ENTRY,
     re.IGNORECASE,
 )
+_PREPARED_BROWSER_PRIORITY = re.compile(
+    r"(?:what\s+(?:would|should)\s+(?:you|we|I)\s+(?:fix|change|improve|prioriti[sz]e)|"
+    r"where\s+would\s+you\s+(?:start|spend\s+time))"
+    r"(?:\s+(?:first|next))?(?:\s+for\s+(?:that|this|it|this goal))?"
+    r"(?:,?\s+and\s+why)?[.?!]?",
+    re.IGNORECASE,
+)
+_SAME_BROWSER_SUBJECT = re.compile(
+    r"\b(?:this|that|same|current)\s+(?:web\s*)?(?:app(?:lication)?|site|page|dashboard)\b"
+    r"|\b(?:the|your)\s+(?:browser\s+(?:review|run|results?|observations?|check)|rendered page)\b",
+    re.IGNORECASE,
+)
+_OTHER_BROWSER_SUBJECT = re.compile(
+    r"\b(?:another|different|new|other|separate|unrelated)\s+"
+    r"(?:project|topic|app(?:lication)?|(?:web\s*)?site|page|dashboard)\b",
+    re.IGNORECASE,
+)
+_PREFACE_ACTION = re.compile(
+    r"(?:^\s*|\b(?:I need you to|please)\s+)(?:please\s+)?"
+    r"(?:edit|implement|run|launch|open|install|deploy|commit|push|upload|delete|replace)\b",
+    re.IGNORECASE,
+)
+_FEEDBACK_FILLER = frozenset({
+    'after','before','could','different','first','from','help','need','people','result','same',
+    'should','test','that','these','they','this','those','trust','want','what','when','which',
+    'with','without','would','your',
+})
 
 
 def explicit_workspace_review(prompt):
@@ -219,6 +246,35 @@ def browser_feedback_intent(prompt):
     return bool(re.fullmatch(r"(?:(?:of|about|with)?\s*(?:it|this|here|first|next|overall|now))?"
                              r"(?:,?\s+and\s+why)?", tail, re.I)
                 or _BROWSER_FEEDBACK_TARGET.search(tail))
+
+
+def browser_feedback_goal(prompt):
+    """Find a declarative goal followed by a short, referential priority question."""
+    if len(prompt)>1800 or _BROWSER_DECLINED.search(prompt):
+        return None
+    parts = re.split(r"(?<=[.?!])\s+|[\r\n]+",prompt.strip(),maxsplit=3)
+    if len(parts)<2 or not _PREPARED_BROWSER_PRIORITY.fullmatch(parts[-1]):
+        return None
+    preface = ' '.join(parts[:-1])
+    if (_OTHER_BROWSER_SUBJECT.search(preface)
+            or any(part.endswith('?') or _PREFACE_ACTION.search(part) for part in parts[:-1])):
+        return None
+    return preface
+
+
+def browser_goal_matches(goal, evidence):
+    """Check a follow-up against the recorded entry and its verified observations."""
+    if (_SAME_BROWSER_SUBJECT.search(goal)
+            or re.search(r"(?<![\w/.-])"+re.escape(evidence['entry'])+r"(?![\w/.-])",goal,re.I)):
+        return True
+
+    def terms(text):
+        words = re.findall(r"[^\W\d_]{4,}",text.casefold())
+        return {word.removesuffix('s') for word in words} - _FEEDBACK_FILLER
+
+    requested = terms(goal)
+    return any(len(requested & terms(row['text']))>=2 for row in evidence['observations']
+               if row['kind'] not in ('network','console'))
 
 
 def measure(store, session, target, evidence, recoverable):

@@ -17,6 +17,8 @@ from vscode_bridge import handle as bridge, request_environment
 ASK = 'can you launch the application and critique the code based on its observed behaviors?'
 FOLLOWUP = 'can you render it in a browser and provide your feedback after running the app?'
 PRIORITY = 'What would you fix first, and why?'
+GOAL_PRIORITY = ('Before release, I need people who enter birth times in different time zones to be able to trust '
+                 'the result. What would you fix first for that, and why?')
 HTML = '<canvas id="face" width="800"></canvas>\n<button id="next">Next</button>\n'
 OBSERVED = {'status':'observed','observations':[
     {'kind':'layout','text':'Canvas overflows the 390 px viewport.','selectors':['face']},
@@ -214,6 +216,154 @@ class BrowserWorkflowTests(unittest.TestCase):
             self.assertNotIn('browser_observation',newer)
             run.assert_called_once()
         self.assertTrue(self.ledger.verify_invocations(reply['binding']['session']))
+
+    def test_goal_preface_reuses_observations_and_never_proposes_a_new_run(self):
+        observed = dict(OBSERVED,observations=[*OBSERVED['observations'],
+            {'kind':'interaction','text':'The same synthetic birth date and time produced identical visible results '
+                                        'with UTC offsets +00:00 and +05:30.'}])
+        with patch('browser_runner.run',return_value=observed) as run:
+            original = self.request('step',self.approve(self.awaiting()))
+            reused = self.advance_until('SYNTHESIS',self.request('start',prompt=GOAL_PRIORITY))
+            self.assertTrue(reused['browser_observation']['reused'])
+            self.assertEqual(reused['browser_observation']['receipt_id'],original['browser_observation']['receipt_id'])
+            self.request('step',reused)
+            self.assertEqual(self.calls[-1]['request'],GOAL_PRIORITY)
+            self.entry.write_text(HTML+'<p>Updated source.</p>')
+            changed = self.advance_until('DONE',self.request('start',prompt=GOAL_PRIORITY))
+            self.assertIn('earlier source version',changed['request_notice'])
+            self.assertNotIn('browser_proposal',changed)
+            self.assertEqual(len(self.calls),2)
+            run.assert_called_once()
+
+    def test_unrelated_goal_preface_stays_in_conversation_after_browser_review(self):
+        from test_conversation import Fake as Router
+
+        with patch('browser_runner.run',return_value=OBSERVED) as run:
+            self.request('step',self.approve(self.awaiting()))
+            router = Router(MODELS[self.tier])
+            with patch.object(self,'provider',return_value=router) as provider:
+                unrelated = 'I am doing my tax return. What would you fix first for that?'
+                reply = self.request('start',prompt=unrelated)
+                self.assertEqual(reply['state'],'DONE')
+                self.assertNotIn('browser_observation',reply)
+                self.assertNotIn('browser_proposal',reply)
+                self.assertEqual(router.payloads[0]['request'],unrelated)
+                provider.assert_called_once_with('conversation')
+            run.assert_called_once()
+
+    def test_published_judgment_follows_verified_receipt_across_reload_and_model_switch(self):
+        from browser_review import request_check
+        from orchestration_flow import browser_prior_judgment, info, move
+        observed = {'status':'observed','observations':[
+            {'kind':'layout','text':'The canvas overflowed the phone viewport.','selectors':['face'],
+             'measurement':{'probe':'canvas_overflow','viewport':390,'layout_width':390,
+                            'canvas_width':800,'left':0,'right':800}},
+            {'kind':'runtime','text':'The browser showed literal Markdown fencing.',
+             'measurement':{'probe':'visible_placeholder'}}]}
+        why = 'Phone readers need to see the entire face to interpret the result.'
+        next_prompt = 'What would you improve next for the watch on a phone?'
+        calls = self.calls
+
+        class JudgmentCritic(Critic):
+            def call(self,cid,system,payload,schema):
+                consume_dispatch(cid,self.model,system,payload,schema)
+                calls.append(payload)
+                value = {'priority':'O2'}
+                if payload['judgment_version']==3:
+                    value = {'goal':'Make the watch readable on a phone.',
+                             'next_action':'fit_canvas_to_viewport','reason':why}
+                    if payload.get('prior_browser_judgment'):
+                        value['comparison'] = 'Clipped readings matter more than visual polish.'
+                return value,{'call_id':cid,'ok':True,'answer':value}
+
+        with patch.object(self,'provider',side_effect=lambda stage: JudgmentCritic(MODELS[self.tier],calls)), \
+                patch('browser_runner.run',return_value=observed) as run:
+            ready = self.awaiting()
+            move(self.ledger,ready['flow_id'],'NEED_TOOL_APPROVAL','FIXTURE_LEGACY_BROWSER_FLOW',
+                 browser_judgment_version=2)
+            measured = self.approve(self.inspect(ready))
+            original = self.request('step',measured)
+            original_spending = self.spent(original)
+            self.reload()
+            self.tier = 'high'
+            ready = self.advance_until('SYNTHESIS',self.request('start',prompt=PRIORITY))
+            self.assertTrue(ready['browser_observation']['reused'])
+            unchanged = dict(priority='O2',request=ASK)
+            _,data = info(self.ledger,ready['flow_id'])
+            self.assertEqual(data['prior_browser_judgment'],unchanged)
+            self.assertEqual(browser_prior_judgment(self.ledger,ready['flow_id'],data),unchanged)
+            reply = self.request('step',ready)
+            self.assertEqual(calls[-1]['prior_browser_judgment'],unchanged)
+            self.assertEqual(reply['browser_result']['model'],MODELS['high'])
+            self.assertEqual(self.spent(original),original_spending)
+            self.assertEqual(self.spent(reply)['operations'],0)
+            sid = ready['binding']['session']
+            self.assertTrue(self.ledger.verify_invocations(sid))
+            forged = dict(calls[-1],prior_browser_judgment=dict(unchanged,priority='O1'))
+            with self.assertRaisesRegex(InvalidUpdate,'completed observation'):
+                request_check(self.ledger,sid,forged)
+            ready = self.advance_until('SYNTHESIS',self.request('start',prompt=next_prompt))
+            latest = self.request('step',ready)
+            self.assertEqual(calls[-1]['prior_browser_judgment'],
+                             dict(priority='O1',request=PRIORITY,original_request=ASK,why_first=why))
+            self.assertEqual(latest['browser_result']['judgment'],dict(priority='O1',why_first=why))
+            _,data = info(self.ledger,latest['flow_id'])
+            self.ledger.quarantine_invocation(latest['binding']['session'],data['invocation_id'],'fixture')
+            ready = self.advance_until('SYNTHESIS',self.request('start',prompt=PRIORITY))
+            self.assertTrue(ready['browser_observation']['reused'])
+            self.request('step',ready)
+            self.assertIsNone(calls[-1]['prior_browser_judgment'])
+            self.entry.write_text(HTML+'<p>New source.</p>')
+            changed = self.advance_until('NEED_TOOL_APPROVAL',self.request('start',prompt=PRIORITY))
+            _,data = info(self.ledger,changed['flow_id'])
+            self.assertNotIn('prior_browser_judgment',data)
+            run.assert_called_once()
+
+    def test_followup_keeps_original_goal_when_published_rationale_is_missing(self):
+        from browser_review import critique, request_check, schema, system_for
+        from model_packet import build
+        from orchestration_flow import info
+
+        class Reviewer(Critic):
+            def call(self,cid,system,payload,schema):
+                consume_dispatch(cid,self.model,system,payload,schema)
+                self.calls.append(payload)
+                value = {'goal':'Check the behavior a visitor relies on.',
+                         'next_action':'check_primary_user_flow','reason':'A known result would make the next check useful.'}
+                return value,{'call_id':cid,'ok':True,'answer':value}
+
+        def incomplete_publication(*args):
+            result, report = critique(*args)
+            self.assertTrue(result['admission']['admitted'])
+            return result, dict(report,judgment={'priority':report['judgment']['priority']})
+
+        with patch.object(self,'provider',side_effect=lambda stage: Reviewer(MODELS[self.tier],self.calls)), \
+                patch('browser_runner.run',return_value=dict(OBSERVED,observation_profile='browser-probes-v2')) as run:
+            measured = self.approve(self.awaiting())
+            with patch('browser_review.critique',side_effect=incomplete_publication):
+                original = self.request('step',measured)
+            self.assertEqual(original['browser_result']['judgment'],{'priority':'scope'})
+            reused = self.advance_until('SYNTHESIS',self.request('start',prompt=PRIORITY))
+            self.assertTrue(reused['browser_observation']['reused'])
+            self.assertEqual(reused['browser_observation']['receipt_id'],original['browser_observation']['receipt_id'])
+            _,data = info(self.ledger,reused['flow_id'])
+            self.assertNotIn('prior_browser_judgment',data)
+            self.request('step',reused)
+            initial, followup = self.calls
+            self.assertNotIn('original_browser_request',initial)
+            self.assertIsNone(followup['prior_browser_judgment'])
+            self.assertEqual(followup['original_browser_request'],ASK)
+            fmt = schema(followup)
+            wire = json.loads(build(system_for(followup),followup,fmt)['messages'][1]['content'])
+            self.assertEqual(wire['original_user_request'],ASK)
+            self.assertEqual(wire['current_user_request'],PRIORITY)
+            self.assertNotIn('previous_recommendation',wire)
+            self.assertNotIn('comparison',fmt['properties'])
+            sid = reused['binding']['session']
+            forged = dict(followup,original_browser_request='A different project goal.')
+            with self.assertRaisesRegex(InvalidUpdate,'completed observation'):
+                request_check(self.ledger,sid,forged)
+            run.assert_called_once()
 
     def test_ambiguous_followup_pauses_until_same_chat_names_a_file(self):
         (self.workspace/'other.html').write_text(HTML)
